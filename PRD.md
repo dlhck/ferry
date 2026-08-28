@@ -230,19 +230,23 @@ First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link
 
 - Five user commands: `init`, `install`, `sync`, `auth`, `status`. Flags cover dry-run, json, provider name, force replace of a live skill directory, yes on install, and commit message. No other verbs in v1.
 
-- Seven modules sit behind those commands.
+- Seven modules sit behind those commands. A registry of descriptors feeds them.
 
-- **Manifest.** Deep module. Interface: given a source home, return a seed (skill names and bodies, plus the one instruction file) or refuse with named clashes and forbidden hits. Implementation owns the managed harness set (shared agents root, Claude, Codex, Pi, Cursor Agent), the union-and-refuse-on-byte-clash rule, and the deny set (vendor auth files, host tokens, session history, caches, sqlite, daemon keys, MCP tokens, settings, secret-looking files inside a skill). Callers never pass a raw rsync set. Tests drive snapshot and refuse.
+- **Registry.** Data, not behaviour. A harness descriptor names an id, a printed name, a skill root, and an instruction file. A tool descriptor names an id, an install command, and a login recipe: probe, login, one completion (device URL, printed URL, or manual guidance), and an optional callback fallback with a port forward. One builtin file holds the official five harnesses (shared agents root, Claude, Codex, Pi, Cursor Agent) and the official five tools (`gh`, Claude, Codex, Pi, Cursor Agent), so each is written down once. Manifest, Apply, Store, Install, and AuthStart take descriptors as input.
 
-- **Store.** Deep module. Interface: clone or open the snapshot remote, publish a commit of the working tree, fetch the current tip, report whether local and remote and box tips match. Implementation owns git clone, commit, push, pull, and snapshot identity. Commits use the operator git identity. Missing identity is an error. Never force-push. Schema metadata in the store names version and managed harnesses. Git command runner is an injected adapter. Tests use an in-memory fake.
+- **Registry loading.** A loader merges `[[harness]]` and `[[tool]]` entries from the operator config into the builtin set. It is a pure function over parsed config data. It refuses a duplicate id, an absolute path, a path that climbs out of the home, and any path the Manifest deny set covers. Descriptors are data. Ferry loads no plugin code from an entry.
 
-- **Apply.** Deep module. Interface: given a store checkout and a target home, return a plan (create symlink, repair symlink, refuse live directory, backup-and-link, delete managed name), then commit the plan or only return it. Implementation owns harness layout and the instruction-file links. One-way. Store clone wins. A live non-empty real directory refuses unless the caller sets force, which backups then links and copies nothing into the clone. Unmanaged extras are reported and left. Tests use a temp home as the local-substitutable filesystem.
+- **Manifest.** Deep module. Interface: given a source home and the harness descriptors, return a seed (skill names and bodies, plus the one instruction file) or refuse with named clashes and forbidden hits. Implementation owns the union-and-refuse-on-byte-clash rule and the deny set (vendor auth files, host tokens, session history, caches, sqlite, daemon keys, MCP tokens, settings, secret-looking files inside a skill). The deny set is hardcoded here. A registry entry can add a path to scan; it cannot disable or widen a deny rule. Callers never pass a raw rsync set. Tests drive snapshot and refuse.
+
+- **Store.** Deep module. Interface: clone or open the snapshot remote, publish a commit of the working tree, fetch the current tip, report whether local and remote and box tips match. Implementation owns git clone, commit, push, pull, and snapshot identity. Commits use the operator git identity. Missing identity is an error. Never force-push. Schema metadata in the store names schema version 2 and the full descriptor of every managed harness. A checkout whose ferry.json cannot be read is refused. Git command runner is an injected adapter. Tests use an in-memory fake.
+
+- **Apply.** Deep module. Interface: given a store checkout and a target home, return a plan (create symlink, repair symlink, refuse live directory, backup-and-link, delete managed name), then commit the plan or only return it. The caller passes the harness descriptors, which carry the skill roots and the instruction-file targets. One-way. Store clone wins. A live non-empty real directory refuses unless the caller sets force, which backups then links and copies nothing into the clone. Unmanaged extras are reported and left. Tests use a temp home as the local-substitutable filesystem.
 
 - **Link.** Deep module. Interface: resolve the named host to a reachable Tailscale address, open an SSH session, run a command or a port-forward, return stdout and a structured error that names operator, network, or box. Implementation owns Tailscale status parsing and OpenSSH. Not `tailscale ssh`. Tests inject a host adapter. Production talks to Tailscale and SSH.
 
-- **AuthStart.** Deep module. Interface: `start(provider)` on a Link session. Returns a local action (open URL, or listen on a forwarded port) and never accepts a credential file from the source machine. Implementation owns per-provider recipes for `gh`, Claude, Codex, and Cursor Agent. Pi is included only when a documented remote login exists that does not require an interactive TTY. Already authenticated returns already-done. Time out a stuck forward. Do not print secrets. Tests use the fake host.
+- **AuthStart.** Deep module. Interface: `start(provider)` on a Link session. Returns a local action (open URL, or listen on a forwarded port) and never accepts a credential file from the source machine. Recipes come from the tool descriptors, and the completion kind decides the local action. A tool whose completion is manual is never probed, which is where Pi sits until a documented remote login exists that does not require an interactive TTY. Already authenticated returns already-done. Time out a stuck forward. Do not print secrets. Tests use the fake host.
 
-- **Install.** Deep module. Interface: `plan()` returns the exact remote commands for the allowlist, `run(confirmed)` executes them over Link. Implementation owns the vendor official install lines for `gh`, Claude, Codex, Pi, and Cursor Agent. Latest, no version pin. The CLI prints the plan and requires confirmation unless yes is set. Tests assert the command list and that run is not called without confirm.
+- **Install.** Deep module. Interface: `plan()` returns the exact remote commands for the allowlist, `run(confirmed)` executes them over Link. The install command of every tool descriptor is the vendor official line. Latest, no version pin. The CLI prints the plan and requires confirmation unless yes is set. Tests assert the command list and that run is not called without confirm.
 
 - **Status.** Shallow composer. Interface: return one report (link health, store identity, symlink health, remaining logins, printed Paseo listen hint). It calls the modules above. No extra policy lives here.
 
@@ -305,7 +309,7 @@ Prior art: none in this repository. The first tests are these interface tests.
 - Rewriting git history.
 - Creating the snapshot GitHub repository for the user.
 - npm or bunx as the primary distribution. Homebrew can wait.
-- OpenCode and other harnesses not in the managed set.
+- Plugin code in the registry. A custom harness or tool is a declarative config entry: paths and commands, never code ferry loads.
 
 ## Further Notes
 
