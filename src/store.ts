@@ -8,21 +8,20 @@
 import {
   existsSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Seed } from "./manifest.ts";
+import type { HarnessDescriptor } from "./registry/types.ts";
 
 const STORE_DIRECTORY = ".ferry/store";
 const DEFAULT_COMMIT_MESSAGE = "chore: update ferry snapshot";
-const MANAGED_HARNESSES = ["agents", "claude", "codex", "pi", "cursor"] as const;
-const STORE_METADATA = `${JSON.stringify(
-  { schemaVersion: 1, managedHarnesses: MANAGED_HARNESSES },
-  null,
-  2,
-)}\n`;
+const METADATA_FILE = "ferry.json";
+/** Version 2 records a harness descriptor. Version 1 recorded a bare id. */
+const SCHEMA_VERSION = 2;
 
 export type GitInvocation = {
   readonly args: readonly string[];
@@ -59,7 +58,7 @@ export class RealGitRunner implements GitRunner {
   }
 }
 
-export type StoreRefusalCode = "remote-clash" | "missing-git-identity";
+export type StoreRefusalCode = "remote-clash" | "missing-git-identity" | "unreadable-store";
 
 export class StoreRefusal extends Error {
   constructor(
@@ -98,6 +97,8 @@ export type TipReport = {
 };
 
 export type OpenStoreOptions = {
+  /** The managed harnesses. The store records their descriptors in ferry.json. */
+  readonly harnesses: readonly HarnessDescriptor[];
   readonly git?: GitRunner;
   /** Source home. The checkout remains at the locked `.ferry/store` path below it. */
   readonly home?: string;
@@ -106,33 +107,36 @@ export type OpenStoreOptions = {
 export async function openStore(
   remote: string,
   seed: Seed,
-  options: OpenStoreOptions = {},
+  options: OpenStoreOptions,
 ): Promise<Store> {
   const git = options.git ?? new RealGitRunner();
   const path = join(options.home ?? homedir(), STORE_DIRECTORY);
+  const metadata = storeMetadata(options.harnesses);
   const freshClone = !existsSync(join(path, ".git"));
 
   if (freshClone) {
     mkdirSync(dirname(path), { recursive: true });
     await checked(git, ["clone", remote, path]);
     const tip = await optionalTip(git, path, "HEAD");
-    if (tip) await refuseRemoteClash(git, path, tip, seed);
+    if (tip) await refuseRemoteClash(git, path, tip, seed, metadata);
   }
+  refuseUnreadableStore(path);
 
-  return new Store(git, path);
+  return new Store(git, path, metadata);
 }
 
 export class Store {
   constructor(
     private readonly git: GitRunner,
     readonly path: string,
+    private readonly metadata: string,
   ) {}
 
   async publish(seed: Seed, message = DEFAULT_COMMIT_MESSAGE): Promise<PublishResult> {
     const identity = await this.readIdentity();
-    writeSeed(this.path, seed);
+    writeSeed(this.path, seed, this.metadata);
 
-    await checked(this.git, ["add", "-A", "--", "skills", "AGENTS.md", "ferry.json"], this.path);
+    await checked(this.git, ["add", "-A", "--", "skills", "AGENTS.md", METADATA_FILE], this.path);
     const diff = await this.git.run({ args: ["diff", "--cached", "--quiet", "--"], cwd: this.path });
     if (diff.status === 0) return { published: false, tip: await this.localTip() };
     if (diff.status !== 1) throw commandError(["diff", "--cached", "--quiet", "--"], diff);
@@ -209,8 +213,9 @@ async function refuseRemoteClash(
   cwd: string,
   tip: string,
   seed: Seed,
+  metadata: string,
 ): Promise<void> {
-  const expected = seedFiles(seed);
+  const expected = seedFiles(seed, metadata);
   const listed = await checked(git, ["ls-tree", "-r", "--name-only", tip], cwd);
   const remotePaths = decode(listed.stdout)
     .split("\n")
@@ -240,7 +245,43 @@ async function refuseRemoteClash(
   }
 }
 
-function writeSeed(root: string, seed: Seed): void {
+/**
+ * The tracked ferry.json. It names the schema version and every managed
+ * harness, so a later ferry can refuse a store it does not understand.
+ */
+function storeMetadata(harnesses: readonly HarnessDescriptor[]): string {
+  const managedHarnesses = harnesses.map((harness) => ({
+    id: harness.id,
+    name: harness.name,
+    ...(harness.skillRoot ? { skillRoot: harness.skillRoot } : {}),
+    ...(harness.instructionFile ? { instructionFile: harness.instructionFile } : {}),
+  }));
+  return `${JSON.stringify({ schemaVersion: SCHEMA_VERSION, managedHarnesses }, null, 2)}\n`;
+}
+
+/** Refuse a checkout whose ferry.json is not store metadata ferry can read. */
+function refuseUnreadableStore(path: string): void {
+  const file = join(path, METADATA_FILE);
+  if (!existsSync(file)) return;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    parsed = null;
+  }
+  const metadata = parsed as { schemaVersion?: unknown; managedHarnesses?: unknown } | null;
+  if (
+    typeof metadata?.schemaVersion !== "number" ||
+    !Array.isArray(metadata.managedHarnesses)
+  ) {
+    throw new StoreRefusal("unreadable-store", `${file} is not readable ferry store metadata`, [
+      file,
+    ]);
+  }
+}
+
+function writeSeed(root: string, seed: Seed, metadata: string): void {
   const skills = join(root, "skills");
   rmSync(skills, { recursive: true, force: true });
   mkdirSync(skills, { recursive: true });
@@ -254,13 +295,13 @@ function writeSeed(root: string, seed: Seed): void {
   }
 
   writeFileSync(join(root, "AGENTS.md"), seed.instructions?.bytes ?? new Uint8Array());
-  writeFileSync(join(root, "ferry.json"), STORE_METADATA);
+  writeFileSync(join(root, METADATA_FILE), metadata);
 }
 
-function seedFiles(seed: Seed): Map<string, Uint8Array> {
+function seedFiles(seed: Seed, metadata: string): Map<string, Uint8Array> {
   const files = new Map<string, Uint8Array>();
   files.set("AGENTS.md", seed.instructions?.bytes ?? new Uint8Array());
-  files.set("ferry.json", Buffer.from(STORE_METADATA));
+  files.set(METADATA_FILE, Buffer.from(metadata));
   for (const skill of seed.skills) {
     for (const file of skill.files) files.set(`skills/${skill.name}/${file.path}`, file.bytes);
   }

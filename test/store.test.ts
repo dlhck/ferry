@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import type { Seed } from "../src/manifest.ts";
+import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 import {
   StoreRefusal,
   openStore,
@@ -45,22 +46,42 @@ function seed(body = "Use small commits.\n"): Seed {
   };
 }
 
+/** The ferry.json a store of the builtin harnesses holds. */
+const expectedMetadata = {
+  schemaVersion: 2,
+  managedHarnesses: [
+    {
+      id: "agents",
+      name: "Shared agents",
+      skillRoot: ".agents/skills",
+      instructionFile: "AGENTS.md",
+    },
+    {
+      id: "claude",
+      name: "Claude",
+      skillRoot: ".claude/skills",
+      instructionFile: ".claude/CLAUDE.md",
+    },
+    {
+      id: "codex",
+      name: "Codex",
+      skillRoot: ".codex/skills",
+      instructionFile: ".codex/AGENTS.md",
+    },
+    {
+      id: "pi",
+      name: "Pi",
+      skillRoot: ".pi/agent/skills",
+      instructionFile: ".pi/agent/AGENTS.md",
+    },
+    { id: "cursor", name: "Cursor Agent", skillRoot: ".cursor/skills" },
+  ],
+};
+
 function expectedFiles(value = seed()): Map<string, Uint8Array> {
   return new Map([
     ["AGENTS.md", value.instructions?.bytes ?? new Uint8Array()],
-    [
-      "ferry.json",
-      Buffer.from(
-        `${JSON.stringify(
-          {
-            schemaVersion: 1,
-            managedHarnesses: ["agents", "claude", "codex", "pi", "cursor"],
-          },
-          null,
-          2,
-        )}\n`,
-      ),
-    ],
+    ["ferry.json", Buffer.from(`${JSON.stringify(expectedMetadata, null, 2)}\n`)],
     ["skills/tdd/SKILL.md", value.skills[0]?.files[0]?.bytes ?? new Uint8Array()],
   ]);
 }
@@ -139,7 +160,7 @@ describe("store publish", () => {
     const home = makeHome();
     const git = new FakeGit();
     const value = seed();
-    const store = await openStore("snapshot.git", value, { git, home });
+    const store = await openStore("snapshot.git", value, { git, home, harnesses: BUILTIN_HARNESSES });
 
     const result = await store.publish(value);
 
@@ -148,16 +169,15 @@ describe("store publish", () => {
     expect(git.commits).toEqual([
       { authorName: "Ferry Operator", authorEmail: "operator@example.com" },
     ]);
-    expect(JSON.parse(readFileSync(join(home, ".ferry/store/ferry.json"), "utf8"))).toEqual({
-      schemaVersion: 1,
-      managedHarnesses: ["agents", "claude", "codex", "pi", "cursor"],
-    });
+    expect(JSON.parse(readFileSync(join(home, ".ferry/store/ferry.json"), "utf8"))).toEqual(
+      expectedMetadata,
+    );
   });
 
   test("fetches the published tip and reports matching local, remote, and box tips", async () => {
     const git = new FakeGit();
     const value = seed();
-    const store = await openStore("snapshot.git", value, { git, home: makeHome() });
+    const store = await openStore("snapshot.git", value, { git, home: makeHome(), harnesses: BUILTIN_HARNESSES });
     const published = await store.publish(value);
 
     expect(await store.fetchTip()).toBe(published.tip);
@@ -174,7 +194,7 @@ describe("store publish", () => {
   test("refuses a fresh clone whose remote bytes differ from the seed", async () => {
     const git = new FakeGit(new Map([["skills/tdd/SKILL.md", Buffer.from("remote version\n")]]));
 
-    await expect(openStore("snapshot.git", seed(), { git, home: makeHome() })).rejects.toMatchObject({
+    await expect(openStore("snapshot.git", seed(), { git, home: makeHome(), harnesses: BUILTIN_HARNESSES })).rejects.toMatchObject({
       code: "remote-clash",
       paths: expect.arrayContaining(["AGENTS.md", "ferry.json", "skills/tdd/SKILL.md"]),
     });
@@ -183,7 +203,7 @@ describe("store publish", () => {
   test("refuses publish when git user.name is missing", async () => {
     const git = new FakeGit(new Map(), { email: "operator@example.com" });
     const value = seed();
-    const store = await openStore("snapshot.git", value, { git, home: makeHome() });
+    const store = await openStore("snapshot.git", value, { git, home: makeHome(), harnesses: BUILTIN_HARNESSES });
 
     await expect(store.publish(value)).rejects.toBeInstanceOf(StoreRefusal);
     await expect(store.publish(value)).rejects.toMatchObject({ code: "missing-git-identity" });
@@ -193,16 +213,31 @@ describe("store publish", () => {
   test("refuses publish when git user.email is missing", async () => {
     const git = new FakeGit(new Map(), { name: "Ferry Operator" });
     const value = seed();
-    const store = await openStore("snapshot.git", value, { git, home: makeHome() });
+    const store = await openStore("snapshot.git", value, { git, home: makeHome(), harnesses: BUILTIN_HARNESSES });
 
     await expect(store.publish(value)).rejects.toMatchObject({ code: "missing-git-identity" });
     expect(git.commits).toHaveLength(0);
   });
 
+  test("refuses a checkout whose store metadata cannot be read", async () => {
+    const home = makeHome();
+    const checkout = join(home, ".ferry", "store");
+    mkdirSync(join(checkout, ".git"), { recursive: true });
+    writeFileSync(join(checkout, "ferry.json"), "{ not json");
+
+    await expect(
+      openStore("snapshot.git", seed(), {
+        git: new FakeGit(),
+        home,
+        harnesses: BUILTIN_HARNESSES,
+      }),
+    ).rejects.toMatchObject({ code: "unreadable-store" });
+  });
+
   test("publishing identical bytes twice creates no second commit and never uses force", async () => {
     const git = new FakeGit();
     const value = seed();
-    const store = await openStore("snapshot.git", value, { git, home: makeHome() });
+    const store = await openStore("snapshot.git", value, { git, home: makeHome(), harnesses: BUILTIN_HARNESSES });
 
     expect(await store.publish(value)).toEqual({ published: true, tip: "local-1" });
     expect(await store.publish(value)).toEqual({ published: false, tip: "local-1" });
