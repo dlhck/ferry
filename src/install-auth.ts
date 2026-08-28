@@ -1,14 +1,10 @@
 import * as prompts from "@clack/prompts";
-import {
-  AuthStart,
-  STARTABLE_AUTH_PROVIDERS,
-  type AuthLink,
-  type AuthProvider,
-  type AuthStartResult,
-} from "./auth-start.ts";
+import { AuthStart, authTools, type AuthLink, type AuthStartResult } from "./auth-start.ts";
 import { readConfig, type PartialOperatorConfig } from "./config.ts";
 import { Install, type InstallRecipe, type InstallResult } from "./install.ts";
 import { Link, type LinkError } from "./link.ts";
+import { BUILTIN_TOOLS } from "./registry/builtin.ts";
+import type { ToolDescriptor } from "./registry/types.ts";
 
 export type InstallCommandInput = { readonly yes: boolean };
 export type AuthCommandInput = { readonly provider?: string };
@@ -19,20 +15,24 @@ type InstallCommand = {
   plan(): readonly InstallRecipe[];
   run(confirmed: boolean): Promise<InstallResult>;
 };
-type AuthCommand = { start(provider: AuthProvider): Promise<AuthStartResult> };
+type AuthCommand = { start(provider: string): Promise<AuthStartResult> };
 
 export type InstallCommandDependencies = {
+  /** The tools this ferry manages. The CLI resolves the registry once. */
+  readonly tools: readonly ToolDescriptor[];
   readonly readConfig: () => PartialOperatorConfig | null;
   readonly createLink: (options: CommandTarget) => CommandLink;
-  readonly createInstall: (link: CommandLink) => InstallCommand;
+  readonly createInstall: (link: CommandLink, tools: readonly ToolDescriptor[]) => InstallCommand;
   readonly confirm: () => Promise<boolean | symbol | undefined>;
   readonly writeLine: (line: string) => void;
 };
 
 export type AuthCommandDependencies = {
+  /** The tools this ferry manages. The CLI resolves the registry once. */
+  readonly tools: readonly ToolDescriptor[];
   readonly readConfig: () => PartialOperatorConfig | null;
   readonly createLink: (options: CommandTarget) => CommandLink;
-  readonly createAuthStart: (link: CommandLink) => AuthCommand;
+  readonly createAuthStart: (link: CommandLink, tools: readonly ToolDescriptor[]) => AuthCommand;
   readonly writeLine: (line: string) => void;
 };
 
@@ -49,7 +49,7 @@ export async function runInstallCommand(
 ): Promise<void> {
   const resolved = { ...defaultInstallDependencies, ...dependencies };
   const target = loadTarget(resolved.readConfig, resolved.writeLine);
-  const install = resolved.createInstall(resolved.createLink(target));
+  const install = resolved.createInstall(resolved.createLink(target), resolved.tools);
 
   for (const recipe of install.plan()) {
     resolved.writeLine(`${recipe.tool}: ${recipe.command}`);
@@ -79,14 +79,14 @@ export async function runAuthCommand(
 ): Promise<void> {
   const resolved = { ...defaultAuthDependencies, ...dependencies };
   if (input.provider === undefined) {
-    for (const provider of STARTABLE_AUTH_PROVIDERS) {
-      resolved.writeLine(`${provider}: startable`);
+    for (const tool of authTools(resolved.tools)) {
+      const manual = tool.auth.completion.kind === "manual";
+      resolved.writeLine(`${tool.id}: ${manual ? "manual SSH flow" : "startable"}`);
     }
-    resolved.writeLine("pi: manual SSH flow");
     return;
   }
 
-  if (!isAuthProvider(input.provider)) {
+  if (!isAuthProvider(input.provider, resolved.tools)) {
     fail(
       "operator/invalid-provider",
       `Unknown auth provider: ${input.provider}.`,
@@ -95,22 +95,24 @@ export async function runAuthCommand(
   }
 
   const target = loadTarget(resolved.readConfig, resolved.writeLine);
-  const auth = resolved.createAuthStart(resolved.createLink(target));
+  const auth = resolved.createAuthStart(resolved.createLink(target), resolved.tools);
   reportAuth(await auth.start(input.provider), resolved.writeLine);
 }
 
 const defaultInstallDependencies: InstallCommandDependencies = {
+  tools: BUILTIN_TOOLS,
   readConfig,
   createLink: (options) => new Link(options),
-  createInstall: (link) => new Install(link),
+  createInstall: (link, tools) => new Install(link, tools),
   confirm: () => prompts.confirm({ message: "Run these commands on the box?" }),
   writeLine: console.log,
 };
 
 const defaultAuthDependencies: AuthCommandDependencies = {
+  tools: BUILTIN_TOOLS,
   readConfig,
   createLink: (options) => new Link(options),
-  createAuthStart: (link) => new AuthStart(link),
+  createAuthStart: (link, tools) => new AuthStart(link, tools),
   writeLine: console.log,
 };
 
@@ -133,8 +135,8 @@ function loadTarget(
   return { host, user };
 }
 
-function isAuthProvider(provider: string): provider is AuthProvider {
-  return provider === "pi" || STARTABLE_AUTH_PROVIDERS.some((candidate) => candidate === provider);
+function isAuthProvider(provider: string, tools: readonly ToolDescriptor[]): boolean {
+  return tools.some((tool) => tool.id === provider && tool.auth);
 }
 
 function reportAuth(result: AuthStartResult, writeLine: (line: string) => void): void {

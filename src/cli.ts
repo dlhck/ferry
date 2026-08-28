@@ -14,7 +14,9 @@ import {
   InstallAuthCommandError,
   runAuthCommand,
   runInstallCommand,
+  type AuthCommandDependencies,
   type AuthCommandInput,
+  type InstallCommandDependencies,
   type InstallCommandInput,
 } from "./install-auth.ts";
 import {
@@ -23,6 +25,7 @@ import {
   type SyncInput,
   type SyncResult,
 } from "./sync.ts";
+import { loadRegistry, type Registry } from "./registry/load.ts";
 
 const DESCRIPTION = `Ferry keeps a remote Linux agent box in the same shape as this machine.
 
@@ -33,14 +36,22 @@ them. Ferry starts a login on the box and you finish it in a browser here.`;
 
 type CliDependencies = {
   readonly runInit?: (input: InitInput, dependencies?: InitDependencies) => Promise<InitResult>;
-  readonly runInstall?: (input: InstallCommandInput) => Promise<void>;
-  readonly runAuth?: (input: AuthCommandInput) => Promise<void>;
+  readonly runInstall?: (
+    input: InstallCommandInput,
+    dependencies?: Partial<InstallCommandDependencies>,
+  ) => Promise<void>;
+  readonly runAuth?: (
+    input: AuthCommandInput,
+    dependencies?: Partial<AuthCommandDependencies>,
+  ) => Promise<void>;
   readonly runSync?: (input: SyncInput) => Promise<SyncResult>;
   readonly prompt?: InitPrompt;
   readonly writeLine?: (line: string) => void;
 };
 
 export function buildProgram(dependencies: CliDependencies = {}): Command {
+  // One registry for the whole run. Every command below reads it, none owns it.
+  const registry = resolveRegistry();
   const program = new Command();
   program
     .name("ferry")
@@ -59,7 +70,12 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .action(async (options: { host?: string; sshUser?: string; snapshotUrl?: string }) => {
       const execute = dependencies.runInit ?? runInit;
       const result = await execute(
-        { host: options.host, sshUser: options.sshUser, snapshotUrl: options.snapshotUrl },
+        {
+          host: options.host,
+          sshUser: options.sshUser,
+          snapshotUrl: options.snapshotUrl,
+          harnesses: registry.harnesses,
+        },
         { prompt: dependencies.prompt ?? promptForInit },
       );
       reportInit(result, dependencies.writeLine ?? console.log);
@@ -70,14 +86,17 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .description("Install the supported agent tools on the configured box")
     .option("--yes", "run without a confirmation prompt")
     .action(async (options: { yes?: boolean }) => {
-      await (dependencies.runInstall ?? runInstallCommand)({ yes: options.yes === true });
+      await (dependencies.runInstall ?? runInstallCommand)(
+        { yes: options.yes === true },
+        { tools: registry.tools },
+      );
     });
 
   program
     .command("auth [provider]")
     .description("Start a login on the configured box without copying credentials")
     .action(async (provider?: string) => {
-      await (dependencies.runAuth ?? runAuthCommand)({ provider });
+      await (dependencies.runAuth ?? runAuthCommand)({ provider }, { tools: registry.tools });
     });
 
   program
@@ -111,7 +130,21 @@ if (import.meta.main) {
   }
 }
 
-async function promptForInit(missing: readonly InitField[], current: InitInput): Promise<InitInput> {
+/** Resolve the builtin registry. Operator entries arrive when config carries them. */
+function resolveRegistry(): Registry {
+  const registry = loadRegistry();
+  if (!registry.ok) {
+    throw new Error(
+      `ferry refused the registry: ${registry.problems.map((problem) => problem.reason).join("; ")}`,
+    );
+  }
+  return registry;
+}
+
+async function promptForInit(
+  missing: readonly InitField[],
+  current: InitInput,
+): Promise<Pick<InitInput, InitField>> {
   prompts.intro("ferry init");
   const result: { host?: string; sshUser?: string; snapshotUrl?: string } = {};
 

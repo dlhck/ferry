@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { ApplyError } from "../src/apply.ts";
 import type { OperatorConfig } from "../src/config.ts";
 import type { Seed } from "../src/manifest.ts";
+import { loadRegistry, type RegistryConfig } from "../src/registry/load.ts";
+import type { HarnessDescriptor } from "../src/registry/types.ts";
 import { runSync, type SyncDependencies } from "../src/sync.ts";
 
 const config: OperatorConfig = {
@@ -251,6 +253,80 @@ describe("runSync", () => {
       },
       applyPlan: { actions: [] },
     });
+  });
+
+  test("passes one effective custom harness registry through Manifest, Store, and Apply", async () => {
+    const customHarness: HarnessDescriptor = {
+      id: "opencode",
+      name: "OpenCode",
+      skillRoot: ".config/opencode/skills",
+      instructionFile: ".config/opencode/AGENTS.md",
+    };
+    const configured = {
+      ...config,
+      harness: [customHarness],
+    } satisfies OperatorConfig & RegistryConfig;
+    let registryCalls = 0;
+    let manifestHarnesses: readonly HarnessDescriptor[] | undefined;
+    let storeHarnesses: readonly HarnessDescriptor[] | undefined;
+    let applyHarnesses: readonly HarnessDescriptor[] | undefined;
+    let published = false;
+    let linkCalls = 0;
+
+    await runSync(
+      { home: "/operator" },
+      {
+        readConfig: () => configured,
+        publisher: () => "operator-machine",
+        loadRegistry: (registryConfig) => {
+          registryCalls += 1;
+          expect(registryConfig).toBe(configured);
+          return loadRegistry(registryConfig);
+        },
+        readSeed: (_home, harnesses) => {
+          manifestHarnesses = harnesses;
+          return seed;
+        },
+        createLink: () => ({
+          run: async () => {
+            linkCalls += 1;
+            return {
+              ok: true,
+              address: "box.example.ts.net",
+              stdout: linkCalls === 1 ? "/srv/ferry\n" : "",
+              stderr: "",
+            };
+          },
+        }),
+        writePlan: () => {},
+        acquireLock: () => () => {},
+        openStore: async (_remote, _seed, options) => {
+          storeHarnesses = options.harnesses;
+          return {
+            path: "/operator/.ferry/store",
+            publish: async () => {
+              published = true;
+              return { published: true, tip: "abc123" };
+            },
+          };
+        },
+        apply: async (input) => {
+          applyHarnesses = input.harnesses;
+          return {
+            checkout: input.checkout,
+            targetHome: input.targetHome,
+            actions: [],
+            unmanaged: [],
+          };
+        },
+      },
+    );
+
+    expect(registryCalls).toBe(1);
+    expect(manifestHarnesses?.map((harness) => harness.id)).toContain("opencode");
+    expect(storeHarnesses).toBe(manifestHarnesses);
+    expect(applyHarnesses).toBe(manifestHarnesses);
+    expect(published).toBe(true);
   });
 
   test("refuses a concurrent sync for the same host and removes the lock after success", async () => {

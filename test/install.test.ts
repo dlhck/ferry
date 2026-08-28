@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Install } from "../src/install.ts";
 import type { LinkResult } from "../src/link.ts";
+import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 
 const expectedPlan = [
   {
@@ -19,7 +20,7 @@ const expectedPlan = [
   { tool: "claude", command: "curl -fsSL https://claude.ai/install.sh | bash" },
   { tool: "codex", command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh" },
   { tool: "pi", command: "curl -fsSL https://pi.dev/install.sh | sh" },
-  { tool: "cursor-agent", command: "curl https://cursor.com/install -fsS | bash" },
+  { tool: "cursor", command: "curl https://cursor.com/install -fsS | bash" },
 ] as const;
 
 class FakeLink {
@@ -39,14 +40,14 @@ const success: LinkResult = { ok: true, address: "build-box", stdout: "", stderr
 
 describe("Install", () => {
   test("plan contains only the five current official install commands", () => {
-    const install = new Install(new FakeLink([]));
+    const install = new Install(new FakeLink([]), BUILTIN_TOOLS);
 
     expect(install.plan()).toEqual(expectedPlan);
   });
 
   test("run refuses without explicit confirmation and does not call Link", async () => {
     const link = new FakeLink([]);
-    const install = new Install(link);
+    const install = new Install(link, BUILTIN_TOOLS);
 
     const outcome = await install.run(false);
 
@@ -63,7 +64,7 @@ describe("Install", () => {
 
   test("a confirmed run executes every planned command through Link", async () => {
     const link = new FakeLink(expectedPlan.map(() => success));
-    const install = new Install(link);
+    const install = new Install(link, BUILTIN_TOOLS);
 
     const outcome = await install.run(true);
 
@@ -77,7 +78,7 @@ describe("Install", () => {
       error: { code: "command-failed", origin: "box", message: "installer failed" },
     };
     const link = new FakeLink([success, failure]);
-    const install = new Install(link);
+    const install = new Install(link, BUILTIN_TOOLS);
 
     const outcome = await install.run(true);
 

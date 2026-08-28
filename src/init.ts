@@ -10,12 +10,15 @@ import {
 } from "./config.ts";
 import { Link, type LinkResult, type RunOptions } from "./link.ts";
 import { readSeed as readManifest, type Leftover, type Seed } from "./manifest.ts";
+import type { HarnessDescriptor } from "./registry/types.ts";
 import { openStore as openSnapshotStore, type PublishResult } from "./store.ts";
 
 export const PASEO_DAEMON_PORT = 6767;
 
 export type InitInput = {
   readonly home?: string;
+  /** The harnesses to seed from and to link. The CLI resolves them once. */
+  readonly harnesses: readonly HarnessDescriptor[];
   readonly host?: string;
   readonly sshUser?: string;
   readonly snapshotUrl?: string;
@@ -46,6 +49,7 @@ export type InitDependencies = {
   readonly apply?: (input: {
     readonly checkout: string;
     readonly targetHome: string;
+    readonly harnesses: readonly HarnessDescriptor[];
     readonly force: true;
   }) => ApplyPlan;
   readonly publisher?: () => string;
@@ -82,7 +86,8 @@ export async function runInit(
   let missing = missingFields(values);
 
   if (missing.length > 0 && dependencies.prompt) {
-    values = mergeValues(await dependencies.prompt(missing, values), values);
+    const answers = await dependencies.prompt(missing, values);
+    values = mergeValues({ ...answers, harnesses: input.harnesses }, values);
     missing = missingFields(values);
   }
   if (missing.length > 0) {
@@ -99,7 +104,7 @@ export async function runInit(
     },
   };
 
-  const seed = (dependencies.readSeed ?? readManifest)(home);
+  const seed = (dependencies.readSeed ?? readManifest)(home, input.harnesses);
   if (!seed.ok) throw manifestRefusal(seed);
 
   const link =
@@ -112,9 +117,14 @@ export async function runInit(
 
   const store = dependencies.openStore
     ? await dependencies.openStore(config.snapshotUrl, seed, home)
-    : await openSnapshotStore(config.snapshotUrl, seed, { home });
+    : await openSnapshotStore(config.snapshotUrl, seed, { home, harnesses: input.harnesses });
   const publication = await store.publish(seed);
-  (dependencies.apply ?? applyStore)({ checkout: store.path, targetHome: home, force: true });
+  (dependencies.apply ?? applyStore)({
+    checkout: store.path,
+    targetHome: home,
+    harnesses: input.harnesses,
+    force: true,
+  });
   (dependencies.writeConfig ?? writeOperatorConfig)(config, home);
 
   return {
@@ -133,6 +143,7 @@ function mergeValues(
   const host = typeof fallbackHost === "string" ? fallbackHost : fallbackHost?.tailscale;
   return {
     home: provided.home,
+    harnesses: provided.harnesses,
     host: nonempty(provided.host) ?? nonempty(host),
     sshUser:
       nonempty(provided.sshUser) ??

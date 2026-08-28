@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { ApplyError, apply, planApply } from "../src/apply.ts";
+import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 import type { LinkResult } from "../src/link.ts";
 
 const roots: string[] = [];
@@ -89,11 +90,17 @@ describe("remote apply", () => {
     mkdirSync(dirname(wrongLink), { recursive: true });
     symlinkSync(wrong, wrongLink);
 
-    const local = planApply({ checkout, targetHome: home, timestamp: "20260828T101112Z" });
+    const local = planApply({
+      checkout,
+      targetHome: home,
+      harnesses: BUILTIN_HARNESSES,
+      timestamp: "20260828T101112Z",
+    });
     const link = new ShellLink(root);
     const remote = await apply({
       checkout,
       targetHome: home,
+      harnesses: BUILTIN_HARNESSES,
       timestamp: "20260828T101112Z",
       dryRun: true,
       link,
@@ -110,7 +117,7 @@ describe("remote apply", () => {
     mkdirSync(home);
     const link = new ShellLink(root);
 
-    const plan = await apply({ checkout, targetHome: home, dryRun: true, link });
+    const plan = await apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES, dryRun: true, link });
 
     expect(plan.actions.length).toBeGreaterThan(0);
     expect(link.commands).toHaveLength(1);
@@ -128,6 +135,7 @@ describe("remote apply", () => {
     const plan = await apply({
       checkout,
       targetHome: home,
+      harnesses: BUILTIN_HARNESSES,
       force: true,
       timestamp: "20260828T101112Z",
       link,
@@ -160,7 +168,7 @@ describe("remote apply", () => {
     const unmanaged = join(home, ".cursor", "skills", "local-only", "SKILL.md");
     write(unmanaged, "local");
 
-    const plan = await apply({ checkout, targetHome: home, link: new ShellLink(root) });
+    const plan = await apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES, link: new ShellLink(root) });
 
     expect(plan.actions.filter((action) => action.kind === "delete-managed-name")).toHaveLength(5);
     for (const skillRoot of skillRoots) {
@@ -176,7 +184,7 @@ describe("remote apply", () => {
     mkdirSync(home);
     writeFileSync(join(home, ".claude"), "blocks the Claude directory");
 
-    await expect(apply({ checkout, targetHome: home, link: new ShellLink(root) })).rejects.toEqual(
+    await expect(apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES, link: new ShellLink(root) })).rejects.toEqual(
       expect.objectContaining({
         code: "commit-failed",
         harness: "Claude",
@@ -202,7 +210,7 @@ describe("remote apply", () => {
     for (const [path, body] of Object.entries(state)) write(join(home, path), body);
     const link = new ShellLink(root);
 
-    await apply({ checkout, targetHome: home, link });
+    await apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES, link });
 
     expect(link.commands).toHaveLength(2);
     expect(existsSync(join(root, "checkout-injected"))).toBe(false);
@@ -229,7 +237,7 @@ describe("remote apply", () => {
     write(join(home, ".claude", "skills", "unslop", "local.md"), "box copy");
     const link = new ShellLink(root);
 
-    await expect(apply({ checkout, targetHome: home, link })).rejects.toBeInstanceOf(ApplyError);
+    await expect(apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES, link })).rejects.toBeInstanceOf(ApplyError);
     expect(link.commands).toHaveLength(1);
     expect(existsSync(join(home, ".agents"))).toBe(false);
   });

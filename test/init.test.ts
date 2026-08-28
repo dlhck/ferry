@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import { readConfig } from "../src/config.ts";
 import { InitRefusal, runInit, type InitDependencies } from "../src/init.ts";
 import type { Seed } from "../src/manifest.ts";
+import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 
 const homes: string[] = [];
 const skillRoots = [
@@ -89,6 +90,7 @@ describe("ferry init", () => {
     const result = await runInit(
       {
         home,
+        harnesses: BUILTIN_HARNESSES,
         host: "builder.tailnet.ts.net",
         sshUser: "david",
         snapshotUrl: "git@example.test:ferry-store.git",
@@ -125,7 +127,7 @@ describe("ferry init", () => {
 
     await expect(
       runInit(
-        { home, host: "box", sshUser: "david", snapshotUrl: "snapshot.git" },
+        { home, harnesses: BUILTIN_HARNESSES, host: "box", sshUser: "david", snapshotUrl: "snapshot.git" },
         deps,
       ),
     ).rejects.toMatchObject({ code: "manifest-refusal" });
@@ -147,7 +149,7 @@ describe("ferry init", () => {
     ].join("\n"));
     const { deps } = dependencies(home);
 
-    await runInit({ home, sshUser: "david" }, deps);
+    await runInit({ home, harnesses: BUILTIN_HARNESSES, sshUser: "david" }, deps);
 
     expect(readConfig(home)).toEqual({
       version: 1,
@@ -178,7 +180,7 @@ describe("ferry init", () => {
 
     await expect(
       runInit(
-        { home, host: "box", sshUser: "david", snapshotUrl: "snapshot.git" },
+        { home, harnesses: BUILTIN_HARNESSES, host: "box", sshUser: "david", snapshotUrl: "snapshot.git" },
         linkDeps,
       ),
     ).rejects.toEqual(

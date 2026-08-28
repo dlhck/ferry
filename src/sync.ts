@@ -12,6 +12,12 @@ import {
 } from "./config.ts";
 import { readSeed as readManifest } from "./manifest.ts";
 import { Link, type LinkResult, type RunOptions } from "./link.ts";
+import {
+  loadRegistry as loadEffectiveRegistry,
+  type Registry,
+  type RegistryConfig,
+} from "./registry/load.ts";
+import type { HarnessDescriptor } from "./registry/types.ts";
 import { openStore as openSnapshotStore, type PublishResult } from "./store.ts";
 
 export type SyncInput = {
@@ -22,17 +28,27 @@ export type SyncInput = {
 };
 
 export type SyncDependencies = {
-  readonly readConfig?: (home: string) => PartialOperatorConfig | null;
+  readonly readConfig?: (home: string) => SyncConfig | null;
+  readonly loadRegistry?: typeof loadEffectiveRegistry;
   readonly readSeed?: typeof readManifest;
   readonly publisher?: () => string;
   readonly createLink?: (host: string, user: string) => SyncLink;
-  readonly openStore?: (remote: string, seed: Seed, home: string) => Promise<SyncStore>;
+  readonly openStore?: (
+    remote: string,
+    seed: Seed,
+    options: SyncStoreOptions,
+  ) => Promise<SyncStore>;
   readonly acquireLock?: (home: string, host: string) => () => void;
   readonly apply?: (input: RemoteApplyInput) => Promise<ApplyPlan>;
   readonly writePlan?: (plan: SyncPlan) => void;
 };
 
+type SyncConfig = PartialOperatorConfig & RegistryConfig;
 type Seed = Extract<ReturnType<typeof readManifest>, { ok: true }>;
+type SyncStoreOptions = {
+  readonly home: string;
+  readonly harnesses: readonly HarnessDescriptor[];
+};
 
 type SyncLink = {
   run(command: string, options?: RunOptions): Promise<LinkResult>;
@@ -64,6 +80,8 @@ export type SyncResult = {
 export type SyncErrorCode =
   | "invalid-config"
   | "wrong-publisher"
+  | "registry-failure"
+  | "registry-refusal"
   | "manifest-failure"
   | "manifest-refusal"
   | "invalid-box-home"
@@ -92,7 +110,8 @@ export async function runSync(
   dependencies: SyncDependencies = {},
 ): Promise<SyncResult> {
   const home = input.home ?? homedir();
-  const config = loadConfig(home, dependencies.readConfig ?? readOperatorConfig);
+  const loadedConfig = loadConfig(home, dependencies.readConfig ?? readOperatorConfig);
+  const config = loadedConfig.operator;
   const currentPublisher = dependencies.publisher?.() ?? hostname();
   if (currentPublisher !== config.publisher) {
     throw new SyncError(
@@ -101,10 +120,14 @@ export async function runSync(
       `configured publisher ${config.publisher} does not match this machine ${currentPublisher}`,
     );
   }
+  const registry = resolveRegistry(
+    loadedConfig.source,
+    dependencies.loadRegistry ?? loadEffectiveRegistry,
+  );
 
   let seed: ReturnType<typeof readManifest>;
   try {
-    seed = (dependencies.readSeed ?? readManifest)(home);
+    seed = (dependencies.readSeed ?? readManifest)(home, registry.harnesses);
   } catch (cause) {
     throw new SyncError(
       "manifest-failure",
@@ -144,8 +167,14 @@ export async function runSync(
     let publication: PublishResult;
     try {
       store = dependencies.openStore
-        ? await dependencies.openStore(config.snapshotUrl, seed, home)
-        : await openSnapshotStore(config.snapshotUrl, seed, { home });
+        ? await dependencies.openStore(config.snapshotUrl, seed, {
+            home,
+            harnesses: registry.harnesses,
+          })
+        : await openSnapshotStore(config.snapshotUrl, seed, {
+            home,
+            harnesses: registry.harnesses,
+          });
       publication = await store.publish(seed, input.message);
     } catch (cause) {
       throw new SyncError(
@@ -173,6 +202,7 @@ export async function runSync(
       applyPlan = await (dependencies.apply ?? applyStore)({
         checkout: required(plan.remoteCheckout),
         targetHome: required(plan.remoteHome),
+        harnesses: registry.harnesses,
         force: input.force === true,
         dryRun: false,
         link,
@@ -297,16 +327,44 @@ function isCode(error: unknown, code: string): boolean {
 
 function loadConfig(
   home: string,
-  read: (home: string) => PartialOperatorConfig | null,
-): OperatorConfig {
+  read: (home: string) => SyncConfig | null,
+): { readonly source: SyncConfig; readonly operator: OperatorConfig } {
   try {
-    return completeConfig(read(home));
+    const source = read(home);
+    return { source: source ?? {}, operator: completeConfig(source) };
   } catch (cause) {
     if (cause instanceof SyncError) throw cause;
     throw new SyncError("invalid-config", "operator", `could not read Ferry config: ${messageOf(cause)}`, {
       cause,
     });
   }
+}
+
+function resolveRegistry(
+  config: RegistryConfig,
+  load: typeof loadEffectiveRegistry,
+): Registry {
+  let result: ReturnType<typeof loadEffectiveRegistry>;
+  try {
+    result = load(config);
+  } catch (cause) {
+    throw new SyncError(
+      "registry-failure",
+      "operator",
+      `could not load the configured registry: ${messageOf(cause)}`,
+      { cause },
+    );
+  }
+  if (!result.ok) {
+    throw new SyncError(
+      "registry-refusal",
+      "operator",
+      `registry refused the operator config: ${result.problems
+        .map((problem) => problem.reason)
+        .join("; ")}`,
+    );
+  }
+  return result;
 }
 
 function completeConfig(config: PartialOperatorConfig | null): OperatorConfig {
