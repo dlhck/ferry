@@ -58,7 +58,11 @@ export class RealGitRunner implements GitRunner {
   }
 }
 
-export type StoreRefusalCode = "remote-clash" | "missing-git-identity" | "unreadable-store";
+export type StoreRefusalCode =
+  | "remote-clash"
+  | "missing-git-identity"
+  | "unreadable-store"
+  | "schema-mismatch";
 
 export class StoreRefusal extends Error {
   constructor(
@@ -120,7 +124,7 @@ export async function openStore(
     const tip = await optionalTip(git, path, "HEAD");
     if (tip) await refuseRemoteClash(git, path, tip, seed, metadata);
   }
-  refuseUnreadableStore(path);
+  refuseUnusableStore(path);
 
   return new Store(git, path, metadata);
 }
@@ -259,8 +263,12 @@ function storeMetadata(harnesses: readonly HarnessDescriptor[]): string {
   return `${JSON.stringify({ schemaVersion: SCHEMA_VERSION, managedHarnesses }, null, 2)}\n`;
 }
 
-/** Refuse a checkout whose ferry.json is not store metadata ferry can read. */
-function refuseUnreadableStore(path: string): void {
+/**
+ * Refuse a checkout this ferry does not manage: metadata it cannot read, or a
+ * schema version it does not write. A store of another version names other
+ * folders, so publishing into it would write the wrong layout.
+ */
+function refuseUnusableStore(path: string): void {
   const file = join(path, METADATA_FILE);
   if (!existsSync(file)) return;
 
@@ -278,6 +286,13 @@ function refuseUnreadableStore(path: string): void {
     throw new StoreRefusal("unreadable-store", `${file} is not readable ferry store metadata`, [
       file,
     ]);
+  }
+  if (metadata.schemaVersion !== SCHEMA_VERSION) {
+    throw new StoreRefusal(
+      "schema-mismatch",
+      `${file} records store schema version ${metadata.schemaVersion}; this ferry manages version ${SCHEMA_VERSION}`,
+      [file],
+    );
   }
 }
 

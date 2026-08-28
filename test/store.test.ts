@@ -219,11 +219,23 @@ describe("store publish", () => {
     expect(git.commits).toHaveLength(0);
   });
 
-  test("refuses a checkout whose store metadata cannot be read", async () => {
+  test.each([
+    ["cannot be read", "{ not json", "unreadable-store"],
+    [
+      "records the older schema",
+      JSON.stringify({ schemaVersion: 1, managedHarnesses: ["agents", "claude"] }),
+      "schema-mismatch",
+    ],
+    [
+      "records a schema from a later ferry",
+      JSON.stringify({ schemaVersion: 99, managedHarnesses: [] }),
+      "schema-mismatch",
+    ],
+  ])("refuses a checkout whose store metadata %s", async (_label, body, code) => {
     const home = makeHome();
     const checkout = join(home, ".ferry", "store");
     mkdirSync(join(checkout, ".git"), { recursive: true });
-    writeFileSync(join(checkout, "ferry.json"), "{ not json");
+    writeFileSync(join(checkout, "ferry.json"), body);
 
     await expect(
       openStore("snapshot.git", seed(), {
@@ -231,7 +243,7 @@ describe("store publish", () => {
         home,
         harnesses: BUILTIN_HARNESSES,
       }),
-    ).rejects.toMatchObject({ code: "unreadable-store" });
+    ).rejects.toMatchObject({ code });
   });
 
   test("publishing identical bytes twice creates no second commit and never uses force", async () => {
