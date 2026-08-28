@@ -1,30 +1,19 @@
 /**
  * Manifest decides what leaves the operator machine.
  *
- * Callers hand it a source home and get back a seed (skill bodies plus the one
- * instruction file) or a refusal that names every clash and every forbidden
- * hit. Callers never pass a path set in: the managed harness set, the union
- * rule, and the deny set live here.
+ * Callers hand it a source home and the harness registry and get back a seed
+ * (skill bodies plus the one instruction file) or a refusal that names every
+ * clash and every forbidden hit. Callers pass harnesses, never a path set: the
+ * union rule and the deny set live here, out of reach of any registry entry.
  */
 
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { join, relative, sep } from "node:path";
+import type { HarnessDescriptor } from "./registry/types.ts";
 
-/**
- * Every harness skill root, relative to the source home. Nothing else is
- * scanned, so vendor auth files that sit beside a root stay out of reach.
- */
-const MANAGED_SKILL_ROOTS: readonly string[] = [
-  ".agents/skills", // the shared agents root
-  ".claude/skills",
-  ".codex/skills",
-  ".pi/agent/skills", // Pi keeps its skills under .pi/agent
-  ".cursor/skills",
-];
-
-/** The one instruction file, relative to the source home. */
+/** The one instruction file of the seed, relative to the source home. */
 const INSTRUCTION_FILE = "AGENTS.md";
 
 type DenyVerdict = "refuse" | "skip";
@@ -112,14 +101,14 @@ export type Refusal = {
 /**
  * Read the seed for `home`.
  *
- * Only the managed skill roots and the home instruction file are read. Project
- * skill directories sit outside those roots, so they are never seen.
+ * Only the skill roots of `harnesses` and the home instruction file are read.
+ * Project skill directories sit outside those roots, so they are never seen.
  */
-export function readSeed(home: string): Seed | Refusal {
+export function readSeed(home: string, harnesses: readonly HarnessDescriptor[]): Seed | Refusal {
   const clashes: Clash[] = [];
   const forbidden: ForbiddenHit[] = [];
   const leftovers: Leftover[] = [];
-  const occurrences = collectOccurrences(home, leftovers);
+  const occurrences = collectOccurrences(home, harnesses, leftovers);
   const skills: SeedSkill[] = [];
 
   for (const [name, found] of [...occurrences].sort(([a], [b]) => compare(a, b))) {
@@ -155,11 +144,16 @@ export function readSeed(home: string): Seed | Refusal {
 
 type Occurrence = { readonly path: string; readonly inode: string };
 
-function collectOccurrences(home: string, leftovers: Leftover[]): Map<string, Occurrence[]> {
+function collectOccurrences(
+  home: string,
+  harnesses: readonly HarnessDescriptor[],
+  leftovers: Leftover[],
+): Map<string, Occurrence[]> {
   const occurrences = new Map<string, Occurrence[]>();
 
-  for (const skillRoot of MANAGED_SKILL_ROOTS) {
-    const root = join(home, skillRoot);
+  for (const harness of harnesses) {
+    if (!harness.skillRoot) continue;
+    const root = join(home, harness.skillRoot);
     let entries: Dirent[];
     try {
       entries = readdirSync(root, { withFileTypes: true });
@@ -248,6 +242,25 @@ function walk(root: string, dir: string, rootReal: string, seen: Set<string>, sc
     }
     scan.files.push({ path: relative(root, path), bytes });
   }
+}
+
+/**
+ * Report the first segment of a relative path that a deny rule covers.
+ *
+ * The registry loader calls this so a harness entry cannot name a path the
+ * deny set already refuses. The rules stay here; nothing can widen them.
+ */
+export function deniedSegment(
+  path: string,
+  leaf: "directory" | "file",
+): (Note & { readonly segment: string }) | null {
+  const segments = path.split("/");
+  for (const [index, segment] of segments.entries()) {
+    const isDirectory = leaf === "directory" || index < segments.length - 1;
+    const rule = denyRuleFor(segment, isDirectory);
+    if (rule) return { segment, code: rule.code, reason: rule.reason };
+  }
+  return null;
 }
 
 function denyRuleFor(name: string, isDirectory: boolean): DenyRule | null {

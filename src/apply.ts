@@ -12,25 +12,13 @@ import {
   unlinkSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-
-const SKILL_HARNESSES = [
-  { name: "Shared agents", path: ".agents/skills" },
-  { name: "Claude", path: ".claude/skills" },
-  { name: "Codex", path: ".codex/skills" },
-  { name: "Pi", path: ".pi/agent/skills" },
-  { name: "Cursor Agent", path: ".cursor/skills" },
-] as const;
-
-const INSTRUCTION_TARGETS = [
-  { name: "Home instructions", path: "AGENTS.md" },
-  { name: "Claude", path: ".claude/CLAUDE.md" },
-  { name: "Codex", path: ".codex/AGENTS.md" },
-  { name: "Pi", path: ".pi/agent/AGENTS.md" },
-] as const;
+import type { HarnessDescriptor } from "./registry/types.ts";
 
 export type ApplyInput = {
   readonly checkout: string;
   readonly targetHome: string;
+  /** The harnesses to link. Apply owns the plan, not the layout. */
+  readonly harnesses: readonly HarnessDescriptor[];
   readonly force?: boolean;
   readonly dryRun?: boolean;
   /** Fixed value for reproducible plans. The default is the current UTC time. */
@@ -110,8 +98,9 @@ export function planApply(input: ApplyInput): ApplyPlan {
   const actions: ApplyAction[] = [];
   const unmanaged: UnmanagedExtra[] = [];
 
-  for (const harness of SKILL_HARNESSES) {
-    const root = join(targetHome, harness.path);
+  for (const harness of input.harnesses) {
+    if (!harness.skillRoot) continue;
+    const root = join(targetHome, harness.skillRoot);
     for (const name of skillNames) {
       planLink(
         harness.name,
@@ -127,10 +116,11 @@ export function planApply(input: ApplyInput): ApplyPlan {
 
   const instructions = join(checkout, "AGENTS.md");
   if (existsSync(instructions)) {
-    for (const target of INSTRUCTION_TARGETS) {
+    for (const harness of input.harnesses) {
+      if (!harness.instructionFile) continue;
       planLink(
-        target.name,
-        join(targetHome, target.path),
+        harness.name,
+        join(targetHome, harness.instructionFile),
         instructions,
         input.force ?? false,
         timestamp,

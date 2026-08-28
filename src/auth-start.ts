@@ -1,3 +1,9 @@
+/**
+ * AuthStart starts a vendor login on the box and returns the step the operator
+ * finishes here. It reads its recipes from the tool registry and never accepts
+ * or reads a credential file from the operator machine.
+ */
+
 import type {
   ForwardOptions,
   LinkErrorCode,
@@ -6,11 +12,7 @@ import type {
   LinkResult,
   RunOptions,
 } from "./link.ts";
-
-export const STARTABLE_AUTH_PROVIDERS = ["gh", "claude", "codex", "cursor"] as const;
-
-export type StartableAuthProvider = (typeof STARTABLE_AUTH_PROVIDERS)[number];
-export type AuthProvider = StartableAuthProvider | "pi";
+import type { AuthFallback, ToolDescriptor } from "./registry/types.ts";
 
 export interface AuthLink {
   run(command: string, options?: RunOptions): Promise<LinkResult>;
@@ -18,21 +20,21 @@ export interface AuthLink {
 }
 
 export type AuthStartResult =
-  | { readonly kind: "already-done"; readonly provider: StartableAuthProvider }
+  | { readonly kind: "already-done"; readonly provider: string }
   | {
       readonly kind: "device-url";
-      readonly provider: "gh" | "codex";
+      readonly provider: string;
       readonly url: string;
       readonly userCode?: string;
     }
   | {
       readonly kind: "printed-url";
-      readonly provider: "claude" | "cursor";
+      readonly provider: string;
       readonly url: string;
     }
   | {
       readonly kind: "local-port-forward";
-      readonly provider: "codex";
+      readonly provider: string;
       readonly url: string;
       readonly localPort: number;
       readonly remotePort: number;
@@ -40,18 +42,18 @@ export type AuthStartResult =
     }
   | {
       readonly kind: "manual-ssh";
-      readonly provider: "pi";
-      readonly command: "pi";
+      readonly provider: string;
+      readonly command: string;
       readonly instruction: string;
     }
   | {
       readonly kind: "link-failure";
-      readonly provider: StartableAuthProvider;
+      readonly provider: string;
       readonly result: LinkFailure;
     }
   | {
       readonly kind: "failed";
-      readonly provider: StartableAuthProvider;
+      readonly provider: string;
       readonly code: "login-output";
       readonly message: string;
     }
@@ -61,32 +63,20 @@ export type AuthStartResult =
       readonly message: string;
     };
 
-type Recipe = {
-  readonly probe: string;
-  readonly login: string;
-};
-
-const RECIPES: Readonly<Record<StartableAuthProvider, Recipe>> = {
-  gh: {
-    probe: "gh auth status --hostname github.com",
-    login: "gh auth login --hostname github.com --git-protocol https --web",
-  },
-  claude: { probe: "claude auth status", login: "claude auth login" },
-  codex: { probe: "codex login status", login: "codex login --device-auth" },
-  cursor: { probe: "cursor-agent status", login: "cursor-agent login" },
-};
-
-const CODEX_FORWARD = {
-  localPort: 1455,
-  remotePort: 1455,
-  remoteHost: "127.0.0.1",
-  timeoutMs: 120_000,
-} as const;
-
 export class AuthStart {
-  constructor(private readonly link: AuthLink) {}
+  constructor(
+    private readonly link: AuthLink,
+    private readonly tools: readonly ToolDescriptor[],
+  ) {}
 
-  async start(provider: AuthProvider): Promise<AuthStartResult> {
+  /** The providers a login can be started for. Manual providers are not listed. */
+  startableProviders(): readonly string[] {
+    return this.tools
+      .filter((tool) => tool.auth && tool.auth.completion.kind !== "manual")
+      .map((tool) => tool.id);
+  }
+
+  async start(provider: string): Promise<AuthStartResult> {
     if (arguments.length !== 1) {
       return {
         kind: "refused",
@@ -94,90 +84,80 @@ export class AuthStart {
         message: "AuthStart accepts only a provider. Logins are not copied.",
       };
     }
-    if (!isAuthProvider(provider)) {
+
+    const auth = this.tools.find((tool) => tool.id === provider)?.auth;
+    if (!auth) {
       return {
         kind: "refused",
         code: "invalid-provider",
         message: "AuthStart received an unknown provider.",
       };
     }
-    if (provider === "pi") {
+
+    const completion = auth.completion;
+    if (completion.kind === "manual") {
       return {
         kind: "manual-ssh",
         provider,
-        command: "pi",
-        instruction: "SSH to the box, run pi, then use /login in its interactive session.",
+        command: completion.command,
+        instruction: completion.instruction,
+      };
+    }
+    if (!auth.probe || !auth.login) {
+      return {
+        kind: "refused",
+        code: "invalid-provider",
+        message: `The ${provider} provider has no login recipe.`,
       };
     }
 
-    const recipe = RECIPES[provider];
-    const probe = await this.link.run(recipe.probe);
+    const probe = await this.link.run(auth.probe);
     if (probe.ok) return { kind: "already-done", provider };
     if (probe.error.code !== "command-failed") return linkFailure(provider, probe);
 
-    const login = await this.link.run(recipe.login);
+    const login = await this.link.run(auth.login);
     if (!login.ok) {
-      if (provider === "codex" && login.error.code === "command-failed") {
-        return this.startCodexCallback();
+      if (auth.fallback && login.error.code === "command-failed") {
+        return this.startFallback(provider, auth.fallback);
       }
       return linkFailure(provider, login);
     }
 
-    switch (provider) {
-      case "gh":
-        return deviceAction(provider, "https://github.com/login/device", login.stdout);
-      case "codex":
-        return deviceAction(provider, "https://auth.openai.com/codex/device", login.stdout);
-      case "claude":
-        return printedUrlAction(provider, login.stdout, ["claude.ai", "anthropic.com"]);
-      case "cursor":
-        return printedUrlAction(provider, login.stdout, ["cursor.com", "cursor.sh"]);
+    if (completion.kind === "device-url") {
+      const userCode = completion.codePattern
+        ? login.stdout.match(new RegExp(completion.codePattern))?.[0]
+        : undefined;
+      return userCode
+        ? { kind: "device-url", provider, url: completion.url, userCode }
+        : { kind: "device-url", provider, url: completion.url };
     }
+    const url = safeUrl(login.stdout, completion.allowedHosts);
+    return url ? { kind: "printed-url", provider, url } : missingUrl(provider);
   }
 
-  private async startCodexCallback(): Promise<AuthStartResult> {
-    const login = await this.link.run("codex login");
-    if (!login.ok) return linkFailure("codex", login);
+  /** The declared callback path: a second login command plus a local forward. */
+  private async startFallback(
+    provider: string,
+    fallback: AuthFallback,
+  ): Promise<AuthStartResult> {
+    const login = await this.link.run(fallback.login);
+    if (!login.ok) return linkFailure(provider, login);
 
-    const url = safeUrl(login.stdout, ["openai.com"]);
-    if (!url) return missingUrl("codex");
+    const url = safeUrl(login.stdout, fallback.allowedHosts);
+    if (!url) return missingUrl(provider);
 
-    const forward = await this.link.forward(CODEX_FORWARD);
-    if (!forward.ok) return linkFailure("codex", forward, true);
+    const forward = await this.link.forward(fallback.forward);
+    if (!forward.ok) return linkFailure(provider, forward, true);
 
     return {
       kind: "local-port-forward",
-      provider: "codex",
+      provider,
       url,
-      localPort: CODEX_FORWARD.localPort,
-      remotePort: CODEX_FORWARD.remotePort,
-      timeoutMs: CODEX_FORWARD.timeoutMs,
+      localPort: fallback.forward.localPort,
+      remotePort: fallback.forward.remotePort,
+      timeoutMs: fallback.forward.timeoutMs,
     };
   }
-}
-
-function isAuthProvider(provider: unknown): provider is AuthProvider {
-  return provider === "pi" || STARTABLE_AUTH_PROVIDERS.some((candidate) => candidate === provider);
-}
-
-function deviceAction(
-  provider: "gh" | "codex",
-  url: string,
-  output: string,
-): AuthStartResult {
-  const userCode = output.match(/\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/)?.[0];
-  return userCode
-    ? { kind: "device-url", provider, url, userCode }
-    : { kind: "device-url", provider, url };
-}
-
-function printedUrlAction(
-  provider: "claude" | "cursor",
-  output: string,
-  allowedHosts: readonly string[],
-): AuthStartResult {
-  const url = safeUrl(output, allowedHosts);
-  return url ? { kind: "printed-url", provider, url } : missingUrl(provider);
 }
 
 function safeUrl(output: string, allowedHosts: readonly string[]): string | null {
@@ -199,7 +179,7 @@ function safeUrl(output: string, allowedHosts: readonly string[]): string | null
   return null;
 }
 
-function missingUrl(provider: StartableAuthProvider): AuthStartResult {
+function missingUrl(provider: string): AuthStartResult {
   return {
     kind: "failed",
     provider,
@@ -209,7 +189,7 @@ function missingUrl(provider: StartableAuthProvider): AuthStartResult {
 }
 
 function linkFailure(
-  provider: StartableAuthProvider,
+  provider: string,
   result: LinkFailure,
   preserveForwardTimeout = false,
 ): AuthStartResult {
