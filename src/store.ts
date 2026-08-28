@@ -163,16 +163,14 @@ export class Store {
   async compareTips(box: string | null): Promise<TipReport> {
     const local = await this.localTip();
     const remote = await this.fetchTip();
-    const localMatchesRemote = local !== null && local === remote;
-    const remoteMatchesBox = remote !== null && remote === box;
-    return {
-      local,
-      remote,
-      box,
-      localMatchesRemote,
-      remoteMatchesBox,
-      allMatch: localMatchesRemote && remoteMatchesBox,
-    };
+    return tipReport(local, remote, box);
+  }
+
+  /** Read local and remote tips without fetching or changing git refs. */
+  async inspectTips(box: string | null): Promise<TipReport> {
+    const local = await this.localTip();
+    const remote = await remoteTip(this.git, this.path);
+    return tipReport(local, remote, box);
   }
 
   private async localTip(): Promise<string | null> {
@@ -192,6 +190,19 @@ export class Store {
   }
 }
 
+function tipReport(local: string | null, remote: string | null, box: string | null): TipReport {
+  const localMatchesRemote = local !== null && local === remote;
+  const remoteMatchesBox = remote !== null && remote === box;
+  return {
+    local,
+    remote,
+    box,
+    localMatchesRemote,
+    remoteMatchesBox,
+    allMatch: localMatchesRemote && remoteMatchesBox,
+  };
+}
+
 async function configuredValue(git: GitRunner, cwd: string, key: string): Promise<string | null> {
   const result = await git.run({ args: ["config", "--get", key], cwd });
   if (result.status !== 0) return null;
@@ -202,6 +213,14 @@ async function optionalTip(git: GitRunner, cwd: string, ref: string): Promise<st
   const result = await git.run({ args: ["rev-parse", "--verify", ref], cwd });
   if (result.status !== 0) return null;
   return decode(result.stdout).trim() || null;
+}
+
+async function remoteTip(git: GitRunner, cwd: string): Promise<string | null> {
+  const args = ["ls-remote", "--exit-code", "origin", "HEAD"] as const;
+  const result = await git.run({ args, cwd });
+  if (result.status === 2) return null;
+  if (result.status !== 0) throw commandError(args, result);
+  return decode(result.stdout).trim().split(/\s+/, 1)[0] || null;
 }
 
 async function refuseRemoteClash(

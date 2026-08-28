@@ -126,8 +126,12 @@ class FakeGit implements GitRunner {
       return ok();
     }
     if (args[0] === "fetch") return ok();
+    if (args[0] === "ls-remote") {
+      return this.remoteTip ? textResult(`${this.remoteTip}\tHEAD\n`) : fail(2);
+    }
     if (args[0] === "rev-parse") {
-      const tip = args.at(-1) === "FETCH_HEAD" ? this.remoteTip : this.localTip;
+      const ref = args.at(-1);
+      const tip = ref === "FETCH_HEAD" ? this.remoteTip : this.localTip;
       return tip ? textResult(`${tip}\n`) : fail();
     }
     return fail(2, `unexpected git command: ${args.join(" ")}`);
@@ -169,6 +173,28 @@ describe("store publish", () => {
       remoteMatchesBox: true,
       allMatch: true,
     });
+  });
+
+  test("inspects local and remote tips without fetching or changing refs", async () => {
+    const git = new FakeGit();
+    const value = seed();
+    const store = await openStore("snapshot.git", value, { git, home: makeHome() });
+    await store.publish(value);
+    git.localTip = "local-2";
+    const before = git.invocations.length;
+
+    expect(await store.inspectTips("box-1")).toEqual({
+      local: "local-2",
+      remote: "local-1",
+      box: "box-1",
+      localMatchesRemote: false,
+      remoteMatchesBox: false,
+      allMatch: false,
+    });
+    expect(git.invocations.slice(before).map((invocation) => invocation.args)).toEqual([
+      ["rev-parse", "--verify", "HEAD"],
+      ["ls-remote", "--exit-code", "origin", "HEAD"],
+    ]);
   });
 
   test("refuses a fresh clone whose remote bytes differ from the seed", async () => {
