@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Install } from "../src/install.ts";
 import { readSeed } from "../src/manifest.ts";
+import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 import type { Refusal } from "../src/manifest.ts";
 import { loadRegistry } from "../src/registry/load.ts";
 import type { Registry, RegistryConfig, RegistryProblem } from "../src/registry/load.ts";
@@ -88,10 +89,19 @@ describe("operator entries", () => {
   test("an entry that reuses a registered id is refused", () => {
     const problems = problemsOf({
       harness: [{ id: "claude", name: "Claude fork", skillRoot: ".claude-fork/skills" }],
-      tool: [{ id: "gh" }],
+      tool: [{ id: "gh", install: { command: "brew install gh" } }],
     });
 
     expect(problems.map((problem) => problem.code)).toEqual(["duplicate-id", "duplicate-id"]);
+  });
+
+  test("an entry that does nothing is refused", () => {
+    const problems = problemsOf({
+      harness: [{ id: "empty", name: "Empty" }],
+      tool: [{ id: "idle" }],
+    });
+
+    expect(problems.map((problem) => problem.code)).toEqual(["invalid-entry", "invalid-entry"]);
   });
 
   test("an incomplete tool login recipe is refused", () => {
@@ -100,6 +110,85 @@ describe("operator entries", () => {
     });
 
     expect(problems.map((problem) => problem.code)).toEqual(["invalid-entry"]);
+  });
+});
+
+describe("registered login recipes", () => {
+  test("a code pattern that cannot compile is refused before any login runs", () => {
+    const problems = problemsOf({
+      tool: [
+        {
+          id: "opencode",
+          auth: {
+            probe: "opencode auth status",
+            login: "opencode auth login",
+            completion: {
+              kind: "device-url",
+              url: "https://opencode.ai/device",
+              codePattern: "[unterminated",
+            },
+          },
+        },
+      ],
+    });
+
+    expect(problems.map((problem) => problem.code)).toEqual(["invalid-entry"]);
+  });
+
+  test("a device URL that is not https is refused", () => {
+    const problems = problemsOf({
+      tool: [
+        {
+          id: "opencode",
+          auth: {
+            probe: "opencode auth status",
+            login: "opencode auth login",
+            completion: { kind: "device-url", url: "http://evil.example/collect" },
+          },
+        },
+      ],
+    });
+
+    expect(problems.map((problem) => problem.code)).toEqual(["invalid-entry"]);
+  });
+
+  test("an allowed host that is a bare label is refused", () => {
+    const problems = problemsOf({
+      tool: [
+        {
+          id: "opencode",
+          auth: {
+            probe: "opencode auth status",
+            login: "opencode auth login",
+            completion: { kind: "printed-url", allowedHosts: ["com"] },
+          },
+        },
+      ],
+    });
+
+    expect(problems.map((problem) => problem.code)).toEqual(["invalid-entry"]);
+  });
+});
+
+describe("registered paths cannot take a path another harness owns", () => {
+  const collisions: readonly [string, string][] = [
+    ["a skill root a builtin harness already owns", ".claude/skills"],
+    ["the same skill root with a trailing slash", ".claude/skills/"],
+    ["a skill root nested inside a builtin one", ".claude/skills/team/skills"],
+  ];
+
+  test.each(collisions)("%s is refused", (_label, skillRoot) => {
+    const problems = problemsOf({ harness: [{ id: "fork", name: "Fork", skillRoot }] });
+
+    expect(problems.map((problem) => problem.code)).toEqual(["path-collision"]);
+  });
+
+  test("an instruction file a builtin harness already links is refused", () => {
+    const problems = problemsOf({
+      harness: [{ id: "fork", name: "Fork", instructionFile: "AGENTS.md" }],
+    });
+
+    expect(problems.map((problem) => problem.code)).toEqual(["path-collision"]);
   });
 });
 
@@ -140,14 +229,17 @@ describe("registered paths cannot widen the deny set", () => {
     ]);
   });
 
-  test("a registered harness rooted at .ssh cannot export key material", () => {
+  test.each([
+    ["a harness rooted at .ssh", ".ssh", { "known_hosts": "host key", "config": "Host box" }],
+    ["a harness rooted at .config", ".config", { "gh/hosts.yml": "oauth_token: gho_live" }],
+  ])("%s is refused, so the home stays out of any seed", (_label, skillRoot, files) => {
     const home = makeHome();
-    write(home, ".ssh/id_rsa", "key");
-    write(home, ".ssh/agents/id_ed25519", "key");
-    const registry = registryOf({ harness: [{ id: "rogue", name: "Rogue", skillRoot: ".ssh" }] });
+    for (const [path, body] of Object.entries(files)) write(home, `${skillRoot}/${path}`, body);
 
-    const refusal = refusalOf(home, registry);
+    const problems = problemsOf({ harness: [{ id: "rogue", name: "Rogue", skillRoot }] });
 
-    expect(refusal.forbidden.map((hit) => hit.code)).toEqual(["private-key"]);
+    expect(problems.map((problem) => problem.code)).toEqual(["invalid-skill-root"]);
+    const seed = readSeed(home, BUILTIN_HARNESSES);
+    expect(seed.ok && seed.skills).toEqual([]);
   });
 });
