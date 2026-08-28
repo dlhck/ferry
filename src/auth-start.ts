@@ -1,5 +1,6 @@
 import type {
   ForwardOptions,
+  LinkError,
   LinkErrorCode,
   LinkFailure,
   LinkOrigin,
@@ -11,6 +12,22 @@ export const STARTABLE_AUTH_PROVIDERS = ["gh", "claude", "codex", "cursor"] as c
 
 export type StartableAuthProvider = (typeof STARTABLE_AUTH_PROVIDERS)[number];
 export type AuthProvider = StartableAuthProvider | "pi";
+
+export type AuthProviderStatus =
+  | { readonly provider: AuthProvider; readonly status: "authenticated" }
+  | { readonly provider: AuthProvider; readonly status: "login-required" }
+  | {
+      readonly provider: "pi";
+      readonly status: "manual";
+      readonly instruction: string;
+    }
+  | {
+      readonly provider: StartableAuthProvider;
+      readonly status: "unavailable";
+      readonly error: LinkError;
+    };
+
+export type AuthStatusReport = { readonly providers: readonly AuthProviderStatus[] };
 
 export interface AuthLink {
   run(command: string, options?: RunOptions): Promise<LinkResult>;
@@ -83,8 +100,36 @@ const CODEX_FORWARD = {
   timeoutMs: 120_000,
 } as const;
 
+const PI_MANUAL_INSTRUCTION =
+  "SSH to the box, run pi, then use /login in its interactive session.";
+
 export class AuthStart {
   constructor(private readonly link: AuthLink) {}
+
+  /** Run authentication probes only. This method never starts a login or forward. */
+  async status(): Promise<AuthStatusReport> {
+    const providers: AuthProviderStatus[] = [];
+    for (const provider of STARTABLE_AUTH_PROVIDERS) {
+      const probe = await this.link.run(RECIPES[provider].probe);
+      if (probe.ok) {
+        providers.push({ provider, status: "authenticated" });
+      } else if (probe.error.code === "command-failed") {
+        providers.push({ provider, status: "login-required" });
+      } else {
+        providers.push({
+          provider,
+          status: "unavailable",
+          error: {
+            code: probe.error.code,
+            origin: probe.error.origin,
+            message: safeLinkMessage(probe.error.code, probe.error.origin),
+          },
+        });
+      }
+    }
+    providers.push({ provider: "pi", status: "manual", instruction: PI_MANUAL_INSTRUCTION });
+    return { providers };
+  }
 
   async start(provider: AuthProvider): Promise<AuthStartResult> {
     if (arguments.length !== 1) {
@@ -106,7 +151,7 @@ export class AuthStart {
         kind: "manual-ssh",
         provider,
         command: "pi",
-        instruction: "SSH to the box, run pi, then use /login in its interactive session.",
+        instruction: PI_MANUAL_INSTRUCTION,
       };
     }
 
