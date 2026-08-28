@@ -11,7 +11,18 @@ import {
   symlinkSync,
   unlinkSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, resolve } from "node:path";
+import {
+  RemoteTargetError,
+  commitRemoteTarget,
+  inspectRemoteTarget,
+  type InspectedEntry,
+  type InspectedPath,
+  type TargetAction,
+  type TargetInspection,
+  type TargetInspectionRequest,
+} from "./apply-remote.ts";
+import type { Link } from "./link.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
 
 export type ApplyInput = {
@@ -23,6 +34,10 @@ export type ApplyInput = {
   readonly dryRun?: boolean;
   /** Fixed value for reproducible plans. The default is the current UTC time. */
   readonly timestamp?: string;
+};
+
+export type RemoteApplyInput = ApplyInput & {
+  readonly link: Pick<Link, "run">;
 };
 
 type LinkAction = {
@@ -84,61 +99,26 @@ export class ApplyError extends Error {
   }
 }
 
-/** Read the checkout and target home. This function does not write. */
+/** Read the local checkout and target home. This function does not write. */
 export function planApply(input: ApplyInput): ApplyPlan {
   const checkout = resolve(input.checkout);
   const targetHome = resolve(input.targetHome);
-  const storeSkills = join(checkout, "skills");
-  const skillNames = readdirSync(storeSkills, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-    .sort(compare);
-  const snapshotNames = new Set(skillNames);
   const timestamp = input.timestamp ?? currentTimestamp();
-  const actions: ApplyAction[] = [];
-  const unmanaged: UnmanagedExtra[] = [];
-
-  for (const harness of input.harnesses) {
-    if (!harness.skillRoot) continue;
-    const root = join(targetHome, harness.skillRoot);
-    for (const name of skillNames) {
-      planLink(
-        harness.name,
-        join(root, name),
-        join(storeSkills, name),
-        input.force ?? false,
-        timestamp,
-        actions,
-      );
-    }
-    planRemovedNames(harness.name, root, storeSkills, snapshotNames, actions, unmanaged);
-  }
-
-  const instructions = join(checkout, "AGENTS.md");
-  if (existsSync(instructions)) {
-    for (const harness of input.harnesses) {
-      if (!harness.instructionFile) continue;
-      planLink(
-        harness.name,
-        join(targetHome, harness.instructionFile),
-        instructions,
-        input.force ?? false,
-        timestamp,
-        actions,
-      );
-    }
-  }
-
-  return { checkout, targetHome, actions, unmanaged };
+  const request = inspectionRequest(input.harnesses, checkout, targetHome, timestamp, join);
+  return planInspection(
+    input.harnesses,
+    checkout,
+    targetHome,
+    input.force ?? false,
+    timestamp,
+    inspectLocalTarget(request),
+    join,
+  );
 }
 
 /** Commit a complete plan. A refusal stops all writes. */
 export function commitApply(plan: ApplyPlan): void {
-  const refusal = plan.actions.find(
-    (action): action is Extract<ApplyAction, { kind: "refuse-live-directory" }> =>
-      action.kind === "refuse-live-directory",
-  );
-  if (refusal) throw new ApplyError("refused", refusal.harness, refusal.path);
+  refusePlan(plan);
 
   for (const action of plan.actions) {
     try {
@@ -149,11 +129,132 @@ export function commitApply(plan: ApplyPlan): void {
   }
 }
 
-/** Plan an apply and commit it unless the caller requests a dry-run. */
-export function apply(input: ApplyInput): ApplyPlan {
+/** Plan and apply to a local target, or to a remote target when Link is present. */
+export function apply(input: RemoteApplyInput): Promise<ApplyPlan>;
+export function apply(input: ApplyInput): ApplyPlan;
+export function apply(input: ApplyInput | RemoteApplyInput): ApplyPlan | Promise<ApplyPlan> {
+  if ("link" in input) return applyRemote(input);
   const plan = planApply(input);
   if (!input.dryRun) commitApply(plan);
   return plan;
+}
+
+async function applyRemote(input: RemoteApplyInput): Promise<ApplyPlan> {
+  const checkout = posix.resolve(input.checkout);
+  const targetHome = posix.resolve(input.targetHome);
+  const timestamp = input.timestamp ?? currentTimestamp();
+  const request = inspectionRequest(input.harnesses, checkout, targetHome, timestamp, posix.join);
+  let inspection: TargetInspection;
+  try {
+    inspection = await inspectRemoteTarget(request, input.link);
+  } catch (cause) {
+    throw new ApplyError("commit-failed", "Remote target", targetHome, { cause });
+  }
+  const plan = planInspection(
+    input.harnesses,
+    checkout,
+    targetHome,
+    input.force ?? false,
+    timestamp,
+    inspection,
+    posix.join,
+  );
+  if (input.dryRun) return plan;
+  refusePlan(plan);
+
+  const mutations = plan.actions.map((action) => targetAction(action, inspection));
+  try {
+    await commitRemoteTarget(mutations, input.link);
+  } catch (cause) {
+    const index = cause instanceof RemoteTargetError ? cause.actionIndex : undefined;
+    const failed = index === undefined ? undefined : plan.actions[index];
+    throw new ApplyError(
+      "commit-failed",
+      failed?.harness ?? "Remote target",
+      failed?.path ?? targetHome,
+      { cause },
+    );
+  }
+  return plan;
+}
+
+function inspectionRequest(
+  harnesses: readonly HarnessDescriptor[],
+  checkout: string,
+  targetHome: string,
+  timestamp: string,
+  joinPath: (...paths: string[]) => string,
+): TargetInspectionRequest {
+  return {
+    storeSkills: joinPath(checkout, "skills"),
+    instructions: joinPath(checkout, "AGENTS.md"),
+    targetRoots: harnesses.flatMap((harness) =>
+      harness.skillRoot ? [joinPath(targetHome, harness.skillRoot)] : [],
+    ),
+    instructionTargets: harnesses.flatMap((harness) =>
+      harness.instructionFile ? [joinPath(targetHome, harness.instructionFile)] : [],
+    ),
+    backupSuffix: `.ferry-backup-${timestamp}`,
+  };
+}
+
+function planInspection(
+  harnesses: readonly HarnessDescriptor[],
+  checkout: string,
+  targetHome: string,
+  force: boolean,
+  timestamp: string,
+  inspection: TargetInspection,
+  joinPath: (...paths: string[]) => string,
+): ApplyPlan {
+  const storeSkills = joinPath(checkout, "skills");
+  const snapshotNames = new Set(inspection.skillNames);
+  const actions: ApplyAction[] = [];
+  const unmanaged: UnmanagedExtra[] = [];
+
+  for (const harness of harnesses) {
+    if (!harness.skillRoot) continue;
+    const root = joinPath(targetHome, harness.skillRoot);
+    for (const name of inspection.skillNames) {
+      planLink(
+        harness.name,
+        joinPath(root, name),
+        joinPath(storeSkills, name),
+        force,
+        timestamp,
+        inspection,
+        actions,
+      );
+    }
+    planRemovedNames(
+      harness.name,
+      root,
+      storeSkills,
+      snapshotNames,
+      inspection.roots.get(root) ?? [],
+      actions,
+      unmanaged,
+      joinPath,
+    );
+  }
+
+  if (inspection.instructionExists) {
+    const instructions = joinPath(checkout, "AGENTS.md");
+    for (const harness of harnesses) {
+      if (!harness.instructionFile) continue;
+      planLink(
+        harness.name,
+        joinPath(targetHome, harness.instructionFile),
+        instructions,
+        force,
+        timestamp,
+        inspection,
+        actions,
+      );
+    }
+  }
+
+  return { checkout, targetHome, actions, unmanaged };
 }
 
 function planLink(
@@ -162,38 +263,31 @@ function planLink(
   target: string,
   force: boolean,
   timestamp: string,
+  inspection: TargetInspection,
   actions: ApplyAction[],
 ): void {
-  let stat;
-  try {
-    stat = lstatSync(path);
-  } catch (error) {
-    if (isMissing(error) || isNotDirectory(error)) {
-      actions.push({ kind: "create-symlink", harness, path, target });
-      return;
-    }
-    throw error;
+  const state = inspection.paths.get(path) ?? { kind: "missing" };
+  if (state.kind === "missing") {
+    actions.push({ kind: "create-symlink", harness, path, target });
+    return;
   }
-
-  if (stat.isSymbolicLink()) {
-    if (resolvedLink(path) !== target) {
+  if (state.kind === "symlink") {
+    if (state.resolvedLink !== target) {
       actions.push({ kind: "repair-symlink", harness, path, target });
     }
     return;
   }
-
-  if (stat.isDirectory() && readdirSync(path).length === 0) {
+  if (state.kind === "empty-directory") {
     actions.push({ kind: "repair-symlink", harness, path, target });
     return;
   }
-
   if (!force) {
     actions.push({ kind: "refuse-live-directory", harness, path });
     return;
   }
 
   const backupPath = `${path}.ferry-backup-${timestamp}`;
-  if (pathExists(backupPath)) {
+  if ((inspection.paths.get(backupPath) ?? { kind: "missing" }).kind !== "missing") {
     throw new ApplyError("refused", harness, backupPath);
   }
   actions.push({ kind: "backup-and-link", harness, path, target, backupPath });
@@ -204,26 +298,114 @@ function planRemovedNames(
   root: string,
   storeSkills: string,
   snapshotNames: ReadonlySet<string>,
+  entries: readonly InspectedEntry[],
   actions: ApplyAction[],
   unmanaged: UnmanagedExtra[],
+  joinPath: (...paths: string[]) => string,
 ): void {
-  let entries;
-  try {
-    entries = readdirSync(root, { withFileTypes: true });
-  } catch (error) {
-    if (isMissing(error) || isNotDirectory(error)) return;
-    throw error;
-  }
-
-  for (const entry of entries.sort((a, b) => compare(a.name, b.name))) {
+  for (const entry of entries) {
     if (snapshotNames.has(entry.name)) continue;
-    const path = join(root, entry.name);
-    if (entry.isSymbolicLink() && resolvedLink(path) === join(storeSkills, entry.name)) {
+    const path = joinPath(root, entry.name);
+    if (
+      entry.state.kind === "symlink" &&
+      entry.state.resolvedLink === joinPath(storeSkills, entry.name)
+    ) {
       actions.push({ kind: "delete-managed-name", harness, path, name: entry.name });
     } else {
       unmanaged.push({ harness, path, name: entry.name });
     }
   }
+}
+
+function inspectLocalTarget(request: TargetInspectionRequest): TargetInspection {
+  const skillNames = readdirSync(request.storeSkills, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort(compare);
+  const paths = new Map<string, InspectedPath>();
+  const roots = new Map<string, readonly InspectedEntry[]>();
+
+  for (const root of request.targetRoots) {
+    const entries = inspectLocalEntries(root);
+    roots.set(root, entries);
+    for (const entry of entries) paths.set(join(root, entry.name), entry.state);
+    for (const name of skillNames) {
+      const path = join(root, name);
+      paths.set(path, inspectLocalPath(path));
+      paths.set(`${path}${request.backupSuffix}`, inspectLocalPath(`${path}${request.backupSuffix}`));
+    }
+  }
+  if (existsSync(request.instructions)) {
+    for (const path of request.instructionTargets) {
+      paths.set(path, inspectLocalPath(path));
+      paths.set(`${path}${request.backupSuffix}`, inspectLocalPath(`${path}${request.backupSuffix}`));
+    }
+  }
+  return {
+    skillNames,
+    instructionExists: existsSync(request.instructions),
+    paths,
+    roots,
+  };
+}
+
+function inspectLocalEntries(root: string): readonly InspectedEntry[] {
+  let names: string[];
+  try {
+    names = readdirSync(root).sort(compare);
+  } catch (error) {
+    if (isMissing(error) || isNotDirectory(error)) return [];
+    throw error;
+  }
+  return names.map((name) => ({ name, state: inspectLocalPath(join(root, name)) }));
+}
+
+function inspectLocalPath(path: string): InspectedPath {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    if (isMissing(error) || isNotDirectory(error)) return { kind: "missing" };
+    throw error;
+  }
+  if (stat.isSymbolicLink()) {
+    return { kind: "symlink", link: readlinkSync(path), resolvedLink: resolvedLink(path) };
+  }
+  if (stat.isDirectory() && readdirSync(path).length === 0) return { kind: "empty-directory" };
+  return { kind: "other" };
+}
+
+function targetAction(action: ApplyAction, inspection: TargetInspection): TargetAction {
+  switch (action.kind) {
+    case "create-symlink":
+    case "repair-symlink":
+      return { kind: action.kind, path: action.path, target: action.target };
+    case "backup-and-link":
+      return {
+        kind: action.kind,
+        path: action.path,
+        target: action.target,
+        backupPath: action.backupPath,
+      };
+    case "delete-managed-name": {
+      const state = inspection.paths.get(action.path);
+      return {
+        kind: action.kind,
+        path: action.path,
+        expectedLink: state?.kind === "symlink" ? state.link : "",
+      };
+    }
+    case "refuse-live-directory":
+      throw new Error("refusal reached target commit");
+  }
+}
+
+function refusePlan(plan: ApplyPlan): void {
+  const refusal = plan.actions.find(
+    (action): action is Extract<ApplyAction, { kind: "refuse-live-directory" }> =>
+      action.kind === "refuse-live-directory",
+  );
+  if (refusal) throw new ApplyError("refused", refusal.harness, refusal.path);
 }
 
 function commitAction(action: ApplyAction, checkout: string): void {
@@ -264,16 +446,6 @@ function resolvedLink(path: string): string {
 
 function currentTimestamp(): string {
   return new Date().toISOString().replaceAll(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
-}
-
-function pathExists(path: string): boolean {
-  try {
-    lstatSync(path);
-    return true;
-  } catch (error) {
-    if (isMissing(error) || isNotDirectory(error)) return false;
-    throw error;
-  }
 }
 
 function isMissing(error: unknown): boolean {

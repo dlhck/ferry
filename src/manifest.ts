@@ -23,6 +23,12 @@ type Note = { readonly code: string; readonly reason: string };
 
 type DenyRule = Note & { readonly verdict: DenyVerdict };
 
+export type DenyRuleDescription = {
+  readonly code: string;
+  readonly description: string;
+  readonly behavior: DenyVerdict;
+};
+
 const DENY_RULES = {
   dotenv: { code: "dotenv", reason: "environment file", verdict: "refuse" },
   credentials: { code: "credentials", reason: "vendor auth or credential file", verdict: "refuse" },
@@ -38,6 +44,15 @@ const DENY_RULES = {
   cache: { code: "cache", reason: "cache or build output", verdict: "skip" },
   settings: { code: "settings", reason: "harness settings, out of the v1 snapshot", verdict: "skip" },
 } as const satisfies Record<string, DenyRule>;
+
+/** Return Manifest's deny rules without scanning or writing the source home. */
+export function denyRules(): readonly DenyRuleDescription[] {
+  return Object.values(DENY_RULES).map((rule) => ({
+    code: rule.code,
+    description: rule.reason,
+    behavior: rule.verdict,
+  }));
+}
 
 /** Notes for entries no deny rule covers. */
 const NOTES = {

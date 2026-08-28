@@ -6,13 +6,45 @@
 
 import type {
   ForwardOptions,
+  LinkError,
   LinkErrorCode,
   LinkFailure,
   LinkOrigin,
   LinkResult,
   RunOptions,
 } from "./link.ts";
-import type { AuthFallback, ToolDescriptor } from "./registry/types.ts";
+import type { AuthFallback, ToolAuth, ToolDescriptor } from "./registry/types.ts";
+
+/** A tool ferry has a login recipe for. */
+export type AuthTool = ToolDescriptor & { readonly auth: ToolAuth };
+
+/**
+ * The tools with a login recipe, in report order: the ones ferry can probe
+ * first, then the manual ones, which carry guidance rather than a state.
+ */
+export function authTools(tools: readonly ToolDescriptor[]): readonly AuthTool[] {
+  const withAuth = tools.filter((tool): tool is AuthTool => tool.auth !== undefined);
+  return [
+    ...withAuth.filter((tool) => tool.auth.completion.kind !== "manual"),
+    ...withAuth.filter((tool) => tool.auth.completion.kind === "manual"),
+  ];
+}
+
+export type AuthProviderStatus =
+  | { readonly provider: string; readonly status: "authenticated" }
+  | { readonly provider: string; readonly status: "login-required" }
+  | {
+      readonly provider: string;
+      readonly status: "manual";
+      readonly instruction: string;
+    }
+  | {
+      readonly provider: string;
+      readonly status: "unavailable";
+      readonly error: LinkError;
+    };
+
+export type AuthStatusReport = { readonly providers: readonly AuthProviderStatus[] };
 
 export interface AuthLink {
   run(command: string, options?: RunOptions): Promise<LinkResult>;
@@ -71,9 +103,45 @@ export class AuthStart {
 
   /** The providers a login can be started for. Manual providers are not listed. */
   startableProviders(): readonly string[] {
-    return this.tools
-      .filter((tool) => tool.auth && tool.auth.completion.kind !== "manual")
+    return authTools(this.tools)
+      .filter((tool) => tool.auth.completion.kind !== "manual")
       .map((tool) => tool.id);
+  }
+
+  /** Run authentication probes only. This method never starts a login or forward. */
+  async status(): Promise<AuthStatusReport> {
+    const providers: AuthProviderStatus[] = [];
+
+    for (const tool of authTools(this.tools)) {
+      const completion = tool.auth.completion;
+      if (completion.kind === "manual") {
+        providers.push({
+          provider: tool.id,
+          status: "manual",
+          instruction: completion.instruction,
+        });
+        continue;
+      }
+      if (!tool.auth.probe) continue;
+
+      const probe = await this.link.run(tool.auth.probe);
+      if (probe.ok) {
+        providers.push({ provider: tool.id, status: "authenticated" });
+      } else if (probe.error.code === "command-failed") {
+        providers.push({ provider: tool.id, status: "login-required" });
+      } else {
+        providers.push({
+          provider: tool.id,
+          status: "unavailable",
+          error: {
+            code: probe.error.code,
+            origin: probe.error.origin,
+            message: safeLinkMessage(probe.error.code, probe.error.origin),
+          },
+        });
+      }
+    }
+    return { providers };
   }
 
   async start(provider: string): Promise<AuthStartResult> {

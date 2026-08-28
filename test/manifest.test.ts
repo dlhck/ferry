@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { readSeed } from "../src/manifest.ts";
+import { denyRules, readSeed } from "../src/manifest.ts";
 import type { Refusal, Seed } from "../src/manifest.ts";
 import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 
@@ -172,6 +172,36 @@ describe("the instruction file", () => {
 });
 
 describe("the deny set", () => {
+  test("exports its human-readable rules for read-only reporting", () => {
+    expect(denyRules()).toEqual([
+      { code: "dotenv", description: "environment file", behavior: "refuse" },
+      {
+        code: "credentials",
+        description: "vendor auth or credential file",
+        behavior: "refuse",
+      },
+      { code: "private-key", description: "private key", behavior: "refuse" },
+      {
+        code: "token",
+        description: "host token, daemon key, or MCP token",
+        behavior: "refuse",
+      },
+      {
+        code: "symlink-escape",
+        description: "symlink that leaves the skill directory",
+        behavior: "refuse",
+      },
+      { code: "history", description: "session history", behavior: "skip" },
+      { code: "database", description: "sqlite or other database file", behavior: "skip" },
+      { code: "cache", description: "cache or build output", behavior: "skip" },
+      {
+        code: "settings",
+        description: "harness settings, out of the v1 snapshot",
+        behavior: "skip",
+      },
+    ]);
+  });
+
   test("forbidden names never appear in a seed", () => {
     const home = makeHome();
     writeSkill(home, ".claude/skills", "unslop", {

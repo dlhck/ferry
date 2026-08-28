@@ -81,6 +81,33 @@ const providerCases: readonly {
 ];
 
 describe("AuthStart", () => {
+  test("reports every provider without starting a login", async () => {
+    const link = new FakeLink([success(), loggedOut(), loggedOut(), success()]);
+
+    const result = await new AuthStart(link, BUILTIN_TOOLS).status();
+
+    expect(result).toEqual({
+      providers: [
+        { provider: "gh", status: "authenticated" },
+        { provider: "claude", status: "login-required" },
+        { provider: "codex", status: "login-required" },
+        { provider: "cursor", status: "authenticated" },
+        {
+          provider: "pi",
+          status: "manual",
+          instruction: "SSH to the box, run pi, then use /login in its interactive session.",
+        },
+      ],
+    });
+    expect(link.runs.map((call) => call.command)).toEqual([
+      "gh auth status --hostname github.com",
+      "claude auth status",
+      "codex login status",
+      "cursor-agent status",
+    ]);
+    expect(link.forwards).toHaveLength(0);
+  });
+
   test("starts each documented provider with its remote command recipe", async () => {
     expect(new AuthStart(new FakeLink(), BUILTIN_TOOLS).startableProviders()).toEqual([
       "gh",
