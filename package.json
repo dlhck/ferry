@@ -1,0 +1,23 @@
+{
+  "name": "ferry",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "ferry": "./src/cli.ts"
+  },
+  "scripts": {
+    "build": "bun build --compile src/cli.ts --outfile dist/ferry",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.0",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.7.0",
+    "commander": "^15.0.0"
+  }
+}
