@@ -19,6 +19,12 @@ import {
   type InstallCommandDependencies,
   type InstallCommandInput,
 } from "./install-auth.ts";
+import {
+  runSync as runSyncCommand,
+  SyncError,
+  type SyncInput,
+  type SyncResult,
+} from "./sync.ts";
 import { loadRegistry, type Registry } from "./registry/load.ts";
 
 const DESCRIPTION = `Ferry keeps a remote Linux agent box in the same shape as this machine.
@@ -38,6 +44,7 @@ type CliDependencies = {
     input: AuthCommandInput,
     dependencies?: Partial<AuthCommandDependencies>,
   ) => Promise<void>;
+  readonly runSync?: (input: SyncInput) => Promise<SyncResult>;
   readonly prompt?: InitPrompt;
   readonly writeLine?: (line: string) => void;
 };
@@ -91,6 +98,20 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .action(async (provider?: string) => {
       await (dependencies.runAuth ?? runAuthCommand)({ provider }, { tools: registry.tools });
     });
+
+  program
+    .command("sync")
+    .description("Publish the snapshot and apply it to the configured box")
+    .option("--dry-run", "print the plan without writing")
+    .option("--force", "back up live managed paths before Apply links them")
+    .option("-m, --message <message>", "snapshot commit message")
+    .action(async (options: { dryRun?: boolean; force?: boolean; message?: string }) => {
+      await (dependencies.runSync ?? runSyncCommand)({
+        dryRun: options.dryRun === true,
+        force: options.force === true,
+        message: options.message,
+      });
+    });
   return program;
 }
 
@@ -98,8 +119,14 @@ if (import.meta.main) {
   try {
     await buildProgram().parseAsync(Bun.argv);
   } catch (error) {
-    if (error instanceof InstallAuthCommandError) process.exitCode = 1;
-    else throw error;
+    if (error instanceof SyncError) {
+      console.error(error.message);
+      process.exitCode = 1;
+    } else if (error instanceof InstallAuthCommandError) {
+      process.exitCode = 1;
+    } else {
+      throw error;
+    }
   }
 }
 

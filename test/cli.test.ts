@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildProgram } from "../src/cli.ts";
 import type { InitInput, InitResult } from "../src/init.ts";
+import type { SyncInput, SyncResult } from "../src/sync.ts";
 
 describe("ferry --help", () => {
   test("states that logins are not copied", () => {
@@ -114,5 +115,50 @@ describe("ferry --help", () => {
       .join("\n");
 
     expect(flags).not.toMatch(/credential|auth-file|token-file|session-file|local-path/i);
+  });
+
+  test("wires every sync flag to the sync module", async () => {
+    let received: SyncInput | undefined;
+    const result: SyncResult = {
+      dryRun: true,
+      published: false,
+      plan: {
+        operator: "operator-machine",
+        gitRemote: "snapshot.git",
+        box: "ferry@box",
+        localCheckout: "/operator/.ferry/store",
+        remoteHome: null,
+        remoteCheckout: null,
+        message: "chore: ship skills",
+        force: true,
+      },
+    };
+    const program = buildProgram({
+      runSync: async (input) => {
+        received = input;
+        return result;
+      },
+    });
+
+    await program.parseAsync(
+      ["sync", "--dry-run", "--force", "-m", "chore: ship skills"],
+      { from: "user" },
+    );
+
+    expect(received).toEqual({
+      dryRun: true,
+      force: true,
+      message: "chore: ship skills",
+    });
+  });
+
+  test("sync help lists dry-run, force, and message flags", () => {
+    const help = buildProgram().commands
+      .find((command) => command.name() === "sync")
+      ?.helpInformation();
+
+    expect(help).toContain("--dry-run");
+    expect(help).toContain("--force");
+    expect(help).toContain("-m, --message <message>");
   });
 });
