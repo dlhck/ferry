@@ -10,6 +10,13 @@ import {
   type InitPrompt,
   type InitResult,
 } from "./init.ts";
+import {
+  InstallAuthCommandError,
+  runAuthCommand,
+  runInstallCommand,
+  type AuthCommandInput,
+  type InstallCommandInput,
+} from "./install-auth.ts";
 
 const DESCRIPTION = `Ferry keeps a remote Linux agent box in the same shape as this machine.
 
@@ -20,6 +27,8 @@ them. Ferry starts a login on the box and you finish it in a browser here.`;
 
 type CliDependencies = {
   readonly runInit?: (input: InitInput, dependencies?: InitDependencies) => Promise<InitResult>;
+  readonly runInstall?: (input: InstallCommandInput) => Promise<void>;
+  readonly runAuth?: (input: AuthCommandInput) => Promise<void>;
   readonly prompt?: InitPrompt;
   readonly writeLine?: (line: string) => void;
 };
@@ -48,11 +57,31 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       );
       reportInit(result, dependencies.writeLine ?? console.log);
     });
+
+  program
+    .command("install")
+    .description("Install the supported agent tools on the configured box")
+    .option("--yes", "run without a confirmation prompt")
+    .action(async (options: { yes?: boolean }) => {
+      await (dependencies.runInstall ?? runInstallCommand)({ yes: options.yes === true });
+    });
+
+  program
+    .command("auth [provider]")
+    .description("Start a login on the configured box without copying credentials")
+    .action(async (provider?: string) => {
+      await (dependencies.runAuth ?? runAuthCommand)({ provider });
+    });
   return program;
 }
 
 if (import.meta.main) {
-  await buildProgram().parseAsync(Bun.argv);
+  try {
+    await buildProgram().parseAsync(Bun.argv);
+  } catch (error) {
+    if (error instanceof InstallAuthCommandError) process.exitCode = 1;
+    else throw error;
+  }
 }
 
 async function promptForInit(missing: readonly InitField[], current: InitInput): Promise<InitInput> {

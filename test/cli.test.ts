@@ -61,4 +61,58 @@ describe("ferry --help", () => {
     expect(help).toContain("--ssh-user <user>");
     expect(help).toContain("--snapshot-url <url>");
   });
+
+  test("wires install --yes to the install command", async () => {
+    let received: { yes: boolean } | undefined;
+    const program = buildProgram({
+      runInstall: async (input) => {
+        received = input;
+      },
+    });
+
+    await program.parseAsync(["install", "--yes"], { from: "user" });
+
+    expect(received).toEqual({ yes: true });
+  });
+
+  test("wires an auth provider to the auth command", async () => {
+    let received: { provider?: string } | undefined;
+    const program = buildProgram({
+      runAuth: async (input) => {
+        received = input;
+      },
+    });
+
+    await program.parseAsync(["auth", "codex"], { from: "user" });
+
+    expect(received).toEqual({ provider: "codex" });
+  });
+
+  test("rejects a credential-file flag before auth execution", async () => {
+    let calls = 0;
+    const program = buildProgram({
+      runAuth: async () => {
+        calls += 1;
+      },
+    });
+    program.exitOverride();
+    program.configureOutput({ writeOut: () => {}, writeErr: () => {} });
+    const auth = program.commands.find((command) => command.name() === "auth");
+    auth?.exitOverride();
+    auth?.configureOutput({ writeOut: () => {}, writeErr: () => {} });
+
+    await expect(
+      program.parseAsync(["auth", "gh", "--credential-file", "auth.json"], { from: "user" }),
+    ).rejects.toThrow("unknown option '--credential-file'");
+    expect(calls).toBe(0);
+  });
+
+  test("install and auth help define no credential path options", () => {
+    const flags = buildProgram().commands
+      .filter((command) => command.name() === "install" || command.name() === "auth")
+      .flatMap((command) => command.options.map((option) => option.flags))
+      .join("\n");
+
+    expect(flags).not.toMatch(/credential|auth-file|token-file|session-file|local-path/i);
+  });
 });
