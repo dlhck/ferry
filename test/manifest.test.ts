@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { DENY_LIST, readSeed } from "../src/manifest.ts";
+import { readSeed } from "../src/manifest.ts";
 import type { Refusal, Seed } from "../src/manifest.ts";
 
 const homes: string[] = [];
@@ -17,9 +17,9 @@ function makeHome(): string {
   return home;
 }
 
-/** Write one skill under a harness. Keys are paths relative to the skill directory. */
-function writeSkill(home: string, harness: string, name: string, files: Record<string, string>) {
-  const dir = join(home, harness, "skills", name);
+/** Write one skill under a harness skill root. Keys are paths relative to the skill directory. */
+function writeSkill(home: string, skillRoot: string, name: string, files: Record<string, string>) {
+  const dir = join(home, skillRoot, name);
   for (const [path, body] of Object.entries(files)) {
     const file = join(dir, path);
     mkdirSync(dirname(file), { recursive: true });
@@ -59,60 +59,71 @@ function bodyOf(seed: Seed, name: string, path: string): string {
 }
 
 describe("union of the managed harnesses", () => {
-  test("a name that exists in only one harness is kept", () => {
+  test("a name that exists in only one harness is kept, for every harness", () => {
     const home = makeHome();
-    writeSkill(home, ".claude", "grilling", { "SKILL.md": "grill" });
-    writeSkill(home, ".codex", "unslop", { "SKILL.md": "unslop" });
-    writeSkill(home, ".pi", "tdd", { "SKILL.md": "tdd" });
+    // One name per managed root, so a wrong root drops its name from the seed.
+    const roots = {
+      agents: ".agents/skills",
+      claude: ".claude/skills",
+      codex: ".codex/skills",
+      pi: ".pi/agent/skills",
+      cursor: ".cursor/skills",
+    };
+    for (const [name, root] of Object.entries(roots)) {
+      writeSkill(home, root, name, { "SKILL.md": `body of ${name}` });
+    }
 
     const seed = seedOf(home);
 
-    expect(names(seed)).toEqual(["grilling", "tdd", "unslop"]);
-    expect(bodyOf(seed, "grilling", "SKILL.md")).toBe("grill");
+    expect(names(seed)).toEqual(["agents", "claude", "codex", "cursor", "pi"]);
+    for (const name of Object.keys(roots)) {
+      expect(bodyOf(seed, name, "SKILL.md")).toBe(`body of ${name}`);
+    }
   });
 
   test("a name in every harness with the same bytes collapses to one entry", () => {
     const home = makeHome();
-    for (const harness of [".agents", ".claude", ".codex", ".pi", ".cursor"]) {
-      writeSkill(home, harness, "unslop", { "SKILL.md": "same", "ref/notes.md": "notes" });
+    const roots = [".agents/skills", ".claude/skills", ".codex/skills", ".pi/agent/skills", ".cursor/skills"];
+    for (const root of roots) {
+      writeSkill(home, root, "unslop", { "SKILL.md": "same", "ref/notes.md": "notes" });
     }
 
     const seed = seedOf(home);
 
     expect(names(seed)).toEqual(["unslop"]);
-    expect(seed.skills[0]?.sources).toEqual(["agents", "claude", "codex", "pi", "cursor"]);
     expect(seed.skills[0]?.files.map((file) => file.path)).toEqual(["SKILL.md", "ref/notes.md"]);
+    expect(bodyOf(seed, "unslop", "SKILL.md")).toBe("same");
   });
 
   test("two harness roots that are the same directory collapse to one entry", () => {
     const home = makeHome();
-    writeSkill(home, ".claude", "unslop", { "SKILL.md": "same" });
+    writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "same" });
     mkdirSync(join(home, ".codex"), { recursive: true });
     symlinkSync(join(home, ".claude", "skills"), join(home, ".codex", "skills"));
 
     const seed = seedOf(home);
 
     expect(names(seed)).toEqual(["unslop"]);
-    expect(seed.skills[0]?.sources).toEqual(["claude", "codex"]);
+    expect(bodyOf(seed, "unslop", "SKILL.md")).toBe("same");
   });
 
   test("a skill directory symlinked into a second harness collapses to one entry", () => {
     const home = makeHome();
-    const source = writeSkill(home, ".claude", "unslop", { "SKILL.md": "same" });
-    mkdirSync(join(home, ".pi", "skills"), { recursive: true });
-    symlinkSync(source, join(home, ".pi", "skills", "unslop"));
+    const source = writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "same" });
+    mkdirSync(join(home, ".pi", "agent", "skills"), { recursive: true });
+    symlinkSync(source, join(home, ".pi", "agent", "skills", "unslop"));
 
     const seed = seedOf(home);
 
     expect(names(seed)).toEqual(["unslop"]);
-    expect(seed.skills[0]?.sources).toEqual(["claude", "pi"]);
+    expect(bodyOf(seed, "unslop", "SKILL.md")).toBe("same");
   });
 
   test("the same name with different bytes refuses and names the clash", () => {
     const home = makeHome();
-    writeSkill(home, ".claude", "unslop", { "SKILL.md": "one" });
-    writeSkill(home, ".codex", "unslop", { "SKILL.md": "two" });
-    writeSkill(home, ".pi", "tdd", { "SKILL.md": "kept" });
+    writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "one" });
+    writeSkill(home, ".codex/skills", "unslop", { "SKILL.md": "two" });
+    writeSkill(home, ".pi/agent/skills", "tdd", { "SKILL.md": "kept" });
 
     const refusal = refusalOf(home);
 
@@ -125,15 +136,15 @@ describe("union of the managed harnesses", () => {
 
   test("an extra file in one harness is a clash, not a silent merge", () => {
     const home = makeHome();
-    writeSkill(home, ".claude", "unslop", { "SKILL.md": "same" });
-    writeSkill(home, ".codex", "unslop", { "SKILL.md": "same", "extra.md": "only here" });
+    writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "same" });
+    writeSkill(home, ".codex/skills", "unslop", { "SKILL.md": "same", "extra.md": "only here" });
 
     expect(refusalOf(home).clashes.map((clash) => clash.name)).toEqual(["unslop"]);
   });
 
   test("project-local skill directories are ignored", () => {
     const home = makeHome();
-    writeSkill(home, ".claude", "unslop", { "SKILL.md": "home" });
+    writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "home" });
     write(home, "work/repo/.claude/skills/local/SKILL.md", "project");
 
     expect(names(seedOf(home))).toEqual(["unslop"]);
@@ -153,7 +164,7 @@ describe("the instruction file", () => {
 
   test("a home without AGENTS.md yields a seed with no instruction file", () => {
     const home = makeHome();
-    writeSkill(home, ".claude", "unslop", { "SKILL.md": "body" });
+    writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "body" });
 
     expect(seedOf(home).instructions).toBeNull();
   });
@@ -162,7 +173,7 @@ describe("the instruction file", () => {
 describe("the deny set", () => {
   test("forbidden names never appear in a seed", () => {
     const home = makeHome();
-    writeSkill(home, ".claude", "unslop", {
+    writeSkill(home, ".claude/skills", "unslop", {
       "SKILL.md": "body",
       ".DS_Store": "junk",
       "history.jsonl": "session",
@@ -175,14 +186,16 @@ describe("the deny set", () => {
     const seed = seedOf(home);
 
     expect(seed.skills[0]?.files.map((file) => file.path)).toEqual(["SKILL.md"]);
-    expect(seed.leftovers.map((leftover) => leftover.path)).toContain(
-      join(home, ".claude", "skills", "unslop", "settings.json"),
-    );
+    expect(seed.leftovers).toContainEqual({
+      path: join(home, ".claude", "skills", "unslop", "settings.json"),
+      code: "settings",
+      reason: expect.any(String),
+    });
   });
 
   test("harness auth and state outside the skill roots never reach the seed", () => {
     const home = makeHome();
-    writeSkill(home, ".claude", "unslop", { "SKILL.md": "body" });
+    writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "body" });
     write(home, ".claude/.credentials.json", "token");
     write(home, ".claude/__store.db", "sqlite");
     write(home, ".codex/auth.json", "token");
@@ -205,8 +218,8 @@ describe("the deny set", () => {
     ["token.json", "{}", "token"],
   ])("a skill holding %s refuses the whole seed", (name, body, code) => {
     const home = makeHome();
-    writeSkill(home, ".claude", "unslop", { "SKILL.md": "body", [name]: body });
-    writeSkill(home, ".codex", "clean", { "SKILL.md": "clean" });
+    writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "body", [name]: body });
+    writeSkill(home, ".codex/skills", "clean", { "SKILL.md": "clean" });
 
     const refusal = refusalOf(home);
 
@@ -221,7 +234,7 @@ describe("the deny set", () => {
 
   test("a private key renamed to look harmless still refuses", () => {
     const home = makeHome();
-    writeSkill(home, ".claude", "unslop", {
+    writeSkill(home, ".claude/skills", "unslop", {
       "notes.md": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaA==\n",
     });
 
@@ -231,7 +244,7 @@ describe("the deny set", () => {
   test("a symlink out of the skill directory refuses", () => {
     const home = makeHome();
     write(home, ".ssh/id_rsa", "key");
-    const skill = writeSkill(home, ".claude", "unslop", { "SKILL.md": "body" });
+    const skill = writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "body" });
     symlinkSync(join(home, ".ssh", "id_rsa"), join(skill, "helper.md"));
 
     const refusal = refusalOf(home);
@@ -242,7 +255,7 @@ describe("the deny set", () => {
 
   test("a symlink inside the skill directory is followed", () => {
     const home = makeHome();
-    const skill = writeSkill(home, ".claude", "unslop", { "SKILL.md": "body" });
+    const skill = writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "body" });
     symlinkSync(join(skill, "SKILL.md"), join(skill, "README.md"));
 
     expect(bodyOf(seedOf(home), "unslop", "README.md")).toBe("body");
@@ -250,9 +263,9 @@ describe("the deny set", () => {
 
   test("refusals report every clash and every forbidden hit at once", () => {
     const home = makeHome();
-    writeSkill(home, ".claude", "unslop", { "SKILL.md": "one" });
-    writeSkill(home, ".codex", "unslop", { "SKILL.md": "two" });
-    writeSkill(home, ".pi", "leaky", { "SKILL.md": "body", ".env": "SECRET=1" });
+    writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "one" });
+    writeSkill(home, ".codex/skills", "unslop", { "SKILL.md": "two" });
+    writeSkill(home, ".pi/agent/skills", "leaky", { "SKILL.md": "body", ".env": "SECRET=1" });
 
     const refusal = refusalOf(home);
 
@@ -262,26 +275,18 @@ describe("the deny set", () => {
 
   test("skipped junk in one harness does not fake a clash with another", () => {
     const home = makeHome();
-    writeSkill(home, ".claude", "unslop", { "SKILL.md": "same", ".DS_Store": "junk" });
-    writeSkill(home, ".codex", "unslop", { "SKILL.md": "same" });
+    writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "same", ".DS_Store": "junk" });
+    writeSkill(home, ".codex/skills", "unslop", { "SKILL.md": "same" });
 
     expect(names(seedOf(home))).toEqual(["unslop"]);
   });
 
-  test("the deny list is published with a stable code per rule", () => {
-    const codes = DENY_LIST.map((rule) => rule.code);
-
-    expect(codes).toContain("dotenv");
-    expect(codes).toContain("credentials");
-    expect(codes).toContain("private-key");
-    expect(new Set(codes).size).toBe(codes.length);
-  });
 });
 
 describe("seed identity", () => {
   test("two reads of the same home give the same identity", () => {
     const home = makeHome();
-    writeSkill(home, ".claude", "unslop", { "SKILL.md": "body" });
+    writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "body" });
     write(home, "AGENTS.md", "rules");
 
     expect(seedOf(home).identity).toBe(seedOf(home).identity);
@@ -289,18 +294,18 @@ describe("seed identity", () => {
 
   test("adding a skill changes the identity", () => {
     const home = makeHome();
-    writeSkill(home, ".claude", "unslop", { "SKILL.md": "body" });
+    writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "body" });
     const before = seedOf(home).identity;
 
-    writeSkill(home, ".claude", "tdd", { "SKILL.md": "red green" });
+    writeSkill(home, ".claude/skills", "tdd", { "SKILL.md": "red green" });
 
     expect(seedOf(home).identity).not.toBe(before);
   });
 
   test("removing a skill changes the identity", () => {
     const home = makeHome();
-    writeSkill(home, ".claude", "unslop", { "SKILL.md": "body" });
-    writeSkill(home, ".claude", "tdd", { "SKILL.md": "red green" });
+    writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "body" });
+    writeSkill(home, ".claude/skills", "tdd", { "SKILL.md": "red green" });
     const before = seedOf(home).identity;
 
     rmSync(join(home, ".claude", "skills", "tdd"), { recursive: true });
@@ -310,21 +315,21 @@ describe("seed identity", () => {
 
   test("editing a skill body changes the identity", () => {
     const home = makeHome();
-    writeSkill(home, ".claude", "unslop", { "SKILL.md": "body" });
+    writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "body" });
     const before = seedOf(home).identity;
 
-    writeSkill(home, ".claude", "unslop", { "SKILL.md": "new body" });
+    writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "new body" });
 
     expect(seedOf(home).identity).not.toBe(before);
   });
 
   test("renaming a skill changes the identity", () => {
     const home = makeHome();
-    writeSkill(home, ".claude", "unslop", { "SKILL.md": "body" });
+    writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "body" });
     const before = seedOf(home).identity;
 
     rmSync(join(home, ".claude", "skills", "unslop"), { recursive: true });
-    writeSkill(home, ".claude", "de-slop", { "SKILL.md": "body" });
+    writeSkill(home, ".claude/skills", "de-slop", { "SKILL.md": "body" });
 
     expect(seedOf(home).identity).not.toBe(before);
   });
@@ -341,10 +346,10 @@ describe("seed identity", () => {
 
   test("the same skill reached through a second harness leaves the identity alone", () => {
     const home = makeHome();
-    writeSkill(home, ".claude", "unslop", { "SKILL.md": "body" });
+    writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "body" });
     const before = seedOf(home).identity;
 
-    writeSkill(home, ".codex", "unslop", { "SKILL.md": "body" });
+    writeSkill(home, ".codex/skills", "unslop", { "SKILL.md": "body" });
 
     expect(seedOf(home).identity).toBe(before);
   });
@@ -367,7 +372,11 @@ describe("an empty home", () => {
 
     expect(seed.skills).toEqual([]);
     expect(seed.leftovers).toEqual([
-      { path: join(home, ".claude", "skills", "README.md"), reason: "not a skill directory" },
+      {
+        path: join(home, ".claude", "skills", "README.md"),
+        code: "not-a-directory",
+        reason: expect.any(String),
+      },
     ]);
   });
 });

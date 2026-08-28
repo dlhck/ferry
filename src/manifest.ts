@@ -12,34 +12,27 @@ import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { join, relative, sep } from "node:path";
 
-export type HarnessName = "agents" | "claude" | "codex" | "pi" | "cursor";
-
-export type Harness = {
-  readonly name: HarnessName;
-  /** Skill root, relative to the source home. */
-  readonly skillsDir: string;
-};
-
-/** Every harness ferry keeps in the same shape. Nothing else is scanned. */
-export const MANAGED_HARNESSES: readonly Harness[] = [
-  { name: "agents", skillsDir: ".agents/skills" },
-  { name: "claude", skillsDir: ".claude/skills" },
-  { name: "codex", skillsDir: ".codex/skills" },
-  { name: "pi", skillsDir: ".pi/skills" },
-  { name: "cursor", skillsDir: ".cursor/skills" },
+/**
+ * Every harness skill root, relative to the source home. Nothing else is
+ * scanned, so vendor auth files that sit beside a root stay out of reach.
+ */
+const MANAGED_SKILL_ROOTS: readonly string[] = [
+  ".agents/skills", // the shared agents root
+  ".claude/skills",
+  ".codex/skills",
+  ".pi/agent/skills", // Pi keeps its skills under .pi/agent
+  ".cursor/skills",
 ];
 
 /** The one instruction file, relative to the source home. */
-export const INSTRUCTION_FILE = "AGENTS.md";
+const INSTRUCTION_FILE = "AGENTS.md";
 
-export type DenyVerdict = "refuse" | "skip";
+type DenyVerdict = "refuse" | "skip";
 
-export type DenyRule = {
-  /** Stable code. Refusal output and status quote it. */
-  readonly code: string;
-  readonly reason: string;
-  readonly verdict: DenyVerdict;
-};
+/** Why ferry set something aside. The code is stable; the reason is for people. */
+type Note = { readonly code: string; readonly reason: string };
+
+type DenyRule = Note & { readonly verdict: DenyVerdict };
 
 const DENY_RULES = {
   dotenv: { code: "dotenv", reason: "environment file", verdict: "refuse" },
@@ -57,8 +50,12 @@ const DENY_RULES = {
   settings: { code: "settings", reason: "harness settings, out of the v1 snapshot", verdict: "skip" },
 } as const satisfies Record<string, DenyRule>;
 
-/** The deny list, for dry-run and status to print. */
-export const DENY_LIST: readonly DenyRule[] = Object.values(DENY_RULES);
+/** Notes for entries no deny rule covers. */
+const NOTES = {
+  "not-a-directory": { code: "not-a-directory", reason: "not a skill directory" },
+  "broken-link": { code: "broken-link", reason: "broken symlink" },
+  "not-a-file": { code: "not-a-file", reason: "not a regular file" },
+} as const satisfies Record<string, Note>;
 
 const CREDENTIAL_NAMES = new Set([
   "credentials.json",
@@ -85,17 +82,12 @@ const PRIVATE_KEY_HEADER = /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/;
 /** A file whose path relative to its skill directory is `path`. */
 export type SeedFile = { readonly path: string; readonly bytes: Uint8Array };
 
-export type SeedSkill = {
-  readonly name: string;
-  /** Every managed harness the name was found in. */
-  readonly sources: readonly HarnessName[];
-  readonly files: readonly SeedFile[];
-};
+export type SeedSkill = { readonly name: string; readonly files: readonly SeedFile[] };
 
 export type Instructions = { readonly bytes: Uint8Array };
 
 /** Something ferry found and did not import. Init prints these. */
-export type Leftover = { readonly path: string; readonly reason: string };
+export type Leftover = Note & { readonly path: string };
 
 export type Seed = {
   readonly ok: true;
@@ -109,11 +101,7 @@ export type Seed = {
 /** One skill name found with different bytes in more than one harness. */
 export type Clash = { readonly name: string; readonly paths: readonly string[] };
 
-export type ForbiddenHit = {
-  readonly path: string;
-  readonly code: string;
-  readonly reason: string;
-};
+export type ForbiddenHit = Note & { readonly path: string };
 
 export type Refusal = {
   readonly ok: false;
@@ -154,11 +142,7 @@ export function readSeed(home: string): Seed | Refusal {
       clashes.push({ name, paths: found.map((o) => o.path).sort(compare) });
       continue;
     }
-    skills.push({
-      name,
-      sources: found.map((o) => o.harness),
-      files: [...variants.values()][0] ?? [],
-    });
+    skills.push({ name, files: [...variants.values()][0] ?? [] });
   }
 
   const instructions = readInstructions(home, leftovers);
@@ -169,13 +153,13 @@ export function readSeed(home: string): Seed | Refusal {
   return { ok: true, skills, instructions, identity: identify(skills, instructions), leftovers };
 }
 
-type Occurrence = { readonly harness: HarnessName; readonly path: string; readonly inode: string };
+type Occurrence = { readonly path: string; readonly inode: string };
 
 function collectOccurrences(home: string, leftovers: Leftover[]): Map<string, Occurrence[]> {
   const occurrences = new Map<string, Occurrence[]>();
 
-  for (const harness of MANAGED_HARNESSES) {
-    const root = join(home, harness.skillsDir);
+  for (const skillRoot of MANAGED_SKILL_ROOTS) {
+    const root = join(home, skillRoot);
     let entries: Dirent[];
     try {
       entries = readdirSync(root, { withFileTypes: true });
@@ -189,20 +173,20 @@ function collectOccurrences(home: string, leftovers: Leftover[]): Map<string, Oc
       try {
         stat = statSync(path);
       } catch {
-        leftovers.push({ path, reason: "broken symlink" });
+        leftovers.push(note(path, NOTES["broken-link"]));
         continue;
       }
       if (!stat.isDirectory()) {
-        leftovers.push({ path, reason: "not a skill directory" });
+        leftovers.push(note(path, NOTES["not-a-directory"]));
         continue;
       }
       const rule = denyRuleFor(entry.name, true);
       if (rule) {
-        leftovers.push({ path, reason: rule.reason });
+        leftovers.push(note(path, rule));
         continue;
       }
       const found = occurrences.get(entry.name) ?? [];
-      found.push({ harness: harness.name, path, inode: `${stat.dev}:${stat.ino}` });
+      found.push({ path, inode: `${stat.dev}:${stat.ino}` });
       occurrences.set(entry.name, found);
     }
   }
@@ -227,11 +211,11 @@ function walk(root: string, dir: string, rootReal: string, seen: Set<string>, sc
       try {
         target = realpathSync(path);
       } catch {
-        scan.leftovers.push({ path, reason: "broken symlink" });
+        scan.leftovers.push(note(path, NOTES["broken-link"]));
         continue;
       }
       if (target !== rootReal && !target.startsWith(rootReal + sep)) {
-        scan.forbidden.push(hit(path, DENY_RULES["symlink-escape"]));
+        scan.forbidden.push(note(path, DENY_RULES["symlink-escape"]));
         continue;
       }
     }
@@ -239,8 +223,8 @@ function walk(root: string, dir: string, rootReal: string, seen: Set<string>, sc
     const stat = statSync(path);
     const rule = denyRuleFor(entry.name, stat.isDirectory());
     if (rule) {
-      if (rule.verdict === "refuse") scan.forbidden.push(hit(path, rule));
-      else scan.leftovers.push({ path, reason: rule.reason });
+      if (rule.verdict === "refuse") scan.forbidden.push(note(path, rule));
+      else scan.leftovers.push(note(path, rule));
       continue;
     }
 
@@ -252,14 +236,14 @@ function walk(root: string, dir: string, rootReal: string, seen: Set<string>, sc
       continue;
     }
     if (!stat.isFile()) {
-      scan.leftovers.push({ path, reason: "not a regular file" });
+      scan.leftovers.push(note(path, NOTES["not-a-file"]));
       continue;
     }
 
     const bytes = readFileSync(path);
     // A key renamed to notes.md is still a key. Read the header, not the name.
     if (PRIVATE_KEY_HEADER.test(bytes.subarray(0, 4096).toString("latin1"))) {
-      scan.forbidden.push(hit(path, DENY_RULES["private-key"]));
+      scan.forbidden.push(note(path, DENY_RULES["private-key"]));
       continue;
     }
     scan.files.push({ path: relative(root, path), bytes });
@@ -289,14 +273,14 @@ function readInstructions(home: string, leftovers: Leftover[]): Instructions | n
     return null;
   }
   if (!stat.isFile()) {
-    leftovers.push({ path, reason: "instruction file is not a regular file" });
+    leftovers.push(note(path, NOTES["not-a-file"]));
     return null;
   }
   return { bytes: readFileSync(path) };
 }
 
-function hit(path: string, rule: DenyRule): ForbiddenHit {
-  return { path, code: rule.code, reason: rule.reason };
+function note(path: string, of: Note): Note & { readonly path: string } {
+  return { path, code: of.code, reason: of.reason };
 }
 
 /** Hash of one skill body. Two harnesses that produce the same key hold the same bytes. */
