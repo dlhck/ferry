@@ -183,10 +183,14 @@ describe("registered paths cannot take a path another harness owns", () => {
     expect(problems.map((problem) => problem.code)).toEqual(["path-collision"]);
   });
 
-  test("an instruction file a builtin harness already links is refused", () => {
-    const problems = problemsOf({
-      harness: [{ id: "fork", name: "Fork", instructionFile: "AGENTS.md" }],
-    });
+  const instructionFiles: readonly [string, string][] = [
+    ["an instruction file a builtin harness already links", "AGENTS.md"],
+    ["an instruction file that is a builtin skill root", ".agents/skills"],
+    ["an instruction file inside a builtin skill root", ".claude/skills/AGENTS.md"],
+  ];
+
+  test.each(instructionFiles)("%s is refused", (_label, instructionFile) => {
+    const problems = problemsOf({ harness: [{ id: "fork", name: "Fork", instructionFile }] });
 
     expect(problems.map((problem) => problem.code)).toEqual(["path-collision"]);
   });

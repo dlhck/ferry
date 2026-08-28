@@ -168,19 +168,22 @@ function plainPath(path: string): string {
 }
 
 /**
- * Two harnesses that link the same path fight over it while apply commits. A
- * shared or nested skill root and a shared instruction file are both refused.
+ * Two harnesses that link the same path fight over it while apply commits. No
+ * path of a new harness may equal or nest inside any path a known harness
+ * holds, whether the two are skill roots, instruction files, or one of each.
  */
 function pathCollision(
   harness: HarnessDescriptor,
   known: readonly HarnessDescriptor[],
 ): string | null {
+  const mine = [harness.skillRoot, harness.instructionFile];
   for (const other of known) {
-    if (harness.skillRoot && other.skillRoot && nests(harness.skillRoot, other.skillRoot)) {
-      return `skillRoot ${harness.skillRoot} collides with ${other.id} at ${other.skillRoot}`;
-    }
-    if (harness.instructionFile && harness.instructionFile === other.instructionFile) {
-      return `instructionFile ${harness.instructionFile} is already linked by ${other.id}`;
+    for (const path of mine) {
+      for (const held of [other.skillRoot, other.instructionFile]) {
+        if (path && held && nests(path, held)) {
+          return `path ${path} collides with ${other.id} at ${held}`;
+        }
+      }
     }
   }
   return null;
