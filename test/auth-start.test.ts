@@ -1,11 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import {
-  AuthStart,
-  STARTABLE_AUTH_PROVIDERS,
-  type AuthLink,
-  type AuthProvider,
-} from "../src/auth-start.ts";
+import { AuthStart, type AuthLink } from "../src/auth-start.ts";
 import type { ForwardOptions, LinkResult, RunOptions } from "../src/link.ts";
+import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 
 type RunCall = {
   readonly command: string;
@@ -48,7 +44,7 @@ function loggedOut(): LinkResult {
 }
 
 const providerCases: readonly {
-  readonly provider: AuthProvider;
+  readonly provider: string;
   readonly probe: RegExp;
   readonly login: RegExp;
   readonly output: string;
@@ -88,7 +84,7 @@ describe("AuthStart", () => {
   test("reports every provider without starting a login", async () => {
     const link = new FakeLink([success(), loggedOut(), loggedOut(), success()]);
 
-    const result = await new AuthStart(link).status();
+    const result = await new AuthStart(link, BUILTIN_TOOLS).status();
 
     expect(result).toEqual({
       providers: [
@@ -113,12 +109,17 @@ describe("AuthStart", () => {
   });
 
   test("starts each documented provider with its remote command recipe", async () => {
-    expect(STARTABLE_AUTH_PROVIDERS).toEqual(["gh", "claude", "codex", "cursor"]);
+    expect(new AuthStart(new FakeLink(), BUILTIN_TOOLS).startableProviders()).toEqual([
+      "gh",
+      "claude",
+      "codex",
+      "cursor",
+    ]);
 
     for (const providerCase of providerCases) {
       const link = new FakeLink([loggedOut(), success(providerCase.output)]);
 
-      const result = await new AuthStart(link).start(providerCase.provider);
+      const result = await new AuthStart(link, BUILTIN_TOOLS).start(providerCase.provider);
 
       expect(link.runs).toHaveLength(2);
       expect(link.runs[0]?.command).toMatch(providerCase.probe);
@@ -130,7 +131,7 @@ describe("AuthStart", () => {
   test("returns already-done without starting another login", async () => {
     const link = new FakeLink([success()]);
 
-    const result = await new AuthStart(link).start("gh");
+    const result = await new AuthStart(link, BUILTIN_TOOLS).start("gh");
 
     expect(result).toEqual({ kind: "already-done", provider: "gh" });
     expect(link.runs).toHaveLength(1);
@@ -139,8 +140,8 @@ describe("AuthStart", () => {
 
   test("refuses compatibility credential input before any Link call", async () => {
     const link = new FakeLink();
-    const startWithLegacyInput = new AuthStart(link).start as unknown as (
-      provider: AuthProvider,
+    const startWithLegacyInput = new AuthStart(link, BUILTIN_TOOLS).start as unknown as (
+      provider: string,
       input: unknown,
     ) => Promise<unknown>;
 
@@ -165,7 +166,7 @@ describe("AuthStart", () => {
       success(`Open https://cursor.com/auth/cli?state=opaque\nAccess token: ${token}\n`),
     ]);
 
-    const result = await new AuthStart(link).start("cursor");
+    const result = await new AuthStart(link, BUILTIN_TOOLS).start("cursor");
 
     expect(result).toEqual({
       kind: "printed-url",
@@ -195,7 +196,7 @@ describe("AuthStart", () => {
       [timeout],
     );
 
-    const result = await new AuthStart(link).start("codex");
+    const result = await new AuthStart(link, BUILTIN_TOOLS).start("codex");
 
     expect(link.runs.map((call) => call.command)).toEqual([
       "codex login status",
@@ -211,7 +212,7 @@ describe("AuthStart", () => {
   test("returns manual SSH guidance for Pi without starting an interactive TTY", async () => {
     const link = new FakeLink();
 
-    const result = await new AuthStart(link).start("pi");
+    const result = await new AuthStart(link, BUILTIN_TOOLS).start("pi");
 
     expect(result).toEqual({
       kind: "manual-ssh",

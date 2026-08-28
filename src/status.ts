@@ -1,9 +1,5 @@
 import type { ApplyAction, ApplyPlan } from "./apply.ts";
-import type {
-  AuthProvider,
-  AuthProviderStatus,
-  AuthStatusReport,
-} from "./auth-start.ts";
+import type { AuthProviderStatus, AuthStatusReport } from "./auth-start.ts";
 import type { LinkError, LinkResult } from "./link.ts";
 import type { DenyRuleDescription } from "./manifest.ts";
 import type { TipReport } from "./store.ts";
@@ -52,7 +48,7 @@ export type StatusReport = {
   };
   readonly auth: {
     readonly providers: readonly AuthProviderStatus[];
-    readonly loginRequired: readonly AuthProvider[];
+    readonly loginRequired: readonly string[];
     readonly error: StatusDependencyError | null;
   };
   readonly paseo: {

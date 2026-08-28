@@ -23,25 +23,13 @@ import {
   type TargetInspectionRequest,
 } from "./apply-remote.ts";
 import type { Link } from "./link.ts";
-
-const SKILL_HARNESSES = [
-  { name: "Shared agents", path: ".agents/skills" },
-  { name: "Claude", path: ".claude/skills" },
-  { name: "Codex", path: ".codex/skills" },
-  { name: "Pi", path: ".pi/agent/skills" },
-  { name: "Cursor Agent", path: ".cursor/skills" },
-] as const;
-
-const INSTRUCTION_TARGETS = [
-  { name: "Home instructions", path: "AGENTS.md" },
-  { name: "Claude", path: ".claude/CLAUDE.md" },
-  { name: "Codex", path: ".codex/AGENTS.md" },
-  { name: "Pi", path: ".pi/agent/AGENTS.md" },
-] as const;
+import type { HarnessDescriptor } from "./registry/types.ts";
 
 export type ApplyInput = {
   readonly checkout: string;
   readonly targetHome: string;
+  /** The harnesses to link. Apply owns the plan, not the layout. */
+  readonly harnesses: readonly HarnessDescriptor[];
   readonly force?: boolean;
   readonly dryRun?: boolean;
   /** Fixed value for reproducible plans. The default is the current UTC time. */
@@ -116,8 +104,9 @@ export function planApply(input: ApplyInput): ApplyPlan {
   const checkout = resolve(input.checkout);
   const targetHome = resolve(input.targetHome);
   const timestamp = input.timestamp ?? currentTimestamp();
-  const request = inspectionRequest(checkout, targetHome, timestamp, join);
+  const request = inspectionRequest(input.harnesses, checkout, targetHome, timestamp, join);
   return planInspection(
+    input.harnesses,
     checkout,
     targetHome,
     input.force ?? false,
@@ -154,7 +143,7 @@ async function applyRemote(input: RemoteApplyInput): Promise<ApplyPlan> {
   const checkout = posix.resolve(input.checkout);
   const targetHome = posix.resolve(input.targetHome);
   const timestamp = input.timestamp ?? currentTimestamp();
-  const request = inspectionRequest(checkout, targetHome, timestamp, posix.join);
+  const request = inspectionRequest(input.harnesses, checkout, targetHome, timestamp, posix.join);
   let inspection: TargetInspection;
   try {
     inspection = await inspectRemoteTarget(request, input.link);
@@ -162,6 +151,7 @@ async function applyRemote(input: RemoteApplyInput): Promise<ApplyPlan> {
     throw new ApplyError("commit-failed", "Remote target", targetHome, { cause });
   }
   const plan = planInspection(
+    input.harnesses,
     checkout,
     targetHome,
     input.force ?? false,
@@ -189,6 +179,7 @@ async function applyRemote(input: RemoteApplyInput): Promise<ApplyPlan> {
 }
 
 function inspectionRequest(
+  harnesses: readonly HarnessDescriptor[],
   checkout: string,
   targetHome: string,
   timestamp: string,
@@ -197,13 +188,18 @@ function inspectionRequest(
   return {
     storeSkills: joinPath(checkout, "skills"),
     instructions: joinPath(checkout, "AGENTS.md"),
-    targetRoots: SKILL_HARNESSES.map((harness) => joinPath(targetHome, harness.path)),
-    instructionTargets: INSTRUCTION_TARGETS.map((target) => joinPath(targetHome, target.path)),
+    targetRoots: harnesses.flatMap((harness) =>
+      harness.skillRoot ? [joinPath(targetHome, harness.skillRoot)] : [],
+    ),
+    instructionTargets: harnesses.flatMap((harness) =>
+      harness.instructionFile ? [joinPath(targetHome, harness.instructionFile)] : [],
+    ),
     backupSuffix: `.ferry-backup-${timestamp}`,
   };
 }
 
 function planInspection(
+  harnesses: readonly HarnessDescriptor[],
   checkout: string,
   targetHome: string,
   force: boolean,
@@ -216,8 +212,9 @@ function planInspection(
   const actions: ApplyAction[] = [];
   const unmanaged: UnmanagedExtra[] = [];
 
-  for (const harness of SKILL_HARNESSES) {
-    const root = joinPath(targetHome, harness.path);
+  for (const harness of harnesses) {
+    if (!harness.skillRoot) continue;
+    const root = joinPath(targetHome, harness.skillRoot);
     for (const name of inspection.skillNames) {
       planLink(
         harness.name,
@@ -243,10 +240,11 @@ function planInspection(
 
   if (inspection.instructionExists) {
     const instructions = joinPath(checkout, "AGENTS.md");
-    for (const target of INSTRUCTION_TARGETS) {
+    for (const harness of harnesses) {
+      if (!harness.instructionFile) continue;
       planLink(
-        target.name,
-        joinPath(targetHome, target.path),
+        harness.name,
+        joinPath(targetHome, harness.instructionFile),
         instructions,
         force,
         timestamp,

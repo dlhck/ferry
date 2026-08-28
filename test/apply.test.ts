@@ -15,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { ApplyError, apply, commitApply, planApply } from "../src/apply.ts";
+import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 
 const roots: string[] = [];
 const skillRoots = [
@@ -52,7 +53,7 @@ describe("apply plan and commit", () => {
     const checkout = makeCheckout();
     const home = makeRoot("home");
 
-    const plan = planApply({ checkout, targetHome: home });
+    const plan = planApply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES });
     expect(plan.actions.filter((action) => action.kind === "create-symlink")).toHaveLength(14);
     commitApply(plan);
 
@@ -71,10 +72,10 @@ describe("apply plan and commit", () => {
   test("a deleted snapshot name is planned and removed", () => {
     const checkout = makeCheckout();
     const home = makeRoot("home");
-    commitApply(planApply({ checkout, targetHome: home }));
+    commitApply(planApply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES }));
     rmSync(join(checkout, "skills", "tdd"), { recursive: true });
 
-    const plan = planApply({ checkout, targetHome: home });
+    const plan = planApply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES });
 
     expect(plan.actions.filter((action) => action.kind === "delete-managed-name")).toHaveLength(5);
     commitApply(plan);
@@ -85,7 +86,7 @@ describe("apply plan and commit", () => {
     const checkout = makeCheckout();
     const home = makeRoot("home");
 
-    const plan = apply({ checkout, targetHome: home, dryRun: true });
+    const plan = apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES, dryRun: true });
 
     expect(plan.actions.length).toBeGreaterThan(0);
     expect(readdirSync(home)).toEqual([]);
@@ -96,7 +97,7 @@ describe("apply plan and commit", () => {
     const home = makeRoot("home");
     write(join(home, ".claude", "skills", "unslop", "local.md"), "box copy");
 
-    const plan = planApply({ checkout, targetHome: home });
+    const plan = planApply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES });
 
     expect(plan.actions).toContainEqual({
       kind: "refuse-live-directory",
@@ -119,6 +120,7 @@ describe("apply plan and commit", () => {
     const plan = planApply({
       checkout,
       targetHome: home,
+      harnesses: BUILTIN_HARNESSES,
       force: true,
       timestamp: "20260828T101112Z",
     });
@@ -149,7 +151,7 @@ describe("apply plan and commit", () => {
     mkdirSync(dirname(path), { recursive: true });
     symlinkSync(old, path);
 
-    const plan = planApply({ checkout, targetHome: home });
+    const plan = planApply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES });
 
     expect(plan.actions).toContainEqual({
       kind: "repair-symlink",
@@ -167,7 +169,7 @@ describe("apply plan and commit", () => {
     const extra = join(home, ".cursor", "skills", "local-only", "SKILL.md");
     write(extra, "local");
 
-    const plan = apply({ checkout, targetHome: home });
+    const plan = apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES });
 
     expect(plan.unmanaged).toContainEqual({
       harness: "Cursor Agent",
@@ -188,7 +190,7 @@ describe("apply plan and commit", () => {
     };
     for (const [path, body] of Object.entries(state)) write(join(home, path), body);
 
-    apply({ checkout, targetHome: home });
+    apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES });
 
     for (const [path, body] of Object.entries(state)) {
       expect(readFileSync(join(home, path), "utf8")).toBe(body);
@@ -199,7 +201,7 @@ describe("apply plan and commit", () => {
     const checkout = makeCheckout(["unslop"]);
     const home = makeRoot("home");
     writeFileSync(join(home, ".claude"), "blocks the Claude directory");
-    const plan = planApply({ checkout, targetHome: home });
+    const plan = planApply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES });
 
     expect(() => commitApply(plan)).toThrow(
       expect.objectContaining({ code: "commit-failed", harness: "Claude" }),

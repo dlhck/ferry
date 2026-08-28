@@ -1,9 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  STARTABLE_AUTH_PROVIDERS,
-  type AuthLink,
-  type AuthStartResult,
-} from "../src/auth-start.ts";
+import type { AuthLink, AuthStartResult } from "../src/auth-start.ts";
 import {
   runAuthCommand,
   runInstallCommand,
@@ -11,6 +7,7 @@ import {
   type InstallCommandDependencies,
 } from "../src/install-auth.ts";
 import type { InstallRecipe, InstallResult } from "../src/install.ts";
+import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 
 const config = {
   version: 1 as const,
@@ -130,7 +127,10 @@ describe("auth command", () => {
     );
 
     expect(output).toEqual([
-      ...STARTABLE_AUTH_PROVIDERS.map((provider) => `${provider}: startable`),
+      "gh: startable",
+      "claude: startable",
+      "codex: startable",
+      "cursor: startable",
       "pi: manual SSH flow",
     ]);
     expect(links).toBe(0);
@@ -152,7 +152,7 @@ describe("auth command", () => {
         createAuthStart: (receivedLink) => {
           authLink = receivedLink;
           return {
-            start: async (provider) => {
+            start: async (provider: string) => {
               providers.push(provider);
               return { kind: "already-done", provider: "gh" };
             },
@@ -305,6 +305,7 @@ function installDependencies(overrides: {
   readonly run?: (confirmed: boolean) => Promise<InstallResult>;
 }): InstallCommandDependencies {
   return {
+    tools: BUILTIN_TOOLS,
     readConfig: () => config,
     createLink: fakeLink,
     createInstall: () => ({
@@ -324,6 +325,7 @@ function authDependencies(overrides: {
   readonly createAuthStart?: AuthCommandDependencies["createAuthStart"];
 } = {}): AuthCommandDependencies {
   return {
+    tools: BUILTIN_TOOLS,
     readConfig: overrides.readConfig ?? (() => config),
     createLink: overrides.createLink ?? fakeLink,
     createAuthStart: overrides.createAuthStart ?? (() => ({

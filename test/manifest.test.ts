@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { denyRules, readSeed } from "../src/manifest.ts";
 import type { Refusal, Seed } from "../src/manifest.ts";
+import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 
 const homes: string[] = [];
 
@@ -36,13 +37,13 @@ function write(home: string, path: string, body: string) {
 }
 
 function seedOf(home: string): Seed {
-  const result = readSeed(home);
+  const result = readSeed(home, BUILTIN_HARNESSES);
   if (!result.ok) throw new Error(`expected a seed, got a refusal: ${JSON.stringify(result)}`);
   return result;
 }
 
 function refusalOf(home: string): Refusal {
-  const result = readSeed(home);
+  const result = readSeed(home, BUILTIN_HARNESSES);
   if (result.ok) throw new Error("expected a refusal, got a seed");
   return result;
 }
@@ -246,6 +247,9 @@ describe("the deny set", () => {
     ["id_ed25519", "key", "private-key"],
     ["deploy.pem", "key", "private-key"],
     ["token.json", "{}", "token"],
+    ["Credentials.json", "{}", "credentials"],
+    ["AUTH.JSON", "{}", "credentials"],
+    [".ENV", "SECRET=1", "dotenv"],
   ])("a skill holding %s refuses the whole seed", (name, body, code) => {
     const home = makeHome();
     writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "body", [name]: body });
