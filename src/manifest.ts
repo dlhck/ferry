@@ -263,14 +263,16 @@ export function deniedSegment(
   return null;
 }
 
-function denyRuleFor(name: string, isDirectory: boolean): DenyRule | null {
+function denyRuleFor(entryName: string, isDirectory: boolean): DenyRule | null {
+  // A case-folding filesystem opens Credentials.json under either spelling.
+  const name = entryName.toLowerCase();
   if (isDirectory) return CACHE_DIRS.has(name) ? DENY_RULES.cache : null;
   if (name === ".env" || name.startsWith(".env.")) return DENY_RULES.dotenv;
   if (CREDENTIAL_NAMES.has(name)) return DENY_RULES.credentials;
   if (TOKEN_NAMES.has(name)) return DENY_RULES.token;
   if (PRIVATE_KEY_NAMES.has(name)) return DENY_RULES["private-key"];
   if (PRIVATE_KEY_EXTS.some((ext) => name.endsWith(ext))) return DENY_RULES["private-key"];
-  if (name === ".DS_Store") return DENY_RULES.cache;
+  if (name === ".ds_store") return DENY_RULES.cache;
   if (DATABASE_EXTS.some((ext) => name.endsWith(ext))) return DENY_RULES.database;
   if (HISTORY_NAMES.has(name)) return DENY_RULES.history;
   if (SETTINGS_NAMES.has(name)) return DENY_RULES.settings;

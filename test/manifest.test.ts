@@ -217,6 +217,9 @@ describe("the deny set", () => {
     ["id_ed25519", "key", "private-key"],
     ["deploy.pem", "key", "private-key"],
     ["token.json", "{}", "token"],
+    ["Credentials.json", "{}", "credentials"],
+    ["AUTH.JSON", "{}", "credentials"],
+    [".ENV", "SECRET=1", "dotenv"],
   ])("a skill holding %s refuses the whole seed", (name, body, code) => {
     const home = makeHome();
     writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "body", [name]: body });
