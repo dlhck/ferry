@@ -26,6 +26,11 @@ import {
   type SyncResult,
 } from "./sync.ts";
 import { loadRegistry, type Registry } from "./registry/load.ts";
+import {
+  runStatusCommand,
+  type StatusCommandDependencies,
+  type StatusCommandInput,
+} from "./status-command.ts";
 
 const DESCRIPTION = `Ferry keeps a remote Linux agent box in the same shape as this machine.
 
@@ -45,6 +50,10 @@ type CliDependencies = {
     dependencies?: Partial<AuthCommandDependencies>,
   ) => Promise<void>;
   readonly runSync?: (input: SyncInput) => Promise<SyncResult>;
+  readonly runStatus?: (
+    input: StatusCommandInput,
+    dependencies?: Partial<StatusCommandDependencies>,
+  ) => Promise<unknown>;
   readonly prompt?: InitPrompt;
   readonly writeLine?: (line: string) => void;
 };
@@ -111,6 +120,19 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
         force: options.force === true,
         message: options.message,
       });
+    });
+
+  program
+    .command("status")
+    .description("Inspect link, snapshot, managed paths, and box logins without writing")
+    .option("--json", "print the status report as JSON")
+    .action(async (options: { json?: boolean }) => {
+      await (dependencies.runStatus ?? runStatusCommand)(
+        { json: options.json === true },
+        {
+          writeLine: dependencies.writeLine ?? console.log,
+        },
+      );
     });
   return program;
 }
