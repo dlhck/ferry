@@ -203,4 +203,37 @@ describe("ferry --help", () => {
 
     expect(help).toContain("--json");
   });
+
+  test("runs watch in the foreground with a shutdown signal", async () => {
+    let signal: AbortSignal | undefined;
+    const program = buildProgram({
+      runWatch: async (input) => {
+        signal = input.signal;
+      },
+    });
+
+    await program.parseAsync(["watch"], { from: "user" });
+
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal?.aborted).toBe(false);
+  });
+
+  test("installs the platform watch service", async () => {
+    const output: string[] = [];
+    let calls = 0;
+    const program = buildProgram({
+      installWatchService: async () => {
+        calls += 1;
+        return { manager: "systemd", path: "/home/me/.config/systemd/user/ferry-watch.service" };
+      },
+      writeLine: (line) => output.push(line),
+    });
+
+    await program.parseAsync(["watch", "install"], { from: "user" });
+
+    expect(calls).toBe(1);
+    expect(output).toEqual([
+      "Installed systemd service at /home/me/.config/systemd/user/ferry-watch.service",
+    ]);
+  });
 });

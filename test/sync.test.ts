@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplyError } from "../src/apply.ts";
@@ -391,6 +392,51 @@ describe("runSync", () => {
       expect(readdirSync(join(home, ".ferry"))).toEqual([]);
     } finally {
       continuePublish();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("recovers a lock left by a dead process", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-sync-stale-lock-"));
+    const lockDirectory = join(home, ".ferry");
+    mkdirSync(lockDirectory, { recursive: true });
+    const digest = createHash("sha256").update("box").digest("hex").slice(0, 16);
+    writeFileSync(join(lockDirectory, `sync-${digest}.lock`), JSON.stringify({ pid: 999_999_999 }));
+
+    try {
+      await runSync(
+        { home },
+        {
+          readConfig: () => config,
+          publisher: () => "operator-machine",
+          readSeed: () => seed,
+          createLink: () => {
+            let calls = 0;
+            return {
+              run: async () => ({
+                ok: true,
+                address: "box.example.ts.net",
+                stdout: ++calls === 1 ? "/srv/ferry\n" : "",
+                stderr: "",
+              }),
+            };
+          },
+          openStore: async () => ({
+            path: join(home, ".ferry", "store"),
+            publish: async () => ({ published: false, tip: "abc123" }),
+          }),
+          apply: async (input) => ({
+            checkout: input.checkout,
+            targetHome: input.targetHome,
+            actions: [],
+            unmanaged: [],
+          }),
+          adopt: () => {},
+          writePlan: () => {},
+        },
+      );
+      expect(readdirSync(lockDirectory)).toEqual([]);
+    } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });
