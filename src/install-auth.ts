@@ -1,15 +1,14 @@
 import * as prompts from "@clack/prompts";
 import { AuthStart, authTools, type AuthLink, type AuthStartResult } from "./auth-start.ts";
-import { readConfig, type PartialOperatorConfig } from "./config.ts";
+import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
 import { Install, type InstallRecipe, type InstallResult } from "./install.ts";
-import { Link, type LinkError } from "./link.ts";
+import { Link, type LinkError, type LinkOptions } from "./link.ts";
 import { BUILTIN_TOOLS } from "./registry/builtin.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
 
 export type InstallCommandInput = { readonly yes: boolean };
 export type AuthCommandInput = { readonly provider?: string };
 
-type CommandTarget = { readonly host: string; readonly user: string };
 type CommandLink = AuthLink;
 type InstallCommand = {
   plan(): readonly InstallRecipe[];
@@ -21,7 +20,7 @@ export type InstallCommandDependencies = {
   /** The tools this ferry manages. The CLI resolves the registry once. */
   readonly tools: readonly ToolDescriptor[];
   readonly readConfig: () => PartialOperatorConfig | null;
-  readonly createLink: (options: CommandTarget) => CommandLink;
+  readonly createLink: (options: LinkOptions) => CommandLink;
   readonly createInstall: (link: CommandLink, tools: readonly ToolDescriptor[]) => InstallCommand;
   readonly confirm: () => Promise<boolean | symbol | undefined>;
   readonly writeLine: (line: string) => void;
@@ -31,7 +30,7 @@ export type AuthCommandDependencies = {
   /** The tools this ferry manages. The CLI resolves the registry once. */
   readonly tools: readonly ToolDescriptor[];
   readonly readConfig: () => PartialOperatorConfig | null;
-  readonly createLink: (options: CommandTarget) => CommandLink;
+  readonly createLink: (options: LinkOptions) => CommandLink;
   readonly createAuthStart: (link: CommandLink, tools: readonly ToolDescriptor[]) => AuthCommand;
   readonly writeLine: (line: string) => void;
 };
@@ -119,7 +118,7 @@ const defaultAuthDependencies: AuthCommandDependencies = {
 function loadTarget(
   read: () => PartialOperatorConfig | null,
   writeLine: (line: string) => void,
-): CommandTarget {
+): LinkOptions {
   let config: PartialOperatorConfig | null;
   try {
     config = read();
@@ -127,12 +126,11 @@ function loadTarget(
     fail("operator/invalid-config", "Could not read Ferry config. Run ferry init.", writeLine);
   }
 
-  const host = config?.host?.tailscale;
-  const user = config?.host?.sshUser;
-  if (!host || !user) {
+  const target = resolveLinkOptions(config?.host);
+  if (!target) {
     fail("operator/invalid-config", "Ferry config has no complete host. Run ferry init.", writeLine);
   }
-  return { host, user };
+  return target;
 }
 
 function isAuthProvider(provider: string, tools: readonly ToolDescriptor[]): boolean {

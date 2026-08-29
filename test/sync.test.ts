@@ -255,6 +255,62 @@ describe("runSync", () => {
     });
   });
 
+  test("uses a direct SSH destination for Link, plans, and locking", async () => {
+    const directConfig: OperatorConfig = {
+      ...config,
+      host: { transport: "ssh", destination: "ubuntu@orb" },
+    };
+    let linkOptions: unknown;
+    let lockKey: string | undefined;
+    let linkCalls = 0;
+
+    const result = await runSync(
+      { home: "/operator" },
+      {
+        readConfig: () => directConfig,
+        publisher: () => "operator-machine",
+        readSeed: () => seed,
+        createLink: (options) => {
+          linkOptions = options;
+          return {
+            run: async () => {
+              linkCalls += 1;
+              return {
+                ok: true,
+                address: "ubuntu@orb",
+                stdout: linkCalls === 1 ? "/home/davidhoeck\n" : "",
+                stderr: "",
+              };
+            },
+          };
+        },
+        acquireLock: (_home, key) => {
+          lockKey = key;
+          return () => {};
+        },
+        openStore: async () => ({
+          path: "/operator/.ferry/store",
+          publish: async () => ({ published: false, tip: "abc123" }),
+        }),
+        apply: async (input) => ({
+          checkout: input.checkout,
+          targetHome: input.targetHome,
+          actions: [],
+          unmanaged: [],
+        }),
+        writePlan: () => {},
+      },
+    );
+
+    expect(linkOptions).toEqual({ destination: "ubuntu@orb" });
+    expect(lockKey).toBe("ssh:ubuntu@orb");
+    expect(result.plan).toMatchObject({
+      box: "ubuntu@orb",
+      remoteHome: "/home/davidhoeck",
+      remoteCheckout: "/home/davidhoeck/.ferry/store",
+    });
+  });
+
   test("passes one effective custom harness registry through Manifest, Store, and Apply", async () => {
     const customHarness: HarnessDescriptor = {
       id: "opencode",

@@ -4,11 +4,12 @@ import { hostname, homedir } from "node:os";
 import { apply as applyStore, type ApplyPlan } from "./apply.ts";
 import {
   readConfig as readOperatorConfig,
+  resolveLinkOptions,
   writeConfig as writeOperatorConfig,
   type OperatorConfig,
   type PartialOperatorConfig,
 } from "./config.ts";
-import { Link, type LinkResult, type RunOptions } from "./link.ts";
+import { Link, type LinkOptions, type LinkResult, type RunOptions } from "./link.ts";
 import { readSeed as readManifest, type Leftover, type Seed } from "./manifest.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
 import { openStore as openSnapshotStore, type PublishResult } from "./store.ts";
@@ -21,6 +22,7 @@ export type InitInput = {
   readonly harnesses: readonly HarnessDescriptor[];
   readonly host?: string;
   readonly sshUser?: string;
+  readonly sshDestination?: string;
   readonly snapshotUrl?: string;
 };
 
@@ -44,7 +46,7 @@ export type InitDependencies = {
   readonly readSeed?: typeof readManifest;
   readonly readConfig?: typeof readOperatorConfig;
   readonly writeConfig?: typeof writeOperatorConfig;
-  readonly createLink?: (host: string, user: string) => InitLink;
+  readonly createLink?: (options: LinkOptions) => InitLink;
   readonly openStore?: (remote: string, seed: Seed, home: string) => Promise<InitStore>;
   readonly apply?: (input: {
     readonly checkout: string;
@@ -63,7 +65,11 @@ export type InitResult = {
   readonly published: boolean;
 };
 
-export type InitRefusalCode = "missing-values" | "manifest-refusal" | "link-refusal";
+export type InitRefusalCode =
+  | "invalid-values"
+  | "missing-values"
+  | "manifest-refusal"
+  | "link-refusal";
 
 export class InitRefusal extends Error {
   constructor(
@@ -82,6 +88,7 @@ export async function runInit(
   const home = input.home ?? homedir();
   const readConfig = dependencies.readConfig ?? readOperatorConfig;
   const existing = readConfig(home);
+  refuseMixedTarget(input);
   let values = mergeValues(input, existing);
   let missing = missingFields(values);
 
@@ -98,18 +105,16 @@ export async function runInit(
     version: 1,
     publisher: existing?.publisher ?? dependencies.publisher?.() ?? hostname(),
     snapshotUrl: required(values.snapshotUrl),
-    host: {
-      tailscale: required(values.host),
-      sshUser: required(values.sshUser),
-    },
+    host: values.sshDestination
+      ? { transport: "ssh", destination: values.sshDestination }
+      : { tailscale: required(values.host), sshUser: required(values.sshUser) },
   };
 
   const seed = (dependencies.readSeed ?? readManifest)(home, input.harnesses);
   if (!seed.ok) throw manifestRefusal(seed);
 
-  const link =
-    dependencies.createLink?.(config.host.tailscale, config.host.sshUser) ??
-    new Link({ host: config.host.tailscale, user: config.host.sshUser });
+  const target = requiredTarget(config);
+  const link = dependencies.createLink?.(target) ?? new Link(target);
   const probe = await link.run("true");
   if (!probe.ok) {
     throw new InitRefusal("link-refusal", `${probe.error.origin}: ${probe.error.message}`);
@@ -141,23 +146,44 @@ function mergeValues(
 ): InitInput {
   const fallbackHost = fallback && "host" in fallback ? fallback.host : undefined;
   const host = typeof fallbackHost === "string" ? fallbackHost : fallbackHost?.tailscale;
+  const direct = nonempty(provided.sshDestination);
+  const tailscale = nonempty(provided.host) || nonempty(provided.sshUser);
   return {
     home: provided.home,
     harnesses: provided.harnesses,
-    host: nonempty(provided.host) ?? nonempty(host),
-    sshUser:
-      nonempty(provided.sshUser) ??
-      nonempty(typeof fallbackHost === "object" ? fallbackHost?.sshUser : undefined),
+    host: direct ? undefined : nonempty(provided.host) ?? nonempty(host),
+    sshUser: direct
+      ? undefined
+      : nonempty(provided.sshUser) ??
+        nonempty(typeof fallbackHost === "object" ? fallbackHost?.sshUser : undefined),
+    sshDestination: tailscale
+      ? undefined
+      : direct ?? nonempty(typeof fallbackHost === "object" ? fallbackHost?.destination : undefined),
     snapshotUrl: nonempty(provided.snapshotUrl) ?? nonempty(fallback?.snapshotUrl),
   };
 }
 
 function missingFields(input: InitInput): InitField[] {
   const missing: InitField[] = [];
-  if (!nonempty(input.host)) missing.push("host");
-  if (!nonempty(input.sshUser)) missing.push("sshUser");
+  if (!nonempty(input.sshDestination)) {
+    if (!nonempty(input.host)) missing.push("host");
+    if (!nonempty(input.sshUser)) missing.push("sshUser");
+  }
   if (!nonempty(input.snapshotUrl)) missing.push("snapshotUrl");
   return missing;
+}
+
+function refuseMixedTarget(input: InitInput): void {
+  if (nonempty(input.sshDestination) && (nonempty(input.host) || nonempty(input.sshUser))) {
+    throw new InitRefusal(
+      "invalid-values",
+      "--ssh-destination cannot be combined with --host or --ssh-user",
+    );
+  }
+}
+
+function requiredTarget(config: OperatorConfig) {
+  return resolveLinkOptions(config.host) as NonNullable<ReturnType<typeof resolveLinkOptions>>;
 }
 
 function nonempty(value: string | undefined): string | undefined {

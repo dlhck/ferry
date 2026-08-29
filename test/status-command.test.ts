@@ -209,6 +209,27 @@ describe("ferry status command", () => {
     expect(stack.mutations).toEqual([]);
   });
 
+  test("constructs Link from a direct SSH destination", async () => {
+    const stack = fakeStack();
+    let linkOptions: unknown;
+    const dependencies = {
+      ...stack.dependencies,
+      readConfig: () => ({
+        version: 1 as const,
+        host: { transport: "ssh" as const, destination: "ubuntu@orb" },
+        harness: [{ id: "custom" }],
+      }),
+      createLink: (options: unknown) => {
+        linkOptions = options;
+        return stack.dependencies.createLink!({ host: "unused", user: "unused" });
+      },
+    };
+
+    await runStatusCommand({ json: false }, dependencies);
+
+    expect(linkOptions).toEqual({ destination: "ubuntu@orb" });
+  });
+
   test("makes an offline host obvious and skips every box inspection", async () => {
     const stack = fakeStack(false);
 

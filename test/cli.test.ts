@@ -74,6 +74,32 @@ describe("ferry --help", () => {
     expect(output).toContain("Paseo: 100.64.0.9:6767");
   });
 
+  test("wires an explicit SSH destination to init", async () => {
+    let received: InitInput | undefined;
+    const program = buildProgram({
+      runInit: async (input) => {
+        received = input;
+        return {
+          address: "ubuntu@orb",
+          paseoPort: 6767,
+          leftovers: [],
+          published: false,
+        };
+      },
+      writeLine: () => {},
+    });
+
+    await program.parseAsync(
+      ["init", "--ssh-destination", "ubuntu@orb", "--snapshot-url", "snapshot.git"],
+      { from: "user" },
+    );
+
+    expect(received).toMatchObject({
+      sshDestination: "ubuntu@orb",
+      snapshotUrl: "snapshot.git",
+    });
+  });
+
   test("init help lists every non-interactive flag", () => {
     const help = buildProgram().commands
       .find((command) => command.name() === "init")
@@ -81,6 +107,7 @@ describe("ferry --help", () => {
 
     expect(help).toContain("--host <host>");
     expect(help).toContain("--ssh-user <user>");
+    expect(help).toContain("--ssh-destination <destination>");
     expect(help).toContain("--snapshot-url <url>");
   });
 
