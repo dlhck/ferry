@@ -21,7 +21,6 @@ import {
 } from "./install-auth.ts";
 import {
   runSync as runSyncCommand,
-  SyncError,
   type SyncInput,
   type SyncResult,
 } from "./sync.ts";
@@ -56,6 +55,11 @@ type CliDependencies = {
   ) => Promise<unknown>;
   readonly prompt?: InitPrompt;
   readonly writeLine?: (line: string) => void;
+};
+
+type CliRuntime = {
+  readonly renderError?: (message: string) => void;
+  readonly setExitCode?: (code: number) => void;
 };
 
 export function buildProgram(dependencies: CliDependencies = {}): Command {
@@ -137,20 +141,22 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
   return program;
 }
 
-if (import.meta.main) {
+export async function runCli(
+  args: readonly string[],
+  dependencies: CliDependencies = {},
+  runtime: CliRuntime = {},
+): Promise<void> {
   try {
-    await buildProgram().parseAsync(Bun.argv);
+    await buildProgram(dependencies).parseAsync([...args], { from: "user" });
   } catch (error) {
-    if (error instanceof SyncError) {
-      console.error(error.message);
-      process.exitCode = 1;
-    } else if (error instanceof InstallAuthCommandError) {
-      process.exitCode = 1;
-    } else {
-      throw error;
+    if (!(error instanceof InstallAuthCommandError)) {
+      (runtime.renderError ?? renderError)(errorMessage(error));
     }
+    (runtime.setExitCode ?? setExitCode)(1);
   }
 }
+
+if (import.meta.main) await runCli(Bun.argv.slice(2));
 
 /** Resolve the builtin registry. Operator entries arrive when config carries them. */
 function resolveRegistry(): Registry {
@@ -203,4 +209,18 @@ function reportInit(result: InitResult, writeLine: (line: string) => void): void
   }
   writeLine(`Paseo: ${result.address}:${result.paseoPort}`);
   writeLine(result.published ? "Snapshot seed published." : "Snapshot already matches the seed.");
+}
+
+function renderError(message: string): void {
+  prompts.log.error(message);
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string" && error) return error;
+  return "Ferry failed.";
+}
+
+function setExitCode(code: number): void {
+  process.exitCode = code;
 }
