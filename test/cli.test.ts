@@ -161,4 +161,25 @@ describe("ferry --help", () => {
     expect(help).toContain("--force");
     expect(help).toContain("-m, --message <message>");
   });
+
+  test("wires status --json to the status command", async () => {
+    let received: { json: boolean } | undefined;
+    const program = buildProgram({
+      runStatus: async (input) => {
+        received = input;
+      },
+    });
+
+    await program.parseAsync(["status", "--json"], { from: "user" });
+
+    expect(received).toEqual({ json: true });
+  });
+
+  test("status help lists the json flag", () => {
+    const help = buildProgram().commands
+      .find((command) => command.name() === "status")
+      ?.helpInformation();
+
+    expect(help).toContain("--json");
+  });
 });
