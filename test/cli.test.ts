@@ -1,9 +1,30 @@
 import { describe, expect, test } from "bun:test";
-import { buildProgram } from "../src/cli.ts";
+import { buildProgram, runCli } from "../src/cli.ts";
 import type { InitInput, InitResult } from "../src/init.ts";
 import type { SyncInput, SyncResult } from "../src/sync.ts";
 
 describe("ferry --help", () => {
+  test("renders command errors without throwing them to Bun", async () => {
+    const errors: string[] = [];
+    const exitCodes: number[] = [];
+
+    await runCli(
+      ["init", "--host", "box", "--ssh-user", "ferry", "--snapshot-url", "snapshot.git"],
+      {
+        runInit: async () => {
+          throw new Error("Manifest refused the source: clash example");
+        },
+      },
+      {
+        renderError: (message) => errors.push(message),
+        setExitCode: (code) => exitCodes.push(code),
+      },
+    );
+
+    expect(errors).toEqual(["Manifest refused the source: clash example"]);
+    expect(exitCodes).toEqual([1]);
+  });
+
   test("states that logins are not copied", () => {
     expect(buildProgram().helpInformation()).toContain("Ferry never copies logins.");
   });
