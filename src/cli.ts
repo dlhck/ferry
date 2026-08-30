@@ -89,7 +89,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("init")
-    .description("Record a host, seed the snapshot, and convert this machine")
+    .description("Record a Tailscale host or SSH destination, seed the snapshot, and convert this machine")
     .option("--host <host>", "Tailscale host name or IP address")
     .option("--ssh-user <user>", "SSH user on the host")
     .option("--ssh-destination <destination>", "explicit OpenSSH destination")
@@ -217,22 +217,55 @@ async function promptForInit(
   current: InitInput,
 ): Promise<Pick<InitInput, InitField>> {
   prompts.intro("ferry init");
-  const result: { host?: string; sshUser?: string; snapshotUrl?: string } = {};
+  const result: { [Field in InitField]?: string } = {};
+  const fields = await resolvePromptFields(missing, current);
 
-  for (const field of missing) {
-    const answer = await prompts.text({
-      message: promptMessage(field),
-      initialValue: current[field],
-      validate: (value) =>
-        !value || value.trim() === "" ? "This value is required." : undefined,
-    });
-    if (prompts.isCancel(answer)) {
-      prompts.cancel("Init cancelled.");
-      throw new Error("init cancelled");
-    }
-    result[field] = answer;
+  for (const field of fields) {
+    result[field] = await askText(field, current[field]);
   }
   return result;
+}
+
+async function resolvePromptFields(
+  missing: readonly InitField[],
+  current: InitInput,
+): Promise<readonly InitField[]> {
+  const needsFreshTarget =
+    (missing.includes("host") || missing.includes("sshUser")) &&
+    !current.host &&
+    !current.sshUser &&
+    !current.sshDestination;
+  if (!needsFreshTarget) return missing.filter((field) => field !== "sshDestination");
+
+  const transport = await prompts.select({
+    message: "How should Ferry reach the box?",
+    options: [
+      { value: "tailscale", label: "Tailscale host" },
+      { value: "ssh", label: "SSH only, no Tailscale" },
+    ],
+  });
+  if (prompts.isCancel(transport)) {
+    prompts.cancel("Init cancelled.");
+    throw new Error("init cancelled");
+  }
+  if (transport === "ssh") {
+    return missing.includes("snapshotUrl") ? ["sshDestination", "snapshotUrl"] : ["sshDestination"];
+  }
+  return missing.filter((field) => field !== "sshDestination");
+}
+
+async function askText(field: InitField, initialValue?: string): Promise<string> {
+  const answer = await prompts.text({
+    message: promptMessage(field),
+    initialValue,
+    validate: (value) =>
+      !value || value.trim() === "" ? "This value is required." : undefined,
+  });
+  if (prompts.isCancel(answer)) {
+    prompts.cancel("Init cancelled.");
+    throw new Error("init cancelled");
+  }
+  return answer;
 }
 
 function promptMessage(field: InitField): string {
@@ -241,6 +274,8 @@ function promptMessage(field: InitField): string {
       return "Tailscale host name or IP";
     case "sshUser":
       return "SSH user";
+    case "sshDestination":
+      return "SSH destination, such as ubuntu@orb";
     case "snapshotUrl":
       return "Private snapshot git URL";
   }

@@ -8,6 +8,8 @@ Ferry never copies logins. OAuth sessions stay on the machine that created them.
 
 ## Usage
 
+`ferry init` asks whether to use a Tailscale host or an SSH-only destination. SSH-only never runs Tailscale.
+
 Use a Tailscale peer:
 
 ```sh
@@ -17,7 +19,7 @@ ferry init \
   --snapshot-url git@github.com:you/ferry-snapshot.git
 ```
 
-Or use an explicit OpenSSH destination. Ferry does not run Tailscale in this mode:
+Or use an explicit OpenSSH destination:
 
 ```sh
 ferry init \
@@ -72,7 +74,7 @@ On macOS, `ferry watch install` writes `~/Library/LaunchAgents/dev.ferry.watch.p
 </plist>
 ```
 
-launchd does not inherit the shell's `PATH` or `SSH_AUTH_SOCK`. Before installation, make sure the current `PATH` contains `git`, `ssh`, and `tailscale`. If the snapshot remote needs an SSH agent, make sure `SSH_AUTH_SOCK` points to its stable socket. Do not put tokens or private keys in the plist.
+launchd does not inherit the shell's `PATH` or `SSH_AUTH_SOCK`. Before installation, make sure the current `PATH` contains `git` and `ssh`. Include `tailscale` only when the configured host uses Tailscale. If the snapshot remote needs an SSH agent, make sure `SSH_AUTH_SOCK` points to its stable socket. Do not put tokens or private keys in the plist.
 
 ### Linux systemd user service
 
