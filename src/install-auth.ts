@@ -1,7 +1,12 @@
 import * as prompts from "@clack/prompts";
 import { AuthStart, authTools, type AuthLink, type AuthStartResult } from "./auth-start.ts";
 import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
-import { Install, type InstallRecipe, type InstallResult } from "./install.ts";
+import {
+  Install,
+  type InstallProgress,
+  type InstallRecipe,
+  type InstallResult,
+} from "./install.ts";
 import { Link, type LinkError, type LinkOptions } from "./link.ts";
 import { BUILTIN_TOOLS } from "./registry/builtin.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
@@ -12,9 +17,20 @@ export type AuthCommandInput = { readonly provider?: string };
 type CommandLink = AuthLink;
 type InstallCommand = {
   plan(): readonly InstallRecipe[];
-  run(confirmed: boolean): Promise<InstallResult>;
+  run(
+    confirmed: boolean,
+    reportProgress?: (progress: InstallProgress) => void,
+  ): Promise<InstallResult>;
 };
 type AuthCommand = { start(provider: string): Promise<AuthStartResult> };
+
+export type InstallProgressIndicator = {
+  start(message: string): void;
+  message(message: string): void;
+  advance(step: number, message: string): void;
+  stop(message: string): void;
+  error(message: string): void;
+};
 
 export type InstallCommandDependencies = {
   /** The tools this ferry manages. The CLI resolves the registry once. */
@@ -22,6 +38,7 @@ export type InstallCommandDependencies = {
   readonly readConfig: () => PartialOperatorConfig | null;
   readonly createLink: (options: LinkOptions) => CommandLink;
   readonly createInstall: (link: CommandLink, tools: readonly ToolDescriptor[]) => InstallCommand;
+  readonly createProgress: (total: number) => InstallProgressIndicator;
   readonly confirm: () => Promise<boolean | symbol | undefined>;
   readonly writeLine: (line: string) => void;
 };
@@ -50,7 +67,8 @@ export async function runInstallCommand(
   const target = loadTarget(resolved.readConfig, resolved.writeLine);
   const install = resolved.createInstall(resolved.createLink(target), resolved.tools);
 
-  for (const recipe of install.plan()) {
+  const plan = install.plan();
+  for (const recipe of plan) {
     resolved.writeLine(`${recipe.tool}: ${recipe.command}`);
   }
 
@@ -59,8 +77,27 @@ export async function runInstallCommand(
     if (confirmed !== true) return;
   }
 
-  const result = await install.run(true);
+  const progress = plan.length > 0 ? resolved.createProgress(plan.length) : undefined;
+  let active: InstallProgress | undefined;
+  let result: InstallResult;
+  try {
+    result = await install.run(true, (update) => {
+      active = update;
+      const message = `${update.phase === "started" ? "Installing" : "Installed"} ${update.tool} (${update.current}/${update.total})`;
+      if (update.phase === "completed") {
+        progress?.advance(1, message);
+      } else if (update.current === 1) {
+        progress?.start(message);
+      } else {
+        progress?.message(message);
+      }
+    });
+  } catch (error) {
+    progress?.error(installFailureMessage(active));
+    throw error;
+  }
   if (!result.ok) {
+    progress?.error(installFailureMessage(active));
     if (result.error.code === "confirmation-required") {
       fail(
         "operator/confirmation-required",
@@ -70,6 +107,7 @@ export async function runInstallCommand(
     }
     failLink("Install", result.error, resolved.writeLine);
   }
+  progress?.stop(`Installed ${plan.length} tools`);
 }
 
 export async function runAuthCommand(
@@ -103,9 +141,16 @@ const defaultInstallDependencies: InstallCommandDependencies = {
   readConfig,
   createLink: (options) => new Link(options),
   createInstall: (link, tools) => new Install(link, tools),
+  createProgress: (total) => prompts.progress({ max: total }),
   confirm: () => prompts.confirm({ message: "Run these commands on the box?" }),
   writeLine: console.log,
 };
+
+function installFailureMessage(progress: InstallProgress | undefined): string {
+  return progress
+    ? `Failed to install ${progress.tool} (${progress.current}/${progress.total})`
+    : "Install failed";
+}
 
 const defaultAuthDependencies: AuthCommandDependencies = {
   tools: BUILTIN_TOOLS,
