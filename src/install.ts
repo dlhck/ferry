@@ -3,6 +3,8 @@
 import type { Link, LinkFailure } from "./link.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
 
+const INSTALL_COMMAND_TIMEOUT_MS = 10 * 60 * 1_000;
+
 export type InstallRecipe = {
   readonly tool: string;
   readonly command: string;
@@ -45,7 +47,7 @@ export class Install {
     }
 
     for (const recipe of this.plan()) {
-      const result = await this.link.run(recipe.command);
+      const result = await this.link.run(recipe.command, { timeoutMs: INSTALL_COMMAND_TIMEOUT_MS });
       if (!result.ok) return result;
     }
     return { ok: true };

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Install } from "../src/install.ts";
-import type { LinkResult } from "../src/link.ts";
+import type { LinkResult, RunOptions } from "../src/link.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 
 const expectedPlan = [
@@ -70,6 +70,27 @@ describe("Install", () => {
 
     expect(outcome).toEqual({ ok: true });
     expect(link.commands).toEqual(expectedPlan.map((entry) => entry.command));
+  });
+
+  test("a first-time install can run longer than Link's default command timeout", async () => {
+    const link = {
+      run: async (_command: string, options: RunOptions = {}): Promise<LinkResult> =>
+        (options.timeoutMs ?? 30_000) >= 90_000
+          ? success
+          : {
+              ok: false,
+              error: {
+                code: "command-timeout",
+                origin: "box",
+                message: "the command on the box timed out",
+              },
+            },
+    };
+    const install = new Install(link, [BUILTIN_TOOLS[0]!]);
+
+    const outcome = await install.run(true);
+
+    expect(outcome).toEqual({ ok: true });
   });
 
   test("a failed remote command fails the install with the Link details", async () => {
