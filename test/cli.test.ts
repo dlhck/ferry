@@ -38,6 +38,7 @@ describe("ferry --help", () => {
   test("wires init flags to the init module", async () => {
     let received: InitInput | undefined;
     const result: InitResult = {
+      dryRun: false,
       address: "100.64.0.9",
       paseoPort: 6767,
       leftovers: [],
@@ -80,6 +81,7 @@ describe("ferry --help", () => {
       runInit: async (input) => {
         received = input;
         return {
+          dryRun: false,
           address: "ubuntu@orb",
           paseoPort: 6767,
           leftovers: [],
@@ -100,6 +102,40 @@ describe("ferry --help", () => {
     });
   });
 
+  test("wires init --dry-run and prints the plan", async () => {
+    let received: InitInput | undefined;
+    const output: string[] = [];
+    const program = buildProgram({
+      runInit: async (input) => {
+        received = input;
+        return {
+          dryRun: true,
+          leftovers: [],
+          plan: {
+            operator: "operator.test",
+            box: "david@box",
+            gitRemote: "snapshot.git",
+            localCheckout: "/home/david/.ferry/store",
+            configPath: "/home/david/.ferry/config.toml",
+            skills: ["tdd"],
+            instructions: true,
+            links: [],
+          },
+        };
+      },
+      writeLine: (line) => output.push(line),
+    });
+
+    await program.parseAsync(
+      ["init", "--host", "box", "--ssh-user", "david", "--snapshot-url", "snapshot.git", "--dry-run"],
+      { from: "user" },
+    );
+
+    expect(received?.dryRun).toBe(true);
+    expect(output).toContain("Init plan (no changes will be made):");
+    expect(output).toContain("Probe: SSH connection to david@box");
+  });
+
   test("init help lists every non-interactive flag", () => {
     const help = buildProgram().commands
       .find((command) => command.name() === "init")
@@ -110,6 +146,7 @@ describe("ferry --help", () => {
     expect(help).toContain("--ssh-user <user>");
     expect(help).toContain("--ssh-destination <destination>");
     expect(help).toContain("--snapshot-url <url>");
+    expect(help).toContain("--dry-run");
   });
 
   test("wires install --yes to the install command", async () => {

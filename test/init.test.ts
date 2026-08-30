@@ -80,6 +80,53 @@ function writeFile(path: string, body: string | Uint8Array): void {
 }
 
 describe("ferry init", () => {
+  test("dry-run returns the machine plan without remote calls or filesystem writes", async () => {
+    const home = makeHome();
+    write(join(home, ".agents/skills/tdd/SKILL.md"), "test first\n");
+    write(join(home, "AGENTS.md"), "Keep changes small.\n");
+    const before = realpathSync(join(home, ".agents/skills/tdd"));
+    const { calls, deps } = dependencies(home);
+
+    const result = await runInit(
+      {
+        home,
+        harnesses: BUILTIN_HARNESSES,
+        host: "builder.tailnet.ts.net",
+        sshUser: "david",
+        snapshotUrl: "git@example.test:ferry-store.git",
+        dryRun: true,
+      },
+      deps,
+    );
+
+    expect(calls).toEqual({ opened: 0, published: 0, linked: 0 });
+    expect(existsSync(join(home, ".ferry"))).toBe(false);
+    expect(realpathSync(join(home, ".agents/skills/tdd"))).toBe(before);
+    expect(result).toMatchObject({
+      dryRun: true,
+      plan: {
+        operator: "operator.test",
+        box: "david@builder.tailnet.ts.net",
+        gitRemote: "git@example.test:ferry-store.git",
+        localCheckout: join(home, ".ferry/store"),
+        configPath: join(home, ".ferry/config.toml"),
+        skills: ["tdd"],
+        instructions: true,
+      },
+    });
+    if (!result.dryRun) throw new Error("expected a dry-run result");
+    expect(result.plan.links).toContainEqual({
+      harness: "Codex",
+      path: join(home, ".codex/skills/tdd"),
+      target: join(home, ".ferry/store/skills/tdd"),
+    });
+    expect(result.plan.links).toContainEqual({
+      harness: "Claude",
+      path: join(home, ".claude/CLAUDE.md"),
+      target: join(home, ".ferry/store/AGENTS.md"),
+    });
+  });
+
   test("seeds a fake store, probes the host, writes config outside it, and applies links", async () => {
     const home = makeHome();
     write(join(home, ".agents/skills/tdd/SKILL.md"), "test first\n");

@@ -1,8 +1,10 @@
 /** Orchestrate the operator-side init workflow through the deep modules. */
 
 import { hostname, homedir } from "node:os";
+import { join } from "node:path";
 import { apply as applyStore, type ApplyPlan } from "./apply.ts";
 import {
+  configPath,
   readConfig as readOperatorConfig,
   resolveLinkOptions,
   writeConfig as writeOperatorConfig,
@@ -17,6 +19,7 @@ import { openStore as openSnapshotStore, type PublishResult } from "./store.ts";
 export const PASEO_DAEMON_PORT = 6767;
 
 export type InitInput = {
+  readonly dryRun?: boolean;
   readonly home?: string;
   /** The harnesses to seed from and to link. The CLI resolves them once. */
   readonly harnesses: readonly HarnessDescriptor[];
@@ -58,12 +61,38 @@ export type InitDependencies = {
   readonly prompt?: InitPrompt;
 };
 
-export type InitResult = {
+export type InitManagedLink = {
+  readonly harness: string;
+  readonly path: string;
+  readonly target: string;
+};
+
+export type InitPlan = {
+  readonly operator: string;
+  readonly box: string;
+  readonly gitRemote: string;
+  readonly localCheckout: string;
+  readonly configPath: string;
+  readonly skills: readonly string[];
+  readonly instructions: boolean;
+  readonly links: readonly InitManagedLink[];
+};
+
+export type InitDryRunResult = {
+  readonly dryRun: true;
+  readonly plan: InitPlan;
+  readonly leftovers: readonly Leftover[];
+};
+
+export type InitExecutedResult = {
+  readonly dryRun: false;
   readonly address: string;
   readonly paseoPort: 6767;
   readonly leftovers: readonly Leftover[];
   readonly published: boolean;
 };
+
+export type InitResult = InitDryRunResult | InitExecutedResult;
 
 export type InitRefusalCode =
   | "invalid-values"
@@ -81,6 +110,18 @@ export class InitRefusal extends Error {
   }
 }
 
+export function runInit(
+  input: InitInput & { readonly dryRun: true },
+  dependencies?: InitDependencies,
+): Promise<InitDryRunResult>;
+export function runInit(
+  input: InitInput & { readonly dryRun?: false },
+  dependencies?: InitDependencies,
+): Promise<InitExecutedResult>;
+export function runInit(
+  input: InitInput,
+  dependencies?: InitDependencies,
+): Promise<InitResult>;
 export async function runInit(
   input: InitInput,
   dependencies: InitDependencies = {},
@@ -112,6 +153,13 @@ export async function runInit(
 
   const seed = (dependencies.readSeed ?? readManifest)(home, input.harnesses);
   if (!seed.ok) throw manifestRefusal(seed);
+  if (input.dryRun) {
+    return {
+      dryRun: true,
+      plan: makeInitPlan(home, config, seed, input.harnesses),
+      leftovers: seed.leftovers,
+    };
+  }
 
   const target = resolveLinkOptions(config.host);
   const link = dependencies.createLink?.(target) ?? new Link(target);
@@ -133,10 +181,54 @@ export async function runInit(
   (dependencies.writeConfig ?? writeOperatorConfig)(config, home);
 
   return {
+    dryRun: false,
     address: probe.address,
     paseoPort: PASEO_DAEMON_PORT,
     leftovers: seed.leftovers,
     published: publication.published,
+  };
+}
+
+function makeInitPlan(
+  home: string,
+  config: OperatorConfig,
+  seed: Seed,
+  harnesses: readonly HarnessDescriptor[],
+): InitPlan {
+  const localCheckout = join(home, ".ferry", "store");
+  const links: InitManagedLink[] = [];
+
+  for (const harness of harnesses) {
+    if (harness.skillRoot) {
+      for (const skill of seed.skills) {
+        links.push({
+          harness: harness.name,
+          path: join(home, harness.skillRoot, skill.name),
+          target: join(localCheckout, "skills", skill.name),
+        });
+      }
+    }
+    if (seed.instructions && harness.instructionFile) {
+      links.push({
+        harness: harness.name,
+        path: join(home, harness.instructionFile),
+        target: join(localCheckout, "AGENTS.md"),
+      });
+    }
+  }
+
+  return {
+    operator: config.publisher,
+    box:
+      config.host.transport === "ssh"
+        ? config.host.destination
+        : `${config.host.sshUser}@${config.host.tailscale}`,
+    gitRemote: config.snapshotUrl,
+    localCheckout,
+    configPath: configPath(home),
+    skills: seed.skills.map((skill) => skill.name),
+    instructions: seed.instructions !== null,
+    links,
   };
 }
 
