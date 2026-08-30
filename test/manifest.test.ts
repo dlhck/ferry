@@ -150,6 +150,26 @@ describe("union of the managed harnesses", () => {
 
     expect(names(seedOf(home))).toEqual(["unslop"]);
   });
+
+  test("a Ferry backup directory is reported and omitted from the seed", () => {
+    const home = makeHome();
+    writeSkill(home, ".agents/skills", "diagnosing-bugs", { "SKILL.md": "current" });
+    const backup = writeSkill(
+      home,
+      ".agents/skills",
+      "diagnosing-bugs.ferry-backup-20260830T160738Z",
+      { "SKILL.md": "backup" },
+    );
+
+    const seed = seedOf(home);
+
+    expect(names(seed)).toEqual(["diagnosing-bugs"]);
+    expect(seed.leftovers).toContainEqual({
+      path: backup,
+      code: "ferry-backup",
+      reason: "Ferry backup directory",
+    });
+  });
 });
 
 describe("the instruction file", () => {
