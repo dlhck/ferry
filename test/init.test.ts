@@ -193,6 +193,37 @@ describe("ferry init", () => {
     });
   });
 
+  test("a prompt can choose an SSH destination instead of Tailscale values", async () => {
+    const home = makeHome();
+    let target: unknown;
+    const { deps } = dependencies(home);
+
+    await runInit(
+      { home, harnesses: BUILTIN_HARNESSES },
+      {
+        ...deps,
+        prompt: async (missing) => {
+          expect(missing).toEqual(["host", "sshUser", "snapshotUrl"]);
+          return { sshDestination: "ubuntu@orb", snapshotUrl: "snapshot.git" };
+        },
+        createLink(options) {
+          target = options;
+          return {
+            async run() {
+              return { ok: true, address: "ubuntu@orb", stdout: "", stderr: "" };
+            },
+          };
+        },
+      },
+    );
+
+    expect(target).toEqual({ destination: "ubuntu@orb" });
+    expect(readConfig(home)?.host).toEqual({
+      transport: "ssh",
+      destination: "ubuntu@orb",
+    });
+  });
+
   test("keeps an explicit SSH destination when the prompt fills the snapshot URL", async () => {
     const home = makeHome();
     let target: unknown;

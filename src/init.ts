@@ -26,7 +26,7 @@ export type InitInput = {
   readonly snapshotUrl?: string;
 };
 
-export type InitField = "host" | "sshUser" | "snapshotUrl";
+export type InitField = "host" | "sshUser" | "sshDestination" | "snapshotUrl";
 
 export type InitPrompt = (
   missing: readonly InitField[],

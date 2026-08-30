@@ -105,6 +105,7 @@ describe("ferry --help", () => {
       .find((command) => command.name() === "init")
       ?.helpInformation();
 
+    expect(help).toContain("Tailscale host or SSH destination");
     expect(help).toContain("--host <host>");
     expect(help).toContain("--ssh-user <user>");
     expect(help).toContain("--ssh-destination <destination>");

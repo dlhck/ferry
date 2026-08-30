@@ -44,7 +44,7 @@ First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link
 
 4. As an operator, I want those binaries on GitHub Releases, so that install is a download, not an npm runtime.
 
-5. As an operator, I want `ferry init` to walk me through the default Tailscale host, SSH user, and snapshot remote, so that a first run does not require a config lecture.
+5. As an operator, I want `ferry init` to ask whether I want a Tailscale host or an SSH-only destination, then walk me through those values and the snapshot remote, so that a first run does not require a config lecture or a Tailscale install.
 
 6. As an operator, I want every init value to exist as a flag, so that I can script a second machine later.
 
