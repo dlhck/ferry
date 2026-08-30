@@ -338,6 +338,9 @@ function snapshotManagedPaths(home: string): PathSnapshot[] {
   return snapshots;
 }
 
+function backupBeside(path: string): string;
+function backupBeside(path: string, required: true): string;
+function backupBeside(path: string, required: false): null;
 function backupBeside(path: string, required = true): string | null {
   const directory = dirname(path);
   const prefix = `${path.split("/").at(-1)}.ferry-backup-`;
