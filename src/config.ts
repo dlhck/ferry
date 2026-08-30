@@ -129,6 +129,10 @@ export function writeConfig(config: OperatorConfig, home = homedir()): void {
   renameSync(temporaryPath, path);
 }
 
+export function resolveLinkOptions(host: OperatorHostConfig): LinkOptions;
+export function resolveLinkOptions(
+  host: PartialOperatorConfig["host"],
+): LinkOptions | null;
 export function resolveLinkOptions(
   host: PartialOperatorConfig["host"],
 ): LinkOptions | null {

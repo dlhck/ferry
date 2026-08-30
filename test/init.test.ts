@@ -193,6 +193,69 @@ describe("ferry init", () => {
     });
   });
 
+  test("keeps an explicit SSH destination when the prompt fills the snapshot URL", async () => {
+    const home = makeHome();
+    let target: unknown;
+    const { deps } = dependencies(home);
+
+    await runInit(
+      { home, harnesses: BUILTIN_HARNESSES, sshDestination: "ubuntu@orb" },
+      {
+        ...deps,
+        prompt: async (missing) => {
+          expect(missing).toEqual(["snapshotUrl"]);
+          return { snapshotUrl: "snapshot.git" };
+        },
+        createLink(options) {
+          target = options;
+          return {
+            async run() {
+              return { ok: true, address: "ubuntu@orb", stdout: "", stderr: "" };
+            },
+          };
+        },
+      },
+    );
+
+    expect(target).toEqual({ destination: "ubuntu@orb" });
+    expect(readConfig(home)?.host).toEqual({
+      transport: "ssh",
+      destination: "ubuntu@orb",
+    });
+  });
+
+  test("keeps a saved SSH destination when the prompt fills missing config", async () => {
+    const home = makeHome();
+    write(join(home, ".ferry/config.toml"), [
+      "version = 1",
+      'publisher = "first-operator"',
+      "",
+      "[host]",
+      'transport = "ssh"',
+      'destination = "ubuntu@orb"',
+      "",
+    ].join("\n"));
+    const { deps } = dependencies(home);
+
+    await runInit(
+      { home, harnesses: BUILTIN_HARNESSES },
+      {
+        ...deps,
+        prompt: async (missing) => {
+          expect(missing).toEqual(["snapshotUrl"]);
+          return { snapshotUrl: "snapshot.git" };
+        },
+      },
+    );
+
+    expect(readConfig(home)).toEqual({
+      version: 1,
+      publisher: "first-operator",
+      snapshotUrl: "snapshot.git",
+      host: { transport: "ssh", destination: "ubuntu@orb" },
+    });
+  });
+
   test("an explicit SSH destination replaces an existing Tailscale target", async () => {
     const home = makeHome();
     write(join(home, ".ferry/config.toml"), [

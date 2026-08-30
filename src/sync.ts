@@ -156,7 +156,7 @@ export async function runSync(
     return { dryRun: true, published: false, plan };
   }
 
-  const target = requiredTarget(config);
+  const target = resolveLinkOptions(config.host);
   const link = dependencies.createLink?.(target) ?? new Link(target);
   const remoteHome = await resolveRemoteHome(link, config);
   const plan = makePlan(input, config, home, remoteHome);
@@ -380,10 +380,6 @@ function completeConfig(config: PartialOperatorConfig | null): OperatorConfig {
     snapshotUrl: config.snapshotUrl,
     host,
   };
-}
-
-function requiredTarget(config: OperatorConfig): LinkOptions {
-  return resolveLinkOptions(config.host) as LinkOptions;
 }
 
 function targetLabel(config: OperatorConfig): string {

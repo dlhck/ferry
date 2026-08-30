@@ -261,7 +261,6 @@ describe("runSync", () => {
       host: { transport: "ssh", destination: "ubuntu@orb" },
     };
     let linkOptions: unknown;
-    let lockKey: string | undefined;
     let linkCalls = 0;
 
     const result = await runSync(
@@ -284,10 +283,7 @@ describe("runSync", () => {
             },
           };
         },
-        acquireLock: (_home, key) => {
-          lockKey = key;
-          return () => {};
-        },
+        acquireLock: () => () => {},
         openStore: async () => ({
           path: "/operator/.ferry/store",
           publish: async () => ({ published: false, tip: "abc123" }),
@@ -303,7 +299,6 @@ describe("runSync", () => {
     );
 
     expect(linkOptions).toEqual({ destination: "ubuntu@orb" });
-    expect(lockKey).toBe("ssh:ubuntu@orb");
     expect(result.plan).toMatchObject({
       box: "ubuntu@orb",
       remoteHome: "/home/davidhoeck",

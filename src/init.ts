@@ -113,7 +113,7 @@ export async function runInit(
   const seed = (dependencies.readSeed ?? readManifest)(home, input.harnesses);
   if (!seed.ok) throw manifestRefusal(seed);
 
-  const target = requiredTarget(config);
+  const target = resolveLinkOptions(config.host);
   const link = dependencies.createLink?.(target) ?? new Link(target);
   const probe = await link.run("true");
   if (!probe.ok) {
@@ -145,20 +145,26 @@ function mergeValues(
   fallback: PartialOperatorConfig | InitInput | null,
 ): InitInput {
   const fallbackHost = fallback && "host" in fallback ? fallback.host : undefined;
+  const fallbackDestination =
+    fallback && "sshDestination" in fallback
+      ? fallback.sshDestination
+      : typeof fallbackHost === "object"
+        ? fallbackHost?.destination
+        : undefined;
   const host = typeof fallbackHost === "string" ? fallbackHost : fallbackHost?.tailscale;
-  const direct = nonempty(provided.sshDestination);
-  const tailscale = nonempty(provided.host) || nonempty(provided.sshUser);
+  const directProvided = nonempty(provided.sshDestination);
+  const tailscaleProvided = nonempty(provided.host) || nonempty(provided.sshUser);
   return {
     home: provided.home,
     harnesses: provided.harnesses,
-    host: direct ? undefined : nonempty(provided.host) ?? nonempty(host),
-    sshUser: direct
+    host: directProvided ? undefined : nonempty(provided.host) ?? nonempty(host),
+    sshUser: directProvided
       ? undefined
       : nonempty(provided.sshUser) ??
         nonempty(typeof fallbackHost === "object" ? fallbackHost?.sshUser : undefined),
-    sshDestination: tailscale
+    sshDestination: tailscaleProvided
       ? undefined
-      : direct ?? nonempty(typeof fallbackHost === "object" ? fallbackHost?.destination : undefined),
+      : directProvided ?? nonempty(fallbackDestination),
     snapshotUrl: nonempty(provided.snapshotUrl) ?? nonempty(fallback?.snapshotUrl),
   };
 }
@@ -180,10 +186,6 @@ function refuseMixedTarget(input: InitInput): void {
       "--ssh-destination cannot be combined with --host or --ssh-user",
     );
   }
-}
-
-function requiredTarget(config: OperatorConfig) {
-  return resolveLinkOptions(config.host) as NonNullable<ReturnType<typeof resolveLinkOptions>>;
 }
 
 function nonempty(value: string | undefined): string | undefined {
