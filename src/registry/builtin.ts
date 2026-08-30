@@ -103,7 +103,14 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
   },
   {
     id: "pi",
-    install: { command: "curl -fsSL https://pi.dev/install.sh | sh" },
+    install: {
+      command:
+        "(command -v node >/dev/null \\\n" +
+        "&& node -e 'const [major, minor] = process.versions.node.split(\".\").map(Number); process.exit(major > 22 || (major === 22 && minor >= 19) ? 0 : 1)' >/dev/null \\\n" +
+        "&& command -v npm >/dev/null \\\n" +
+        "|| (sudo apt update && sudo apt install nodejs npm -y)) \\\n" +
+        "&& curl -fsSL https://pi.dev/install.sh | sh",
+    },
     // Pi has no remote login ferry can drive, so it carries no probe or login.
     auth: {
       completion: {

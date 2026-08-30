@@ -19,7 +19,15 @@ const expectedPlan = [
   },
   { tool: "claude", command: "curl -fsSL https://claude.ai/install.sh | bash" },
   { tool: "codex", command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh" },
-  { tool: "pi", command: "curl -fsSL https://pi.dev/install.sh | sh" },
+  {
+    tool: "pi",
+    command:
+      "(command -v node >/dev/null \\\n" +
+      "&& node -e 'const [major, minor] = process.versions.node.split(\".\").map(Number); process.exit(major > 22 || (major === 22 && minor >= 19) ? 0 : 1)' >/dev/null \\\n" +
+      "&& command -v npm >/dev/null \\\n" +
+      "|| (sudo apt update && sudo apt install nodejs npm -y)) \\\n" +
+      "&& curl -fsSL https://pi.dev/install.sh | sh",
+  },
   { tool: "cursor", command: "curl https://cursor.com/install -fsS | bash" },
 ] as const;
 
