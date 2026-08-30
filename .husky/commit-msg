@@ -1,1 +1,1 @@
-npx strip-clanker-attribution "$1"
+bunx strip-clanker-attribution "$1"
