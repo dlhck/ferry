@@ -30,6 +30,13 @@ import {
   type StatusCommandDependencies,
   type StatusCommandInput,
 } from "./status-command.ts";
+import { runWatch, type WatchDependencies, type WatchInput } from "./watch.ts";
+import {
+  installWatchService,
+  type WatchServiceDependencies,
+  type WatchServiceInput,
+  type WatchServiceResult,
+} from "./watch-service.ts";
 
 const DESCRIPTION = `Ferry keeps a remote Linux agent box in the same shape as this machine.
 
@@ -54,6 +61,11 @@ type CliDependencies = {
     input: StatusCommandInput,
     dependencies?: Partial<StatusCommandDependencies>,
   ) => Promise<unknown>;
+  readonly runWatch?: (input: WatchInput, dependencies?: WatchDependencies) => Promise<void>;
+  readonly installWatchService?: (
+    input?: WatchServiceInput,
+    dependencies?: WatchServiceDependencies,
+  ) => Promise<WatchServiceResult>;
   readonly prompt?: InitPrompt;
   readonly writeLine?: (line: string) => void;
 };
@@ -145,6 +157,29 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
           writeLine: dependencies.writeLine ?? console.log,
         },
       );
+    });
+
+  const watch = program
+    .command("watch")
+    .description("Watch the portable set and sync accepted changes")
+    .action(async () => {
+      const controller = new AbortController();
+      const stop = () => controller.abort();
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+      try {
+        await (dependencies.runWatch ?? runWatch)({ signal: controller.signal });
+      } finally {
+        process.off("SIGINT", stop);
+        process.off("SIGTERM", stop);
+      }
+    });
+  watch
+    .command("install")
+    .description("Install and start the watch user service")
+    .action(async () => {
+      const result = await (dependencies.installWatchService ?? installWatchService)();
+      (dependencies.writeLine ?? console.log)(`Installed ${result.manager} service at ${result.path}`);
     });
   return program;
 }

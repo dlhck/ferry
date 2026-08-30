@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplyError } from "../src/apply.ts";
@@ -440,6 +440,71 @@ describe("runSync", () => {
       continuePublish();
       await first;
       expect(readdirSync(join(home, ".ferry"))).toEqual([]);
+    } finally {
+      continuePublish();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("recovers a lock left by a dead process", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-sync-stale-lock-"));
+    const lockDirectory = join(home, ".ferry");
+    let markPublishStarted: () => void = () => {};
+    let continuePublish: () => void = () => {};
+    let publishCalls = 0;
+    const publishStarted = new Promise<void>((resolve) => {
+      markPublishStarted = resolve;
+    });
+    const publishMayFinish = new Promise<void>((resolve) => {
+      continuePublish = resolve;
+    });
+    const dependencies: SyncDependencies = {
+      readConfig: () => config,
+      publisher: () => "operator-machine",
+      readSeed: () => seed,
+      createLink: () => {
+        let calls = 0;
+        return {
+          run: async () => ({
+            ok: true,
+            address: "box.example.ts.net",
+            stdout: ++calls === 1 ? "/srv/ferry\n" : "",
+            stderr: "",
+          }),
+        };
+      },
+      openStore: async () => ({
+        path: join(home, ".ferry", "store"),
+        publish: async () => {
+          publishCalls += 1;
+          if (publishCalls === 1) {
+            markPublishStarted();
+            await publishMayFinish;
+          }
+          return { published: false, tip: "abc123" };
+        },
+      }),
+      apply: async (input) => ({
+        checkout: input.checkout,
+        targetHome: input.targetHome,
+        actions: [],
+        unmanaged: [],
+      }),
+      adopt: () => {},
+      writePlan: () => {},
+    };
+
+    try {
+      const first = runSync({ home }, dependencies);
+      await publishStarted;
+      const [lockFile] = readdirSync(lockDirectory);
+      expect(lockFile).toMatch(/^sync-[a-f0-9]{16}\.lock$/);
+      writeFileSync(join(lockDirectory, lockFile!), JSON.stringify({ pid: 999_999_999 }));
+      continuePublish();
+      await first;
+
+      await runSync({ home }, dependencies);
+      expect(readdirSync(lockDirectory)).toEqual([]);
     } finally {
       continuePublish();
       rmSync(home, { recursive: true, force: true });

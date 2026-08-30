@@ -228,7 +228,7 @@ First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link
 
 - Ship one bun TypeScript CLI compiled to a standalone executable. Targets are darwin and linux, arm64 and x64. The operator machine runs it. The box does not need a ferry daemon or a ferry binary.
 
-- Five user commands: `init`, `install`, `sync`, `auth`, `status`. Flags cover dry-run, json, provider name, force replace of a live skill directory, yes on install, and commit message. No other verbs in v1.
+- Six user commands: `init`, `install`, `sync`, `auth`, `status`, and `watch`. `watch` stays in the foreground while launchd or a systemd user service owns its process lifecycle.
 
 - Seven modules sit behind those commands. A registry of descriptors feeds them.
 
@@ -305,7 +305,7 @@ Prior art: none in this repository. The first tests are these interface tests.
 - Windows as source or target.
 - Bidirectional sync. The box never wins.
 - Full home directory or full vendor home trees.
-- Real-time watch daemons.
+- A Ferry-owned background daemon. `ferry watch` does not fork or daemonize itself.
 - Rewriting git history.
 - Creating the snapshot GitHub repository for the user.
 - npm or bunx as the primary distribution. Homebrew can wait.

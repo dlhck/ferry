@@ -1,7 +1,7 @@
 /** Publish the operator snapshot and apply it to the configured box. */
 
-import { createHash } from "node:crypto";
-import { closeSync, mkdirSync, openSync, unlinkSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname, homedir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { apply as applyStore, type ApplyPlan, type RemoteApplyInput } from "./apply.ts";
@@ -21,6 +21,7 @@ import {
 } from "./registry/load.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
 import { openStore as openSnapshotStore, type PublishResult } from "./store.ts";
+import { adoptPublishedSkills } from "./adopt.ts";
 
 export type SyncInput = {
   readonly home?: string;
@@ -42,6 +43,7 @@ export type SyncDependencies = {
   ) => Promise<SyncStore>;
   readonly acquireLock?: (home: string, host: string) => () => void;
   readonly apply?: (input: RemoteApplyInput) => Promise<ApplyPlan>;
+  readonly adopt?: typeof adoptPublishedSkills;
   readonly writePlan?: (plan: SyncPlan) => void;
 };
 
@@ -112,43 +114,7 @@ export async function runSync(
   dependencies: SyncDependencies = {},
 ): Promise<SyncResult> {
   const home = input.home ?? homedir();
-  const loadedConfig = loadConfig(home, dependencies.readConfig ?? readOperatorConfig);
-  const config = loadedConfig.operator;
-  const currentPublisher = dependencies.publisher?.() ?? hostname();
-  if (currentPublisher !== config.publisher) {
-    throw new SyncError(
-      "wrong-publisher",
-      "operator",
-      `configured publisher ${config.publisher} does not match this machine ${currentPublisher}`,
-    );
-  }
-  const registry = resolveRegistry(
-    loadedConfig.source,
-    dependencies.loadRegistry ?? loadEffectiveRegistry,
-  );
-
-  let seed: ReturnType<typeof readManifest>;
-  try {
-    seed = (dependencies.readSeed ?? readManifest)(home, registry.harnesses);
-  } catch (cause) {
-    throw new SyncError(
-      "manifest-failure",
-      "operator",
-      `Manifest could not read publisher ${config.publisher}: ${messageOf(cause)}`,
-      { cause },
-    );
-  }
-  if (!seed.ok) {
-    const details = [
-      ...seed.clashes.map((clash) => `clash ${clash.name}: ${clash.paths.join(", ")}`),
-      ...seed.forbidden.map((hit) => `${hit.reason}: ${hit.path}`),
-    ];
-    throw new SyncError(
-      "manifest-refusal",
-      "operator",
-      `Manifest refused publisher ${config.publisher}: ${details.join("; ")}`,
-    );
-  }
+  const { config, registry, seed } = inspectSyncSource(home, dependencies);
 
   if (input.dryRun) {
     const plan = makePlan(input, config, home, null);
@@ -217,10 +183,52 @@ export async function runSync(
       );
     }
 
+    try {
+      (dependencies.adopt ?? adoptPublishedSkills)(home, store.path, registry.harnesses, seed);
+    } catch (cause) {
+      throw new SyncError(
+        "apply-failure",
+        "operator",
+        `could not adopt a published local skill: ${messageOf(cause)}`,
+        { cause },
+      );
+    }
+
     return { dryRun: false, published: publication.published, plan, applyPlan };
   } finally {
     release();
   }
+}
+
+export function inspectSyncSource(
+  home: string,
+  dependencies: Pick<SyncDependencies, "readConfig" | "loadRegistry" | "readSeed" | "publisher"> = {},
+): { readonly config: OperatorConfig; readonly registry: Registry; readonly seed: Seed } {
+  const loadedConfig = loadConfig(home, dependencies.readConfig ?? readOperatorConfig);
+  const config = loadedConfig.operator;
+  const currentPublisher = dependencies.publisher?.() ?? hostname();
+  if (currentPublisher !== config.publisher) {
+    throw new SyncError(
+      "wrong-publisher",
+      "operator",
+      `configured publisher ${config.publisher} does not match this machine ${currentPublisher}`,
+    );
+  }
+  const registry = resolveRegistry(loadedConfig.source, dependencies.loadRegistry ?? loadEffectiveRegistry);
+  let seed: ReturnType<typeof readManifest>;
+  try {
+    seed = (dependencies.readSeed ?? readManifest)(home, registry.harnesses);
+  } catch (cause) {
+    throw new SyncError("manifest-failure", "operator", `Manifest could not read publisher ${config.publisher}: ${messageOf(cause)}`, { cause });
+  }
+  if (!seed.ok) {
+    const details = [
+      ...seed.clashes.map((clash) => `clash ${clash.name}: ${clash.paths.join(", ")}`),
+      ...seed.forbidden.map((hit) => `${hit.reason}: ${hit.path}`),
+    ];
+    throw new SyncError("manifest-refusal", "operator", `Manifest refused publisher ${config.publisher}: ${details.join("; ")}`);
+  }
+  return { config, registry, seed };
 }
 
 function makePlan(
@@ -295,20 +303,54 @@ function takeLock(
 function acquireSyncLock(home: string, host: string): () => void {
   const digest = createHash("sha256").update(host).digest("hex").slice(0, 16);
   const path = join(home, ".ferry", `sync-${digest}.lock`);
+  const token = randomUUID();
+  const temporary = `${path}.${process.pid}.${token}`;
   mkdirSync(dirname(path), { recursive: true });
-  let descriptor: number;
+  writeFileSync(temporary, JSON.stringify({ pid: process.pid, token }), { mode: 0o600 });
   try {
-    descriptor = openSync(path, "wx", 0o600);
-  } catch (cause) {
-    if (isCode(cause, "EEXIST")) {
-      throw new SyncError("concurrent-sync", "operator", `another sync is active for ${host}`);
+    for (;;) {
+      try {
+        linkSync(temporary, path);
+        break;
+      } catch (cause) {
+        if (!isCode(cause, "EEXIST")) throw cause;
+        if (!staleLock(path)) {
+          throw new SyncError("concurrent-sync", "operator", `another sync is active for ${host}`);
+        }
+        try {
+          unlinkSync(path);
+        } catch (unlinkError) {
+          if (!isCode(unlinkError, "ENOENT")) throw unlinkError;
+        }
+      }
     }
-    throw cause;
+  } finally {
+    unlinkSync(temporary);
   }
   return () => {
-    closeSync(descriptor);
-    unlinkSync(path);
+    try {
+      const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+      if ((value as { token?: unknown }).token === token) unlinkSync(path);
+    } catch (error) {
+      if (!isCode(error, "ENOENT")) throw error;
+    }
   };
+}
+
+function staleLock(path: string): boolean {
+  try {
+    const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+    const pid = (value as { pid?: unknown }).pid;
+    if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return true;
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch (error) {
+      return isCode(error, "ESRCH");
+    }
+  } catch {
+    return true;
+  }
 }
 
 function quoteShell(value: string): string {
