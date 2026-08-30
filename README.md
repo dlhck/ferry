@@ -29,6 +29,8 @@ ferry init \
 
 Ferry never falls back from Tailscale to direct SSH. The selected transport is stored in `~/.ferry/config.toml`.
 
+Add `--dry-run` to inspect the SSH probe, snapshot publish, config write, and managed symlinks without connecting to the box or changing the local filesystem.
+
 ## Automatic sync
 
 `ferry watch` runs in the foreground. It watches the Manifest identity for every configured global skill root and `~/AGENTS.md`. It does not watch project-local skills. After an accepted change stays stable for one second, Ferry runs the normal sync without `--force`. Network, SSH, and Git failures retry with a backoff capped at 60 seconds. Manifest refusals name the local path and wait for another edit.

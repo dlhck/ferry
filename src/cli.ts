@@ -94,11 +94,13 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .option("--ssh-user <user>", "SSH user on the host")
     .option("--ssh-destination <destination>", "explicit OpenSSH destination")
     .option("--snapshot-url <url>", "private snapshot git URL")
+    .option("--dry-run", "print the init plan without writing or connecting")
     .action(async (options: {
       host?: string;
       sshUser?: string;
       sshDestination?: string;
       snapshotUrl?: string;
+      dryRun?: boolean;
     }) => {
       const execute = dependencies.runInit ?? runInit;
       const result = await execute(
@@ -107,6 +109,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
           sshUser: options.sshUser,
           sshDestination: options.sshDestination,
           snapshotUrl: options.snapshotUrl,
+          dryRun: options.dryRun === true,
           harnesses: registry.harnesses,
         },
         { prompt: dependencies.prompt ?? promptForInit },
@@ -284,6 +287,22 @@ function promptMessage(field: InitField): string {
 function reportInit(result: InitResult, writeLine: (line: string) => void): void {
   for (const leftover of result.leftovers) {
     writeLine(`Leftover: ${leftover.path} (${leftover.reason})`);
+  }
+  if (result.dryRun) {
+    const plan = result.plan;
+    const contents = `${plan.skills.length} ${plan.skills.length === 1 ? "skill" : "skills"}${plan.instructions ? " and AGENTS.md" : ""}`;
+    writeLine("Init plan (no changes will be made):");
+    writeLine(`Operator: ${plan.operator}`);
+    writeLine(`Box: ${plan.box}`);
+    writeLine(`Probe: SSH connection to ${plan.box}`);
+    writeLine(`Snapshot: Clone or open ${plan.gitRemote} at ${plan.localCheckout}`);
+    writeLine(`Publish: ${contents} to ${plan.gitRemote}`);
+    writeLine(`Config: Write ${plan.configPath}`);
+    writeLine("Convert: Back up live managed paths, then create these links:");
+    for (const link of plan.links) {
+      writeLine(`Link (${link.harness}): ${link.path} -> ${link.target}`);
+    }
+    return;
   }
   writeLine(`Paseo: ${result.address}:${result.paseoPort}`);
   writeLine(result.published ? "Snapshot seed published." : "Snapshot already matches the seed.");

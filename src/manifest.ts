@@ -59,8 +59,10 @@ const NOTES = {
   "not-a-directory": { code: "not-a-directory", reason: "not a skill directory" },
   "broken-link": { code: "broken-link", reason: "broken symlink" },
   "not-a-file": { code: "not-a-file", reason: "not a regular file" },
+  "ferry-backup": { code: "ferry-backup", reason: "Ferry backup directory" },
 } as const satisfies Record<string, Note>;
 
+const FERRY_BACKUP_NAME = /\.ferry-backup-\d{8}T\d{6}Z$/;
 const CREDENTIAL_NAMES = new Set([
   "credentials.json",
   ".credentials.json",
@@ -193,6 +195,10 @@ function collectOccurrences(
       }
       if (!stat.isDirectory()) {
         leftovers.push(note(path, NOTES["not-a-directory"]));
+        continue;
+      }
+      if (FERRY_BACKUP_NAME.test(entry.name)) {
+        leftovers.push(note(path, NOTES["ferry-backup"]));
         continue;
       }
       const rule = denyRuleFor(entry.name, true);
