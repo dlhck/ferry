@@ -154,7 +154,13 @@ export function readSeed(home: string, harnesses: readonly HarnessDescriptor[]):
   if (clashes.length > 0 || forbidden.length > 0) {
     return { ok: false, clashes, forbidden };
   }
-  return { ok: true, skills, instructions, identity: identify(skills, instructions), leftovers };
+  return {
+    ok: true,
+    skills,
+    instructions,
+    identity: identify(skills, instructions, harnesses),
+    leftovers,
+  };
 }
 
 type Occurrence = { readonly path: string; readonly inode: string };
@@ -320,8 +326,17 @@ function contentKey(files: readonly SeedFile[]): string {
   return hash.digest("hex");
 }
 
-function identify(skills: readonly SeedSkill[], instructions: Instructions | null): string {
+function identify(
+  skills: readonly SeedSkill[],
+  instructions: Instructions | null,
+  harnesses: readonly HarnessDescriptor[],
+): string {
   const hash = createHash("sha256");
+  for (const harness of harnesses) {
+    hash.update(
+      `harness:${harness.id}:${harness.skillRoot ?? "none"}:${harness.instructionFile ?? "none"}\n`,
+    );
+  }
   for (const skill of skills) hash.update(`skill:${skill.name}:${contentKey(skill.files)}\n`);
   hash.update(`instructions:${instructions ? digest(instructions.bytes) : "none"}\n`);
   return hash.digest("hex");

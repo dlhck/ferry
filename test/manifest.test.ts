@@ -387,6 +387,24 @@ describe("seed identity", () => {
 
     expect(seedOf(home).identity).toBe(before);
   });
+
+  test("changing a configured target changes the identity", () => {
+    const home = makeHome();
+    const original = readSeed(home, BUILTIN_HARNESSES);
+    const configured = readSeed(home, [
+      ...BUILTIN_HARNESSES,
+      {
+        id: "custom",
+        name: "Custom",
+        skillRoot: ".custom/skills",
+        instructionFile: ".custom/AGENTS.md",
+      },
+    ]);
+
+    expect(original.ok).toBe(true);
+    expect(configured.ok).toBe(true);
+    if (original.ok && configured.ok) expect(configured.identity).not.toBe(original.identity);
+  });
 });
 
 describe("an empty home", () => {

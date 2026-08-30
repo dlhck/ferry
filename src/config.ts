@@ -24,6 +24,7 @@ export type PartialOperatorConfig = {
     readonly tailscale?: string;
     readonly sshUser?: string;
   };
+  readonly harness?: readonly Record<string, string>[];
 };
 
 export class ConfigError extends Error {
@@ -46,18 +47,27 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     publisher?: string;
     snapshotUrl?: string;
     host: { tailscale?: string; sshUser?: string };
-  } = { host: {} };
+    harness: Record<string, string>[];
+  } = { host: {}, harness: [] };
   let section = "";
+  let harness: Record<string, string> | null = null;
 
   for (const sourceLine of readFileSync(path, "utf8").split(/\r?\n/)) {
     const line = sourceLine.trim();
     if (line === "" || line.startsWith("#")) continue;
     if (line === "[host]") {
       section = "host";
+      harness = null;
+      continue;
+    }
+    if (line === "[[harness]]") {
+      section = "harness";
+      harness = {};
+      config.harness.push(harness);
       continue;
     }
 
-    const match = /^(version|publisher|snapshot_url|tailscale|ssh_user)\s*=\s*(.+)$/.exec(line);
+    const match = /^(version|publisher|snapshot_url|tailscale|ssh_user|id|name|skill_root|instruction_file)\s*=\s*(.+)$/.exec(line);
     if (!match) continue;
     const [, key, encoded] = match;
     if (key === "version") {
@@ -71,8 +81,13 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     else if (section === "" && key === "snapshot_url") config.snapshotUrl = value;
     else if (section === "host" && key === "tailscale") config.host.tailscale = value;
     else if (section === "host" && key === "ssh_user") config.host.sshUser = value;
+    else if (section === "harness" && harness && key === "id") harness.id = value;
+    else if (section === "harness" && harness && key === "name") harness.name = value;
+    else if (section === "harness" && harness && key === "skill_root") harness.skillRoot = value;
+    else if (section === "harness" && harness && key === "instruction_file") harness.instructionFile = value;
   }
 
+  if (config.harness.length === 0) delete (config as { harness?: unknown }).harness;
   return config;
 }
 
