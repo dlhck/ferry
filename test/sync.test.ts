@@ -7,7 +7,7 @@ import type { OperatorConfig } from "../src/config.ts";
 import type { Seed } from "../src/manifest.ts";
 import { loadRegistry, type RegistryConfig } from "../src/registry/load.ts";
 import type { HarnessDescriptor } from "../src/registry/types.ts";
-import { runSync, type SyncDependencies } from "../src/sync.ts";
+import { remoteUpdateCommand, runSync, type SyncDependencies } from "../src/sync.ts";
 
 const config: OperatorConfig = {
   version: 1,
@@ -23,6 +23,14 @@ const seed: Seed = {
   identity: "seed-identity",
   leftovers: [],
 };
+
+describe("remoteUpdateCommand", () => {
+  test("clones when the box checkout is missing and pulls when it exists", () => {
+    expect(remoteUpdateCommand("/srv/ferry/.ferry/store", "git@example.test:operator/ferry-store.git")).toBe(
+      "if [ -d '/srv/ferry/.ferry/store/.git' ]; then git -C '/srv/ferry/.ferry/store' pull --ff-only; else mkdir -p '/srv/ferry/.ferry' && git clone 'git@example.test:operator/ferry-store.git' '/srv/ferry/.ferry/store'; fi",
+    );
+  });
+});
 
 describe("runSync", () => {
   test("refuses a machine that is not the configured publisher before other work", async () => {
@@ -232,7 +240,8 @@ describe("runSync", () => {
     expect(linkCalls).toEqual([
       { command: `printf '%s\\n' "$HOME"`, options: undefined },
       {
-        command: "git -C '/srv/ferry/.ferry/store' pull --ff-only",
+        command:
+          "if [ -d '/srv/ferry/.ferry/store/.git' ]; then git -C '/srv/ferry/.ferry/store' pull --ff-only; else mkdir -p '/srv/ferry/.ferry' && git clone 'git@example.test:operator/ferry-store.git' '/srv/ferry/.ferry/store'; fi",
         options: { agentForwarding: "git" },
       },
     ]);

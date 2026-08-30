@@ -153,7 +153,7 @@ export async function runSync(
     }
 
     const update = await link.run(
-      `git -C ${quoteShell(required(plan.remoteCheckout))} pull --ff-only`,
+      remoteUpdateCommand(required(plan.remoteCheckout), config.snapshotUrl),
       { agentForwarding: "git" },
     );
     if (!update.ok) {
@@ -259,11 +259,24 @@ function printPlan(plan: SyncPlan): void {
       `Git remote: ${plan.gitRemote}`,
       `Box: ${plan.box}`,
       `Publish: ${plan.localCheckout} (${plan.message ?? "Store default message"})`,
-      `Update: ${remoteCheckout} with git pull --ff-only`,
+      `Update: ${remoteCheckout} with git clone or pull --ff-only`,
       "SSH agent forwarding is limited to the box git update.",
       `Apply: ${remoteCheckout} -> ${remoteHome} (force: ${plan.force ? "yes" : "no"})`,
     ].join("\n"),
   );
+}
+
+/** Clone the snapshot on the box when missing; otherwise fast-forward the existing checkout. */
+export function remoteUpdateCommand(checkout: string, remote: string): string {
+  const quotedCheckout = quoteShell(checkout);
+  const quotedRemote = quoteShell(remote);
+  return [
+    `if [ -d ${quoteShell(`${checkout}/.git`)} ]; then`,
+    `git -C ${quotedCheckout} pull --ff-only;`,
+    `else`,
+    `mkdir -p ${quoteShell(posix.dirname(checkout))} && git clone ${quotedRemote} ${quotedCheckout};`,
+    `fi`,
+  ].join(" ");
 }
 
 async function resolveRemoteHome(link: SyncLink, config: OperatorConfig): Promise<string> {
