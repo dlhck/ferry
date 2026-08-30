@@ -2,8 +2,8 @@ import { homedir } from "node:os";
 import { join, posix } from "node:path";
 import { apply, type ApplyPlan, type RemoteApplyInput } from "./apply.ts";
 import { AuthStart, type AuthLink, type AuthStatusReport } from "./auth-start.ts";
-import { readConfig, type PartialOperatorConfig } from "./config.ts";
-import { Link } from "./link.ts";
+import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
+import { Link, type LinkOptions } from "./link.ts";
 import { denyRules, type DenyRuleDescription } from "./manifest.ts";
 import {
   loadRegistry,
@@ -34,7 +34,7 @@ export type StatusCommandDependencies = {
   readonly readConfig: () => StatusConfig | null;
   readonly loadRegistry: (config: RegistryConfig) => RegistryResult;
   readonly home: () => string;
-  readonly createLink: (host: string, user: string) => StatusLink;
+  readonly createLink: (options: LinkOptions) => StatusLink;
   readonly createStore: (home: string) => StatusStore;
   readonly inspectApply: (input: RemoteApplyInput) => Promise<ApplyPlan>;
   readonly createAuthStart: (
@@ -55,7 +55,7 @@ export async function runStatusCommand(
   const target = configuredTarget(config);
   const registry = effectiveRegistry(config, resolved.loadRegistry);
   const home = resolved.home();
-  const link = resolved.createLink(target.host, target.user);
+  const link = resolved.createLink(target);
   const store = resolved.createStore(home);
   const auth = resolved.createAuthStart(link, registry.tools);
   let boxHome: string | null = null;
@@ -147,7 +147,7 @@ const defaultDependencies: StatusCommandDependencies = {
   readConfig,
   loadRegistry,
   home: homedir,
-  createLink: (host, user) => new Link({ host, user }),
+  createLink: (options) => new Link(options),
   createStore: (home) =>
     new Store(new RealGitRunner(), join(home, STORE_RELATIVE_PATH), ""),
   inspectApply: (input) => apply(input),
@@ -156,11 +156,10 @@ const defaultDependencies: StatusCommandDependencies = {
   writeLine: console.log,
 };
 
-function configuredTarget(config: StatusConfig): { readonly host: string; readonly user: string } {
-  const host = config.host?.tailscale;
-  const user = config.host?.sshUser;
-  if (!host || !user) throw new Error("operator: Ferry config has no complete host. Run ferry init.");
-  return { host, user };
+function configuredTarget(config: StatusConfig): LinkOptions {
+  const target = resolveLinkOptions(config.host);
+  if (!target) throw new Error("operator: Ferry config has no complete host. Run ferry init.");
+  return target;
 }
 
 function effectiveRegistry(

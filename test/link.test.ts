@@ -85,6 +85,51 @@ describe("Link", () => {
     ]);
   });
 
+  test("runs a command through an explicit SSH destination without Tailscale", async () => {
+    const host = new FakeHost([result({ stdout: "/home/davidhoeck\n" })]);
+    const link = new Link({ destination: "ubuntu@orb" }, host);
+
+    const outcome = await link.run(`printf '%s\\n' "$HOME"`);
+
+    expect(outcome).toEqual({
+      ok: true,
+      address: "ubuntu@orb",
+      stdout: "/home/davidhoeck\n",
+      stderr: "",
+    });
+    expect(host.commands).toEqual([
+      {
+        argv: [
+          "ssh",
+          "-o",
+          "BatchMode=yes",
+          "-o",
+          "ConnectTimeout=10",
+          "ubuntu@orb",
+          `printf '%s\\n' "$HOME"`,
+        ],
+        timeoutMs: 30_000,
+      },
+    ]);
+  });
+
+  test("refuses an option-shaped SSH destination before execution", async () => {
+    const host = new FakeHost([]);
+    const link = new Link({ destination: "-oProxyCommand=unsafe" }, host);
+
+    const outcome = await link.run("true");
+
+    expect(outcome).toEqual({
+      ok: false,
+      error: {
+        code: "invalid-config",
+        origin: "operator",
+        message: "the SSH destination is invalid",
+      },
+    });
+    expect(host.commands).toEqual([]);
+  });
+
   test("agent forwarding is explicit and limited to the git purpose", async () => {
     const host = new FakeHost([result({ stdout: onlineStatus }), result()]);
     const link = new Link({ host: "build-box", user: "ferry" }, host);
@@ -158,5 +203,26 @@ describe("Link", () => {
       ],
       timeoutMs: 2_000,
     });
+  });
+
+  test("a direct port forward uses the SSH destination without Tailscale", async () => {
+    const host = new FakeHost([result()]);
+    const link = new Link({ destination: "ubuntu@orb" }, host);
+
+    await link.forward({ localPort: 1455, remotePort: 1455, timeoutMs: 2_000 });
+
+    expect(host.commands[0]?.argv).toEqual([
+      "ssh",
+      "-N",
+      "-o",
+      "ExitOnForwardFailure=yes",
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "ConnectTimeout=10",
+      "-L",
+      "127.0.0.1:1455:127.0.0.1:1455",
+      "ubuntu@orb",
+    ]);
   });
 });

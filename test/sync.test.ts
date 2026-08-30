@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplyError } from "../src/apply.ts";
@@ -256,6 +255,57 @@ describe("runSync", () => {
     });
   });
 
+  test("uses a direct SSH destination for Link, plans, and locking", async () => {
+    const directConfig: OperatorConfig = {
+      ...config,
+      host: { transport: "ssh", destination: "ubuntu@orb" },
+    };
+    let linkOptions: unknown;
+    let linkCalls = 0;
+
+    const result = await runSync(
+      { home: "/operator" },
+      {
+        readConfig: () => directConfig,
+        publisher: () => "operator-machine",
+        readSeed: () => seed,
+        createLink: (options) => {
+          linkOptions = options;
+          return {
+            run: async () => {
+              linkCalls += 1;
+              return {
+                ok: true,
+                address: "ubuntu@orb",
+                stdout: linkCalls === 1 ? "/home/davidhoeck\n" : "",
+                stderr: "",
+              };
+            },
+          };
+        },
+        acquireLock: () => () => {},
+        openStore: async () => ({
+          path: "/operator/.ferry/store",
+          publish: async () => ({ published: false, tip: "abc123" }),
+        }),
+        apply: async (input) => ({
+          checkout: input.checkout,
+          targetHome: input.targetHome,
+          actions: [],
+          unmanaged: [],
+        }),
+        writePlan: () => {},
+      },
+    );
+
+    expect(linkOptions).toEqual({ destination: "ubuntu@orb" });
+    expect(result.plan).toMatchObject({
+      box: "ubuntu@orb",
+      remoteHome: "/home/davidhoeck",
+      remoteCheckout: "/home/davidhoeck/.ferry/store",
+    });
+  });
+
   test("passes one effective custom harness registry through Manifest, Store, and Apply", async () => {
     const customHarness: HarnessDescriptor = {
       id: "opencode",
@@ -399,44 +449,64 @@ describe("runSync", () => {
   test("recovers a lock left by a dead process", async () => {
     const home = mkdtempSync(join(tmpdir(), "ferry-sync-stale-lock-"));
     const lockDirectory = join(home, ".ferry");
-    mkdirSync(lockDirectory, { recursive: true });
-    const digest = createHash("sha256").update("box").digest("hex").slice(0, 16);
-    writeFileSync(join(lockDirectory, `sync-${digest}.lock`), JSON.stringify({ pid: 999_999_999 }));
+    let markPublishStarted: () => void = () => {};
+    let continuePublish: () => void = () => {};
+    let publishCalls = 0;
+    const publishStarted = new Promise<void>((resolve) => {
+      markPublishStarted = resolve;
+    });
+    const publishMayFinish = new Promise<void>((resolve) => {
+      continuePublish = resolve;
+    });
+    const dependencies: SyncDependencies = {
+      readConfig: () => config,
+      publisher: () => "operator-machine",
+      readSeed: () => seed,
+      createLink: () => {
+        let calls = 0;
+        return {
+          run: async () => ({
+            ok: true,
+            address: "box.example.ts.net",
+            stdout: ++calls === 1 ? "/srv/ferry\n" : "",
+            stderr: "",
+          }),
+        };
+      },
+      openStore: async () => ({
+        path: join(home, ".ferry", "store"),
+        publish: async () => {
+          publishCalls += 1;
+          if (publishCalls === 1) {
+            markPublishStarted();
+            await publishMayFinish;
+          }
+          return { published: false, tip: "abc123" };
+        },
+      }),
+      apply: async (input) => ({
+        checkout: input.checkout,
+        targetHome: input.targetHome,
+        actions: [],
+        unmanaged: [],
+      }),
+      adopt: () => {},
+      writePlan: () => {},
+    };
 
     try {
-      await runSync(
-        { home },
-        {
-          readConfig: () => config,
-          publisher: () => "operator-machine",
-          readSeed: () => seed,
-          createLink: () => {
-            let calls = 0;
-            return {
-              run: async () => ({
-                ok: true,
-                address: "box.example.ts.net",
-                stdout: ++calls === 1 ? "/srv/ferry\n" : "",
-                stderr: "",
-              }),
-            };
-          },
-          openStore: async () => ({
-            path: join(home, ".ferry", "store"),
-            publish: async () => ({ published: false, tip: "abc123" }),
-          }),
-          apply: async (input) => ({
-            checkout: input.checkout,
-            targetHome: input.targetHome,
-            actions: [],
-            unmanaged: [],
-          }),
-          adopt: () => {},
-          writePlan: () => {},
-        },
-      );
+      const first = runSync({ home }, dependencies);
+      await publishStarted;
+      const [lockFile] = readdirSync(lockDirectory);
+      expect(lockFile).toMatch(/^sync-[a-f0-9]{16}\.lock$/);
+      writeFileSync(join(lockDirectory, lockFile!), JSON.stringify({ pid: 999_999_999 }));
+      continuePublish();
+      await first;
+
+      await runSync({ home }, dependencies);
       expect(readdirSync(lockDirectory)).toEqual([]);
     } finally {
+      continuePublish();
       rmSync(home, { recursive: true, force: true });
     }
   });

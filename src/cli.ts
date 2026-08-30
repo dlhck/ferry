@@ -40,7 +40,8 @@ import {
 
 const DESCRIPTION = `Ferry keeps a remote Linux agent box in the same shape as this machine.
 
-Use ferry init to record one Tailscale host and seed the private snapshot.
+Use ferry init to record a Tailscale host or OpenSSH destination and seed the
+private snapshot.
 
 Ferry never copies logins. Vendor sessions stay on the machine that created
 them. Ferry starts a login on the box and you finish it in a browser here.`;
@@ -91,13 +92,20 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .description("Record a host, seed the snapshot, and convert this machine")
     .option("--host <host>", "Tailscale host name or IP address")
     .option("--ssh-user <user>", "SSH user on the host")
+    .option("--ssh-destination <destination>", "explicit OpenSSH destination")
     .option("--snapshot-url <url>", "private snapshot git URL")
-    .action(async (options: { host?: string; sshUser?: string; snapshotUrl?: string }) => {
+    .action(async (options: {
+      host?: string;
+      sshUser?: string;
+      sshDestination?: string;
+      snapshotUrl?: string;
+    }) => {
       const execute = dependencies.runInit ?? runInit;
       const result = await execute(
         {
           host: options.host,
           sshUser: options.sshUser,
+          sshDestination: options.sshDestination,
           snapshotUrl: options.snapshotUrl,
           harnesses: registry.harnesses,
         },

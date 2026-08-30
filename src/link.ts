@@ -1,4 +1,4 @@
-/** Link owns the Tailscale reachability check and ordinary OpenSSH transport. */
+/** Link resolves a configured target and owns ordinary OpenSSH transport. */
 
 export type HostCommand = {
   readonly argv: readonly string[];
@@ -50,13 +50,22 @@ export type LinkSuccess = {
 
 export type LinkResult = LinkSuccess | LinkFailure;
 
-export type LinkOptions = {
-  readonly host: string;
-  readonly user: string;
+type LinkTimeouts = {
   readonly probeTimeoutMs?: number;
   readonly connectTimeoutMs?: number;
   readonly commandTimeoutMs?: number;
 };
+
+type TailscaleLinkOptions = LinkTimeouts & {
+  readonly host: string;
+  readonly user: string;
+};
+
+type DirectLinkOptions = LinkTimeouts & {
+  readonly destination: string;
+};
+
+export type LinkOptions = TailscaleLinkOptions | DirectLinkOptions;
 
 export type RunOptions = {
   readonly timeoutMs?: number;
@@ -89,7 +98,7 @@ export class Link {
     const resolved = await this.resolve();
     if (!resolved.ok) return resolved;
 
-    const argv = this.sshBase(resolved.address);
+    const argv = this.sshBase(resolved.destination);
     if (options.agentForwarding === "git") argv.splice(1, 0, "-A");
     argv.push(command);
 
@@ -131,7 +140,7 @@ export class Link {
       ...this.sshOptions(),
       "-L",
       `127.0.0.1:${options.localPort}:${remoteHost}:${options.remotePort}`,
-      `${this.options.user}@${resolved.address}`,
+      resolved.destination,
     ];
 
     let execution: HostCommandResult;
@@ -155,6 +164,16 @@ export class Link {
   }
 
   private validateConfig(): LinkFailure | null {
+    if (isDirect(this.options)) {
+      const destination = this.options.destination.trim();
+      if (destination === "") {
+        return failure("invalid-config", "operator", "the SSH destination is empty");
+      }
+      if (destination.startsWith("-") || /[\s\0]/.test(destination)) {
+        return failure("invalid-config", "operator", "the SSH destination is invalid");
+      }
+      return null;
+    }
     if (this.options.host.trim() === "") {
       return failure("invalid-config", "operator", "the Tailscale host is empty");
     }
@@ -164,12 +183,21 @@ export class Link {
     return null;
   }
 
-  private async resolve(): Promise<{ readonly ok: true; readonly address: string } | LinkFailure> {
+  private async resolve(): Promise<ResolvedTarget | LinkFailure> {
+    const options = this.options;
+    if (isDirect(options)) {
+      return {
+        ok: true,
+        address: options.destination,
+        destination: options.destination,
+      };
+    }
+
     let status: HostCommandResult;
     try {
       status = await this.adapter.run({
         argv: ["tailscale", "status", "--json"],
-        timeoutMs: this.options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS,
+        timeoutMs: options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS,
       });
     } catch (error) {
       return failure(
@@ -198,32 +226,32 @@ export class Link {
     }
 
     const peer = Object.values(parsed.Peer ?? {}).find((candidate) =>
-      peerMatches(candidate, this.options.host),
+      peerMatches(candidate, options.host),
     );
     if (!peer) {
       return failure(
         "host-not-found",
         "network",
-        `Tailscale status does not contain host ${this.options.host}`,
+        `Tailscale status does not contain host ${options.host}`,
       );
     }
     if (peer.Online !== true) {
-      return failure("host-offline", "network", `Tailscale host ${this.options.host} is offline`);
+      return failure("host-offline", "network", `Tailscale host ${options.host} is offline`);
     }
 
-    const address = addressOf(peer, this.options.host);
+    const address = addressOf(peer, options.host);
     if (!address) {
       return failure(
         "host-not-found",
         "network",
-        `Tailscale host ${this.options.host} has no reachable address`,
+        `Tailscale host ${options.host} has no reachable address`,
       );
     }
-    return { ok: true, address };
+    return { ok: true, address, destination: `${options.user}@${address}` };
   }
 
-  private sshBase(address: string): string[] {
-    return ["ssh", ...this.sshOptions(), `${this.options.user}@${address}`];
+  private sshBase(destination: string): string[] {
+    return ["ssh", ...this.sshOptions(), destination];
   }
 
   private sshOptions(): string[] {
@@ -231,6 +259,16 @@ export class Link {
     const connectTimeoutSeconds = Math.max(1, Math.ceil(connectTimeoutMs / 1_000));
     return ["-o", "BatchMode=yes", "-o", `ConnectTimeout=${connectTimeoutSeconds}`];
   }
+}
+
+type ResolvedTarget = {
+  readonly ok: true;
+  readonly address: string;
+  readonly destination: string;
+};
+
+function isDirect(options: LinkOptions): options is DirectLinkOptions {
+  return "destination" in options && typeof options.destination === "string";
 }
 
 /** Production adapter. It runs only on the operator machine. */

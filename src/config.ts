@@ -3,6 +3,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import type { LinkOptions } from "./link.ts";
 
 export const CONFIG_RELATIVE_PATH = ".ferry/config.toml";
 
@@ -10,19 +11,29 @@ export type OperatorConfig = {
   readonly version: 1;
   readonly publisher: string;
   readonly snapshotUrl: string;
-  readonly host: {
-    readonly tailscale: string;
-    readonly sshUser: string;
-  };
+  readonly host: OperatorHostConfig;
 };
+
+export type OperatorHostConfig =
+  | {
+      readonly transport?: "tailscale";
+      readonly tailscale: string;
+      readonly sshUser: string;
+    }
+  | {
+      readonly transport: "ssh";
+      readonly destination: string;
+    };
 
 export type PartialOperatorConfig = {
   readonly version?: 1;
   readonly publisher?: string;
   readonly snapshotUrl?: string;
   readonly host?: {
+    readonly transport?: "tailscale" | "ssh";
     readonly tailscale?: string;
     readonly sshUser?: string;
+    readonly destination?: string;
   };
   readonly harness?: readonly Record<string, string>[];
 };
@@ -46,7 +57,12 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     version?: 1;
     publisher?: string;
     snapshotUrl?: string;
-    host: { tailscale?: string; sshUser?: string };
+    host: {
+      transport?: "tailscale" | "ssh";
+      tailscale?: string;
+      sshUser?: string;
+      destination?: string;
+    };
     harness: Record<string, string>[];
   } = { host: {}, harness: [] };
   let section = "";
@@ -67,7 +83,10 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       continue;
     }
 
-    const match = /^(version|publisher|snapshot_url|tailscale|ssh_user|id|name|skill_root|instruction_file)\s*=\s*(.+)$/.exec(line);
+    const match =
+      /^(version|publisher|snapshot_url|transport|tailscale|ssh_user|destination|id|name|skill_root|instruction_file)\s*=\s*(.+)$/.exec(
+        line,
+      );
     if (!match) continue;
     const [, key, encoded] = match;
     if (key === "version") {
@@ -79,8 +98,14 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     const value = parseString(encoded ?? "", path);
     if (section === "" && key === "publisher") config.publisher = value;
     else if (section === "" && key === "snapshot_url") config.snapshotUrl = value;
-    else if (section === "host" && key === "tailscale") config.host.tailscale = value;
+    else if (section === "host" && key === "transport") {
+      if (value !== "tailscale" && value !== "ssh") {
+        throw new ConfigError(`unsupported host transport in ${path}`);
+      }
+      config.host.transport = value;
+    } else if (section === "host" && key === "tailscale") config.host.tailscale = value;
     else if (section === "host" && key === "ssh_user") config.host.sshUser = value;
+    else if (section === "host" && key === "destination") config.host.destination = value;
     else if (section === "harness" && harness && key === "id") harness.id = value;
     else if (section === "harness" && harness && key === "name") harness.name = value;
     else if (section === "harness" && harness && key === "skill_root") harness.skillRoot = value;
@@ -103,13 +128,45 @@ export function writeConfig(config: OperatorConfig, home = homedir()): void {
       `snapshot_url = ${JSON.stringify(config.snapshotUrl)}`,
       "",
       "[host]",
-      `tailscale = ${JSON.stringify(config.host.tailscale)}`,
-      `ssh_user = ${JSON.stringify(config.host.sshUser)}`,
+      ...(config.host.transport === "ssh"
+        ? [
+            'transport = "ssh"',
+            `destination = ${JSON.stringify(config.host.destination)}`,
+          ]
+        : [
+            `tailscale = ${JSON.stringify(config.host.tailscale)}`,
+            `ssh_user = ${JSON.stringify(config.host.sshUser)}`,
+          ]),
       "",
     ].join("\n"),
     { mode: 0o600 },
   );
   renameSync(temporaryPath, path);
+}
+
+export function resolveLinkOptions(host: OperatorHostConfig): LinkOptions;
+export function resolveLinkOptions(
+  host: PartialOperatorConfig["host"],
+): LinkOptions | null;
+export function resolveLinkOptions(
+  host: PartialOperatorConfig["host"],
+): LinkOptions | null {
+  const complete = completeHostConfig(host);
+  if (!complete) return null;
+  if (complete.transport === "ssh") return { destination: complete.destination };
+  return { host: complete.tailscale, user: complete.sshUser };
+}
+
+export function completeHostConfig(
+  host: PartialOperatorConfig["host"],
+): OperatorHostConfig | null {
+  if (host?.transport === "ssh") {
+    return nonempty(host.destination)
+      ? { transport: "ssh", destination: host.destination.trim() }
+      : null;
+  }
+  if (!nonempty(host?.tailscale) || !nonempty(host.sshUser)) return null;
+  return { tailscale: host.tailscale.trim(), sshUser: host.sshUser.trim() };
 }
 
 function parseString(encoded: string, path: string): string {
@@ -120,4 +177,8 @@ function parseString(encoded: string, path: string): string {
     // Report one config error below.
   }
   throw new ConfigError(`invalid string in ${path}`);
+}
+
+function nonempty(value: string | undefined): value is string {
+  return value !== undefined && value.trim() !== "";
 }

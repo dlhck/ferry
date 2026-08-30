@@ -1,6 +1,6 @@
 # Ferry
 
-A CLI that keeps a remote Linux agent box in the same portable shape as the operator machine. The operator machine is the source of truth. A second private git repository stores skills and one global instruction file. Both machines clone that repository and point harness directories at the clone with symlinks. Tailscale is the only path to the box. Logins stay on the box. The CLI starts those logins from the operator machine. It does not copy sessions.
+A CLI that keeps a remote Linux agent box in the same portable shape as the operator machine. The operator machine is the source of truth. A second private git repository stores skills and one global instruction file. Both machines clone that repository and point harness directories at the clone with symlinks. Tailscale is the default path to the box. An operator can instead configure one explicit OpenSSH destination for a local machine or an existing SSH setup. Logins stay on the box. The CLI starts those logins from the operator machine. It does not copy sessions.
 
 This document is the v1 product specification after the design grill. The repository is empty. There is no existing code to change.
 
@@ -20,7 +20,7 @@ I want the laptop to stay the source of truth. The box is a deploy target. If th
 
 Ferry is a small CLI I run on the operator machine (macOS or Linux). It is MIT licensed. Releases are compiled bun executables. The box does not run ferry.
 
-`ferry init` is a wizard (all values also exist as flags). It records one Linux host (Tailscale name or IP, SSH user), the private snapshot git URL I created, and converts this machine onto the clone model. It seeds the store from the union of managed harness skill directories plus the home instruction file. Same skill name with different bytes is a refuse. If the remote already has files that clash with the seed, refuse. It writes operator config next to the store clone. It fails if Tailscale is missing. It probes the host over SSH on the tailnet.
+`ferry init` is a wizard (all values also exist as flags). It records either a Tailscale name or IP plus an SSH user, or one explicit OpenSSH destination. It also records the private snapshot git URL I created and converts this machine onto the clone model. It seeds the store from the union of managed harness skill directories plus the home instruction file. Same skill name with different bytes is a refuse. If the remote already has files that clash with the seed, refuse. It writes operator config next to the store clone. Tailscale mode fails if Tailscale is missing. Direct mode does not call Tailscale. Both modes probe the host over SSH.
 
 `ferry install` prints each vendor's official install command for the allowlist (`gh`, Claude Code, Codex, Pi, Cursor Agent), asks for yes, then runs it on the box. `--yes` skips the prompt.
 
@@ -28,7 +28,7 @@ Ferry is a small CLI I run on the operator machine (macOS or Linux). It is MIT l
 
 `ferry auth` starts a vendor login on the box (device URL, printed URL, or port-forward) and I finish it on the laptop. Providers are `gh`, Claude, Codex, and Cursor Agent. Pi if we can start a real login without leaving me inside a TUI. Tokens land only on the box. Ferry never reads or sends laptop credential files.
 
-`ferry status` reports Tailscale reachability, whether the store tip matches the box clone, whether harness paths are the expected symlinks, which CLIs still need a login, and the Tailscale address plus usual Paseo daemon port. It writes nothing. `--json` exists for scripts.
+`ferry status` reports link reachability, whether the store tip matches the box clone, whether harness paths are the expected symlinks, which CLIs still need a login, and the resolved address or destination plus the usual Paseo daemon port. It writes nothing. `--json` exists for scripts.
 
 The portable set is user-global skills and one `AGENTS.md`. The forbidden set is credentials, host tokens, session history, caches, databases, MCP tokens, and settings files. Project-local skill directories stay in the project git repo.
 
@@ -44,13 +44,13 @@ First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link
 
 4. As an operator, I want those binaries on GitHub Releases, so that install is a download, not an npm runtime.
 
-5. As an operator, I want `ferry init` to walk me through host, SSH user, and snapshot remote, so that a first run does not require a config lecture.
+5. As an operator, I want `ferry init` to walk me through the default Tailscale host, SSH user, and snapshot remote, so that a first run does not require a config lecture.
 
 6. As an operator, I want every init value to exist as a flag, so that I can script a second machine later.
 
-7. As an operator, I want `ferry init` to fail if Tailscale is missing on this machine, so that I do not configure a host I cannot reach securely.
+7. As an operator, I want `ferry init` to fail if Tailscale is missing while I selected Tailscale mode, so that I do not configure a host I cannot reach securely.
 
-8. As an operator, I want `ferry init` to probe the host over Tailscale and SSH, so that I learn a bad name or a missing key before the first sync.
+8. As an operator, I want `ferry init` to probe the host through the selected transport, so that I learn a bad destination or a missing key before the first sync.
 
 9. As an operator, I want `ferry init` to be safe to run twice, so that I can fill a missing value without destroying the rest of the config.
 
@@ -64,7 +64,7 @@ First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link
 
 14. As an operator, I want `ferry init` to clone that remote into a store directory on this machine, so that the payload has one checkout.
 
-15. As an operator, I want operator config to live next to that checkout and not inside it, so that my Tailscale hostname is not committed with the skills.
+15. As an operator, I want operator config to live next to that checkout and not inside it, so that my connection target is not committed with the skills.
 
 16. As an operator, I want `ferry init` to seed the store from every managed harness skill directory I already have, so that a Claude-only skill is not dropped.
 
@@ -106,9 +106,9 @@ First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link
 
 35. As an operator, I want sync to SSH to the box, pull the clone, and repair symlinks, so that the box does not depend on a live laptop filesystem.
 
-36. As an operator, I want sync to use ordinary SSH to the Tailscale name or IP, so that I do not need `tailscale ssh` ACLs.
+36. As an operator, I want sync to use ordinary OpenSSH with either a verified Tailscale peer or an explicit SSH destination, so that existing SSH aliases and local virtual machines work without automatic fallback.
 
-37. As an operator, I want sync to stop if Tailscale shows the host offline, so that I do not hang on SSH.
+37. As an operator, I want sync in Tailscale mode to stop if Tailscale shows the host offline, so that I do not hang on SSH.
 
 38. As an operator, I want sync to work from a cafe on the same tailnet, so that the laptop does not need to be on the LAN.
 
@@ -160,7 +160,7 @@ First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link
 
 62. As an operator, I want Paseo install and daemon writes out of ferry, so that pairing is not a ferry bug.
 
-63. As an operator, I want init and status to print the Tailscale address and the usual daemon port, so that I can add the host in Paseo Desktop myself.
+63. As an operator, I want init and status to print the resolved address or SSH destination and the usual daemon port, so that I can add the host in Paseo Desktop myself.
 
 64. As an operator, I want `ferry auth` to list the providers it can start, so that I do not invent names.
 
@@ -190,7 +190,7 @@ First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link
 
 77. As an operator, I want SSH agent forwarding treated as optional and only for git-over-SSH on the box, so that I do not think it logs in `gh` or Claude.
 
-78. As an operator, I want `ferry status` to show Tailscale online or offline for the host, so that I do not debug SSH first.
+78. As an operator, I want `ferry status` to show whether the configured link is online, so that I do not debug later steps first.
 
 79. As an operator, I want status to show whether the last store commit is on the box clone, so that I know if I forgot to sync.
 
@@ -204,7 +204,7 @@ First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link
 
 84. As an operator, I want errors to name the machine that failed (operator, git remote, or box), so that I do not chase the wrong end of the path.
 
-85. As an operator, I want the box to need only SSH, git, Tailscale, and the vendor CLIs, so that I do not install a second agent runtime for ferry.
+85. As an operator, I want the box to need only SSH, git, the vendor CLIs, and Tailscale when that transport is selected, so that I do not install a second agent runtime for ferry.
 
 86. As an operator, I want config to live on the operator machine only, so that the box does not need a ferry daemon.
 
@@ -214,7 +214,7 @@ First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link
 
 89. As an operator who uses Paseo, I want daemon keys and Paseo home denied, so that a sync cannot break pairing.
 
-90. As a stranger with Tailscale and an empty Linux box, I want `init`, `install`, `sync`, `auth`, and a green status on link and apply to be done, so that I know when to stop.
+90. As a stranger with a reachable Linux box, I want `init`, `install`, `sync`, `auth`, and a green status on link and apply to be done, so that I know when to stop.
 
 91. As an operator, I want tests that prove a forbidden file never enters a commit, so that a future include cannot ship `auth.json`.
 
@@ -242,7 +242,7 @@ First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link
 
 - **Apply.** Deep module. Interface: given a store checkout and a target home, return a plan (create symlink, repair symlink, refuse live directory, backup-and-link, delete managed name), then commit the plan or only return it. The caller passes the harness descriptors, which carry the skill roots and the instruction-file targets. One-way. Store clone wins. A live non-empty real directory refuses unless the caller sets force, which backups then links and copies nothing into the clone. Unmanaged extras are reported and left. Tests use a temp home as the local-substitutable filesystem.
 
-- **Link.** Deep module. Interface: resolve the named host to a reachable Tailscale address, open an SSH session, run a command or a port-forward, return stdout and a structured error that names operator, network, or box. Implementation owns Tailscale status parsing and OpenSSH. Not `tailscale ssh`. Tests inject a host adapter. Production talks to Tailscale and SSH.
+- **Link.** Deep module. Interface: resolve the configured target, open an SSH session, run a command or a port-forward, return stdout and a structured error that names operator, network, or box. A Tailscale target verifies the peer and resolves its address. A direct target uses the explicit OpenSSH destination without calling Tailscale. The implementation owns both resolution modes and OpenSSH. It never falls back between them and does not use `tailscale ssh`. Tests inject a host adapter.
 
 - **AuthStart.** Deep module. Interface: `start(provider)` on a Link session. Returns a local action (open URL, or listen on a forwarded port) and never accepts a credential file from the source machine. Recipes come from the tool descriptors, and the completion kind decides the local action. A tool whose completion is manual is never probed, which is where Pi sits until a documented remote login exists that does not require an interactive TTY. Already authenticated returns already-done. Time out a stuck forward. Do not print secrets. Tests use the fake host.
 
@@ -256,7 +256,7 @@ First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link
 
 - One host in config for v1.
 
-- Transport is Tailscale then OpenSSH. No public listen port from ferry. Offline tailnet is a hard fail.
+- Transport is explicit. Tailscale then OpenSSH is the default. A direct OpenSSH destination is opt-in. Ferry never falls back between them or disables host-key checks. No public listen port comes from ferry. An offline tailnet is a hard fail in Tailscale mode.
 
 - Paseo. Do not install it, start it, or write daemon config. Print address and the usual daemon port.
 
@@ -286,7 +286,7 @@ Test these modules:
 
 - Install. Plan lists only the allowlist. Run without confirm is refused. A failed remote command is a failed install.
 
-- Link. A fake host offline error becomes a structured host-offline result. The module does not retry forever.
+- Link. A fake Tailscale host offline error becomes a structured host-offline result. A direct destination skips Tailscale and keeps the same SSH safety options. The module does not retry forever or fall back between transports.
 
 Do not add a suite that shells out to a real Tailscale network in v1. Do not test the CLI string parser beyond a few wiring tests if the modules above are covered.
 

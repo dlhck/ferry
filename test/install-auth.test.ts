@@ -138,7 +138,7 @@ describe("auth command", () => {
 
   test("constructs Link from config and calls start once", async () => {
     const link = fakeLink();
-    let linkOptions: { host: string; user: string } | undefined;
+    let linkOptions: unknown;
     let authLink: unknown;
     const providers: string[] = [];
 
@@ -164,6 +164,26 @@ describe("auth command", () => {
     expect(linkOptions).toEqual({ host: config.host.tailscale, user: config.host.sshUser });
     expect(authLink).toBe(link);
     expect(providers).toEqual(["gh"]);
+  });
+
+  test("constructs Link from a direct SSH destination", async () => {
+    let linkOptions: unknown;
+
+    await runAuthCommand(
+      { provider: "gh" },
+      authDependencies({
+        readConfig: () => ({
+          ...config,
+          host: { transport: "ssh", destination: "ubuntu@orb" },
+        }),
+        createLink: (options) => {
+          linkOptions = options;
+          return fakeLink();
+        },
+      }),
+    );
+
+    expect(linkOptions).toEqual({ destination: "ubuntu@orb" });
   });
 
   const renderCases: readonly {

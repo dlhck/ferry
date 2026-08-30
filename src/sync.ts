@@ -6,12 +6,14 @@ import { hostname, homedir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { apply as applyStore, type ApplyPlan, type RemoteApplyInput } from "./apply.ts";
 import {
+  completeHostConfig,
   readConfig as readOperatorConfig,
+  resolveLinkOptions,
   type OperatorConfig,
   type PartialOperatorConfig,
 } from "./config.ts";
 import { readSeed as readManifest } from "./manifest.ts";
-import { Link, type LinkResult, type RunOptions } from "./link.ts";
+import { Link, type LinkOptions, type LinkResult, type RunOptions } from "./link.ts";
 import {
   loadRegistry as loadEffectiveRegistry,
   type Registry,
@@ -33,7 +35,7 @@ export type SyncDependencies = {
   readonly loadRegistry?: typeof loadEffectiveRegistry;
   readonly readSeed?: typeof readManifest;
   readonly publisher?: () => string;
-  readonly createLink?: (host: string, user: string) => SyncLink;
+  readonly createLink?: (options: LinkOptions) => SyncLink;
   readonly openStore?: (
     remote: string,
     seed: Seed,
@@ -120,14 +122,13 @@ export async function runSync(
     return { dryRun: true, published: false, plan };
   }
 
-  const link =
-    dependencies.createLink?.(config.host.tailscale, config.host.sshUser) ??
-    new Link({ host: config.host.tailscale, user: config.host.sshUser });
+  const target = resolveLinkOptions(config.host);
+  const link = dependencies.createLink?.(target) ?? new Link(target);
   const remoteHome = await resolveRemoteHome(link, config);
   const plan = makePlan(input, config, home, remoteHome);
   (dependencies.writePlan ?? printPlan)(plan);
 
-  const release = takeLock(dependencies, home, config.host.tailscale);
+  const release = takeLock(dependencies, home, targetKey(config));
   try {
     let store: SyncStore;
     let publication: PublishResult;
@@ -239,7 +240,7 @@ function makePlan(
   return {
     operator: config.publisher,
     gitRemote: config.snapshotUrl,
-    box: `${config.host.sshUser}@${config.host.tailscale}`,
+    box: targetLabel(config),
     localCheckout: join(home, ".ferry", "store"),
     remoteHome,
     remoteCheckout: remoteHome ? posix.join(remoteHome, ".ferry", "store") : null,
@@ -266,12 +267,13 @@ function printPlan(plan: SyncPlan): void {
 }
 
 async function resolveRemoteHome(link: SyncLink, config: OperatorConfig): Promise<string> {
+  const box = targetLabel(config);
   const result = await link.run(`printf '%s\\n' "$HOME"`);
   if (!result.ok) {
     throw new SyncError(
       "link-failure",
       result.error.origin === "operator" ? "operator" : "box",
-      `failed to resolve home on ${config.host.sshUser}@${config.host.tailscale}: ${result.error.origin}/${result.error.code}: ${result.error.message}`,
+      `failed to resolve home on ${box}: ${result.error.origin}/${result.error.code}: ${result.error.message}`,
     );
   }
   const remoteHome = result.stdout.replace(/\r?\n$/, "");
@@ -279,7 +281,7 @@ async function resolveRemoteHome(link: SyncLink, config: OperatorConfig): Promis
     throw new SyncError(
       "invalid-box-home",
       "box",
-      `${config.host.sshUser}@${config.host.tailscale} returned an invalid absolute home path`,
+      `${box} returned an invalid absolute home path`,
     );
   }
   return remoteHome;
@@ -410,19 +412,24 @@ function resolveRegistry(
 }
 
 function completeConfig(config: PartialOperatorConfig | null): OperatorConfig {
-  if (
-    config?.version !== 1 ||
-    !config.publisher ||
-    !config.snapshotUrl ||
-    !config.host?.tailscale ||
-    !config.host.sshUser
-  ) {
+  const host = completeHostConfig(config?.host);
+  if (config?.version !== 1 || !config.publisher || !config.snapshotUrl || !host) {
     throw new SyncError("invalid-config", "operator", "Ferry config is incomplete. Run ferry init.");
   }
   return {
     version: 1,
     publisher: config.publisher,
     snapshotUrl: config.snapshotUrl,
-    host: { tailscale: config.host.tailscale, sshUser: config.host.sshUser },
+    host,
   };
+}
+
+function targetLabel(config: OperatorConfig): string {
+  return config.host.transport === "ssh"
+    ? config.host.destination
+    : `${config.host.sshUser}@${config.host.tailscale}`;
+}
+
+function targetKey(config: OperatorConfig): string {
+  return `${config.host.transport === "ssh" ? "ssh" : "tailscale"}:${targetLabel(config)}`;
 }
