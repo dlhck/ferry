@@ -31,6 +31,8 @@ Ferry never falls back from Tailscale to direct SSH. The selected transport is s
 
 Add `--dry-run` to inspect the SSH probe, snapshot publish, config write, and managed symlinks without connecting to the box or changing the local filesystem.
 
+Run `ferry uninstall` to remove the local store and config, remove Ferry-managed symlinks, and restore the paths that existed before the first `ferry init`. The command refuses to write if a managed symlink was replaced with local content. Backups from older Ferry versions are restored when Ferry can identify one unambiguous backup for a managed path.
+
 ## Automatic sync
 
 `ferry watch` runs in the foreground. It watches the Manifest identity for every configured global skill root and `~/AGENTS.md`. It does not watch project-local skills. After an accepted change stays stable for one second, Ferry runs the normal sync without `--force`. Network, SSH, and Git failures retry with a backoff capped at 60 seconds. Manifest refusals name the local path and wait for another edit.
