@@ -37,6 +37,11 @@ import {
   type WatchServiceInput,
   type WatchServiceResult,
 } from "./watch-service.ts";
+import {
+  runUninstall,
+  type UninstallInput,
+  type UninstallResult,
+} from "./uninstall.ts";
 
 const DESCRIPTION = `Ferry keeps a remote Linux agent box in the same shape as this machine.
 
@@ -62,6 +67,7 @@ type CliDependencies = {
     dependencies?: Partial<StatusCommandDependencies>,
   ) => Promise<unknown>;
   readonly runWatch?: (input: WatchInput, dependencies?: WatchDependencies) => Promise<void>;
+  readonly runUninstall?: (input: UninstallInput) => UninstallResult;
   readonly installWatchService?: (
     input?: WatchServiceInput,
     dependencies?: WatchServiceDependencies,
@@ -125,6 +131,18 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       await (dependencies.runInstall ?? runInstallCommand)(
         { yes: options.yes === true },
         { tools: registry.tools },
+      );
+    });
+
+  program
+    .command("uninstall")
+    .description("Remove Ferry's local state and restore paths changed by init")
+    .action(() => {
+      const result = (dependencies.runUninstall ?? runUninstall)({ harnesses: registry.harnesses });
+      const restored = `${result.restored} ${result.restored === 1 ? "path" : "paths"}`;
+      const removed = `${result.removed} managed ${result.removed === 1 ? "path" : "paths"}`;
+      (dependencies.writeLine ?? console.log)(
+        `Uninstalled Ferry. Restored ${restored} and removed ${removed}.`,
       );
     });
 

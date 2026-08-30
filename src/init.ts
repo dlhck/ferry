@@ -2,7 +2,7 @@
 
 import { hostname, homedir } from "node:os";
 import { join } from "node:path";
-import { apply as applyStore, type ApplyPlan } from "./apply.ts";
+import { commitApply, planApply, type ApplyPlan } from "./apply.ts";
 import {
   configPath,
   readConfig as readOperatorConfig,
@@ -15,6 +15,7 @@ import { Link, type LinkOptions, type LinkResult, type RunOptions } from "./link
 import { readSeed as readManifest, type Leftover, type Seed } from "./manifest.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
 import { openStore as openSnapshotStore, type PublishResult } from "./store.ts";
+import { captureInitState, writeInitState } from "./uninstall.ts";
 
 export const PASEO_DAEMON_PORT = 6767;
 
@@ -161,6 +162,12 @@ export async function runInit(
     };
   }
 
+  const uninstallState = captureInitState({
+    home,
+    harnesses: input.harnesses,
+    skillNames: seed.skills.map((skill) => skill.name),
+  });
+
   const target = resolveLinkOptions(config.host);
   const link = dependencies.createLink?.(target) ?? new Link(target);
   const probe = await link.run("true");
@@ -172,12 +179,20 @@ export async function runInit(
     ? await dependencies.openStore(config.snapshotUrl, seed, home)
     : await openSnapshotStore(config.snapshotUrl, seed, { home, harnesses: input.harnesses });
   const publication = await store.publish(seed);
-  (dependencies.apply ?? applyStore)({
+  const applyInput = {
     checkout: store.path,
     targetHome: home,
     harnesses: input.harnesses,
-    force: true,
-  });
+    force: true as const,
+  };
+  if (dependencies.apply) {
+    const plan = dependencies.apply(applyInput);
+    writeInitState(home, uninstallState, plan);
+  } else {
+    const plan = planApply(applyInput);
+    writeInitState(home, uninstallState, plan);
+    commitApply(plan);
+  }
   (dependencies.writeConfig ?? writeOperatorConfig)(config, home);
 
   return {

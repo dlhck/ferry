@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { buildProgram, runCli } from "../src/cli.ts";
 import type { InitInput, InitResult } from "../src/init.ts";
 import type { SyncInput, SyncResult } from "../src/sync.ts";
+import type { UninstallInput, UninstallResult } from "../src/uninstall.ts";
 
 describe("ferry --help", () => {
   test("renders command errors without throwing them to Bun", async () => {
@@ -160,6 +161,24 @@ describe("ferry --help", () => {
     await program.parseAsync(["install", "--yes"], { from: "user" });
 
     expect(received).toEqual({ yes: true });
+  });
+
+  test("wires uninstall to the uninstall module and reports the result", async () => {
+    let received: UninstallInput | undefined;
+    const output: string[] = [];
+    const result: UninstallResult = { removed: 11, restored: 3 };
+    const program = buildProgram({
+      runUninstall: (input) => {
+        received = input;
+        return result;
+      },
+      writeLine: (line) => output.push(line),
+    });
+
+    await program.parseAsync(["uninstall"], { from: "user" });
+
+    expect(received?.harnesses).toHaveLength(5);
+    expect(output).toEqual(["Uninstalled Ferry. Restored 3 paths and removed 11 managed paths."]);
   });
 
   test("wires an auth provider to the auth command", async () => {
