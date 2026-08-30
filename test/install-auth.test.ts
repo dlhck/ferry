@@ -6,7 +6,7 @@ import {
   type AuthCommandDependencies,
   type InstallCommandDependencies,
 } from "../src/install-auth.ts";
-import type { InstallRecipe, InstallResult } from "../src/install.ts";
+import type { InstallProgress, InstallRecipe, InstallResult } from "../src/install.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 
 const config = {
@@ -85,8 +85,36 @@ describe("install command", () => {
     expect(confirmed).toBe(true);
   });
 
+  test("shows a spinner and per-tool progress while installing", async () => {
+    const progress: string[] = [];
+
+    await runInstallCommand(
+      { yes: true },
+      installDependencies({
+        plan,
+        progress,
+        run: async (_confirmed, reportProgress) => {
+          reportProgress?.({ phase: "started", tool: "gh", current: 1, total: 2 });
+          reportProgress?.({ phase: "completed", tool: "gh", current: 1, total: 2 });
+          reportProgress?.({ phase: "started", tool: "codex", current: 2, total: 2 });
+          reportProgress?.({ phase: "completed", tool: "codex", current: 2, total: 2 });
+          return { ok: true };
+        },
+      }),
+    );
+
+    expect(progress).toEqual([
+      "start:Installing gh (1/2)",
+      "advance:1:Installed gh (1/2)",
+      "message:Installing codex (2/2)",
+      "advance:1:Installed codex (2/2)",
+      "stop:Installed 2 tools",
+    ]);
+  });
+
   test("fails safely when an installer fails", async () => {
     const output: string[] = [];
+    const progress: string[] = [];
 
     await expect(
       runInstallCommand(
@@ -94,17 +122,25 @@ describe("install command", () => {
         installDependencies({
           plan,
           output,
-          run: async () => ({
-            ok: false,
-            error: {
-              code: "command-failed",
-              origin: "box",
-              message: "raw remote stderr with token-secret",
-            },
-          }),
+          progress,
+          run: async (_confirmed, reportProgress) => {
+            reportProgress?.({ phase: "started", tool: "gh", current: 1, total: 2 });
+            return {
+              ok: false,
+              error: {
+                code: "command-failed",
+                origin: "box",
+                message: "raw remote stderr with token-secret",
+              },
+            };
+          },
         }),
       ),
     ).rejects.toThrow("Install stopped because Link reported command-failed from box.");
+    expect(progress).toEqual([
+      "start:Installing gh (1/2)",
+      "error:Failed to install gh (1/2)",
+    ]);
     expect(output.join("\n")).toContain("box/command-failed");
     expect(output.join("\n")).not.toContain("token-secret");
   });
@@ -321,8 +357,12 @@ describe("auth command", () => {
 function installDependencies(overrides: {
   readonly plan: readonly InstallRecipe[];
   readonly output?: string[];
+  readonly progress?: string[];
   readonly confirm?: () => Promise<boolean | symbol | undefined>;
-  readonly run?: (confirmed: boolean) => Promise<InstallResult>;
+  readonly run?: (
+    confirmed: boolean,
+    reportProgress?: (progress: InstallProgress) => void,
+  ) => Promise<InstallResult>;
 }): InstallCommandDependencies {
   return {
     tools: BUILTIN_TOOLS,
@@ -331,6 +371,13 @@ function installDependencies(overrides: {
     createInstall: () => ({
       plan: () => overrides.plan,
       run: overrides.run ?? (async () => ({ ok: true })),
+    }),
+    createProgress: () => ({
+      start: (message) => overrides.progress?.push(`start:${message}`),
+      message: (message) => overrides.progress?.push(`message:${message}`),
+      advance: (step, message) => overrides.progress?.push(`advance:${step}:${message}`),
+      stop: (message) => overrides.progress?.push(`stop:${message}`),
+      error: (message) => overrides.progress?.push(`error:${message}`),
     }),
     confirm: overrides.confirm ?? (async () => true),
     writeLine: (line) => overrides.output?.push(line),
