@@ -42,11 +42,12 @@ function dependencies(home: string) {
   const calls = { opened: 0, published: 0, linked: 0 };
   const deps: InitDependencies = {
     publisher: () => "operator.test",
+    checkAgent: async () => ({ ok: true }),
     createLink: () => ({
       async run(command) {
         calls.linked++;
-        expect(command).toBe("true");
-        return { ok: true, address: "100.64.0.9", stdout: "", stderr: "" };
+        const stdout = command.includes("ssh-keygen -F") ? "trusted\n" : "";
+        return { ok: true, address: "100.64.0.9", stdout, stderr: "" };
       },
     }),
     async openStore(_remote, seed) {
@@ -145,7 +146,7 @@ describe("ferry init", () => {
       deps,
     );
 
-    expect(calls).toEqual({ opened: 1, published: 1, linked: 1 });
+    expect(calls).toEqual({ opened: 1, published: 1, linked: 3 });
     expect(result.address).toBe("100.64.0.9");
     expect(result.paseoPort).toBe(6767);
     expect(result.leftovers).toHaveLength(1);
@@ -180,6 +181,247 @@ describe("ferry init", () => {
     ).rejects.toMatchObject({ code: "manifest-refusal" });
 
     expect(calls).toEqual({ opened: 0, published: 0, linked: 0 });
+    expect(existsSync(join(home, ".ferry"))).toBe(false);
+  });
+
+  test("an SSH snapshot refuses when the operator agent has no identities", async () => {
+    const home = makeHome();
+    const { calls, deps } = dependencies(home);
+
+    await expect(
+      runInit(
+        {
+          home,
+          harnesses: BUILTIN_HARNESSES,
+          sshDestination: "ubuntu@orb",
+          snapshotUrl: "git@github.com:operator/ferry-store.git",
+        },
+        {
+          ...deps,
+          checkAgent: async () => ({ ok: false, message: "The agent has no identities." }),
+        },
+      ),
+    ).rejects.toEqual(
+      new InitRefusal(
+        "agent-refusal",
+        "operator SSH agent is unavailable or has no identities: The agent has no identities. Run ssh-add before ferry init.",
+      ),
+    );
+
+    expect(calls).toEqual({ opened: 0, published: 0, linked: 0 });
+    expect(existsSync(join(home, ".ferry"))).toBe(false);
+  });
+
+  test("an SSH snapshot refuses when the box cannot use the forwarded agent", async () => {
+    const home = makeHome();
+    const { calls, deps } = dependencies(home);
+
+    await expect(
+      runInit(
+        {
+          home,
+          harnesses: BUILTIN_HARNESSES,
+          sshDestination: "ubuntu@orb",
+          snapshotUrl: "git@github.com:operator/ferry-store.git",
+        },
+        {
+          ...deps,
+          checkAgent: async () => ({ ok: true }),
+          createLink: () => ({
+            async run(command, options) {
+              calls.linked++;
+              expect(command).toContain("SSH_AUTH_SOCK");
+              expect(options).toEqual({ agentForwarding: "git" });
+              return {
+                ok: false,
+                error: {
+                  code: "command-failed",
+                  origin: "box",
+                  message: "SSH agent forwarding is unavailable",
+                },
+              };
+            },
+          }),
+        },
+      ),
+    ).rejects.toEqual(
+      new InitRefusal(
+        "agent-refusal",
+        "box: SSH agent forwarding is unavailable",
+      ),
+    );
+
+    expect(calls).toEqual({ opened: 0, published: 0, linked: 1 });
+    expect(existsSync(join(home, ".ferry"))).toBe(false);
+  });
+
+  test("an untrusted Git host key requires operator approval", async () => {
+    const home = makeHome();
+    const { calls, deps } = dependencies(home);
+    let linkCall = 0;
+    let approval: unknown;
+
+    await expect(
+      runInit(
+        {
+          home,
+          harnesses: BUILTIN_HARNESSES,
+          sshDestination: "ubuntu@orb",
+          snapshotUrl: "git@github.com:operator/ferry-store.git",
+        },
+        {
+          ...deps,
+          checkAgent: async () => ({ ok: true }),
+          approveHostKeys: async (request) => {
+            approval = request;
+            return false;
+          },
+          createLink: () => ({
+            async run() {
+              calls.linked++;
+              linkCall++;
+              if (linkCall === 1) {
+                return { ok: true, address: "ubuntu@orb", stdout: "identity\n", stderr: "" };
+              }
+              if (linkCall === 2) {
+                return { ok: true, address: "ubuntu@orb", stdout: "missing\n", stderr: "" };
+              }
+              return {
+                ok: true,
+                address: "ubuntu@orb",
+                stdout:
+                  "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n",
+                stderr: "",
+              };
+            },
+          }),
+        },
+      ),
+    ).rejects.toEqual(
+      new InitRefusal("host-key-refusal", "operator did not trust the SSH host keys for github.com"),
+    );
+
+    expect(approval).toEqual({
+      host: "github.com",
+      keys: [
+        {
+          algorithm: "ssh-ed25519",
+          fingerprint: "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU",
+        },
+      ],
+    });
+    expect(calls).toEqual({ opened: 0, published: 0, linked: 3 });
+    expect(existsSync(join(home, ".ferry"))).toBe(false);
+  });
+
+  test("an approved Git host key is installed before repository access is verified", async () => {
+    const home = makeHome();
+    const { calls, deps } = dependencies(home);
+    let linkCall = 0;
+    let installed = false;
+    let repositoryChecked = false;
+
+    const result = await runInit(
+      {
+        home,
+        harnesses: BUILTIN_HARNESSES,
+        sshDestination: "ubuntu@orb",
+        snapshotUrl: "git@github.com:operator/ferry-store.git",
+      },
+      {
+        ...deps,
+        checkAgent: async () => ({ ok: true }),
+        approveHostKeys: async () => true,
+        createLink: () => ({
+          async run(command, options) {
+            calls.linked++;
+            linkCall++;
+            if (linkCall === 1) {
+              return { ok: true, address: "ubuntu@orb", stdout: "identity\n", stderr: "" };
+            }
+            if (linkCall === 2) {
+              return { ok: true, address: "ubuntu@orb", stdout: "missing\n", stderr: "" };
+            }
+            if (linkCall === 3) {
+              return {
+                ok: true,
+                address: "ubuntu@orb",
+                stdout:
+                  "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n",
+                stderr: "",
+              };
+            }
+            if (linkCall === 4) {
+              expect(command).toContain("$HOME/.ssh/known_hosts");
+              expect(command).toContain(
+                "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
+              );
+              installed = true;
+              return { ok: true, address: "ubuntu@orb", stdout: "", stderr: "" };
+            }
+            expect(installed).toBe(true);
+            expect(command).toBe(
+              "git ls-remote 'git@github.com:operator/ferry-store.git' HEAD",
+            );
+            expect(options).toEqual({ agentForwarding: "git" });
+            repositoryChecked = true;
+            return { ok: true, address: "ubuntu@orb", stdout: "tip\tHEAD\n", stderr: "" };
+          },
+        }),
+      },
+    );
+
+    expect(repositoryChecked).toBe(true);
+    expect(calls).toEqual({ opened: 1, published: 1, linked: 5 });
+    expect(result).toMatchObject({ dryRun: false, address: "ubuntu@orb", published: true });
+  });
+
+  test("an SSH snapshot refuses when the forwarded identity cannot read the repository", async () => {
+    const home = makeHome();
+    const { calls, deps } = dependencies(home);
+    let linkCall = 0;
+
+    await expect(
+      runInit(
+        {
+          home,
+          harnesses: BUILTIN_HARNESSES,
+          sshDestination: "ubuntu@orb",
+          snapshotUrl: "git@github.com:operator/ferry-store.git",
+        },
+        {
+          ...deps,
+          checkAgent: async () => ({ ok: true }),
+          createLink: () => ({
+            async run() {
+              calls.linked++;
+              linkCall++;
+              if (linkCall === 1) {
+                return { ok: true, address: "ubuntu@orb", stdout: "identity\n", stderr: "" };
+              }
+              if (linkCall === 2) {
+                return { ok: true, address: "ubuntu@orb", stdout: "trusted\n", stderr: "" };
+              }
+              return {
+                ok: false,
+                error: {
+                  code: "command-failed",
+                  origin: "box",
+                  message: "git@github.com: Permission denied (publickey).",
+                },
+              };
+            },
+          }),
+        },
+      ),
+    ).rejects.toEqual(
+      new InitRefusal(
+        "snapshot-access-refusal",
+        "box: could not read git@github.com:operator/ferry-store.git through the forwarded agent: git@github.com: Permission denied (publickey).",
+      ),
+    );
+
+    expect(calls).toEqual({ opened: 0, published: 0, linked: 3 });
     expect(existsSync(join(home, ".ferry"))).toBe(false);
   });
 

@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { buildProgram, runCli } from "../src/cli.ts";
-import type { InitInput, InitResult } from "../src/init.ts";
+import type {
+  InitDependencies,
+  InitInput,
+  InitResult,
+  SnapshotHostKeyApproval,
+} from "../src/init.ts";
 import type { SyncInput, SyncResult } from "../src/sync.ts";
 import type { UninstallInput, UninstallResult } from "../src/uninstall.ts";
 
@@ -101,6 +106,40 @@ describe("ferry --help", () => {
       sshDestination: "ubuntu@orb",
       snapshotUrl: "snapshot.git",
     });
+  });
+
+  test("wires Git host key approval to init", async () => {
+    let initDependencies: InitDependencies | undefined;
+    const request: SnapshotHostKeyApproval = {
+      host: "github.com",
+      keys: [
+        {
+          algorithm: "ssh-ed25519",
+          fingerprint: "SHA256:github-key",
+        },
+      ],
+    };
+    const program = buildProgram({
+      runInit: async (_input, dependencies) => {
+        initDependencies = dependencies;
+        return {
+          dryRun: false,
+          address: "ubuntu@orb",
+          paseoPort: 6767,
+          leftovers: [],
+          published: false,
+        };
+      },
+      approveHostKeys: async (value) => value === request,
+      writeLine: () => {},
+    });
+
+    await program.parseAsync(
+      ["init", "--ssh-destination", "ubuntu@orb", "--snapshot-url", "snapshot.git"],
+      { from: "user" },
+    );
+
+    expect(await initDependencies?.approveHostKeys?.(request)).toBe(true);
   });
 
   test("wires init --dry-run and prints the plan", async () => {

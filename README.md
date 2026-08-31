@@ -29,6 +29,8 @@ ferry init \
 
 Ferry never falls back from Tailscale to direct SSH. The selected transport is stored in `~/.ferry/config.toml`.
 
+An SSH snapshot URL requires a loaded identity in the operator's SSH agent. During `ferry init`, Ferry checks the agent, forwards it to the box, and tests read access to the snapshot repository. If the Git host is not in the box's `known_hosts`, Ferry prints the host-key fingerprints and asks for approval before it adds the public host keys. The operator's private key stays on the operator machine.
+
 Add `--dry-run` to inspect the SSH probe, snapshot publish, config write, and managed symlinks without connecting to the box or changing the local filesystem.
 
 Run `ferry uninstall` to remove the local store and config, remove Ferry-managed symlinks, and restore the paths that existed before the first `ferry init`. The command refuses to write if a managed symlink was replaced with local content. Backups from older Ferry versions are restored when Ferry can identify one unambiguous backup for a managed path.

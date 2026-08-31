@@ -9,6 +9,7 @@ import {
   type InitInput,
   type InitPrompt,
   type InitResult,
+  type SnapshotHostKeyApproval,
 } from "./init.ts";
 import {
   InstallAuthCommandError,
@@ -73,6 +74,7 @@ type CliDependencies = {
     dependencies?: WatchServiceDependencies,
   ) => Promise<WatchServiceResult>;
   readonly prompt?: InitPrompt;
+  readonly approveHostKeys?: (request: SnapshotHostKeyApproval) => Promise<boolean>;
   readonly writeLine?: (line: string) => void;
 };
 
@@ -118,7 +120,10 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
           dryRun: options.dryRun === true,
           harnesses: registry.harnesses,
         },
-        { prompt: dependencies.prompt ?? promptForInit },
+        {
+          prompt: dependencies.prompt ?? promptForInit,
+          approveHostKeys: dependencies.approveHostKeys ?? approveHostKeys,
+        },
       );
       reportInit(result, dependencies.writeLine ?? console.log);
     });
@@ -287,6 +292,23 @@ async function askText(field: InitField, initialValue?: string): Promise<string>
     throw new Error("init cancelled");
   }
   return answer;
+}
+
+async function approveHostKeys(request: SnapshotHostKeyApproval): Promise<boolean> {
+  prompts.note(
+    request.keys
+      .map((key) => `${key.algorithm} ${key.fingerprint}`)
+      .join("\n"),
+    `SSH host keys for ${request.host}`,
+  );
+  const accepted = await prompts.confirm({
+    message: `Trust these SSH host keys for ${request.host} on the box?`,
+  });
+  if (prompts.isCancel(accepted)) {
+    prompts.cancel("Init cancelled.");
+    throw new Error("init cancelled");
+  }
+  return accepted;
 }
 
 function promptMessage(field: InitField): string {
