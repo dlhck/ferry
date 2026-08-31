@@ -28,9 +28,14 @@ export type TargetInspection = {
 export type TargetInspectionRequest = {
   readonly storeSkills: string;
   readonly instructions: string;
-  readonly targetRoots: readonly string[];
-  readonly instructionTargets: readonly string[];
-  readonly backupSuffix: string;
+  readonly targetRoots: readonly {
+    readonly root: string;
+    readonly backupDirectory: string;
+  }[];
+  readonly instructionTargets: readonly {
+    readonly path: string;
+    readonly backupPath: string;
+  }[];
 };
 
 export type TargetAction =
@@ -127,12 +132,12 @@ case "$mode" in
     ;;
   candidates)
     candidate_root=$1
-    candidate_suffix=$2
+    candidate_backup_dir=$2
     shift 2
     for source_path do
       candidate_name=$(basename "$source_path") || exit 1
       candidate_path=$candidate_root/$candidate_name
-      candidate_backup=$candidate_path$candidate_suffix
+      candidate_backup=$candidate_backup_dir/$candidate_name
       printf 'P\t%s\t' "$(printf '%s' "$candidate_path" | hex)"
       state "$candidate_path" || exit 1
       printf '\nP\t%s\t' "$(printf '%s' "$candidate_backup" | hex)"
@@ -141,10 +146,10 @@ case "$mode" in
     done
     ;;
   direct)
-    direct_suffix=$1
-    shift
-    for direct_path do
-      direct_backup=$direct_path$direct_suffix
+    while [ "$#" -gt 0 ]; do
+      direct_path=$1
+      direct_backup=$2
+      shift 2
       printf 'P\t%s\t' "$(printf '%s' "$direct_path" | hex)"
       state "$direct_path" || exit 1
       printf '\nP\t%s\t' "$(printf '%s' "$direct_backup" | hex)"
@@ -160,9 +165,8 @@ set -f
 worker=$1
 store_skills=$2
 instructions=$3
-backup_suffix=$4
-root_count=$5
-shift 5
+root_count=$4
+shift 4
 find "$store_skills"/. ! -name . -prune -type d -exec sh -c "$worker" sh source {} + || exit 1
 if [ -e "$instructions" ]; then
   printf 'I\t1\n'
@@ -172,19 +176,20 @@ fi
 root_index=0
 while [ "$root_index" -lt "$root_count" ]; do
   target_root=$1
-  shift
+  backup_dir=$2
+  shift 2
   if [ -d "$target_root" ]; then
     find "$target_root"/. ! -name . -prune \
       -exec sh -c "$worker" sh entries "$target_root" {} + || exit 1
   fi
   find "$store_skills"/. ! -name . -prune -type d \
-    -exec sh -c "$worker" sh candidates "$target_root" "$backup_suffix" {} + || exit 1
+    -exec sh -c "$worker" sh candidates "$target_root" "$backup_dir" {} + || exit 1
   root_index=$((root_index + 1))
 done
 direct_count=$1
 shift
 if [ "$direct_count" -gt 0 ]; then
-  sh -c "$worker" sh direct "$backup_suffix" "$@" || exit 1
+  sh -c "$worker" sh direct "$@" || exit 1
 fi
 `;
 
@@ -212,7 +217,9 @@ while [ "$#" -gt 0 ]; do
       fi && ln -s "$action_target" "$action_path"
       ;;
     backup-and-link)
-      mv "$action_path" "$action_extra" && ln -s "$action_target" "$action_path"
+      mkdir -p "$(dirname "$action_extra")" && \
+        mv "$action_path" "$action_extra" && \
+        ln -s "$action_target" "$action_path"
       ;;
     delete-managed-name)
       [ -L "$action_path" ] && [ "$(readlink "$action_path")" = "$action_extra" ] && \
@@ -235,11 +242,10 @@ function inspectionCommand(request: TargetInspectionRequest): string {
     INSPECTION_WORKER,
     request.storeSkills,
     request.instructions,
-    request.backupSuffix,
     String(request.targetRoots.length),
-    ...request.targetRoots,
+    ...request.targetRoots.flatMap((root) => [root.root, root.backupDirectory]),
     String(request.instructionTargets.length),
-    ...request.instructionTargets,
+    ...request.instructionTargets.flatMap((target) => [target.path, target.backupPath]),
   ];
   return shellCommand(INSPECTION_SCRIPT, arguments_);
 }

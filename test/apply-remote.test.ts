@@ -129,6 +129,7 @@ describe("remote apply", () => {
     const checkout = makeCheckout(root, ["unslop"]);
     const home = join(root, "home");
     const live = join(home, ".claude", "skills", "unslop");
+    const backup = join(home, ".ferry", "backups", "20260828T101112Z", "claude", "unslop");
     write(join(live, "local.md"), "box copy");
     const link = new ShellLink(root);
 
@@ -146,13 +147,11 @@ describe("remote apply", () => {
       harness: "Claude",
       path: live,
       target: join(checkout, "skills", "unslop"),
-      backupPath: `${live}.ferry-backup-20260828T101112Z`,
+      backupPath: backup,
     });
     expect(link.commands).toHaveLength(2);
     expect(realpathSync(live)).toBe(join(checkout, "skills", "unslop"));
-    expect(readFileSync(`${live}.ferry-backup-20260828T101112Z/local.md`, "utf8")).toBe(
-      "box copy",
-    );
+    expect(readFileSync(join(backup, "local.md"), "utf8")).toBe("box copy");
   });
 
   test("deleted managed names are removed while unmanaged names remain", async () => {

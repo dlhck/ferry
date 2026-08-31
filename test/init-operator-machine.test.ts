@@ -135,15 +135,15 @@ describe("init on an operator-shaped machine", () => {
     expect(realpathSync(join(home, ".claude/CLAUDE.md"))).toBe(join(store, "AGENTS.md"));
     expect(realpathSync(join(home, ".codex/AGENTS.md"))).toBe(join(store, "AGENTS.md"));
     expect(realpathSync(join(home, ".pi/agent/AGENTS.md"))).toBe(join(store, "AGENTS.md"));
-    expect(readFileSync(backupBeside(join(home, "AGENTS.md")), "utf8")).toBe(
+    expect(readFileSync(backupInStore(home, "agents", "AGENTS.md"), "utf8")).toBe(
       "Keep the laptop the source of truth.\n",
     );
-    expect(readFileSync(backupBeside(join(home, ".pi/agent/AGENTS.md")), "utf8")).toBe(
+    expect(readFileSync(backupInStore(home, "pi", "AGENTS.md"), "utf8")).toBe(
       "Pi-only instructions.\n",
     );
-    expect(backupBeside(join(home, ".claude/CLAUDE.md"), false)).toBeNull();
+    expect(backupInStore(home, "claude", "CLAUDE.md", false)).toBeNull();
     expect(lstatSync(join(home, ".agents/skills/tdd")).isSymbolicLink()).toBe(true);
-    expect(lstatSync(backupBeside(join(home, ".agents/skills/tdd"))!).isDirectory()).toBe(true);
+    expect(lstatSync(backupInStore(home, "agents", "tdd")!).isDirectory()).toBe(true);
   });
 
   test("init converts a clash-resolved synthetic multi-harness home", async () => {
@@ -338,16 +338,18 @@ function snapshotManagedPaths(home: string): PathSnapshot[] {
   return snapshots;
 }
 
-function backupBeside(path: string): string;
-function backupBeside(path: string, required: true): string;
-function backupBeside(path: string, required: false): null;
-function backupBeside(path: string, required = true): string | null {
-  const directory = dirname(path);
-  const prefix = `${path.split("/").at(-1)}.ferry-backup-`;
-  const matches = readdirSync(directory).filter((name) => name.startsWith(prefix));
+function backupInStore(home: string, harness: string, name: string): string;
+function backupInStore(home: string, harness: string, name: string, required: false): null;
+function backupInStore(home: string, harness: string, name: string, required = true): string | null {
+  const root = join(home, ".ferry", "backups");
+  const matches = existsSync(root)
+    ? readdirSync(root)
+        .map((timestamp) => join(root, timestamp, harness, name))
+        .filter((candidate) => existsSync(candidate))
+    : [];
   if (required) {
     expect(matches).toHaveLength(1);
-    return join(directory, matches[0]!);
+    return matches[0]!;
   }
   expect(matches).toHaveLength(0);
   return null;
