@@ -111,10 +111,11 @@ describe("apply plan and commit", () => {
     );
   });
 
-  test("force moves a live directory to a timestamped backup, then links", () => {
+  test("force moves a live directory to a backup outside the skill root, then links", () => {
     const checkout = makeCheckout(["unslop"]);
     const home = makeRoot("home");
     const live = join(home, ".claude", "skills", "unslop");
+    const backup = join(home, ".ferry", "backups", "20260828T101112Z", "claude", "unslop");
     write(join(live, "local.md"), "box copy");
 
     const plan = planApply({
@@ -132,13 +133,14 @@ describe("apply plan and commit", () => {
       harness: "Claude",
       path: live,
       target: join(checkout, "skills", "unslop"),
-      backupPath: `${live}.ferry-backup-20260828T101112Z`,
+      backupPath: backup,
     });
 
     commitApply(plan);
 
     expect(realpathSync(live)).toBe(join(checkout, "skills", "unslop"));
-    expect(readFileSync(`${live}.ferry-backup-20260828T101112Z/local.md`, "utf8")).toBe("box copy");
+    expect(readFileSync(join(backup, "local.md"), "utf8")).toBe("box copy");
+    expect(readdirSync(join(home, ".claude", "skills"))).toEqual(["unslop"]);
     expect(existsSync(join(checkout, "skills", "unslop", "local.md"))).toBe(false);
   });
 

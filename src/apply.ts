@@ -189,13 +189,39 @@ function inspectionRequest(
     storeSkills: joinPath(checkout, "skills"),
     instructions: joinPath(checkout, "AGENTS.md"),
     targetRoots: harnesses.flatMap((harness) =>
-      harness.skillRoot ? [joinPath(targetHome, harness.skillRoot)] : [],
+      harness.skillRoot
+        ? [{
+            root: joinPath(targetHome, harness.skillRoot),
+            backupDirectory: backupDirectory(joinPath, targetHome, timestamp, harness.id),
+          }]
+        : [],
     ),
     instructionTargets: harnesses.flatMap((harness) =>
-      harness.instructionFile ? [joinPath(targetHome, harness.instructionFile)] : [],
+      harness.instructionFile
+        ? [{
+            path: joinPath(targetHome, harness.instructionFile),
+            backupPath: joinPath(
+              backupDirectory(joinPath, targetHome, timestamp, harness.id),
+              nameOf(harness.instructionFile),
+            ),
+          }]
+        : [],
     ),
-    backupSuffix: `.ferry-backup-${timestamp}`,
   };
+}
+
+/** Backups live outside harness skill roots so harnesses never scan them. */
+function backupDirectory(
+  joinPath: (...paths: string[]) => string,
+  targetHome: string,
+  timestamp: string,
+  harnessId: string,
+): string {
+  return joinPath(targetHome, ".ferry", "backups", timestamp, harnessId);
+}
+
+function nameOf(path: string): string {
+  return path.split(/[\\/]/).at(-1)!;
 }
 
 function planInspection(
@@ -215,13 +241,14 @@ function planInspection(
   for (const harness of harnesses) {
     if (!harness.skillRoot) continue;
     const root = joinPath(targetHome, harness.skillRoot);
+    const backups = backupDirectory(joinPath, targetHome, timestamp, harness.id);
     for (const name of inspection.skillNames) {
       planLink(
         harness.name,
         joinPath(root, name),
         joinPath(storeSkills, name),
         force,
-        timestamp,
+        joinPath(backups, name),
         inspection,
         actions,
       );
@@ -247,7 +274,10 @@ function planInspection(
         joinPath(targetHome, harness.instructionFile),
         instructions,
         force,
-        timestamp,
+        joinPath(
+          backupDirectory(joinPath, targetHome, timestamp, harness.id),
+          nameOf(harness.instructionFile),
+        ),
         inspection,
         actions,
       );
@@ -262,7 +292,7 @@ function planLink(
   path: string,
   target: string,
   force: boolean,
-  timestamp: string,
+  backupPath: string,
   inspection: TargetInspection,
   actions: ApplyAction[],
 ): void {
@@ -286,7 +316,6 @@ function planLink(
     return;
   }
 
-  const backupPath = `${path}.ferry-backup-${timestamp}`;
   if ((inspection.paths.get(backupPath) ?? { kind: "missing" }).kind !== "missing") {
     throw new ApplyError("refused", harness, backupPath);
   }
@@ -326,19 +355,19 @@ function inspectLocalTarget(request: TargetInspectionRequest): TargetInspection 
   const roots = new Map<string, readonly InspectedEntry[]>();
 
   for (const root of request.targetRoots) {
-    const entries = inspectLocalEntries(root);
-    roots.set(root, entries);
-    for (const entry of entries) paths.set(join(root, entry.name), entry.state);
+    const entries = inspectLocalEntries(root.root);
+    roots.set(root.root, entries);
+    for (const entry of entries) paths.set(join(root.root, entry.name), entry.state);
     for (const name of skillNames) {
-      const path = join(root, name);
-      paths.set(path, inspectLocalPath(path));
-      paths.set(`${path}${request.backupSuffix}`, inspectLocalPath(`${path}${request.backupSuffix}`));
+      paths.set(join(root.root, name), inspectLocalPath(join(root.root, name)));
+      const backup = join(root.backupDirectory, name);
+      paths.set(backup, inspectLocalPath(backup));
     }
   }
   if (existsSync(request.instructions)) {
-    for (const path of request.instructionTargets) {
-      paths.set(path, inspectLocalPath(path));
-      paths.set(`${path}${request.backupSuffix}`, inspectLocalPath(`${path}${request.backupSuffix}`));
+    for (const target of request.instructionTargets) {
+      paths.set(target.path, inspectLocalPath(target.path));
+      paths.set(target.backupPath, inspectLocalPath(target.backupPath));
     }
   }
   return {
@@ -423,6 +452,7 @@ function commitAction(action: ApplyAction, checkout: string): void {
       return;
     }
     case "backup-and-link":
+      mkdirSync(dirname(action.backupPath), { recursive: true });
       renameSync(action.path, action.backupPath);
       symlinkSync(action.target, action.path);
       return;

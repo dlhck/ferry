@@ -182,11 +182,14 @@ export function runUninstall(input: UninstallInput): UninstallResult {
         mkdirSync(path, { recursive: true });
         restored++;
         break;
-      case "backup":
+      case "backup": {
+        const backup = fromRelative(home, entry.original.path);
         mkdirSync(dirname(path), { recursive: true });
-        renameSync(fromRelative(home, entry.original.path), path);
+        renameSync(backup, path);
+        pruneBackupDirectories(home, backup);
         restored++;
         break;
+      }
     }
   }
 
@@ -344,7 +347,7 @@ function legacyState(home: string, harnesses: readonly HarnessDescriptor[]): Uni
     config: { kind: "missing" },
     absentDirectories: [],
     paths: links.map((entry): ManagedPath => {
-      const backups = backupCandidates(entry.path);
+      const backups = backupCandidates(home, harnesses, entry.path);
       if (backups.length > 1) {
         throw new UninstallRefusal(
           "invalid-state",
@@ -362,11 +365,50 @@ function legacyState(home: string, harnesses: readonly HarnessDescriptor[]): Uni
   };
 }
 
-function backupCandidates(path: string): string[] {
+/**
+ * Find init backups for a managed path. Current Ferry writes them under
+ * .ferry/backups so harnesses never scan them; older versions moved the
+ * original beside the managed path, so both places are searched.
+ */
+function backupCandidates(
+  home: string,
+  harnesses: readonly HarnessDescriptor[],
+  path: string,
+): string[] {
   const prefix = `${basename(path)}.ferry-backup-`;
-  return readNames(dirname(path))
+  const beside = readNames(dirname(path))
     .filter((name) => name.startsWith(prefix))
     .map((name) => join(dirname(path), name));
+  const harnessId = harnessIdFor(home, harnesses, path);
+  if (!harnessId) return beside;
+  const root = join(home, ".ferry", "backups");
+  const central = readNames(root)
+    .map((timestamp) => join(root, timestamp, harnessId, basename(path)))
+    .filter((candidate) => existsSync(candidate));
+  return [...beside, ...central];
+}
+
+function harnessIdFor(
+  home: string,
+  harnesses: readonly HarnessDescriptor[],
+  path: string,
+): string | null {
+  for (const harness of harnesses) {
+    if (harness.skillRoot && dirname(path) === join(home, harness.skillRoot)) return harness.id;
+    if (harness.instructionFile && path === join(home, harness.instructionFile)) return harness.id;
+  }
+  return null;
+}
+
+/** Remove the empty harness and timestamp directories a restored backup leaves. */
+function pruneBackupDirectories(home: string, backup: string): void {
+  const root = join(home, ".ferry", "backups");
+  let directory = dirname(backup);
+  while (directory === root || directory.startsWith(`${root}/`)) {
+    removeEmpty(directory);
+    if (directory === root) break;
+    directory = dirname(directory);
+  }
 }
 
 function isState(value: unknown): value is UninstallState {
