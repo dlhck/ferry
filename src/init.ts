@@ -1,5 +1,6 @@
 /** Orchestrate the operator-side init workflow through the deep modules. */
 
+import { createHash } from "node:crypto";
 import { hostname, homedir } from "node:os";
 import { join } from "node:path";
 import { commitApply, planApply, type ApplyPlan } from "./apply.ts";
@@ -11,7 +12,13 @@ import {
   type OperatorConfig,
   type PartialOperatorConfig,
 } from "./config.ts";
-import { Link, type LinkOptions, type LinkResult, type RunOptions } from "./link.ts";
+import {
+  BunHostAdapter,
+  Link,
+  type LinkOptions,
+  type LinkResult,
+  type RunOptions,
+} from "./link.ts";
 import { readSeed as readManifest, type Leftover, type Seed } from "./manifest.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
 import { openStore as openSnapshotStore, type PublishResult } from "./store.ts";
@@ -46,6 +53,18 @@ type InitStore = {
   publish(seed: Seed): Promise<PublishResult>;
 };
 
+export type OperatorAgentCheck =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly message: string };
+
+export type SnapshotHostKeyApproval = {
+  readonly host: string;
+  readonly keys: readonly {
+    readonly algorithm: string;
+    readonly fingerprint: string;
+  }[];
+};
+
 export type InitDependencies = {
   readonly readSeed?: typeof readManifest;
   readonly readConfig?: typeof readOperatorConfig;
@@ -60,6 +79,8 @@ export type InitDependencies = {
   }) => ApplyPlan;
   readonly publisher?: () => string;
   readonly prompt?: InitPrompt;
+  readonly checkAgent?: () => Promise<OperatorAgentCheck>;
+  readonly approveHostKeys?: (request: SnapshotHostKeyApproval) => Promise<boolean>;
 };
 
 export type InitManagedLink = {
@@ -99,6 +120,9 @@ export type InitRefusalCode =
   | "invalid-values"
   | "missing-values"
   | "manifest-refusal"
+  | "agent-refusal"
+  | "host-key-refusal"
+  | "snapshot-access-refusal"
   | "link-refusal";
 
 export class InitRefusal extends Error {
@@ -162,6 +186,17 @@ export async function runInit(
     };
   }
 
+  const snapshotTarget = snapshotSshTarget(config.snapshotUrl);
+  if (snapshotTarget) {
+    const agent = await (dependencies.checkAgent ?? checkOperatorAgent)();
+    if (!agent.ok) {
+      throw new InitRefusal(
+        "agent-refusal",
+        `operator SSH agent is unavailable or has no identities: ${agent.message} Run ssh-add before ferry init.`,
+      );
+    }
+  }
+
   const uninstallState = captureInitState({
     home,
     harnesses: input.harnesses,
@@ -170,9 +205,30 @@ export async function runInit(
 
   const target = resolveLinkOptions(config.host);
   const link = dependencies.createLink?.(target) ?? new Link(target);
-  const probe = await link.run("true");
+  const probe = snapshotTarget
+    ? await link.run(
+        'if [ -z "$SSH_AUTH_SOCK" ]; then printf "%s\\n" "SSH agent forwarding is unavailable" >&2; exit 1; fi; ssh-add -l',
+        { agentForwarding: "git" },
+      )
+    : await link.run("true");
   if (!probe.ok) {
-    throw new InitRefusal("link-refusal", `${probe.error.origin}: ${probe.error.message}`);
+    throw new InitRefusal(
+      snapshotTarget ? "agent-refusal" : "link-refusal",
+      `${probe.error.origin}: ${probe.error.message}`,
+    );
+  }
+  if (snapshotTarget) {
+    await approveSnapshotHostKey(link, snapshotTarget, dependencies.approveHostKeys);
+    const access = await link.run(
+      `git ls-remote ${quoteShell(config.snapshotUrl)} HEAD`,
+      { agentForwarding: "git" },
+    );
+    if (!access.ok) {
+      throw new InitRefusal(
+        "snapshot-access-refusal",
+        `${access.error.origin}: could not read ${config.snapshotUrl} through the forwarded agent: ${access.error.message}`,
+      );
+    }
   }
 
   const store = dependencies.openStore
@@ -302,6 +358,119 @@ function nonempty(value: string | undefined): string | undefined {
 
 function required(value: string | undefined): string {
   return value as string;
+}
+
+type SnapshotSshTarget = {
+  readonly host: string;
+  readonly knownHost: string;
+  readonly scanPort: string;
+};
+
+type ScannedHostKey = {
+  readonly line: string;
+  readonly algorithm: string;
+  readonly fingerprint: string;
+};
+
+function snapshotSshTarget(remote: string): SnapshotSshTarget | null {
+  const match = /^(?:[^@/:\s]+@)?([^:/\s]+):.+$/.exec(remote);
+  if (!match?.[1]) return null;
+  return { host: match[1], knownHost: match[1], scanPort: "" };
+}
+
+async function approveSnapshotHostKey(
+  link: InitLink,
+  target: SnapshotSshTarget,
+  approve: InitDependencies["approveHostKeys"],
+): Promise<void> {
+  const trust = await link.run(
+    `if ssh-keygen -F ${quoteShell(target.knownHost)} -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1; then printf "trusted\\n"; else printf "missing\\n"; fi`,
+  );
+  if (!trust.ok) {
+    throw new InitRefusal("host-key-refusal", `${trust.error.origin}: ${trust.error.message}`);
+  }
+  if (trust.stdout.trim() === "trusted") return;
+
+  const scan = await link.run(
+    `ssh-keyscan -T 10 ${target.scanPort}${quoteShell(target.host)} 2>/dev/null`,
+  );
+  if (!scan.ok) {
+    throw new InitRefusal("host-key-refusal", `${scan.error.origin}: ${scan.error.message}`);
+  }
+  const keys = parseHostKeys(scan.stdout, target.knownHost);
+  if (keys.length === 0) {
+    throw new InitRefusal(
+      "host-key-refusal",
+      `the box could not read an SSH host key for ${target.host}`,
+    );
+  }
+  const accepted = await approve?.({
+    host: target.knownHost,
+    keys: keys.map(({ algorithm, fingerprint }) => ({ algorithm, fingerprint })),
+  });
+  if (accepted !== true) {
+    throw new InitRefusal(
+      "host-key-refusal",
+      `operator did not trust the SSH host keys for ${target.knownHost}`,
+    );
+  }
+  const install = await link.run(installHostKeysCommand(keys));
+  if (!install.ok) {
+    throw new InitRefusal("host-key-refusal", `${install.error.origin}: ${install.error.message}`);
+  }
+}
+
+function parseHostKeys(stdout: string, knownHost: string): ScannedHostKey[] {
+  const keys: ScannedHostKey[] = [];
+  for (const source of stdout.split(/\r?\n/)) {
+    if (source === "" || source.startsWith("#")) continue;
+    const fields = source.trim().split(/\s+/);
+    const algorithm = fields[1];
+    const encoded = fields[2];
+    if (!algorithm || !encoded) continue;
+    const bytes = Buffer.from(encoded, "base64");
+    if (bytes.length === 0) continue;
+    const digest = createHash("sha256").update(bytes).digest("base64").replace(/=+$/, "");
+    keys.push({
+      line: `${knownHost} ${algorithm} ${encoded}`,
+      algorithm,
+      fingerprint: `SHA256:${digest}`,
+    });
+  }
+  return keys;
+}
+
+function installHostKeysCommand(keys: readonly ScannedHostKey[]): string {
+  const quotedKeys = keys.map((key) => quoteShell(key.line)).join(" ");
+  return [
+    "umask 077;",
+    'install -d -m 700 "$HOME/.ssh";',
+    'touch "$HOME/.ssh/known_hosts";',
+    'chmod 600 "$HOME/.ssh/known_hosts";',
+    `for key in ${quotedKeys}; do`,
+    'grep -Fqx -- "$key" "$HOME/.ssh/known_hosts" || printf "%s\\n" "$key" >> "$HOME/.ssh/known_hosts";',
+    "done",
+  ].join(" ");
+}
+
+async function checkOperatorAgent(): Promise<OperatorAgentCheck> {
+  try {
+    const result = await new BunHostAdapter().run({ argv: ["ssh-add", "-l"], timeoutMs: 5_000 });
+    if (!result.timedOut && result.exitCode === 0) return { ok: true };
+    const message = result.timedOut
+      ? "ssh-add timed out."
+      : result.stderr.trim() || result.stdout.trim() || "ssh-add failed.";
+    return { ok: false, message };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error && error.message ? error.message : "could not run ssh-add.",
+    };
+  }
+}
+
+function quoteShell(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 function manifestRefusal(
