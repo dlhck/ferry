@@ -35,7 +35,7 @@ export type PartialOperatorConfig = {
     readonly sshUser?: string;
     readonly destination?: string;
   };
-  readonly harness?: readonly Record<string, string>[];
+  readonly harness?: readonly unknown[];
 };
 
 export class ConfigError extends Error {

@@ -19,7 +19,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import type { ApplyPlan } from "./apply.ts";
 import { configPath } from "./config.ts";
-import type { HarnessDescriptor } from "./registry/types.ts";
+import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
 
 const STATE_RELATIVE_PATH = ".ferry/uninstall.json";
 const STORE_RELATIVE_PATH = ".ferry/store";
@@ -215,7 +215,7 @@ function managedPaths(
   const checkout = join(home, STORE_RELATIVE_PATH);
   const paths = new Map<string, string>();
   for (const harness of harnesses) {
-    if (harness.skillRoot) {
+    if (ownsSkills(harness) && harness.skillRoot) {
       for (const name of skillNames) {
         paths.set(join(home, harness.skillRoot, name), join(checkout, "skills", name));
       }

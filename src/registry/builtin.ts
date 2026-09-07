@@ -27,6 +27,7 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
     id: "codex",
     name: "Codex",
     skillRoot: ".codex/skills",
+    ownSkills: false,
     instructionFile: ".codex/AGENTS.md",
   },
   {
@@ -34,12 +35,14 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
     name: "Pi",
     // Pi keeps its skills and its instruction file under .pi/agent.
     skillRoot: ".pi/agent/skills",
+    ownSkills: false,
     instructionFile: ".pi/agent/AGENTS.md",
   },
   {
     id: "cursor",
     name: "Cursor Agent",
     skillRoot: ".cursor/skills",
+    ownSkills: false,
   },
 ];
 

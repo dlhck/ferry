@@ -18,13 +18,8 @@ import { ApplyError, apply, commitApply, planApply } from "../src/apply.ts";
 import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 
 const roots: string[] = [];
-const skillRoots = [
-  ".agents/skills",
-  ".claude/skills",
-  ".codex/skills",
-  ".pi/agent/skills",
-  ".cursor/skills",
-] as const;
+const ownedSkillRoots = [".agents/skills", ".claude/skills"] as const;
+const sharedSkillRoots = [".codex/skills", ".pi/agent/skills", ".cursor/skills"] as const;
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -54,19 +49,47 @@ describe("apply plan and commit", () => {
     const home = makeRoot("home");
 
     const plan = planApply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES });
-    expect(plan.actions.filter((action) => action.kind === "create-symlink")).toHaveLength(14);
+    expect(plan.actions.filter((action) => action.kind === "create-symlink")).toHaveLength(8);
     commitApply(plan);
 
-    for (const root of skillRoots) {
+    for (const root of ownedSkillRoots) {
       expect(readdirSync(join(home, root)).sort()).toEqual(["tdd", "unslop"]);
       for (const name of ["tdd", "unslop"]) {
         expect(realpathSync(join(home, root, name))).toBe(join(checkout, "skills", name));
       }
     }
+    for (const root of sharedSkillRoots) {
+      expect(existsSync(join(home, root))).toBe(false);
+    }
     expect(realpathSync(join(home, "AGENTS.md"))).toBe(join(checkout, "AGENTS.md"));
     expect(realpathSync(join(home, ".claude", "CLAUDE.md"))).toBe(join(checkout, "AGENTS.md"));
     expect(realpathSync(join(home, ".codex", "AGENTS.md"))).toBe(join(checkout, "AGENTS.md"));
     expect(realpathSync(join(home, ".pi", "agent", "AGENTS.md"))).toBe(join(checkout, "AGENTS.md"));
+  });
+
+  test("leftover store links in shared skill roots are removed", () => {
+    const checkout = makeCheckout(["unslop"]);
+    const home = makeRoot("home");
+    const leftover = join(home, ".codex", "skills", "unslop");
+    const official = join(home, ".codex", "skills", ".system", "SKILL.md");
+    mkdirSync(dirname(leftover), { recursive: true });
+    symlinkSync(join(checkout, "skills", "unslop"), leftover);
+    write(official, "codex system skill");
+
+    const plan = planApply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES });
+    expect(plan.actions).toContainEqual({
+      kind: "delete-managed-name",
+      harness: "Codex",
+      path: leftover,
+      name: "unslop",
+    });
+    commitApply(plan);
+
+    expect(existsSync(leftover)).toBe(false);
+    expect(readFileSync(official, "utf8")).toBe("codex system skill");
+    expect(realpathSync(join(home, ".agents", "skills", "unslop"))).toBe(
+      join(checkout, "skills", "unslop"),
+    );
   });
 
   test("a deleted snapshot name is planned and removed", () => {
@@ -77,9 +100,9 @@ describe("apply plan and commit", () => {
 
     const plan = planApply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES });
 
-    expect(plan.actions.filter((action) => action.kind === "delete-managed-name")).toHaveLength(5);
+    expect(plan.actions.filter((action) => action.kind === "delete-managed-name")).toHaveLength(2);
     commitApply(plan);
-    for (const root of skillRoots) expect(existsSync(join(home, root, "tdd"))).toBe(false);
+    for (const root of ownedSkillRoots) expect(existsSync(join(home, root, "tdd"))).toBe(false);
   });
 
   test("dry-run returns the plan without writing", () => {
@@ -149,7 +172,7 @@ describe("apply plan and commit", () => {
     const home = makeRoot("home");
     const old = makeRoot("old-store");
     write(join(old, "SKILL.md"), "old");
-    const path = join(home, ".codex", "skills", "unslop");
+    const path = join(home, ".claude", "skills", "unslop");
     mkdirSync(dirname(path), { recursive: true });
     symlinkSync(old, path);
 
@@ -157,7 +180,7 @@ describe("apply plan and commit", () => {
 
     expect(plan.actions).toContainEqual({
       kind: "repair-symlink",
-      harness: "Codex",
+      harness: "Claude",
       path,
       target: join(checkout, "skills", "unslop"),
     });

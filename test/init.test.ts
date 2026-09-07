@@ -15,13 +15,7 @@ import type { Seed } from "../src/manifest.ts";
 import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 
 const homes: string[] = [];
-const skillRoots = [
-  ".agents/skills",
-  ".claude/skills",
-  ".codex/skills",
-  ".pi/agent/skills",
-  ".cursor/skills",
-] as const;
+const skillRoots = [".agents/skills", ".claude/skills"] as const;
 
 afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
@@ -117,10 +111,11 @@ describe("ferry init", () => {
     });
     if (!result.dryRun) throw new Error("expected a dry-run result");
     expect(result.plan.links).toContainEqual({
-      harness: "Codex",
-      path: join(home, ".codex/skills/tdd"),
+      harness: "Shared agents",
+      path: join(home, ".agents/skills/tdd"),
       target: join(home, ".ferry/store/skills/tdd"),
     });
+    expect(result.plan.links.some((link) => link.path.includes(".codex/skills"))).toBe(false);
     expect(result.plan.links).toContainEqual({
       harness: "Claude",
       path: join(home, ".claude/CLAUDE.md"),

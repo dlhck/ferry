@@ -277,6 +277,7 @@ function storeMetadata(harnesses: readonly HarnessDescriptor[]): string {
     id: harness.id,
     name: harness.name,
     ...(harness.skillRoot ? { skillRoot: harness.skillRoot } : {}),
+    ...(harness.ownSkills === false ? { ownSkills: false } : {}),
     ...(harness.instructionFile ? { instructionFile: harness.instructionFile } : {}),
   }));
   return `${JSON.stringify({ schemaVersion: SCHEMA_VERSION, managedHarnesses }, null, 2)}\n`;
