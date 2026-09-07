@@ -20,7 +20,7 @@ import {
   type RunOptions,
 } from "./link.ts";
 import { readSeed as readManifest, type Leftover, type Seed } from "./manifest.ts";
-import type { HarnessDescriptor } from "./registry/types.ts";
+import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
 import { openStore as openSnapshotStore, type PublishResult } from "./store.ts";
 import { captureInitState, writeInitState } from "./uninstall.ts";
 
@@ -270,7 +270,7 @@ function makeInitPlan(
   const links: InitManagedLink[] = [];
 
   for (const harness of harnesses) {
-    if (harness.skillRoot) {
+    if (ownsSkills(harness) && harness.skillRoot) {
       for (const skill of seed.skills) {
         links.push({
           harness: harness.name,

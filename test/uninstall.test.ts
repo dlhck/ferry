@@ -76,7 +76,7 @@ describe("ferry uninstall", () => {
     write(join(home, "AGENTS.md"), "original instructions\n");
     write(join(home, ".agents/skills/tdd/SKILL.md"), "test first\n");
     await runInit(initInput(home), initDependencies(home));
-    const changed = join(home, ".codex/skills/tdd");
+    const changed = join(home, ".claude/skills/tdd");
     rmSync(changed);
     write(join(changed, "local.md"), "do not delete\n");
     const managed = join(home, ".agents/skills/tdd");

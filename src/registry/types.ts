@@ -15,9 +15,19 @@ export type HarnessDescriptor = {
   readonly name: string;
   /** Skill directory of the harness, such as `.claude/skills`. */
   readonly skillRoot?: string;
+  /**
+   * When false, ferry inspects `skillRoot` only to remove leftover store
+   * links. Codex, Pi, and Cursor Agent already read `.agents/skills`.
+   */
+  readonly ownSkills?: boolean;
   /** Instruction file the harness reads, such as `.claude/CLAUDE.md`. */
   readonly instructionFile?: string;
 };
+
+/** Codex, Pi, and Cursor Agent read `.agents/skills` instead of their own copies. */
+export function ownsSkills(harness: HarnessDescriptor): boolean {
+  return harness.skillRoot !== undefined && harness.ownSkills !== false;
+}
 
 /** How the operator finishes a login that started on the box. */
 export type AuthCompletion =

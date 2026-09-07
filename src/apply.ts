@@ -23,7 +23,7 @@ import {
   type TargetInspectionRequest,
 } from "./apply-remote.ts";
 import type { Link } from "./link.ts";
-import type { HarnessDescriptor } from "./registry/types.ts";
+import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
 
 export type ApplyInput = {
   readonly checkout: string;
@@ -215,16 +215,19 @@ function planInspection(
   for (const harness of harnesses) {
     if (!harness.skillRoot) continue;
     const root = joinPath(targetHome, harness.skillRoot);
-    for (const name of inspection.skillNames) {
-      planLink(
-        harness.name,
-        joinPath(root, name),
-        joinPath(storeSkills, name),
-        force,
-        timestamp,
-        inspection,
-        actions,
-      );
+    const owns = ownsSkills(harness);
+    if (owns) {
+      for (const name of inspection.skillNames) {
+        planLink(
+          harness.name,
+          joinPath(root, name),
+          joinPath(storeSkills, name),
+          force,
+          timestamp,
+          inspection,
+          actions,
+        );
+      }
     }
     planRemovedNames(
       harness.name,
@@ -235,6 +238,7 @@ function planInspection(
       actions,
       unmanaged,
       joinPath,
+      !owns,
     );
   }
 
@@ -302,9 +306,10 @@ function planRemovedNames(
   actions: ApplyAction[],
   unmanaged: UnmanagedExtra[],
   joinPath: (...paths: string[]) => string,
+  dropStoreLinks: boolean,
 ): void {
   for (const entry of entries) {
-    if (snapshotNames.has(entry.name)) continue;
+    if (snapshotNames.has(entry.name) && !dropStoreLinks) continue;
     const path = joinPath(root, entry.name);
     if (
       entry.state.kind === "symlink" &&

@@ -34,6 +34,7 @@ const skillRoots = [
   ".pi/agent/skills",
   ".cursor/skills",
 ] as const;
+const ownedSkillRoots = [".agents/skills", ".claude/skills"] as const;
 const clashNames = ["deploy", "review", "release"] as const;
 const fourHarnessRoots = [
   ".agents/skills",
@@ -124,7 +125,7 @@ describe("init on an operator-shaped machine", () => {
 
     const store = join(home, ".ferry/store");
     const union = ["agents-only", "claude-only", "shared", "tdd"];
-    for (const root of skillRoots) {
+    for (const root of ownedSkillRoots) {
       for (const name of union) {
         expect(realpathSync(join(home, root, name))).toBe(join(store, "skills", name));
       }
@@ -171,7 +172,7 @@ describe("init on an operator-shaped machine", () => {
     const store = join(home, ".ferry/store");
     expect(realpathSync(join(home, "AGENTS.md"))).toBe(join(store, "AGENTS.md"));
     for (const name of ["deploy", "review", "shared"]) {
-      for (const root of skillRoots) {
+      for (const root of ownedSkillRoots) {
         expect(realpathSync(join(home, root, name))).toBe(join(store, "skills", name));
       }
     }

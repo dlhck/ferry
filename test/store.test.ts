@@ -66,15 +66,17 @@ const expectedMetadata = {
       id: "codex",
       name: "Codex",
       skillRoot: ".codex/skills",
+      ownSkills: false,
       instructionFile: ".codex/AGENTS.md",
     },
     {
       id: "pi",
       name: "Pi",
       skillRoot: ".pi/agent/skills",
+      ownSkills: false,
       instructionFile: ".pi/agent/AGENTS.md",
     },
-    { id: "cursor", name: "Cursor Agent", skillRoot: ".cursor/skills" },
+    { id: "cursor", name: "Cursor Agent", skillRoot: ".cursor/skills", ownSkills: false },
   ],
 };
 

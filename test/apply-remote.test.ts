@@ -16,13 +16,8 @@ import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 import type { LinkResult } from "../src/link.ts";
 
 const roots: string[] = [];
-const skillRoots = [
-  ".agents/skills",
-  ".claude/skills",
-  ".codex/skills",
-  ".pi/agent/skills",
-  ".cursor/skills",
-] as const;
+const ownedSkillRoots = [".agents/skills", ".claude/skills"] as const;
+const sharedSkillRoots = [".codex/skills", ".pi/agent/skills", ".cursor/skills"] as const;
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -160,7 +155,7 @@ describe("remote apply", () => {
     const checkout = makeCheckout(root, ["unslop"]);
     const home = join(root, "home");
     mkdirSync(home);
-    for (const skillRoot of skillRoots) {
+    for (const skillRoot of [...ownedSkillRoots, ...sharedSkillRoots]) {
       const managed = join(home, skillRoot, "deleted");
       mkdirSync(dirname(managed), { recursive: true });
       symlinkSync(join(checkout, "skills", "deleted"), managed);
@@ -171,7 +166,7 @@ describe("remote apply", () => {
     const plan = await apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES, link: new ShellLink(root) });
 
     expect(plan.actions.filter((action) => action.kind === "delete-managed-name")).toHaveLength(5);
-    for (const skillRoot of skillRoots) {
+    for (const skillRoot of [...ownedSkillRoots, ...sharedSkillRoots]) {
       expect(existsSync(join(home, skillRoot, "deleted"))).toBe(false);
     }
     expect(readFileSync(unmanaged, "utf8")).toBe("local");
