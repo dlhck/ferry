@@ -107,6 +107,23 @@ describe("ferry uninstall", () => {
     expect(existsSync(backup)).toBe(false);
     expect(existsSync(join(home, ".ferry"))).toBe(false);
   });
+
+  test("restores central backups when the uninstall state is missing", () => {
+    const home = makeHome();
+    const storeSkill = join(home, ".ferry/store/skills/tdd");
+    const managed = join(home, ".agents/skills/tdd");
+    const backup = join(home, ".ferry/backups/20260830T120000Z/agents/tdd");
+    write(join(storeSkill, "SKILL.md"), "current\n");
+    write(join(backup, "SKILL.md"), "before init\n");
+    mkdirSync(dirname(managed), { recursive: true });
+    symlinkSync(storeSkill, managed);
+    write(join(home, ".ferry/config.toml"), "version = 1\n");
+
+    runUninstall({ home, harnesses: BUILTIN_HARNESSES });
+
+    expect(readFileSync(join(managed, "SKILL.md"), "utf8")).toBe("before init\n");
+    expect(existsSync(join(home, ".ferry"))).toBe(false);
+  });
 });
 
 function makeHome(): string {
