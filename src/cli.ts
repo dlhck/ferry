@@ -25,6 +25,7 @@ import {
   type SyncInput,
   type SyncResult,
 } from "./sync.ts";
+import { readConfig, type PartialOperatorConfig } from "./config.ts";
 import { loadRegistry, type Registry } from "./registry/load.ts";
 import {
   runStatusCommand,
@@ -73,6 +74,7 @@ type CliDependencies = {
     input?: WatchServiceInput,
     dependencies?: WatchServiceDependencies,
   ) => Promise<WatchServiceResult>;
+  readonly readConfig?: () => PartialOperatorConfig | null;
   readonly prompt?: InitPrompt;
   readonly approveHostKeys?: (request: SnapshotHostKeyApproval) => Promise<boolean>;
   readonly writeLine?: (line: string) => void;
@@ -84,8 +86,8 @@ type CliRuntime = {
 };
 
 export function buildProgram(dependencies: CliDependencies = {}): Command {
-  // One registry for the whole run. Every command below reads it, none owns it.
-  const registry = resolveRegistry();
+  // Commands that need the registry resolve it when they run, so help never reads the config.
+  const registry = () => resolveRegistry((dependencies.readConfig ?? readConfig)() ?? {});
   const program = new Command();
   program
     .name("ferry")
@@ -118,7 +120,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
           sshDestination: options.sshDestination,
           snapshotUrl: options.snapshotUrl,
           dryRun: options.dryRun === true,
-          harnesses: registry.harnesses,
+          harnesses: registry().harnesses,
         },
         {
           prompt: dependencies.prompt ?? promptForInit,
@@ -135,7 +137,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .action(async (options: { yes?: boolean }) => {
       await (dependencies.runInstall ?? runInstallCommand)(
         { yes: options.yes === true },
-        { tools: registry.tools },
+        { tools: registry().tools },
       );
     });
 
@@ -143,7 +145,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .command("uninstall")
     .description("Remove Ferry's local state and restore paths changed by init")
     .action(() => {
-      const result = (dependencies.runUninstall ?? runUninstall)({ harnesses: registry.harnesses });
+      const result = (dependencies.runUninstall ?? runUninstall)({ harnesses: registry().harnesses });
       const restored = `${result.restored} ${result.restored === 1 ? "path" : "paths"}`;
       const removed = `${result.removed} managed ${result.removed === 1 ? "path" : "paths"}`;
       (dependencies.writeLine ?? console.log)(
@@ -155,7 +157,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .command("auth [provider]")
     .description("Start a login on the configured box without copying credentials")
     .action(async (provider?: string) => {
-      await (dependencies.runAuth ?? runAuthCommand)({ provider }, { tools: registry.tools });
+      await (dependencies.runAuth ?? runAuthCommand)({ provider }, { tools: registry().tools });
     });
 
   program
@@ -227,9 +229,9 @@ export async function runCli(
 
 if (import.meta.main) await runCli(Bun.argv.slice(2));
 
-/** Resolve the builtin registry. Operator entries arrive when config carries them. */
-function resolveRegistry(): Registry {
-  const registry = loadRegistry();
+/** Merge the operator's config entries into the builtin registry. */
+function resolveRegistry(config: PartialOperatorConfig): Registry {
+  const registry = loadRegistry(config);
   if (!registry.ok) {
     throw new Error(
       `ferry refused the registry: ${registry.problems.map((problem) => problem.reason).join("; ")}`,
