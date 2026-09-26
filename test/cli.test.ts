@@ -220,10 +220,51 @@ describe("ferry --help", () => {
       writeLine: (line) => output.push(line),
     });
 
-    await program.parseAsync(["uninstall"], { from: "user" });
+    await program.parseAsync(["uninstall", "--yes"], { from: "user" });
 
     expect(received?.harnesses).toHaveLength(5);
     expect(output).toEqual(["Uninstalled Ferry. Restored 3 paths and removed 11 managed paths."]);
+  });
+
+  test("uninstall asks for confirmation and stops when refused", async () => {
+    let calls = 0;
+    let asked = 0;
+    const output: string[] = [];
+    const program = buildProgram({
+      readConfig: () => null,
+      confirmUninstall: async () => {
+        asked += 1;
+        return false;
+      },
+      runUninstall: () => {
+        calls += 1;
+        return { removed: 0, restored: 0 };
+      },
+      writeLine: (line) => output.push(line),
+    });
+
+    await program.parseAsync(["uninstall"], { from: "user" });
+
+    expect(asked).toBe(1);
+    expect(calls).toBe(0);
+    expect(output).toEqual(["Uninstall cancelled."]);
+  });
+
+  test("uninstall --yes skips the confirmation", async () => {
+    let asked = 0;
+    const program = buildProgram({
+      readConfig: () => null,
+      confirmUninstall: async () => {
+        asked += 1;
+        return false;
+      },
+      runUninstall: () => ({ removed: 0, restored: 0 }),
+      writeLine: () => {},
+    });
+
+    await program.parseAsync(["uninstall", "--yes"], { from: "user" });
+
+    expect(asked).toBe(0);
   });
 
   test("passes custom harnesses from the config to uninstall", async () => {
@@ -239,7 +280,7 @@ describe("ferry --help", () => {
       writeLine: () => {},
     });
 
-    await program.parseAsync(["uninstall"], { from: "user" });
+    await program.parseAsync(["uninstall", "--yes"], { from: "user" });
 
     expect(received?.harnesses.map((harness) => harness.id)).toContain("opencode");
   });

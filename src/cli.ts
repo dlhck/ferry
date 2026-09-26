@@ -77,6 +77,7 @@ type CliDependencies = {
   readonly readConfig?: () => PartialOperatorConfig | null;
   readonly prompt?: InitPrompt;
   readonly approveHostKeys?: (request: SnapshotHostKeyApproval) => Promise<boolean>;
+  readonly confirmUninstall?: () => Promise<boolean>;
   readonly writeLine?: (line: string) => void;
 };
 
@@ -144,7 +145,12 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
   program
     .command("uninstall")
     .description("Remove Ferry's local state and restore paths changed by init")
-    .action(() => {
+    .option("--yes", "run without a confirmation prompt")
+    .action(async (options: { yes?: boolean }) => {
+      if (!options.yes && !(await (dependencies.confirmUninstall ?? confirmUninstall)())) {
+        (dependencies.writeLine ?? console.log)("Uninstall cancelled.");
+        return;
+      }
       const result = (dependencies.runUninstall ?? runUninstall)({ harnesses: registry().harnesses });
       const restored = `${result.restored} ${result.restored === 1 ? "path" : "paths"}`;
       const removed = `${result.removed} managed ${result.removed === 1 ? "path" : "paths"}`;
@@ -311,6 +317,13 @@ async function approveHostKeys(request: SnapshotHostKeyApproval): Promise<boolea
     throw new Error("init cancelled");
   }
   return accepted;
+}
+
+async function confirmUninstall(): Promise<boolean> {
+  const accepted = await prompts.confirm({
+    message: "Remove Ferry's local state and restore the paths changed by init?",
+  });
+  return accepted === true;
 }
 
 function promptMessage(field: InitField): string {
