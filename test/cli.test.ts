@@ -52,6 +52,7 @@ describe("ferry --help", () => {
     };
     const output: string[] = [];
     const program = buildProgram({
+      readConfig: () => null,
       runInit: async (input) => {
         received = input;
         return result;
@@ -84,6 +85,7 @@ describe("ferry --help", () => {
   test("wires an explicit SSH destination to init", async () => {
     let received: InitInput | undefined;
     const program = buildProgram({
+      readConfig: () => null,
       runInit: async (input) => {
         received = input;
         return {
@@ -120,6 +122,7 @@ describe("ferry --help", () => {
       ],
     };
     const program = buildProgram({
+      readConfig: () => null,
       runInit: async (_input, dependencies) => {
         initDependencies = dependencies;
         return {
@@ -146,6 +149,7 @@ describe("ferry --help", () => {
     let received: InitInput | undefined;
     const output: string[] = [];
     const program = buildProgram({
+      readConfig: () => null,
       runInit: async (input) => {
         received = input;
         return {
@@ -192,6 +196,7 @@ describe("ferry --help", () => {
   test("wires install --yes to the install command", async () => {
     let received: { yes: boolean } | undefined;
     const program = buildProgram({
+      readConfig: () => null,
       runInstall: async (input) => {
         received = input;
       },
@@ -207,6 +212,7 @@ describe("ferry --help", () => {
     const output: string[] = [];
     const result: UninstallResult = { removed: 11, restored: 3 };
     const program = buildProgram({
+      readConfig: () => null,
       runUninstall: (input) => {
         received = input;
         return result;
@@ -214,15 +220,85 @@ describe("ferry --help", () => {
       writeLine: (line) => output.push(line),
     });
 
-    await program.parseAsync(["uninstall"], { from: "user" });
+    await program.parseAsync(["uninstall", "--yes"], { from: "user" });
 
     expect(received?.harnesses).toHaveLength(5);
     expect(output).toEqual(["Uninstalled Ferry. Restored 3 paths and removed 11 managed paths."]);
   });
 
+  test("uninstall asks for confirmation and stops when refused", async () => {
+    let calls = 0;
+    let asked = 0;
+    const output: string[] = [];
+    const program = buildProgram({
+      readConfig: () => null,
+      confirmUninstall: async () => {
+        asked += 1;
+        return false;
+      },
+      runUninstall: () => {
+        calls += 1;
+        return { removed: 0, restored: 0 };
+      },
+      writeLine: (line) => output.push(line),
+    });
+
+    await program.parseAsync(["uninstall"], { from: "user" });
+
+    expect(asked).toBe(1);
+    expect(calls).toBe(0);
+    expect(output).toEqual(["Uninstall cancelled."]);
+  });
+
+  test("uninstall --yes skips the confirmation", async () => {
+    let asked = 0;
+    const program = buildProgram({
+      readConfig: () => null,
+      confirmUninstall: async () => {
+        asked += 1;
+        return false;
+      },
+      runUninstall: () => ({ removed: 0, restored: 0 }),
+      writeLine: () => {},
+    });
+
+    await program.parseAsync(["uninstall", "--yes"], { from: "user" });
+
+    expect(asked).toBe(0);
+  });
+
+  test("passes custom harnesses from the config to uninstall", async () => {
+    let received: UninstallInput | undefined;
+    const program = buildProgram({
+      readConfig: () => ({
+        harness: [{ id: "opencode", name: "OpenCode", skillRoot: ".config/opencode/skills" }],
+      }),
+      runUninstall: (input) => {
+        received = input;
+        return { removed: 0, restored: 0 };
+      },
+      writeLine: () => {},
+    });
+
+    await program.parseAsync(["uninstall", "--yes"], { from: "user" });
+
+    expect(received?.harnesses.map((harness) => harness.id)).toContain("opencode");
+  });
+
+  test("help does not read the config", () => {
+    const program = buildProgram({
+      readConfig: () => {
+        throw new Error("config read");
+      },
+    });
+
+    expect(program.helpInformation()).toContain("Ferry never copies logins.");
+  });
+
   test("wires an auth provider to the auth command", async () => {
     let received: { provider?: string } | undefined;
     const program = buildProgram({
+      readConfig: () => null,
       runAuth: async (input) => {
         received = input;
       },
@@ -236,6 +312,7 @@ describe("ferry --help", () => {
   test("rejects a credential-file flag before auth execution", async () => {
     let calls = 0;
     const program = buildProgram({
+      readConfig: () => null,
       runAuth: async () => {
         calls += 1;
       },
@@ -278,6 +355,7 @@ describe("ferry --help", () => {
       },
     };
     const program = buildProgram({
+      readConfig: () => null,
       runSync: async (input) => {
         received = input;
         return result;
@@ -309,6 +387,7 @@ describe("ferry --help", () => {
   test("wires status --json to the status command", async () => {
     let received: { json: boolean } | undefined;
     const program = buildProgram({
+      readConfig: () => null,
       runStatus: async (input) => {
         received = input;
       },
@@ -330,6 +409,7 @@ describe("ferry --help", () => {
   test("runs watch in the foreground with a shutdown signal", async () => {
     let signal: AbortSignal | undefined;
     const program = buildProgram({
+      readConfig: () => null,
       runWatch: async (input) => {
         signal = input.signal;
       },
@@ -345,6 +425,7 @@ describe("ferry --help", () => {
     const output: string[] = [];
     let calls = 0;
     const program = buildProgram({
+      readConfig: () => null,
       installWatchService: async () => {
         calls += 1;
         return { manager: "systemd", path: "/home/me/.config/systemd/user/ferry-watch.service" };

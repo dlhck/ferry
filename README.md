@@ -33,7 +33,7 @@ An SSH snapshot URL requires a loaded identity in the operator's SSH agent. Duri
 
 Add `--dry-run` to inspect the SSH probe, snapshot publish, config write, and managed symlinks without connecting to the box or changing the local filesystem.
 
-Run `ferry uninstall` to remove the local store and config, remove Ferry-managed symlinks, and restore the paths that existed before the first `ferry init`. The command refuses to write if a managed symlink was replaced with local content. Backups from older Ferry versions are restored when Ferry can identify one unambiguous backup for a managed path.
+Run `ferry uninstall` to remove the local store and config, remove Ferry-managed symlinks, and restore the paths that existed before the first `ferry init`. The command refuses to write if a managed symlink was replaced with local content. Backups from older Ferry versions are restored when Ferry can identify one unambiguous backup for a managed path. The command asks for confirmation first. Add `--yes` to skip the prompt.
 
 ## Automatic sync
 
@@ -115,6 +115,8 @@ name = "OpenCode"
 skill_root = ".config/opencode/skills"
 instruction_file = ".config/opencode/AGENTS.md"
 ```
+
+Every command uses these entries, and `ferry init` keeps them when it rewrites the file. Ferry refuses an unknown key or section in the config and names it.
 
 ## Development
 

@@ -12,6 +12,7 @@ export type OperatorConfig = {
   readonly publisher: string;
   readonly snapshotUrl: string;
   readonly host: OperatorHostConfig;
+  readonly harness?: readonly unknown[];
 };
 
 export type OperatorHostConfig =
@@ -36,6 +37,20 @@ export type PartialOperatorConfig = {
     readonly destination?: string;
   };
   readonly harness?: readonly unknown[];
+};
+
+/** TOML key to parsed property for each `[[harness]]` entry. */
+const HARNESS_KEYS = {
+  id: "id",
+  name: "name",
+  skill_root: "skillRoot",
+  instruction_file: "instructionFile",
+} as const;
+
+const SECTION_KEYS: Record<string, readonly string[]> = {
+  "": ["version", "publisher", "snapshot_url"],
+  "[host]": ["transport", "tailscale", "ssh_user", "destination"],
+  "[[harness]]": Object.keys(HARNESS_KEYS),
 };
 
 export class ConfigError extends Error {
@@ -72,23 +87,23 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     const line = sourceLine.trim();
     if (line === "" || line.startsWith("#")) continue;
     if (line === "[host]") {
-      section = "host";
+      section = "[host]";
       harness = null;
       continue;
     }
     if (line === "[[harness]]") {
-      section = "harness";
+      section = "[[harness]]";
       harness = {};
       config.harness.push(harness);
       continue;
     }
 
-    const match =
-      /^(version|publisher|snapshot_url|transport|tailscale|ssh_user|destination|id|name|skill_root|instruction_file)\s*=\s*(.+)$/.exec(
-        line,
-      );
-    if (!match) continue;
-    const [, key, encoded] = match;
+    const match = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(line);
+    if (!match) throw new ConfigError(`unsupported line ${line} in ${path}`);
+    const [, key = "", encoded] = match;
+    if (!SECTION_KEYS[section]?.includes(key)) {
+      throw new ConfigError(`unknown key ${key} in ${section || "the top level"} of ${path}`);
+    }
     if (key === "version") {
       if (section !== "" || encoded !== "1") throw new ConfigError(`unsupported config at ${path}`);
       config.version = 1;
@@ -98,18 +113,15 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     const value = parseString(encoded ?? "", path);
     if (section === "" && key === "publisher") config.publisher = value;
     else if (section === "" && key === "snapshot_url") config.snapshotUrl = value;
-    else if (section === "host" && key === "transport") {
+    else if (section === "[host]" && key === "transport") {
       if (value !== "tailscale" && value !== "ssh") {
         throw new ConfigError(`unsupported host transport in ${path}`);
       }
       config.host.transport = value;
-    } else if (section === "host" && key === "tailscale") config.host.tailscale = value;
-    else if (section === "host" && key === "ssh_user") config.host.sshUser = value;
-    else if (section === "host" && key === "destination") config.host.destination = value;
-    else if (section === "harness" && harness && key === "id") harness.id = value;
-    else if (section === "harness" && harness && key === "name") harness.name = value;
-    else if (section === "harness" && harness && key === "skill_root") harness.skillRoot = value;
-    else if (section === "harness" && harness && key === "instruction_file") harness.instructionFile = value;
+    } else if (section === "[host]" && key === "tailscale") config.host.tailscale = value;
+    else if (section === "[host]" && key === "ssh_user") config.host.sshUser = value;
+    else if (section === "[host]" && key === "destination") config.host.destination = value;
+    else if (harness) harness[HARNESS_KEYS[key as keyof typeof HARNESS_KEYS]] = value;
   }
 
   if (config.harness.length === 0) delete (config as { harness?: unknown }).harness;
@@ -138,6 +150,14 @@ export function writeConfig(config: OperatorConfig, home = homedir()): void {
             `ssh_user = ${JSON.stringify(config.host.sshUser)}`,
           ]),
       "",
+      ...(config.harness ?? []).flatMap((entry) => [
+        "[[harness]]",
+        ...Object.entries(HARNESS_KEYS).flatMap(([key, property]) => {
+          const value = (entry as Record<string, unknown>)[property];
+          return typeof value === "string" ? [`${key} = ${JSON.stringify(value)}`] : [];
+        }),
+        "",
+      ]),
     ].join("\n"),
     { mode: 0o600 },
   );

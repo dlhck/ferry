@@ -443,6 +443,32 @@ describe("ferry init", () => {
     });
   });
 
+  test("a second run keeps custom harness entries", async () => {
+    const home = makeHome();
+    write(join(home, ".ferry/config.toml"), [
+      "version = 1",
+      'publisher = "first-operator"',
+      'snapshot_url = "snapshot.git"',
+      "",
+      "[host]",
+      'tailscale = "box"',
+      'ssh_user = "david"',
+      "",
+      "[[harness]]",
+      'id = "opencode"',
+      'name = "OpenCode"',
+      'skill_root = ".config/opencode/skills"',
+      "",
+    ].join("\n"));
+    const { deps } = dependencies(home);
+
+    await runInit({ home, harnesses: BUILTIN_HARNESSES }, deps);
+
+    expect(readConfig(home)?.harness).toEqual([
+      { id: "opencode", name: "OpenCode", skillRoot: ".config/opencode/skills" },
+    ]);
+  });
+
   test("records and probes an explicit SSH destination", async () => {
     const home = makeHome();
     let target: unknown;
