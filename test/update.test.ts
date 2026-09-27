@@ -19,12 +19,61 @@ const config = {
   host: { tailscale: "builder.tailnet.ts.net", sshUser: "david" },
 };
 
+const PREFIX_END = 'cd "$HOME" || exit 1; ';
+
+const fill = (command: string) => (version: string) => command.replaceAll("{version}", `'${version}'`);
+
+function configTool(id: string, extra: Partial<ToolDescriptor> = {}): ToolDescriptor {
+  return {
+    id,
+    kind: "tool",
+    localVersion: `${id} --version`,
+    boxVersion: `${id} --version`,
+    recipe: { install: fill(`install ${id} {version}`), update: fill(`update ${id} {version}`) },
+    ...extra,
+  };
+}
+
+function agent(id: string): ToolDescriptor {
+  return {
+    id,
+    kind: "agent",
+    localVersion: `${id} --version`,
+    boxVersion: `${id} --version`,
+    install: { command: `install ${id}` },
+    update: { command: `${id} update`, binary: id },
+  };
+}
+
 const tools: readonly ToolDescriptor[] = [
-  { id: "gh", update: { command: "sudo apt install gh -y" } },
-  { id: "claude", update: { command: "claude update", binary: "claude" } },
-  { id: "codex", update: { command: "codex update", binary: "codex" } },
-  { id: "aider", install: { command: "install aider" } },
+  {
+    id: "gh",
+    kind: "tool",
+    localVersion: "gh --version",
+    boxVersion: "gh --version",
+    install: { command: "install gh" },
+    update: { command: "sudo apt install gh -y" },
+  },
+  agent("claude"),
+  agent("codex"),
+  configTool("pnpm", { dependsOn: ["node"] }),
+  configTool("node"),
 ];
+
+const LOCAL_VERSIONS: Readonly<Record<string, string>> = {
+  "gh --version": "gh version 2.92.0",
+  "claude --version": "2.1.0",
+  "codex --version": "0.156.1",
+  "node --version": "v24.16.0",
+  "pnpm --version": "11.17.0",
+};
+
+const BOX_VERSIONS: Readonly<Record<string, string>> = {
+  "gh --version": "gh version 2.91.0",
+  "claude --version": "2.0.0",
+  "codex --version": "0.150.0",
+  "node --version": "v24.16.0",
+};
 
 type Recorder = {
   readonly box: string[];
@@ -32,9 +81,17 @@ type Recorder = {
   readonly output: string[];
 };
 
+/** The command after the nvm and home prefix of a version read, or null for another command. */
+function versionRead(script: string): string | null {
+  const at = script.indexOf(PREFIX_END);
+  return at === -1 ? null : script.slice(at + PREFIX_END.length);
+}
+
 function dependencies(
   options: {
     readonly installed?: readonly string[];
+    readonly localVersions?: Readonly<Record<string, string>>;
+    readonly boxVersions?: Readonly<Record<string, string>>;
     readonly confirm?: () => Promise<boolean | symbol | undefined>;
     readonly boxFails?: readonly string[];
     readonly localFails?: readonly string[];
@@ -42,6 +99,8 @@ function dependencies(
 ): { recorder: Recorder; deps: Partial<UpdateCommandDependencies> } {
   const recorder: Recorder = { box: [], local: [], output: [] };
   const installed = options.installed ?? ["claude", "codex"];
+  const localVersions = options.localVersions ?? LOCAL_VERSIONS;
+  const boxVersions = options.boxVersions ?? BOX_VERSIONS;
   return {
     recorder,
     deps: {
@@ -49,6 +108,12 @@ function dependencies(
       readConfig: () => config,
       createLink: () => ({
         run: async (command: string): Promise<LinkResult> => {
+          const read = versionRead(command);
+          if (read !== null) {
+            const stdout = boxVersions[read];
+            if (stdout === undefined) return { ok: false, error: { code: "command-failed", origin: "box", message: "missing" } };
+            return { ok: true, address: "100.64.0.1", stdout, stderr: "" };
+          }
           recorder.box.push(command);
           if (options.boxFails?.includes(command)) {
             return {
@@ -62,6 +127,11 @@ function dependencies(
       local: {
         run: async (command: HostCommand): Promise<HostCommandResult> => {
           const script = command.argv.at(-1) ?? "";
+          const read = versionRead(script);
+          if (read !== null) {
+            const stdout = localVersions[read];
+            return { exitCode: stdout === undefined ? 127 : 0, stdout: stdout ?? "", stderr: "", timedOut: false };
+          }
           const probe = /^command -v (\S+)$/.exec(script);
           if (probe) {
             const found = installed.includes(probe[1] ?? "");
@@ -79,35 +149,40 @@ function dependencies(
 }
 
 const PLAN = [
-  "Box gh: sudo apt install gh -y",
-  "Box claude: claude update",
-  "Box codex: codex update",
-  "Box aider: skipped, no update command",
+  "Box gh: update 2.92.0 (policy operator): sudo apt install gh -y",
+  "Box claude: update latest (policy latest): claude update",
+  "Box codex: update latest (policy latest): codex update",
+  "Box node: skipped, the box has 24.16.0 (policy operator)",
+  "Box pnpm: install 11.17.0 (policy operator): install pnpm '11.17.0'",
   "Operator gh: skipped, no own update command",
   "Operator claude: claude update",
   "Operator codex: codex update",
-  "Operator aider: skipped, no update command",
+  "Operator pnpm: skipped, no own update command",
+  "Operator node: skipped, no own update command",
 ];
 
 describe("update plan", () => {
-  test("lists every box update and only the installed operator tools", async () => {
+  test("plans the box by version in depends order and updates only the installed agent CLIs on the operator machine", async () => {
     const { recorder, deps } = dependencies({ installed: ["claude"] });
 
-    const plan = await planUpdate(tools, deps.local!);
+    const plan = await planUpdate(tools, undefined, deps.local!, deps.createLink!(config.host as never));
 
-    expect(plan.steps).toEqual([
-      { target: "box", tool: "gh", command: "sudo apt install gh -y" },
-      { target: "box", tool: "claude", command: "claude update" },
-      { target: "box", tool: "codex", command: "codex update" },
-      { target: "operator", tool: "claude", command: "claude update" },
+    expect(plan.box.map(({ tool, action, command }) => [tool, action, command])).toEqual([
+      ["gh", "update", "sudo apt install gh -y"],
+      ["claude", "update", "claude update"],
+      ["codex", "update", "codex update"],
+      ["node", "skip-same", undefined],
+      ["pnpm", "install", "install pnpm '11.17.0'"],
     ]);
-    expect(plan.skipped).toEqual([
-      { target: "box", tool: "aider", reason: "no update command" },
-      { target: "operator", tool: "gh", reason: "no own update command" },
-      { target: "operator", tool: "codex", reason: "not installed" },
-      { target: "operator", tool: "aider", reason: "no update command" },
+    expect(plan.operator).toEqual([
+      { tool: "gh", reason: "no own update command" },
+      { tool: "claude", command: "claude update" },
+      { tool: "codex", reason: "not installed" },
+      { tool: "pnpm", reason: "no own update command" },
+      { tool: "node", reason: "no own update command" },
     ]);
     expect(recorder.local).toEqual([]);
+    expect(recorder.box).toEqual([]);
   });
 
   test("the builtin tools carry the verified vendor update commands", () => {
@@ -161,7 +236,7 @@ describe("update command", () => {
 
     await runUpdateCommand({ yes: false, dryRun: false }, deps);
 
-    expect(recorder.box).toEqual(["sudo apt install gh -y", "claude update", "codex update"]);
+    expect(recorder.box).toEqual(["sudo apt install gh -y", "claude update", "codex update", "install pnpm '11.17.0'"]);
     expect(recorder.local).toEqual(["claude update", "codex update"]);
   });
 
@@ -177,16 +252,50 @@ describe("update command", () => {
     await runUpdateCommand({ yes: true, dryRun: false }, deps);
 
     expect(prompts).toBe(0);
-    expect(recorder.box).toHaveLength(3);
+    expect(recorder.box).toHaveLength(4);
   });
 
-  test("never installs a tool that is missing on the operator machine", async () => {
-    const { recorder, deps } = dependencies({ installed: [] });
+  test("never installs a tool that is missing on the operator machine, there or on the box", async () => {
+    const { recorder, deps } = dependencies({ installed: [], localVersions: { "claude --version": "2.1.0" } });
 
     await runUpdateCommand({ yes: true, dryRun: false }, deps);
 
     expect(recorder.local).toEqual([]);
+    expect(recorder.box).toEqual(["claude update", "codex update"]);
     expect(recorder.output).toContain("Operator claude: skipped, not installed");
+    expect(recorder.output).toContain("Box gh: skipped, not on the operator machine (policy operator)");
+    expect(recorder.output).toContain("Box pnpm: skipped, not on the operator machine (policy operator)");
+  });
+
+  test("uses the update recipe of a config tool when its box version differs", async () => {
+    const { recorder, deps } = dependencies({ boxVersions: { ...BOX_VERSIONS, "node --version": "v24.15.0", "pnpm --version": "11.17.0" } });
+
+    await runUpdateCommand({ yes: true, dryRun: false }, deps);
+
+    expect(recorder.box).toContain("update node '24.16.0'");
+    expect(recorder.output).toContain("Box pnpm: skipped, the box has 11.17.0 (policy operator)");
+  });
+
+  test("prints the output of an update after its step, such as the gh fallback warning", async () => {
+    const { recorder, deps } = dependencies();
+    const warning = "Warning: gh 2.92.0 is not in the apt repository. Installing the latest version.";
+
+    await runUpdateCommand({ yes: true, dryRun: false }, {
+      ...deps,
+      createLink: (options) => {
+        const link = deps.createLink!(options);
+        return {
+          run: async (command, runOptions) => {
+            const result = await link.run(command, runOptions);
+            return command === "sudo apt install gh -y" && result.ok ? { ...result, stdout: `${warning}\n` } : result;
+          },
+        };
+      },
+    });
+
+    const at = recorder.output.indexOf(`  ${warning}`);
+    expect(at).toBeGreaterThan(-1);
+    expect(recorder.output[at + 1]).toBe("Updated box gh.");
   });
 
   test("a failed update does not stop the others and the command fails", async () => {
@@ -198,12 +307,48 @@ describe("update command", () => {
     const run = runUpdateCommand({ yes: true, dryRun: false }, deps);
 
     await expect(run).rejects.toBeInstanceOf(UpdateError);
-    await expect(run).rejects.toThrow("2 of 5 updates failed: box claude, operator claude");
-    expect(recorder.box).toEqual(["sudo apt install gh -y", "claude update", "codex update"]);
+    await expect(run).rejects.toThrow("2 of 6 updates failed: box claude, operator claude");
+    expect(recorder.box).toEqual(["sudo apt install gh -y", "claude update", "codex update", "install pnpm '11.17.0'"]);
     expect(recorder.local).toEqual(["claude update", "codex update"]);
     expect(recorder.output).toContain("Failed to update box claude: update refused");
     expect(recorder.output).toContain("Failed to update operator claude: no network");
     expect(recorder.output).toContain("Updated operator codex.");
+  });
+
+  test("a failed dependency skips the tools that depend on it", async () => {
+    const { recorder, deps } = dependencies({
+      boxVersions: { ...BOX_VERSIONS, "node --version": "v24.15.0" },
+      boxFails: ["update node '24.16.0'"],
+    });
+
+    await expect(runUpdateCommand({ yes: true, dryRun: false }, deps)).rejects.toThrow(
+      "2 of 7 updates failed: box node, box pnpm",
+    );
+    expect(recorder.box).not.toContain("install pnpm '11.17.0'");
+    expect(recorder.output).toContain("Skipped box pnpm: it depends on node, which failed.");
+  });
+
+  test("refuses the whole update when a tool to change depends on a tool that the operator machine lacks", async () => {
+    const { recorder, deps } = dependencies({ localVersions: { ...LOCAL_VERSIONS, "node --version": "" } });
+
+    await expect(runUpdateCommand({ yes: true, dryRun: false }, deps)).rejects.toThrow(
+      "Update stopped before it changed anything. pnpm depends on node, which is not on the operator machine.",
+    );
+    expect(recorder.box).toEqual([]);
+    expect(recorder.local).toEqual([]);
+  });
+
+  test("latestOnly updates only the tools whose policy is latest, on both sides", async () => {
+    const { recorder, deps } = dependencies({ boxVersions: {} });
+
+    await runUpdateCommand({ yes: true, dryRun: false, latestOnly: true }, {
+      ...deps,
+      readConfig: () => ({ ...config, tools: { codex: "0.156.1" } }),
+    });
+
+    expect(recorder.box).toEqual(["install claude"]);
+    expect(recorder.local).toEqual(["claude update"]);
+    expect(recorder.output.some((line) => /gh|codex|node|pnpm/.test(line))).toBe(false);
   });
 
   test("shows a counted step for each update and prints each result after its step", async () => {
@@ -218,24 +363,27 @@ describe("update command", () => {
     };
 
     await expect(runUpdateCommand({ yes: true, dryRun: false }, { ...deps, progress })).rejects.toThrow(
-      "1 of 5 updates failed",
+      "1 of 6 updates failed",
     );
 
-    expect(events.slice(0, 2)).toEqual(["start:Checking the installed tools", "done"]);
-    expect(events.slice(-15)).toEqual([
-      "start:Updating box gh (1/5)",
+    expect(events.slice(0, 2)).toEqual(["start:Checking the tool versions", "done"]);
+    expect(events.slice(-18)).toEqual([
+      "start:Updating box gh (1/6)",
       "done",
       "Updated box gh.",
-      "start:Updating box claude (2/5)",
+      "start:Updating box claude (2/6)",
       "fail",
       "Failed to update box claude: update refused",
-      "start:Updating box codex (3/5)",
+      "start:Updating box codex (3/6)",
       "done",
       "Updated box codex.",
-      "start:Updating operator claude (4/5)",
+      "start:Updating box pnpm (4/6)",
+      "done",
+      "Updated box pnpm.",
+      "start:Updating operator claude (5/6)",
       "done",
       "Updated operator claude.",
-      "start:Updating operator codex (5/5)",
+      "start:Updating operator codex (6/6)",
       "done",
       "Updated operator codex.",
     ]);
@@ -263,8 +411,9 @@ describe("update command registry", () => {
       },
     );
 
-    expect(recorder.output).toContain("Box claude: claude update");
-    expect(recorder.output).toContain("Box aider: skipped, no update command");
+    expect(recorder.output).toContain("Box claude: update latest (policy latest): claude update");
+    expect(recorder.output).toContain("Box aider: skipped, not on the operator machine (policy operator)");
+    expect(recorder.output).toContain("Operator aider: skipped, no own update command");
   });
 
   test("refuses a config whose [tools.<id>] tables the registry refuses", async () => {
@@ -341,7 +490,7 @@ describe("update command with integrations", () => {
         { yes: true, dryRun: false, includeIntegrations: true },
         { ...deps, readConfig: () => enabled, integrations: [fakePaseo([], true)] },
       ),
-    ).rejects.toThrow("1 of 6 updates failed: box paseo");
+    ).rejects.toThrow("1 of 7 updates failed: box paseo");
     expect(recorder.output).toContain("Failed to update box paseo: restart failed");
   });
 

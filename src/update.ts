@@ -1,37 +1,35 @@
 /**
- * Update runs the update command of every managed tool on the box and on the
- * operator machine. On the operator machine it updates only a tool that is
- * already there. It never installs one.
+ * Update puts each managed tool on the box at the version that its policy
+ * selects, with the same rules as install. It changes a tool only when the box
+ * version differs. On the operator machine it runs the own update command of
+ * an agent CLI that is already there. It never installs a tool there.
  */
 
 import * as prompts from "@clack/prompts";
-import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
+import { readConfig, resolveLinkOptions, type PartialOperatorConfig, type ToolsConfig } from "./config.ts";
 import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
 import { BunHostAdapter, Link, type HostAdapter, type LinkOptions } from "./link.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
 import { loadRegistry } from "./registry/load.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
+import { outputLines } from "./install.ts";
+import { describeStep, effectivePolicy, planTools, ToolPlanError, type ToolStep } from "./tools/resolve.ts";
 
 const UPDATE_COMMAND_TIMEOUT_MS = 30 * 60 * 1_000;
 const PROBE_TIMEOUT_MS = 10_000;
 
 export type UpdateTarget = "box" | "operator";
 
-export type UpdateStep = {
-  readonly target: UpdateTarget;
-  readonly tool: string;
-  readonly command: string;
-};
-
-export type UpdateSkip = {
-  readonly target: UpdateTarget;
-  readonly tool: string;
-  readonly reason: "no update command" | "no own update command" | "not installed";
-};
+/** A tool on the operator machine: its update command, or why ferry skips it. */
+export type OperatorUpdate =
+  | { readonly tool: string; readonly command: string }
+  | { readonly tool: string; readonly reason: "no own update command" | "not installed" };
 
 export type UpdatePlan = {
-  readonly steps: readonly UpdateStep[];
-  readonly skipped: readonly UpdateSkip[];
+  /** Each tool on the box, in `depends` order. */
+  readonly box: readonly ToolStep[];
+  /** Each tool on the operator machine, in registry order. */
+  readonly operator: readonly OperatorUpdate[];
 };
 
 export type UpdateCommandInput = {
@@ -42,6 +40,11 @@ export type UpdateCommandInput = {
    * box, so only `ferry update` sets it. `ferry watch` never does.
    */
   readonly includeIntegrations?: boolean;
+  /**
+   * Update only the tools whose policy is `latest`. `ferry watch` sets it, so
+   * an `operator` or exact version changes only with `ferry update`.
+   */
+  readonly latestOnly?: boolean;
 };
 
 export type UpdateCommandDependencies = {
@@ -64,29 +67,29 @@ export class UpdateError extends Error {
   }
 }
 
-/** The box gets every update command. The operator machine gets only the installed tools. */
+/**
+ * The box gets the tools whose box version differs from the resolved version.
+ * The operator machine gets only the installed agent CLIs. Throws
+ * ToolPlanError when the box plan cannot run.
+ */
 export async function planUpdate(
   tools: readonly ToolDescriptor[],
+  config: ToolsConfig | undefined,
   local: HostAdapter,
+  box: Pick<Link, "run">,
 ): Promise<UpdatePlan> {
-  const steps: UpdateStep[] = [];
-  const skipped: UpdateSkip[] = [];
+  const boxPlan = await planTools("update", tools, config, local, box);
+  const operator: OperatorUpdate[] = [];
   for (const tool of tools) {
-    if (tool.update) steps.push({ target: "box", tool: tool.id, command: tool.update.command });
-    else skipped.push({ target: "box", tool: tool.id, reason: "no update command" });
-  }
-  for (const tool of tools) {
-    if (!tool.update) {
-      skipped.push({ target: "operator", tool: tool.id, reason: "no update command" });
-    } else if (tool.update.binary === undefined) {
-      skipped.push({ target: "operator", tool: tool.id, reason: "no own update command" });
+    if (tool.update?.binary === undefined) {
+      operator.push({ tool: tool.id, reason: "no own update command" });
     } else if (!(await isInstalled(local, tool.update.binary))) {
-      skipped.push({ target: "operator", tool: tool.id, reason: "not installed" });
+      operator.push({ tool: tool.id, reason: "not installed" });
     } else {
-      steps.push({ target: "operator", tool: tool.id, command: tool.update.command });
+      operator.push({ tool: tool.id, command: tool.update.command });
     }
   }
-  return { steps, skipped };
+  return { box: boxPlan, operator };
 }
 
 export async function runUpdateCommand(
@@ -95,27 +98,35 @@ export async function runUpdateCommand(
 ): Promise<void> {
   const resolved = { ...defaultDependencies, ...dependencies };
   const { target, config } = loadTarget(resolved.readConfig);
-  const tools = resolved.tools ?? registryTools(config);
+  const registered = resolved.tools ?? registryTools(config);
+  const tools = input.latestOnly === true
+    ? registered.filter((tool) => effectivePolicy(tool, config?.tools) === "latest")
+    : registered;
   const integrations = input.includeIntegrations === true
     ? resolved.integrations.filter((integration) => config?.integrations?.[integration.id] === true)
     : [];
-  const plan = await step(
-    resolved.progress,
-    "Checking the installed tools",
-    () => planUpdate(tools, resolved.local),
-    undefined,
-    (plan) => `${plural(plan.steps.length, "update")}, ${plan.skipped.length} skipped`,
-  );
-  resolved.progress.plan(input.dryRun ? 1 : 1 + plan.steps.length + integrations.length);
+  const link = resolved.createLink(target);
+  let plan: UpdatePlan;
+  try {
+    plan = await step(
+      resolved.progress,
+      "Checking the tool versions",
+      () => planUpdate(tools, config?.tools, resolved.local, link),
+      undefined,
+      (plan) => `${plural(runnable(plan).length, "update")}, ${plan.box.length + plan.operator.length - runnable(plan).length} skipped`,
+    );
+  } catch (error) {
+    if (error instanceof ToolPlanError) throw new UpdateError(`Update stopped before it changed anything. ${error.message}`);
+    throw error;
+  }
+  const steps = runnable(plan);
+  resolved.progress.plan(input.dryRun ? 1 : 1 + steps.length + integrations.length);
 
-  // One line for each tool on each side, in registry order.
-  for (const side of ["box", "operator"] as const) {
-    for (const tool of tools) {
-      const step = plan.steps.find((entry) => entry.target === side && entry.tool === tool.id);
-      const skip = plan.skipped.find((entry) => entry.target === side && entry.tool === tool.id);
-      if (step) resolved.writeLine(`${label(side)} ${tool.id}: ${step.command}`);
-      if (skip) resolved.writeLine(`${label(side)} ${tool.id}: skipped, ${skip.reason}`);
-    }
+  for (const entry of plan.box) resolved.writeLine(`Box ${entry.tool}: ${describeStep(entry)}`);
+  for (const entry of plan.operator) {
+    resolved.writeLine(
+      "command" in entry ? `Operator ${entry.tool}: ${entry.command}` : `Operator ${entry.tool}: skipped, ${entry.reason}`,
+    );
   }
   for (const integration of integrations) {
     resolved.writeLine(`Box ${integration.id}:`);
@@ -130,21 +141,33 @@ export async function runUpdateCommand(
     }
   }
 
-  const link = resolved.createLink(target);
   const failed: string[] = [];
-  for (const [index, step] of plan.steps.entries()) {
-    resolved.progress.start(`Updating ${step.target} ${step.tool} (${index + 1}/${plan.steps.length})`);
-    const failure =
+  const failedOnBox = new Set<string>();
+  for (const [index, step] of steps.entries()) {
+    const name = `${step.target} ${step.tool}`;
+    const failedDependency = step.dependsOn.find((dependency) => failedOnBox.has(dependency));
+    if (failedDependency !== undefined) {
+      resolved.progress.skip(`Updating ${name} (${index + 1}/${steps.length})`, `${failedDependency} failed`);
+      failed.push(name);
+      failedOnBox.add(step.tool);
+      resolved.writeLine(`Skipped ${name}: it depends on ${failedDependency}, which failed.`);
+      continue;
+    }
+    resolved.progress.start(`Updating ${name} (${index + 1}/${steps.length})`);
+    const { failure, stdout } =
       step.target === "box"
         ? await runOnBox(link, step.command)
         : await runOnOperator(resolved.local, step.command);
     if (failure === null) {
       resolved.progress.done();
-      resolved.writeLine(`Updated ${step.target} ${step.tool}.`);
+      // The update output can hold a warning, such as the gh fallback to the latest version.
+      for (const line of outputLines(stdout)) resolved.writeLine(`  ${line}`);
+      resolved.writeLine(`Updated ${name}.`);
     } else {
       resolved.progress.fail(failure);
-      failed.push(`${step.target} ${step.tool}`);
-      resolved.writeLine(`Failed to update ${step.target} ${step.tool}: ${failure}`);
+      failed.push(name);
+      if (step.target === "box") failedOnBox.add(step.tool);
+      resolved.writeLine(`Failed to update ${name}: ${failure}`);
     }
   }
   for (const integration of integrations) {
@@ -157,9 +180,26 @@ export async function runUpdateCommand(
   }
   if (failed.length > 0) {
     throw new UpdateError(
-      `${failed.length} of ${plan.steps.length + integrations.length} updates failed: ${failed.join(", ")}`,
+      `${failed.length} of ${steps.length + integrations.length} updates failed: ${failed.join(", ")}`,
     );
   }
+}
+
+/** The commands to run: the box changes in `depends` order, then the operator updates. */
+function runnable(plan: UpdatePlan): {
+  readonly target: UpdateTarget;
+  readonly tool: string;
+  readonly command: string;
+  readonly dependsOn: readonly string[];
+}[] {
+  return [
+    ...plan.box.flatMap(({ tool, command, dependsOn }) =>
+      command === undefined ? [] : [{ target: "box" as const, tool, command, dependsOn }],
+    ),
+    ...plan.operator.flatMap((entry) =>
+      "command" in entry ? [{ target: "operator" as const, tool: entry.tool, command: entry.command, dependsOn: [] }] : [],
+    ),
+  ];
 }
 
 const defaultDependencies: UpdateCommandDependencies = {
@@ -171,10 +211,6 @@ const defaultDependencies: UpdateCommandDependencies = {
   writeLine: console.log,
   progress: noProgress,
 };
-
-function label(target: UpdateTarget): string {
-  return target === "box" ? "Box" : "Operator";
-}
 
 function loadTarget(read: () => PartialOperatorConfig | null): {
   target: LinkOptions;
@@ -211,21 +247,25 @@ async function isInstalled(local: HostAdapter, binary: string): Promise<boolean>
   }
 }
 
-/** Returns null on success, or the failure message. */
-async function runOnBox(link: Pick<Link, "run">, command: string): Promise<string | null> {
+/** The failure message, or null on success, and the standard output. */
+type CommandOutcome = { readonly failure: string | null; readonly stdout: string };
+
+async function runOnBox(link: Pick<Link, "run">, command: string): Promise<CommandOutcome> {
   const result = await link.run(command, { timeoutMs: UPDATE_COMMAND_TIMEOUT_MS });
-  return result.ok ? null : result.error.message;
+  return result.ok ? { failure: null, stdout: result.stdout } : { failure: result.error.message, stdout: "" };
 }
 
-/** Returns null on success, or the failure message. */
-async function runOnOperator(local: HostAdapter, command: string): Promise<string | null> {
+async function runOnOperator(local: HostAdapter, command: string): Promise<CommandOutcome> {
   try {
     const result = await local.run({ argv: ["sh", "-c", command], timeoutMs: UPDATE_COMMAND_TIMEOUT_MS });
-    if (result.timedOut) return "the command timed out";
-    if (result.exitCode === 0) return null;
-    return result.stderr.trim() || result.stdout.trim() || `the command exited with ${result.exitCode}`;
+    if (result.timedOut) return { failure: "the command timed out", stdout: "" };
+    if (result.exitCode === 0) return { failure: null, stdout: result.stdout };
+    return {
+      failure: result.stderr.trim() || result.stdout.trim() || `the command exited with ${result.exitCode}`,
+      stdout: "",
+    };
   } catch (error) {
-    return messageOf(error);
+    return { failure: messageOf(error), stdout: "" };
   }
 }
 

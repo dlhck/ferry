@@ -1,6 +1,6 @@
-/** Read the version of a tool on the operator machine. */
+/** Read the version of a tool on the operator machine and on the box. */
 
-import type { HostAdapter } from "../link.ts";
+import type { HostAdapter, Link } from "../link.ts";
 import type { ToolDescriptor } from "../registry/types.ts";
 
 const VERSION_TIMEOUT_MS = 15_000;
@@ -39,4 +39,18 @@ export async function readLocalVersion(
   } catch {
     return null;
   }
+}
+
+/**
+ * The version of the tool on the box, or null when the box does not have the
+ * tool. The same rules apply as on the operator machine.
+ */
+export async function readBoxVersion(
+  tool: Pick<ToolDescriptor, "boxVersion">,
+  box: Pick<Link, "run">,
+): Promise<string | null> {
+  if (tool.boxVersion === undefined) return null;
+  const result = await box.run(PREFIX + tool.boxVersion, { timeoutMs: VERSION_TIMEOUT_MS });
+  if (!result.ok) return null;
+  return parseVersion(result.stdout) ?? parseVersion(result.stderr);
 }
