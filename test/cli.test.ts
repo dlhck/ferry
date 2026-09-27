@@ -1114,3 +1114,60 @@ describe("ferry --version", () => {
     }
   });
 });
+
+describe("ferry tunnel", () => {
+  const BOXES: PartialOperatorConfig = {
+    version: 1,
+    publisher: "operator",
+    snapshotUrl: "snapshot.git",
+    defaultBox: "a",
+    boxes: [
+      { name: "a", host: { transport: "ssh", destination: "dev@box-a.example" } },
+      { name: "lab", host: { tailscale: "lab", sshUser: "dev" } },
+    ],
+  };
+  const HOST: PartialOperatorConfig = {
+    version: 1,
+    publisher: "operator",
+    snapshotUrl: "snapshot.git",
+    host: { transport: "ssh", destination: "dev@box.example" },
+  };
+
+  async function tunnelInput(config: PartialOperatorConfig, args: string[]): Promise<unknown> {
+    let captured: unknown;
+    await buildProgram({
+      readConfig: () => config,
+      runTunnel: async (input) => {
+        captured = input;
+      },
+      writeLine: () => {},
+    }).parseAsync(args, { from: "user" });
+    return captured;
+  }
+
+  test("passes the ports, --list, and the box of --box, then default_box, then the only box", async () => {
+    expect(await tunnelInput(BOXES, ["tunnel", "3000", "5173:4000", "--box", "lab"])).toEqual({
+      ports: ["3000", "5173:4000"],
+      list: false,
+      box: { name: "lab", host: { tailscale: "lab", sshUser: "dev" } },
+    });
+    expect(await tunnelInput(BOXES, ["tunnel", "--list"])).toEqual({
+      ports: [],
+      list: true,
+      box: { name: "a", host: { transport: "ssh", destination: "dev@box-a.example" } },
+    });
+    expect(await tunnelInput(HOST, ["tunnel", "3000"])).toEqual({
+      ports: ["3000"],
+      list: false,
+      box: { name: "default", host: { transport: "ssh", destination: "dev@box.example" } },
+    });
+  });
+
+  test("refuses more than one box and an unknown box", async () => {
+    await expect(tunnelInput(BOXES, ["tunnel", "3000", "--box", "a", "--box", "lab"])).rejects.toThrow(
+      "ferry tunnel changes one box. Give --box once.",
+    );
+    await expect(tunnelInput({ ...BOXES, defaultBox: undefined }, ["tunnel", "3000"])).rejects.toThrow("Add --box <name>");
+    await expect(tunnelInput(BOXES, ["tunnel", "3000", "--box", "c"])).rejects.toThrow("unknown box c.");
+  });
+});
