@@ -127,6 +127,22 @@ const DISABLE_COMMAND = [
 const UNINSTALL_COMMAND = `npm uninstall -g --prefix "$HOME/.local" ${PACKAGE}`;
 const KEEP_DATA = "Ferry keeps ~/.paseo on the box. It holds the Paseo config, agent state and worktrees.";
 
+/** The target version of an update, the daemon version on the box, and the warnings of the check. */
+type UpdateCheck = {
+  /** Null when there is no local app and npm view failed. */
+  readonly target: string | null;
+  /** Null when Ferry could not read the version, or the daemon does not run. */
+  readonly box: string | null;
+  readonly warnings: readonly string[];
+};
+
+/** The report line when the box already runs the target version, else null. */
+function currentLine(check: UpdateCheck): string | null {
+  return check.target !== null && check.box === check.target
+    ? `Paseo ${check.target} is current. Ferry does not install it or restart ${UNIT}.`
+    : null;
+}
+
 function installCommand(version: string | null): string {
   return `npm install -g --prefix "$HOME/.local" ${PACKAGE}@${version ?? "latest"}`;
 }
@@ -184,6 +200,27 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
     );
   };
 
+  /**
+   * Find the version to install and the version that the daemon on the box
+   * runs. The target is the local app version, else the npm latest version.
+   * Both reads change nothing.
+   */
+  const checkUpdate = async (link: IntegrationLink, local: LocalVersion): Promise<UpdateCheck> => {
+    const target = local.version ?? (await runVersion(host, ["npm", "view", PACKAGE, "version"]));
+    if (target === null) {
+      const warning = `Warning: npm view ${PACKAGE} version failed. Ferry installs the npm latest tag and restarts ${UNIT}.`;
+      return { target, box: null, warnings: [warning] };
+    }
+    const result = await link.run(STATUS_COMMAND, { timeoutMs: BOX_TIMEOUT_MS });
+    const status = result.ok ? parseDaemonStatus(result.stdout) : null;
+    const box = status?.localDaemon === "running" ? status.daemonVersion : null;
+    if (box === null) {
+      const warning = `Warning: Ferry could not read the Paseo version on the box. Ferry installs Paseo and restarts ${UNIT}.`;
+      return { target, box, warnings: [warning] };
+    }
+    return { target, box, warnings: [] };
+  };
+
   const self: Integration = {
     id: "paseo",
     name: "Paseo",
@@ -203,7 +240,7 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
       }
       return { version: null, source: null };
     },
-    async plan(action: IntegrationAction): Promise<readonly string[]> {
+    async plan(action: IntegrationAction, link?: IntegrationLink): Promise<readonly string[]> {
       if (action === "disable" || action === "purge") {
         return [
           "Box commands:",
@@ -218,14 +255,26 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
         local.version === null
           ? "Local app: not found. Ferry installs the npm latest tag. The version is not pinned."
           : `Local app: Paseo ${local.version} (${local.source})`,
-        "Box commands:",
       ];
       if (action === "update") {
-        lines.push(...indent(installCommand(local.version)), ...indent(RESTART_COMMAND), ...indent(STATUS_COMMAND));
-        lines.push("The restart stops the agents that run on the box.");
+        // Only the update plan reads the box, and only the daemon version.
+        const check = link === undefined ? null : await checkUpdate(link, local);
+        if (check !== null) {
+          const current = currentLine(check);
+          if (current !== null) return [...lines, current];
+          lines.push(...check.warnings, ...(check.box === null ? [] : [`Box: Paseo ${check.box}`]));
+        }
+        lines.push(
+          "Box commands:",
+          ...indent(installCommand(check?.target ?? local.version)),
+          ...indent(RESTART_COMMAND),
+          ...indent(STATUS_COMMAND),
+          "The restart stops the agents that run on the box.",
+        );
         return lines;
       }
       lines.push(
+        "Box commands:",
         ...indent(NODE_COMMAND),
         ...indent(`${NODE_VERSION_COMMAND}   # stop if the major version is lower than ${NODE_MAJOR}`),
         ...indent(installCommand(local.version)),
@@ -298,11 +347,15 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
       return lines;
     },
     async update(link: IntegrationLink, progress: Progress): Promise<readonly string[]> {
-      const { version } = await self.localVersion();
-      await install(link, progress, version);
+      const local = await self.localVersion();
+      const check = await step(progress, "Checking the Paseo version on the box", () => checkUpdate(link, local),
+        undefined, (result) => result.box ?? "unknown");
+      const current = currentLine(check);
+      if (current !== null) return [current];
+      await install(link, progress, check.target);
       await step(progress, `Restarting ${UNIT}`, () => boxRun(link, RESTART_COMMAND, `Ferry could not restart ${UNIT}`));
       const running = await step(progress, "Waiting for the Paseo daemon", () => waitForDaemon(link), undefined, (v) => v);
-      return [`Paseo ${running} runs on the box${version === null ? ". The version is not pinned." : "."}`];
+      return [...check.warnings, `Paseo ${running} runs on the box${local.version === null ? ". The version is not pinned." : "."}`];
     },
     async health(link: IntegrationLink): Promise<IntegrationHealth> {
       const [result, local] = await Promise.all([

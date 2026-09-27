@@ -550,6 +550,8 @@ The daemon has no password. Any process of any user on the box can control it th
 
 `ferry update` updates Paseo only when `paseo = true`. It installs the local app version with npm, then runs `systemctl --user restart ferry-paseo.service`. `paseo daemon restart` is not sufficient, because it keeps the old binary. The restart stops the agents that run on the box. For this reason, the daily update of `ferry watch` never updates Paseo.
 
+Before it installs, Ferry reads the version of the running daemon with `paseo daemon status --json`. If the box already runs the target version, Ferry prints `Paseo <version> is current` and does not install or restart. The target is the local app version. With no local app, the target is the output of `npm view @getpaseo/cli version` on this machine. If Ferry cannot read one of the two versions, it prints a warning and updates. `ferry update --dry-run` also reads the box version, and shows the skip or the box commands.
+
 ### Disable Paseo
 
 ```sh

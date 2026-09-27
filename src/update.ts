@@ -130,7 +130,7 @@ export async function runUpdateCommand(
   }
   for (const integration of integrations) {
     resolved.writeLine(`Box ${integration.id}:`);
-    for (const line of await integration.plan("update")) resolved.writeLine(`  ${line}`);
+    for (const line of await integration.plan("update", link)) resolved.writeLine(`  ${line}`);
   }
   if (input.dryRun) return;
   if (!input.yes) {
