@@ -386,6 +386,41 @@ describe("the deny set", () => {
     expect(names(seedOf(home))).toEqual(["unslop"]);
   });
 
+  test.each([
+    ["github-token", "gh" + "s_" + "x".repeat(36)],
+    ["github-token", "gh" + "u_" + "X".repeat(36)],
+    ["github-token", "github" + "_pat_" + "0".repeat(40)],
+    ["anthropic-key", "sk-" + "ant-" + "xxxx-xxxx_xxxx-xxxx_xxxx"],
+    ["openai-key", "sk-" + "proj-" + "X".repeat(24)],
+    ["slack-token", "xo" + "xb-" + "xxxx-xxxx-xxxx-xxxx-xxxx"],
+    ["aws-access-key", "AK" + "IA" + "X".repeat(16)],
+  ])("a %s placeholder in documentation does not refuse", (_code, placeholder) => {
+    const home = makeHome();
+    writeSkill(home, ".claude/skills", "unslop", {
+      "SKILL.md": "body",
+      "example.md": `{ "token": "${placeholder}" }\n`,
+    });
+
+    expect(names(seedOf(home))).toEqual(["unslop"]);
+  });
+
+  test("a real-looking token next to placeholders still refuses", () => {
+    const home = makeHome();
+    const token = tokens[3]![1];
+    writeSkill(home, ".claude/skills", "unslop", {
+      "SKILL.md": "body",
+      "example.md":
+        `{ "installationToken": "gh${"s_" + "x".repeat(36)}" }\n` +
+        `{ "token": "gh${"u_" + "0".repeat(36)}" }\n` +
+        `{ "token": "${token}" }\n`,
+    });
+
+    const refusal = refusalOf(home);
+
+    expect(refusal.forbidden.map((hit) => hit.code)).toEqual(["github-token"]);
+    expect(JSON.stringify(refusal)).not.toContain(token);
+  });
+
   test("a symlink out of the skill directory refuses", () => {
     const home = makeHome();
     write(home, ".ssh/id_rsa", "key");
