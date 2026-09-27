@@ -34,8 +34,12 @@ export interface Integration {
   readonly description: string;
   /** Find the local app version. It runs only on the operator machine. */
   localVersion(): Promise<LocalVersion>;
-  /** Lines with the exact box commands of `action`. Ferry prints them before it asks for confirmation. It does not connect to the box. */
-  plan(action: IntegrationAction): Promise<readonly string[]>;
+  /**
+   * Lines with the exact box commands of `action`. Ferry prints them before it
+   * asks for confirmation. Only the `update` plan uses `link`, to read the box
+   * version. The other plans do not connect to the box.
+   */
+  plan(action: IntegrationAction, link?: IntegrationLink): Promise<readonly string[]>;
   /** Install and start the service on the box. A repeat run gives the same result. Returns report lines. */
   enable(link: IntegrationLink, progress: Progress): Promise<readonly string[]>;
   /** Stop and remove the service. `purge` also removes the package on the box. Returns report lines. */
@@ -44,7 +48,7 @@ export interface Integration {
     progress: Progress,
     options: { readonly purge: boolean },
   ): Promise<readonly string[]>;
-  /** Install the local app version on the box and restart the service. Only `ferry update` calls it. Returns report lines. */
+  /** Install the local app version on the box and restart the service, if the box version differs. Only `ferry update` calls it. Returns report lines. */
   update(link: IntegrationLink, progress: Progress): Promise<readonly string[]>;
   /** Read the state of the service on the box without changes. */
   health(link: IntegrationLink): Promise<IntegrationHealth>;

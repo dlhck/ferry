@@ -494,6 +494,26 @@ describe("update command with integrations", () => {
     expect(recorder.output).toContain("Failed to update box paseo: restart failed");
   });
 
+  test("dry run gives the box link to the integration update plan", async () => {
+    const { recorder, deps } = dependencies();
+    const actions: string[] = [];
+    const paseo: Integration = {
+      ...fakePaseo([]),
+      plan: async (action, link) => {
+        actions.push(`${action} ${link === undefined ? "offline" : "with link"}`);
+        return [];
+      },
+    };
+
+    await runUpdateCommand(
+      { yes: false, dryRun: true, includeIntegrations: true },
+      { ...deps, readConfig: () => enabled, integrations: [paseo] },
+    );
+
+    expect(actions).toEqual(["update with link"]);
+    expect(recorder.box).toEqual([]);
+  });
+
   test("dry run prints the integration plan and updates nothing", async () => {
     const { recorder, deps } = dependencies();
     const calls: string[] = [];
