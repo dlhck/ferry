@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   readlinkSync,
+  realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -53,7 +54,25 @@ function adopt(source: string, target: string): void {
   }
   if (stat.isSymbolicLink()) {
     if (resolve(dirname(source), readlinkSync(source)) === target) return;
-    throw new AdoptionRefusal(source);
+    // A chain through another harness root that ends at the store copy becomes a direct link.
+    let real;
+    try {
+      real = realpathSync(source);
+    } catch (error) {
+      // A broken link has no content to lose. Manifest reports it as a leftover.
+      if (isMissing(error)) return;
+      throw error;
+    }
+    if (real !== realpathSync(target)) throw new AdoptionRefusal(source);
+    const held = `${source}.ferry-adopting-${process.pid}`;
+    symlinkSync(target, held);
+    try {
+      renameSync(held, source);
+    } catch (error) {
+      unlinkSync(held);
+      throw error;
+    }
+    return;
   }
   if (!stat.isDirectory() || !sameTree(source, target)) throw new AdoptionRefusal(source);
 

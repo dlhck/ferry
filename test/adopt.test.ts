@@ -62,6 +62,53 @@ describe("local skill adoption", () => {
     expect(lstatSync(path).isDirectory()).toBe(true);
   });
 
+  test("replaces a relative symlink chain into the store copy with a direct store link", () => {
+    const { home, store, seed } = fixture();
+    const intermediate = join(home, ".agents", "skills", "example");
+    const path = join(home, ".chain", "skills", "example");
+    mkdirSync(join(intermediate, ".."), { recursive: true });
+    mkdirSync(join(path, ".."), { recursive: true });
+    symlinkSync(join(store, "skills", "example"), intermediate);
+    symlinkSync(join("..", "..", ".agents", "skills", "example"), path);
+
+    adoptPublishedSkills(
+      home,
+      store,
+      [
+        { id: "chain", name: "Chain", skillRoot: ".chain/skills" },
+        { id: "agents", name: "Agents", skillRoot: ".agents/skills" },
+      ],
+      seed,
+    );
+
+    expect(lstatSync(path).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(path)).toBe(join(store, "skills", "example"));
+    expect(readlinkSync(intermediate)).toBe(join(store, "skills", "example"));
+  });
+
+  test("leaves a broken symlink chain in place", () => {
+    const { home, store, seed } = fixture();
+    const path = join(home, ".chain", "skills", "example");
+    mkdirSync(join(path, ".."), { recursive: true });
+    symlinkSync(join("..", "..", ".agents", "skills", "example"), path);
+
+    adoptPublishedSkills(home, store, [{ id: "chain", name: "Chain", skillRoot: ".chain/skills" }], seed);
+
+    expect(readlinkSync(path)).toBe(join("..", "..", ".agents", "skills", "example"));
+  });
+
+  test("refuses a symlink chain that resolves outside the store copy", () => {
+    const { home, store, seed } = fixture();
+    const path = join(home, ".chain", "skills", "example");
+    mkdirSync(join(path, ".."), { recursive: true });
+    symlinkSync(join("..", "..", ".custom", "skills", "example"), path);
+
+    expect(() =>
+      adoptPublishedSkills(home, store, [{ id: "chain", name: "Chain", skillRoot: ".chain/skills" }], seed),
+    ).toThrow(AdoptionRefusal);
+    expect(readlinkSync(path)).toBe(join("..", "..", ".custom", "skills", "example"));
+  });
+
   test("removes leftover links to the Codex system skills and keeps a real directory", () => {
     const { home, store, seed } = fixture();
     const leftover = join(home, ".custom", "skills", ".system");
