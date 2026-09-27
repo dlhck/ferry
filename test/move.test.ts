@@ -8,6 +8,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -100,7 +101,7 @@ async function move(w: World, input: Partial<MoveInput> & { path: string }, over
   let error: unknown = null;
   try {
     await runMove(
-      { fromBox: false, dryRun: false, remove: false, includeEnv: false, ...input },
+      { fromBox: false, dryRun: false, remove: false, includeEnv: false, allowSecrets: false, yes: false, ...input },
       {
         readConfig: () => ({ host: { transport: "ssh", destination: "user@box.example" } }),
         createLink: () => w.link,
@@ -110,6 +111,7 @@ async function move(w: World, input: Partial<MoveInput> & { path: string }, over
         now: () => new Date("2026-09-27T10:11:12.345Z"),
         writeLine: (line) => lines.push(line),
         progress,
+        interactive: false,
         ...overrides,
       },
     );
@@ -474,6 +476,204 @@ describe("ferry move to the box", () => {
       expect(skipped.sort()).toEqual([...SKIPPED].sort());
     });
   }
+});
+
+describe("ferry move --allow-secrets", () => {
+  // Fake credentials, built at runtime so that no secret scanner flags this file.
+  const AWS_KEY_ID = "AK" + "IA" + "Q2W3E4R5T6Y7U8I9";
+  const DB_PASSWORD = "hunt" + "er2-" + "example";
+  const GITHUB_TOKEN = "gh" + "p_" + "a".repeat(36);
+  const ENV_LOCAL = `AWS_ACCESS_KEY_ID=${AWS_KEY_ID}\nPASSWORD=${DB_PASSWORD}\nPORT=3000\n`;
+
+  function secretApp(w: World): string {
+    const app = project(w, w.operator);
+    write(join(app, ".env.local"), ENV_LOCAL);
+    chmodSync(join(app, ".env.local"), 0o644);
+    return app;
+  }
+
+  function expectNoSecretValue(result: { lines: string[]; events: string[]; error: Error | null }): void {
+    const text = [...result.lines, ...result.events, result.error?.message ?? ""].join("\n");
+    for (const value of [AWS_KEY_ID, DB_PASSWORD, GITHUB_TOKEN]) expect(text).not.toContain(value);
+  }
+
+  test("--include-env alone refuses an .env file with an AWS access key ID", async () => {
+    const w = world();
+    secretApp(w);
+
+    const result = await move(w, { path: "Developer/app", includeEnv: true });
+
+    expect(result.error).toBeNull();
+    expect(existsSync(join(w.box, "Developer/app/.env.local"))).toBe(false);
+    expect(result.lines).toContain("Refuse: .env.local (AWS access key ID in file content)");
+    expectNoSecretValue(result);
+  });
+
+  test("carries the .env file with mode 600, lists the secret kinds, and verifies its checksum", async () => {
+    const w = world();
+    secretApp(w);
+
+    const result = await move(w, { path: "Developer/app", includeEnv: true, allowSecrets: true });
+
+    expect(result.error).toBeNull();
+    const carried = join(w.box, "Developer/app/.env.local");
+    expect(readFileSync(carried, "utf8")).toBe(ENV_LOCAL);
+    expect(statSync(carried).mode & 0o777).toBe(0o600);
+    expect(result.lines).toContain(
+      "Carry with secrets: .env.local (AWS access key ID in file content; key PASSWORD holds a password or secret)",
+    );
+    const verified = w.commands.find((entry) => entry.command.includes("sha256sum"));
+    expect(Buffer.from(verified?.options.input ?? []).toString()).toContain(".env.local");
+    expect(result.lines.at(-1)).toMatch(/^Moved ~\/Developer\/app to the box: carried 1, refused 0,/);
+    expectNoSecretValue(result);
+  });
+
+  test("a changed .env file on the destination fails the checksum check", async () => {
+    const w = world();
+    secretApp(w);
+    const tampering: Pick<Link, "run"> = {
+      async run(command, options) {
+        const result = await w.link.run(command, options);
+        if (command.startsWith("tar -xf -")) write(join(w.box, "Developer/app/.env.local"), "PORT=1\n");
+        return result;
+      },
+    };
+
+    const result = await move(
+      w,
+      { path: "Developer/app", includeEnv: true, allowSecrets: true },
+      { createLink: () => tampering },
+    );
+
+    expect(result.error?.message).toContain("The checksum of .env.local on the box does not match");
+  });
+
+  test("--allow-secrets without --include-env is refused before any change", async () => {
+    const w = world();
+    secretApp(w);
+
+    const result = await move(w, { path: "Developer/app", allowSecrets: true });
+
+    expect(result.error?.message).toBe("--allow-secrets works only together with --include-env.");
+    expect(w.commands).toEqual([]);
+    expect(existsSync(join(w.box, "Developer"))).toBe(false);
+  });
+
+  test("other files keep every deny rule", async () => {
+    const w = world();
+    const app = secretApp(w);
+    write(join(app, "notes/token.md"), `GITHUB_TOKEN=${GITHUB_TOKEN}\n`);
+    write(join(app, "deploy.pem"), "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n");
+    write(join(app, ".env.keys"), "-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n-----END OPENSSH PRIVATE KEY-----\n");
+    write(join(app, ".env.bin"), new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]));
+
+    const result = await move(w, { path: "Developer/app", includeEnv: true, allowSecrets: true });
+
+    expect(result.error).toBeNull();
+    const boxApp = join(w.box, "Developer/app");
+    for (const path of ["notes/token.md", "deploy.pem", ".env.keys", ".env.bin"]) {
+      expect(existsSync(join(boxApp, path))).toBe(false);
+    }
+    expect(existsSync(join(boxApp, ".env.local"))).toBe(true);
+    expect(result.lines).toContain("Refuse: notes/token.md (GitHub token in file content)");
+    expect(result.lines).toContain("Refuse: deploy.pem (private key)");
+    expect(result.lines).toContain("Refuse: .env.keys (private key)");
+    expect(result.lines).toContain("Refuse: .env.bin (executable binary (ELF, Mach-O, or PE))");
+    expectNoSecretValue(result);
+  });
+
+  test("--dry-run lists the secret files and changes nothing", async () => {
+    const w = world();
+    const app = secretApp(w);
+    const before = { operator: listTree(w.operator), box: listTree(w.box) };
+    let asked = 0;
+
+    const result = await move(
+      w,
+      { path: "Developer/app", includeEnv: true, allowSecrets: true, dryRun: true },
+      { interactive: true, confirm: async () => ++asked > 0 },
+    );
+
+    expect(result.error).toBeNull();
+    expect(result.lines).toContain(
+      "Carry with secrets: .env.local (AWS access key ID in file content; key PASSWORD holds a password or secret)",
+    );
+    expect(asked).toBe(0);
+    expect({ operator: listTree(w.operator), box: listTree(w.box) }).toEqual(before);
+    expect(statSync(join(app, ".env.local")).mode & 0o777).toBe(0o644);
+    expectNoSecretValue(result);
+  });
+
+  test("on a terminal, asks before the transfer and stops when the operator declines", async () => {
+    const w = world();
+    secretApp(w);
+    const questions: string[] = [];
+
+    const result = await move(
+      w,
+      { path: "Developer/app", includeEnv: true, allowSecrets: true },
+      {
+        interactive: true,
+        confirm: async (question) => {
+          questions.push(question);
+          return false;
+        },
+      },
+    );
+
+    expect(questions).toEqual([
+      "Carry 1 file with secrets to the box? Anyone with access to the box user can read them.",
+    ]);
+    expect(result.error).toBeNull();
+    expect(result.lines.at(-1)).toBe("Move cancelled.");
+    expect(result.events).toEqual(["start:Preflight", "done", "pause"]);
+    expect(existsSync(join(w.box, "Developer"))).toBe(false);
+    expectNoSecretValue(result);
+  });
+
+  test("--yes carries the secret files without a question", async () => {
+    const w = world();
+    secretApp(w);
+    let asked = 0;
+
+    const result = await move(
+      w,
+      { path: "Developer/app", includeEnv: true, allowSecrets: true, yes: true },
+      { interactive: true, confirm: async () => ++asked > 0 },
+    );
+
+    expect(result.error).toBeNull();
+    expect(asked).toBe(0);
+    expect(existsSync(join(w.box, "Developer/app/.env.local"))).toBe(true);
+  });
+
+  test("without a terminal, carries the secret files without a question", async () => {
+    const w = world();
+    secretApp(w);
+    let asked = 0;
+
+    const result = await move(
+      w,
+      { path: "Developer/app", includeEnv: true, allowSecrets: true },
+      { interactive: false, confirm: async () => ++asked > 0 },
+    );
+
+    expect(result.error).toBeNull();
+    expect(asked).toBe(0);
+    expect(existsSync(join(w.box, "Developer/app/.env.local"))).toBe(true);
+  });
+
+  test("--from-box writes the secret files with mode 600 on this machine", async () => {
+    const w = world();
+    const boxApp = project(w, w.box);
+    write(join(boxApp, ".env.local"), ENV_LOCAL);
+    chmodSync(join(boxApp, ".env.local"), 0o644);
+
+    const result = await move(w, { path: "Developer/app", fromBox: true, includeEnv: true, allowSecrets: true });
+
+    expect(result.error).toBeNull();
+    expect(statSync(join(w.operator, "Developer/app/.env.local")).mode & 0o777).toBe(0o600);
+  });
 });
 
 describe("ferry move --from-box", () => {

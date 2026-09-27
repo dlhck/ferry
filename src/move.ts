@@ -12,6 +12,7 @@
  * machine runs it with `sh -c`. The box runs it through Link.
  */
 
+import * as prompts from "@clack/prompts";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -31,6 +32,10 @@ export type MoveInput = {
   readonly dryRun: boolean;
   readonly remove: boolean;
   readonly includeEnv: boolean;
+  /** Also carry an environment file that fails the token or secret-field rules. Needs `includeEnv`. */
+  readonly allowSecrets: boolean;
+  /** Carry the files with secrets without a question. */
+  readonly yes: boolean;
 };
 
 export type MoveDependencies = {
@@ -46,6 +51,9 @@ export type MoveDependencies = {
   readonly progress: Progress;
   /** All built-in integrations. Move uses the ones that the config enables. */
   readonly integrations: readonly Integration[];
+  /** True when Ferry can ask a question on a terminal. */
+  readonly interactive: boolean;
+  readonly confirm: (message: string) => Promise<boolean | symbol | undefined>;
 };
 
 /** The line for `--remove`. Ferry never removes the source project from an integration. */
@@ -90,7 +98,8 @@ export const SKIPPED_NAMES = [
 ] as const;
 
 type Hit = { readonly path: string; readonly code: string; readonly reason: string };
-type Carried = { readonly path: string; readonly sha256: string };
+/** `secrets` holds the kinds of secret in a carried environment file, never the values. */
+type Carried = { readonly path: string; readonly sha256: string; readonly secrets: readonly string[] };
 
 type SideResult = { readonly ok: true; readonly stdout: string } | { readonly ok: false; readonly message: string };
 
@@ -124,9 +133,14 @@ const NETWORK_TIMEOUT_MS = 120_000;
 const GH_TIMEOUT_MS = 15_000;
 const TRANSFER_TIMEOUT_MS = 15 * 60_000;
 const SECTION = "ferry-section";
+/** Content rules that refuse an environment file also with `allowSecrets`. */
+const ALWAYS_REFUSED = new Set(["private-key", "executable"]);
 
 export async function runMove(input: MoveInput, overrides: Partial<MoveDependencies> = {}): Promise<void> {
   const dependencies: MoveDependencies = { ...defaultDependencies(), ...overrides };
+  if (input.allowSecrets && !input.includeEnv) {
+    throw new MoveError("--allow-secrets works only together with --include-env.");
+  }
   const home = realpathSync(dependencies.home);
   const rel = homeRelative(input, home, dependencies.cwd);
   const { target, config } = loadTarget(dependencies.readConfig);
@@ -167,7 +181,11 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
         ? `Clone: ${plan.git.url} ${plan.git.branch ? `at branch ${plan.git.branch}` : "at the default branch"}`
         : "Clone: none, the folder has no git repository; Ferry copies the folder",
     );
-    for (const file of plan.carry) writeLine(`Carry: ${file.path}`);
+    for (const file of plan.carry) {
+      writeLine(
+        file.secrets.length > 0 ? `Carry with secrets: ${file.path} (${file.secrets.join("; ")})` : `Carry: ${file.path}`,
+      );
+    }
     for (const hit of plan.refused) writeLine(`Refuse: ${hit.path} (${hit.reason})`);
     for (const hit of plan.skipped) writeLine(`Skip: ${hit.path} (${hit.reason})`);
     for (const note of plan.notes) writeLine(`Note: ${note}`);
@@ -178,6 +196,17 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       );
     }
     if (input.dryRun) return;
+
+    const secrets = plan.carry.filter((file) => file.secrets.length > 0);
+    if (secrets.length > 0 && !input.yes && dependencies.interactive) {
+      progress.pause();
+      const readers = input.fromBox ? "" : " Anyone with access to the box user can read them.";
+      const question = `Carry ${plural(secrets.length, "file")} with secrets to ${destination.label}?${readers}`;
+      if ((await dependencies.confirm(question)) !== true) {
+        writeLine("Move cancelled.");
+        return;
+      }
+    }
 
     const incomplete = `The copy at ~/${rel} on ${destination.label} is incomplete. Move it away before you try again.`;
     await step(progress, `Cloning on ${destination.label}`, async () => {
@@ -194,8 +223,13 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
     } else {
       await step(progress, `Carrying ${plan.carry.length} ${plan.carry.length === 1 ? "file" : "files"}`, async () => {
         const archive = await createArchive(plan.stage, plan.carry.map((file) => file.path));
+        // tar keeps the source mode, so the files with secrets get mode 600 after the extraction.
+        const chmod =
+          secrets.length > 0
+            ? ` && cd ${destinationPath} && chmod 600 ${secrets.map((file) => quoteShell(`./${file.path}`)).join(" ")}`
+            : "";
         await must(
-          destination.run(`tar -xf - -C ${destinationPath}`, { input: archive, timeoutMs: TRANSFER_TIMEOUT_MS }),
+          destination.run(`tar -xf - -C ${destinationPath}${chmod}`, { input: archive, timeoutMs: TRANSFER_TIMEOUT_MS }),
           `Ferry could not carry the files. ${incomplete}`,
         );
       });
@@ -344,9 +378,16 @@ async function preflight(
       continue;
     }
     const bytes = readFileSync(full);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
     const hits = carriedContentHits(path, bytes);
-    if (hits.length > 0) refused.push(...hits);
-    else carry.push({ path, sha256: createHash("sha256").update(bytes).digest("hex") });
+    if (hits.length === 0) carry.push({ path, sha256, secrets: [] });
+    else if (!input.allowSecrets || carriedNameHit(path)?.code !== "dotenv") refused.push(...hits);
+    else {
+      const all = [...hits, ...envLineHits(path, bytes)];
+      const kept = all.find((hit) => ALWAYS_REFUSED.has(hit.code));
+      if (kept) refused.push(kept);
+      else carry.push({ path, sha256, secrets: [...new Set(all.map((hit) => hit.reason))] });
+    }
   }
 
   if (input.remove && refused.length > 0) {
@@ -538,6 +579,18 @@ const GIT_LIST = `git ls-files -z --others ${X_SKIPPED} && printf '\\0${SECTION}
 const FIND_LIST = `find . ${FIND_SKIPPED} -prune -o ! -type d -print0 && printf '\\0${SECTION}\\0' && find . -mindepth 1 ${FIND_SKIPPED} -prune -print0`;
 
 /**
+ * The content hits of each line of an environment file. `carriedContentHits`
+ * reports only the first content rule that finds a secret in the file, so
+ * Ferry checks each line alone to name all kinds of secret.
+ */
+function envLineHits(path: string, bytes: Uint8Array): Hit[] {
+  return Buffer.from(bytes)
+    .toString("utf8")
+    .split("\n")
+    .flatMap((line) => carriedContentHits(path, Buffer.from(line)));
+}
+
+/**
  * True when `path` matches an entry of `SKIPPED_NAMES`. For a skipped file name
  * such as `*.tsbuildinfo`, `git ls-files --directory` also lists its parent
  * directories.
@@ -686,6 +739,8 @@ function defaultDependencies(): MoveDependencies {
     writeLine: console.log,
     progress: noProgress,
     integrations: INTEGRATIONS,
+    interactive: process.stdin.isTTY === true && process.stdout.isTTY === true,
+    confirm: (message) => prompts.confirm({ message, initialValue: false }),
   };
 }
 
