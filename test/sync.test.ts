@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplyError } from "../src/apply.ts";
+import { buildProgram } from "../src/cli.ts";
 import type { OperatorConfig } from "../src/config.ts";
 import { denyRules, type Seed } from "../src/manifest.ts";
 import { loadRegistry, type RegistryConfig } from "../src/registry/load.ts";
@@ -26,7 +27,7 @@ import {
   type SyncDependencies,
   type SyncPlan,
 } from "../src/sync.ts";
-import type { Progress } from "../src/progress.ts";
+import { plainProgress, type Progress } from "../src/progress.ts";
 
 const config: OperatorConfig = {
   version: 1,
@@ -219,22 +220,38 @@ describe("runSync", () => {
     }
   });
 
-  test("dry-run prints nothing about Paseo when no integration is enabled", async () => {
-    const output: string[] = [];
-    const log = console.log;
-    console.log = (line: string) => output.push(line);
-    try {
-      await runSync(
-        { home: "/operator", dryRun: true },
-        { readConfig: () => config, publisher: () => "operator-machine", readSeed: () => seed },
-      );
-    } finally {
-      console.log = log;
-    }
+  for (const [label, integrations] of [
+    ["no [integrations] section", {}],
+    ["paseo = false", { integrations: { paseo: false } }],
+  ] as const) {
+    test(`sync --dry-run prints nothing about Paseo with ${label}`, async () => {
+      const lines: string[] = [];
+      const log = console.log;
+      console.log = (line: string) => lines.push(line);
+      try {
+        await buildProgram({
+          runSync: (input, dependencies) =>
+            runSync(
+              { ...input, home: "/operator" },
+              {
+                readConfig: () => ({ ...config, ...integrations }),
+                publisher: () => "operator-machine",
+                readSeed: () => seed,
+                ...dependencies,
+              },
+            ),
+          createProgress: () => plainProgress((line) => lines.push(`progress: ${line}`)),
+        }).parseAsync(["sync", "--dry-run"], { from: "user" });
+      } finally {
+        console.log = log;
+      }
 
-    expect(output.join("\n")).toContain("Deny list:");
-    expect(output.join("\n")).not.toMatch(/paseo/i);
-  });
+      const output = lines.join("\n");
+      expect(output).toContain("Deny list:");
+      expect(output).toContain("progress: Reading the portable set...");
+      expect(output).not.toMatch(/paseo/i);
+    });
+  }
 
   test("dry-run lists the carried settings keys that differ from the store, offline", async () => {
     const home = realpathSync(mkdtempSync(join(tmpdir(), "ferry-sync-home-")));

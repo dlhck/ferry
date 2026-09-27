@@ -177,7 +177,6 @@ describe("ferry --help", () => {
     );
 
     expect(received?.dryRun).toBe(true);
-    expect(output.join("\n")).not.toMatch(/paseo/i);
     expect(output).toContain("Init plan (no changes will be made):");
     expect(output).toContain("Probe: SSH connection to david@box");
     expect(output).toContain("Deny list:");

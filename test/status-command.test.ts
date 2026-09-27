@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { ApplyPlan, RemoteApplyInput } from "../src/apply.ts";
 import type { AuthStatusReport } from "../src/auth-start.ts";
+import { buildProgram } from "../src/cli.ts";
 import type { LinkResult } from "../src/link.ts";
+import { plainProgress } from "../src/progress.ts";
 import type { Registry } from "../src/registry/load.ts";
 import type { ToolDescriptor } from "../src/registry/types.ts";
 import type { TipReport } from "../src/store.ts";
@@ -227,16 +229,34 @@ describe("ferry status command", () => {
     expect(stack.reads.some((call) => /\bgit pull\b/.test(call))).toBe(false);
   });
 
-  test("prints nothing about Paseo when no integration is enabled", async () => {
-    const human = fakeStack();
-    const json = fakeStack();
+  for (const [label, integrations] of [
+    ["no [integrations] section", {}],
+    ["paseo = false", { integrations: { paseo: false } }],
+  ] as const) {
+    test(`status and status --json print nothing about Paseo with ${label}`, async () => {
+      const lines: string[] = [];
+      for (const args of [["status"], ["status", "--json"]]) {
+        const stack = fakeStack();
+        const readConfig = stack.dependencies.readConfig!;
+        await buildProgram({
+          runStatus: (input, dependencies) =>
+            runStatusCommand(input, {
+              ...stack.dependencies,
+              readConfig: () => ({ ...readConfig(), ...integrations }),
+              ...dependencies,
+            }),
+          writeLine: (line) => lines.push(line),
+          createProgress: () => plainProgress((line) => lines.push(`progress: ${line}`)),
+        }).parseAsync(args, { from: "user" });
+      }
 
-    await runStatusCommand({ json: false }, human.dependencies);
-    await runStatusCommand({ json: true }, json.dependencies);
-
-    expect(human.output.join("\n")).not.toMatch(/paseo/i);
-    expect(json.output.join("\n")).not.toMatch(/paseo/i);
-  });
+      const output = lines.join("\n");
+      expect(output).toContain("Host: ONLINE");
+      expect(output).toContain('"schemaVersion":1');
+      expect(output).toContain("progress: ");
+      expect(output).not.toMatch(/paseo/i);
+    });
+  }
 
   test("prints the exact report as JSON without human text", async () => {
     const stack = fakeStack();
