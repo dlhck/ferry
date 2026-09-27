@@ -1,7 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { isRetryableWatchError, runWatch, type WatchObservation } from "../src/watch.ts";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  isRetryableWatchError,
+  runWatch,
+  type WatchObservation,
+  type WatchState,
+  type WatchStateRecord,
+  type WatchSyncRequest,
+} from "../src/watch.ts";
 import { StoreRefusal } from "../src/store.ts";
-import { SyncError } from "../src/sync.ts";
+import { BoxesSyncError, SyncError, type SyncPlan } from "../src/sync.ts";
 import { createPaseo } from "../src/integrations/paseo.ts";
 import type { Integration } from "../src/integrations/types.ts";
 import { runUpdateCommand } from "../src/update.ts";
@@ -28,6 +38,7 @@ describe("watch", () => {
           syncs += 1;
         },
         sleep: async () => {},
+        readBoxes: () => ["default"],
         readState: () => null,
         writeState: () => {},
         writeLine: () => {},
@@ -48,12 +59,13 @@ describe("watch", () => {
       { signal: controller.signal, pollMs: 1, debounceMs: 2 },
       {
         observe: () => accepted(identities[index++] ?? current),
-        sync: async (identity) => {
+        sync: async ({ identity }) => {
           synced.push(identity);
           if (identity === "three") current = "four";
           else controller.abort();
         },
         sleep: async () => {},
+        readBoxes: () => ["default"],
         readState: () => null,
         writeState: () => {},
         writeLine: () => {},
@@ -63,34 +75,45 @@ describe("watch", () => {
     expect(synced).toEqual(["three", "four"]);
   });
 
-  test("retries transport failures with capped backoff", async () => {
+  test("retries transport failures with capped backoff and never sleeps for the backoff", async () => {
     const controller = new AbortController();
     let scans = 0;
-    let attempts = 0;
-    const delays: number[] = [];
+    let time = 0;
+    const attempts: number[] = [];
+    const sleeps = new Set<number>();
+    const lines: string[] = [];
 
     await runWatch(
-      { signal: controller.signal, pollMs: 1, debounceMs: 1, maxBackoffMs: 4_000 },
+      { signal: controller.signal, pollMs: 100, debounceMs: 100, maxBackoffMs: 4_000 },
       {
         observe: () => accepted(scans++ === 0 ? "one" : "two"),
         sync: async () => {
-          attempts += 1;
-          if (attempts < 4) throw Object.assign(new Error("offline"), { retryable: true });
+          attempts.push(time);
+          if (attempts.length < 4) throw new SyncError("link-failure", "box", "offline");
           controller.abort();
         },
-        isRetryable: (error) =>
-          error instanceof Error && "retryable" in error && error.retryable === true,
         sleep: async (milliseconds) => {
-          if (milliseconds > 1) delays.push(milliseconds);
+          sleeps.add(milliseconds);
+          time += milliseconds;
         },
+        now: () => time,
+        readBoxes: () => ["default"],
         readState: () => null,
         writeState: () => {},
-        writeLine: () => {},
+        writeLine: (line) => lines.push(line),
       },
     );
 
-    expect(attempts).toBe(4);
-    expect(delays).toEqual([1_000, 2_000, 4_000]);
+    expect(attempts).toHaveLength(4);
+    expect([...sleeps]).toEqual([100]);
+    expect(lines.filter((line) => line.startsWith("Watch sync failed"))).toEqual([
+      "Watch sync failed; retrying in 1000 ms: box: offline",
+      "Watch sync failed; retrying in 2000 ms: box: offline",
+      "Watch sync failed; retrying in 4000 ms: box: offline",
+    ]);
+    expect(attempts[1]! - attempts[0]!).toBeGreaterThanOrEqual(1_000);
+    expect(attempts[3]! - attempts[2]!).toBeGreaterThanOrEqual(4_000);
+    expect(attempts[3]! - attempts[2]!).toBeLessThan(4_200);
   });
 
   test("reports a refusal once and waits for content to change", async () => {
@@ -114,6 +137,7 @@ describe("watch", () => {
         },
         sync: async () => {},
         sleep: async () => {},
+        readBoxes: () => ["default"],
         readState: () => null,
         writeState: () => {},
         writeLine: (line) => lines.push(line),
@@ -126,7 +150,7 @@ describe("watch", () => {
   test("remembers a non-retryable refusal across restarts", async () => {
     const controller = new AbortController();
     let scans = 0;
-    const states: string[] = [];
+    const states: WatchStateRecord[] = [];
 
     await runWatch(
       { signal: controller.signal, pollMs: 1, debounceMs: 1 },
@@ -137,13 +161,14 @@ describe("watch", () => {
           throw new Error("content conflict");
         },
         sleep: async () => {},
+        readBoxes: () => ["default"],
         readState: () => null,
-        writeState: (_home, identity) => states.push(identity),
+        writeState: (_home, state) => states.push(state),
         writeLine: () => {},
       },
     );
 
-    expect(states).toEqual(["two"]);
+    expect(states.at(-1)).toEqual({ published: "one", boxes: { default: "two" } });
   });
 
   test("does not retry a store conflict", () => {
@@ -156,6 +181,211 @@ describe("watch", () => {
 
     expect(isRetryableWatchError(conflict)).toBe(false);
     expect(isRetryableWatchError(new SyncError("publish-failure", "git remote", "offline"))).toBe(true);
+  });
+});
+
+describe("multi-box watch", () => {
+  const offline = () => new SyncError("link-failure", "box", "box-b.example is offline");
+  const boxFailure = (ok: readonly string[], failed: readonly string[]) =>
+    new BoxesSyncError([
+      ...ok.map((name) => ({ name, plan: {} as SyncPlan })),
+      ...failed.map((name) => ({ name, plan: {} as SyncPlan, failure: { step: "Connecting", error: offline() } })),
+    ]);
+
+  /**
+   * Run the watch on a fake clock. Each poll advances the clock by `pollMs`.
+   * `script` gives the identity and the box names of each poll, and ends the watch when it returns null.
+   */
+  async function watchBoxes(options: {
+    readonly state?: WatchState | null;
+    readonly script: (poll: number) => { readonly identity: string; readonly boxes: readonly string[] } | null;
+    readonly sync?: (request: WatchSyncRequest, time: number) => Promise<void>;
+    readonly pollMs?: number;
+  }) {
+    const controller = new AbortController();
+    const pollMs = options.pollMs ?? 100;
+    let time = 0;
+    let poll = 0;
+    let current = options.script(0)!;
+    const record = {
+      requests: [] as (WatchSyncRequest & { time: number })[],
+      states: [] as WatchStateRecord[],
+      lines: [] as string[],
+      sleeps: new Set<number>(),
+      observes: [] as number[],
+    };
+    await runWatch(
+      { signal: controller.signal, pollMs, debounceMs: pollMs },
+      {
+        observe: () => {
+          record.observes.push(time);
+          return accepted(current.identity);
+        },
+        readBoxes: () => current.boxes,
+        sync: async (request) => {
+          record.requests.push({ ...request, time });
+          await options.sync?.(request, time);
+        },
+        sleep: async (milliseconds) => {
+          record.sleeps.add(milliseconds);
+          time += milliseconds;
+          poll += 1;
+          const next = options.script(poll);
+          if (next === null) controller.abort();
+          else current = next;
+        },
+        now: () => time,
+        readState: () => options.state === undefined ? { published: "one", boxes: { a: "one", b: "one" } } : options.state,
+        writeState: (_home, state) => record.states.push(state),
+        writeLine: (line) => record.lines.push(line),
+      },
+    );
+    return record;
+  }
+
+  test("an offline box does not stop the sync of the other box", async () => {
+    const record = await watchBoxes({
+      script: (poll) => (poll > 4 ? null : { identity: poll === 0 ? "one" : "two", boxes: ["a", "b"] }),
+      sync: async (request) => {
+        if (request.boxes.includes("b")) throw boxFailure(request.boxes.filter((name) => name !== "b"), ["b"]);
+      },
+    });
+
+    expect(record.requests[0]).toMatchObject({ identity: "two", boxes: ["a", "b"], publish: true });
+    expect(record.states.at(-1)).toEqual({ published: "two", boxes: { a: "two", b: "one" } });
+    expect(record.lines).toContain("[a] Synced Manifest two.");
+    expect(record.lines).toContain(
+      "[b] Watch sync failed; retrying in 1000 ms: box: box-b.example is offline",
+    );
+  });
+
+  test("the backoff of one box does not block the observe loop or a new change", async () => {
+    const record = await watchBoxes({
+      // The Manifest changes to "three" 500 ms after the first failure of b. Box b is still in its backoff then.
+      script: (poll) => (poll > 12 ? null : { identity: poll === 0 ? "one" : poll < 7 ? "two" : "three", boxes: ["a", "b"] }),
+      sync: async (request) => {
+        if (request.identity === "two" && request.boxes.includes("b")) {
+          throw boxFailure(request.boxes.filter((name) => name !== "b"), ["b"]);
+        }
+      },
+    });
+
+    expect([...record.sleeps]).toEqual([100]);
+    const failed = record.requests[0]!;
+    expect(failed).toMatchObject({ identity: "two", boxes: ["a", "b"], publish: true });
+    // The loop observes during the backoff of b.
+    expect(record.observes.filter((time) => time > failed.time && time < failed.time + 1_000).length).toBeGreaterThan(3);
+    expect(record.requests[1]).toMatchObject({ identity: "three", boxes: ["a", "b"], publish: true });
+    expect(record.requests[1]!.time - failed.time).toBeLessThan(1_000);
+    expect(record.states.at(-1)).toEqual({ published: "three", boxes: { a: "three", b: "three" } });
+  });
+
+  test("a due box retry syncs that box only and does not publish again", async () => {
+    let failures = 0;
+    const record = await watchBoxes({
+      script: (poll) => (poll > 50 ? null : { identity: poll === 0 ? "one" : "two", boxes: ["a", "b"] }),
+      sync: async (request) => {
+        if (request.boxes.includes("b") && failures < 2) {
+          failures += 1;
+          const others = request.boxes.filter((name) => name !== "b");
+          throw others.length > 0 ? boxFailure(others, ["b"]) : offline();
+        }
+      },
+    });
+
+    expect(record.requests.map(({ boxes, publish }) => ({ boxes, publish }))).toEqual([
+      { boxes: ["a", "b"], publish: true },
+      { boxes: ["b"], publish: false },
+      { boxes: ["b"], publish: false },
+    ]);
+    const [first, second, third] = record.requests;
+    expect(second!.time - first!.time).toBeGreaterThanOrEqual(1_000);
+    expect(third!.time - second!.time).toBeGreaterThanOrEqual(2_000);
+    expect(record.lines).toContain("[b] Watch sync failed; retrying in 2000 ms: box: box-b.example is offline");
+    expect(record.states.at(-1)).toEqual({ published: "two", boxes: { a: "two", b: "two" } });
+  });
+
+  test("reads the config each cycle: a new box syncs, and a removed box leaves the state", async () => {
+    const record = await watchBoxes({
+      script: (poll) =>
+        poll > 6 ? null : { identity: "one", boxes: poll < 3 ? ["a", "b"] : poll < 5 ? ["a", "b", "c"] : ["a", "c"] },
+    });
+
+    expect(record.requests.map(({ identity, boxes, publish }) => ({ identity, boxes, publish }))).toEqual([
+      { identity: "one", boxes: ["c"], publish: false },
+    ]);
+    expect(record.states.at(-1)).toEqual({ published: "one", boxes: { a: "one", c: "one" } });
+  });
+
+  test("a version 1 state file is the accepted identity of each configured box, and the watch writes version 2", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-watch-"));
+    try {
+      const path = join(home, ".ferry", "watch-state.json");
+      mkdirSync(join(home, ".ferry"));
+      writeFileSync(path, `${JSON.stringify({ version: 1, identity: "one" })}\n`);
+      const controller = new AbortController();
+      let scans = 0;
+      const requests: WatchSyncRequest[] = [];
+
+      await runWatch(
+        { home, signal: controller.signal, pollMs: 1, debounceMs: 1 },
+        {
+          observe: () => {
+            scans += 1;
+            if (scans > 3) controller.abort();
+            return accepted("one");
+          },
+          readBoxes: () => ["a", "b"],
+          sync: async (request) => { requests.push(request); },
+          sleep: async () => {},
+          writeLine: () => {},
+        },
+      );
+
+      expect(requests).toEqual([]);
+      expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ version: 2, published: "one", boxes: { a: "one", b: "one" } });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a [host] config watches the box default with plain lines and no prefix", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-watch-"));
+    try {
+      mkdirSync(join(home, ".ferry"));
+      writeFileSync(
+        join(home, ".ferry", "config.toml"),
+        ['version = 1', 'publisher = "operator"', 'snapshot_url = "snapshot.git"', "", "[host]", 'tailscale = "box"', 'ssh_user = "ferry"', ""].join("\n"),
+      );
+      const controller = new AbortController();
+      let scans = 0;
+      const requests: WatchSyncRequest[] = [];
+      const lines: string[] = [];
+
+      await runWatch(
+        { home, signal: controller.signal, pollMs: 1, debounceMs: 1 },
+        {
+          observe: () => {
+            scans += 1;
+            if (scans > 3) controller.abort();
+            return accepted(scans === 1 ? "one" : "two");
+          },
+          sync: async (request) => { requests.push(request); },
+          sleep: async () => {},
+          writeLine: (line) => lines.push(line),
+        },
+      );
+
+      expect(requests).toEqual([{ identity: "two", home, boxes: ["default"], publish: true }]);
+      expect(lines).toContain("Synced Manifest two.");
+      expect(JSON.parse(readFileSync(join(home, ".ferry", "watch-state.json"), "utf8"))).toEqual({
+        version: 2,
+        published: "two",
+        boxes: { default: "two" },
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 
@@ -184,6 +414,7 @@ describe("watch daily update", () => {
           record.syncs += 1;
         },
         sleep: async () => {},
+        readBoxes: () => ["default"],
         readState: () => null,
         writeState: () => {},
         writeLine: (line) => record.output.push(line),
@@ -288,6 +519,7 @@ describe("watch daily update", () => {
           return accepted("one");
         },
         sleep: async () => {},
+        readBoxes: () => ["default"],
         readState: () => null,
         writeState: () => {},
         writeLine: () => {},
@@ -335,6 +567,7 @@ describe("watch daily update", () => {
           return accepted("one");
         },
         sleep: async () => {},
+        readBoxes: () => ["default"],
         readState: () => null,
         writeState: () => {},
         writeLine: () => {},
@@ -369,5 +602,70 @@ describe("watch daily update", () => {
 
     expect(boxCommands).toEqual(["claude update"]);
     expect(localCommands).toEqual(["claude update"]);
+  });
+
+  test("the daily update runs once for all boxes, and skips and logs an offline box", async () => {
+    const controller = new AbortController();
+    const boxCommands: string[] = [];
+    const output: string[] = [];
+    let scans = 0;
+    let updates = 0;
+    let lastRun: number | null = null;
+
+    await runWatch(
+      { signal: controller.signal, pollMs: 1, debounceMs: 1, dailyUpdate: true },
+      {
+        observe: () => {
+          scans += 1;
+          if (scans > 5) controller.abort();
+          return accepted("one");
+        },
+        sleep: async () => {},
+        readBoxes: () => ["a", "b"],
+        readState: () => null,
+        writeState: () => {},
+        writeLine: (line) => output.push(line),
+        now: () => DAY_MS * 10,
+        readUpdateState: () => lastRun,
+        writeUpdateState: (_home, time) => { lastRun = time; },
+        runUpdate: (input, dependencies) => {
+          updates += 1;
+          return runUpdateCommand(input, {
+            ...dependencies,
+            tools: [{
+              id: "claude",
+              kind: "agent",
+              localVersion: "claude --version",
+              boxVersion: "claude --version",
+              install: { command: "install claude" },
+              update: { command: "claude update", binary: "claude" },
+            }],
+            integrations: [],
+            readConfig: () => ({
+              tools: { claude: "latest" },
+              boxes: [
+                { name: "a", host: { transport: "ssh", destination: "dev@box-a.example" } },
+                { name: "b", host: { transport: "ssh", destination: "dev@box-b.example" } },
+              ],
+            }),
+            createLink: (options) => ({
+              run: async (command) => {
+                if ("destination" in options && options.destination === "dev@box-b.example") {
+                  return { ok: false, error: { code: "ssh-failed", origin: "box", message: "box-b.example is offline" } };
+                }
+                if (!command.includes('cd "$HOME"') && command !== "true") boxCommands.push(`a: ${command}`);
+                return { ok: true, address: "box", stdout: command.includes("--version") ? "1.0.0" : "", stderr: "" };
+              },
+            }),
+            local: { run: async () => ({ exitCode: 1, stdout: "", stderr: "", timedOut: false }) },
+          });
+        },
+      },
+    );
+
+    expect(updates).toBe(1);
+    expect(boxCommands).toEqual(["a: claude update"]);
+    expect(output).toContain("[b] Box offline, Ferry skips it: box-b.example is offline");
+    expect(output.some((line) => line.startsWith("Watch update failed:") && line.includes("[b] box offline"))).toBe(true);
   });
 });
