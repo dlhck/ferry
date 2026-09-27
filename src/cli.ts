@@ -29,6 +29,7 @@ import {
 } from "./sync.ts";
 import { noProgress, plainProgress, terminalProgress, type Progress } from "./progress.ts";
 import { readConfig, type PartialOperatorConfig } from "./config.ts";
+import { INTEGRATIONS, integrationLines, type Integration } from "./integrations/index.ts";
 import { loadRegistry, type Registry } from "./registry/load.ts";
 import {
   runStatusCommand,
@@ -95,6 +96,7 @@ type CliDependencies = {
   ) => Promise<WatchServiceResult>;
   readonly runProcess?: RunProcess;
   readonly readConfig?: () => PartialOperatorConfig | null;
+  readonly integrations?: readonly Integration[];
   readonly prompt?: InitPrompt;
   readonly approveHostKeys?: (request: SnapshotHostKeyApproval) => Promise<boolean>;
   readonly confirmUninstall?: () => Promise<boolean>;
@@ -265,6 +267,14 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
           progress: options.json === true ? noProgress : progress(),
         },
       );
+    });
+
+  program
+    .command("integrations")
+    .description("List the integrations, whether each one is enabled, and the local app versions")
+    .action(async () => {
+      const lines = await integrationLines(config(), dependencies.integrations ?? INTEGRATIONS);
+      for (const line of lines) (dependencies.writeLine ?? console.log)(line);
     });
 
   const watch = program

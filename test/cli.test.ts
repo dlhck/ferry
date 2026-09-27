@@ -9,6 +9,7 @@ import type {
   InitResult,
   SnapshotHostKeyApproval,
 } from "../src/init.ts";
+import { createPaseo } from "../src/integrations/paseo.ts";
 import { denyRules } from "../src/manifest.ts";
 import type { SyncInput, SyncResult } from "../src/sync.ts";
 import type { UninstallInput, UninstallResult } from "../src/uninstall.ts";
@@ -176,12 +177,49 @@ describe("ferry --help", () => {
     );
 
     expect(received?.dryRun).toBe(true);
+    expect(output.join("\n")).not.toMatch(/paseo/i);
     expect(output).toContain("Init plan (no changes will be made):");
     expect(output).toContain("Probe: SSH connection to david@box");
     expect(output).toContain("Deny list:");
     for (const rule of denyRules()) {
       expect(output).toContain(`  ${rule.code}: ${rule.behavior} ${rule.description}`);
     }
+  });
+
+  test("lists the integrations from the config without other work", async () => {
+    const output: string[] = [];
+    const program = buildProgram({
+      readConfig: () => ({
+        host: { transport: "ssh", destination: "ploi@box" },
+        integrations: { paseo: true },
+      }),
+      integrations: [createPaseo({ platform: "win32" })],
+      writeLine: (line) => output.push(line),
+    });
+
+    await program.parseAsync(["integrations"], { from: "user" });
+
+    expect(output).toEqual([
+      "paseo  enabled  Paseo daemon on the box",
+      "  Local app: not found. The box version is not pinned.",
+      "  Connect to the box:",
+      "    Open Paseo Desktop.",
+      "    Open Settings → Add host → Remote SSH.",
+      "    Enter ssh://ploi@box.",
+      "",
+      "Ferry does not set up integrations on the box in this release.",
+    ]);
+  });
+
+  test("integrations has no enable or disable command in this release", async () => {
+    const program = buildProgram({ readConfig: () => null, writeLine: () => {} }).exitOverride();
+    program.configureOutput({ writeOut: () => {}, writeErr: () => {} });
+    program.commands
+      .find((command) => command.name() === "integrations")
+      ?.exitOverride()
+      .configureOutput({ writeOut: () => {}, writeErr: () => {} });
+
+    await expect(program.parseAsync(["integrations", "enable", "paseo"], { from: "user" })).rejects.toThrow();
   });
 
   test("init help lists every non-interactive flag", () => {
