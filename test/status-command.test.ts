@@ -92,7 +92,7 @@ function fakeStack(
         address: "100.64.0.8",
         stdout: command.startsWith("printf")
           ? "/box/home\n"
-          : command.startsWith("sudo -n true")
+          : command.startsWith("sudo -n /usr/bin/true")
             ? boxSudo
             : command.includes(" status ")
             ? boxChanges
@@ -297,7 +297,7 @@ describe("ferry status command", () => {
 
     expect(passwordless.output[0]).toContain("Box sudo: PASSWORDLESS");
     expect(passwordless.reads).toContain(
-      "link.run:sudo -n true >/dev/null 2>&1 && echo yes || echo no",
+      "link.run:sudo -n /usr/bin/true >/dev/null 2>&1 && echo yes || echo no",
     );
     expect(password.output[0]).toContain("Box sudo: PASSWORD REQUIRED");
     expect(password.output[0]).not.toContain("WARNING");

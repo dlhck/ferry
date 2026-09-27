@@ -23,7 +23,7 @@ import { boxChangesCommand } from "./sync.ts";
 
 const STORE_RELATIVE_PATH = ".ferry/store";
 /** `sudo -n` fails when sudo asks for a password. Only the answer goes to stdout. */
-const BOX_SUDO_COMMAND = "sudo -n true >/dev/null 2>&1 && echo yes || echo no";
+const BOX_SUDO_COMMAND = "sudo -n /usr/bin/true >/dev/null 2>&1 && echo yes || echo no";
 
 export type StatusCommandInput = {
   readonly json: boolean;
