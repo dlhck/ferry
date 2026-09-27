@@ -30,6 +30,13 @@ export type Progress = {
   pause(): void;
   /** Clear the live line, print the summary table, then write the held lines. */
   finish(): void;
+  /**
+   * Return a reporter for one box whose steps run at the same time as the
+   * steps of other boxes. Each step name starts with `[<name>] `. Its
+   * `finish()` does nothing. Use `groupProgress`, which also works for a
+   * reporter without this member.
+   */
+  group?(name: string): Progress;
 };
 
 export const noProgress: Progress = {
@@ -44,19 +51,38 @@ export const noProgress: Progress = {
   finish() {},
 };
 
+/**
+ * A reporter for the steps of box `name`, which run at the same time as the
+ * steps of other boxes. A reporter without `group` shows the steps one at a
+ * time, with `[<name>] ` before each step name.
+ */
+export function groupProgress(progress: Progress, name: string): Progress {
+  if (progress.group) return progress.group(name);
+  return {
+    ...progress,
+    plan() {},
+    start: (step) => progress.start(`[${name}] ${step}`),
+    skip: (step, detail) => progress.skip(`[${name}] ${step}`, detail),
+    finish() {},
+  };
+}
+
 /** Write one line when a step starts or its count changes. It writes no control characters and no table. */
 export function plainProgress(writeLine: (line: string) => void): Progress {
-  let step = "";
-  return {
-    ...noProgress,
-    start(name) {
-      step = name;
-      writeLine(`${name}...`);
-    },
-    count(current, total) {
-      writeLine(`${counted(step, current, total)}...`);
-    },
+  const track = (prefix: string): Progress => {
+    let step = "";
+    return {
+      ...noProgress,
+      start(name) {
+        step = `${prefix}${name}`;
+        writeLine(`${step}...`);
+      },
+      count(current, total) {
+        writeLine(`${counted(step, current, total)}...`);
+      },
+    };
   };
+  return { ...track(""), group: (name) => track(`[${name}] `) };
 }
 
 export type TerminalWriter = {
@@ -70,6 +96,8 @@ export type TerminalWriter = {
 
 type Row = {
   readonly step: string;
+  /** The step, with its count while it runs. */
+  label: string;
   result: "done" | "failed" | "skipped" | "running";
   detail: string;
   readonly started: number;
@@ -87,18 +115,27 @@ const CLEAR_LINE = "\r\x1b[2K";
  * `finish()`. A finished step leaves no line behind. The cursor is hidden only
  * while the line is live. Ctrl-C clears the line, shows the cursor, and then
  * stops the process unless another SIGINT handler owns the interrupt.
+ *
+ * The steps of groups run at the same time. The live line shows each running
+ * step, and the table keeps the rows of one group together, at the place of
+ * its first step.
  */
 export function lineProgress(terminal: TerminalWriter): Progress {
-  const rows: Row[] = [];
+  /** A step outside a group has its own slot. A group has one slot for all its steps. */
+  const slots: Row[][] = [];
   const held: Array<() => void> = [];
   let total = 0;
-  let label = "";
   let frame = 0;
   let timer: ReturnType<typeof setInterval> | null = null;
 
+  const rows = () => slots.flat();
   const draw = () => {
-    const current = rows.length;
+    const current = rows().length;
     const position = total > 0 ? `[${current}/${Math.max(total, current)}] ` : "";
+    const label = rows()
+      .filter((row) => row.result === "running")
+      .map((row) => row.label)
+      .join(" · ");
     const text = fit(`${FRAMES[frame % FRAMES.length]} ${position}${label}`, terminal.columns - 1);
     terminal.write(`${CLEAR_LINE}${text}`);
   };
@@ -125,55 +162,78 @@ export function lineProgress(terminal: TerminalWriter): Progress {
     }, FRAME_MS);
     timer.unref?.();
   };
-  const end = (result: "done" | "failed", detail = "") => {
-    stop();
-    const row = rows.at(-1);
-    if (row?.result !== "running") return;
-    row.result = result;
-    row.detail = detail;
-    row.ended = terminal.now();
-  };
   const flush = () => {
     for (const write of held.splice(0)) write();
   };
+  const hold = (writeLine: (line: string) => void) => (line: string) => {
+    held.push(() => writeLine(line));
+  };
+  const pause = () => {
+    stop();
+    flush();
+  };
+
+  /** The step methods of the reporter, or of one group when `prefix` is set. */
+  const track = (prefix: string) => {
+    let row: Row | null = null;
+    let slot: Row[] | null = null;
+    const add = (added: Row) => {
+      row = added;
+      if (!prefix) {
+        slots.push([added]);
+      } else if (slot) {
+        slot.push(added);
+      } else {
+        slot = [added];
+        slots.push(slot);
+      }
+    };
+    const end = (result: "done" | "failed", detail = "") => {
+      if (row?.result === "running") {
+        row.result = result;
+        row.detail = detail;
+        row.ended = terminal.now();
+      }
+      if (rows().some((other) => other.result === "running")) draw();
+      else stop();
+    };
+    return {
+      start(name: string) {
+        const now = terminal.now();
+        add({ step: `${prefix}${name}`, label: `${prefix}${name}`, result: "running", detail: "", started: now, ended: now });
+        live();
+        draw();
+      },
+      count(current: number, count: number) {
+        if (row?.result !== "running") return;
+        row.label = counted(row.step, current, count);
+        live();
+        draw();
+      },
+      done: (detail?: string) => end("done", detail),
+      fail: (detail?: string) => end("failed", detail),
+      skip(name: string, detail = "") {
+        const now = terminal.now();
+        add({ step: `${prefix}${name}`, label: `${prefix}${name}`, result: "skipped", detail, started: now, ended: now });
+      },
+    };
+  };
 
   return {
+    ...track(""),
     plan(planned) {
       total = planned;
     },
-    start(name) {
-      const now = terminal.now();
-      rows.push({ step: name, result: "running", detail: "", started: now, ended: now });
-      label = name;
-      live();
-      draw();
-    },
-    count(current, count) {
-      const row = rows.at(-1);
-      if (row?.result !== "running") return;
-      label = counted(row.step, current, count);
-      live();
-      draw();
-    },
-    done: (detail) => end("done", detail),
-    fail: (detail) => end("failed", detail),
-    skip(name, detail = "") {
-      const now = terminal.now();
-      rows.push({ step: name, result: "skipped", detail, started: now, ended: now });
-    },
-    hold: (writeLine) => (line) => {
-      held.push(() => writeLine(line));
-    },
-    pause() {
-      stop();
-      flush();
-    },
+    hold,
+    pause,
     finish() {
       stop();
-      if (rows.length > 0) terminal.write(`${summaryTable(rows, terminal).join("\n")}\n`);
-      rows.length = 0;
+      const all = rows();
+      if (all.length > 0) terminal.write(`${summaryTable(all, terminal).join("\n")}\n`);
+      slots.length = 0;
       flush();
     },
+    group: (name) => ({ ...track(`[${name}] `), plan() {}, hold, pause, finish() {} }),
   };
 }
 
