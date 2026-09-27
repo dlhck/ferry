@@ -4,12 +4,15 @@ import { createHash } from "node:crypto";
 import { hostname, homedir } from "node:os";
 import { join } from "node:path";
 import { commitApply, planApply, type ApplyPlan } from "./apply.ts";
+import { resolveTargetBox } from "./boxes.ts";
 import {
   configPath,
   readConfig as readOperatorConfig,
   resolveLinkOptions,
   writeConfig as writeOperatorConfig,
+  type BoxesOperatorConfig,
   type OperatorConfig,
+  type OperatorHostConfig,
   type PartialOperatorConfig,
 } from "./config.ts";
 import {
@@ -34,6 +37,8 @@ export type InitInput = {
   readonly sshUser?: string;
   readonly sshDestination?: string;
   readonly snapshotUrl?: string;
+  /** The box to init again when the config has `[box.<name>]` tables. The default is `default_box` or the only box. */
+  readonly box?: string;
 };
 
 export type InitField = "host" | "sshUser" | "sshDestination" | "snapshotUrl";
@@ -43,7 +48,7 @@ export type InitPrompt = (
   current: InitInput,
 ) => Promise<Pick<InitInput, InitField>>;
 
-type InitLink = {
+export type InitLink = {
   run(command: string, options?: RunOptions): Promise<LinkResult>;
 };
 
@@ -154,7 +159,19 @@ export async function runInit(
   const readConfig = dependencies.readConfig ?? readOperatorConfig;
   const existing = readConfig(home);
   refuseMixedTarget(input);
-  let values = mergeValues(input, existing);
+  const boxes = existing?.boxes;
+  if (boxes && (nonempty(input.host) || nonempty(input.sshUser) || nonempty(input.sshDestination))) {
+    throw new InitRefusal(
+      "invalid-values",
+      "the config has [box.<name>] tables, so ferry init does not change a box host. Use ferry box add to add a box.",
+    );
+  }
+  if (!boxes && input.box !== undefined) {
+    throw new InitRefusal("invalid-values", "--box needs [box.<name>] tables in the config. Use ferry box add to add a box.");
+  }
+  // With boxes, init runs again for one box and keeps all box tables.
+  const targetBox = existing && boxes ? resolveTargetBox(existing, input.box) : undefined;
+  let values = mergeValues(input, targetBox ? { ...existing, host: targetBox.host } : existing);
   let missing = missingFields(values);
 
   if (missing.length > 0 && dependencies.prompt) {
@@ -167,20 +184,22 @@ export async function runInit(
     throw new InitRefusal("missing-values", `missing init values: ${missing.join(", ")}`);
   }
 
-  const config: OperatorConfig = {
-    version: 1,
+  const host: OperatorHostConfig = values.sshDestination
+    ? { transport: "ssh", destination: values.sshDestination }
+    : { tailscale: required(values.host), sshUser: required(values.sshUser) };
+  const shared = {
+    version: 1 as const,
     publisher: existing?.publisher ?? dependencies.publisher?.() ?? hostname(),
     snapshotUrl: required(values.snapshotUrl),
-    host: values.sshDestination
-      ? { transport: "ssh", destination: values.sshDestination }
-      : { tailscale: required(values.host), sshUser: required(values.sshUser) },
     harness: existing?.harness,
     update: existing?.update,
     integrations: existing?.integrations,
     tools: existing?.tools,
   };
-  const snapshotTarget = snapshotSshTarget(config.snapshotUrl);
-  progress.plan(input.dryRun ? 1 : snapshotTarget ? 8 : 4);
+  const config: OperatorConfig | BoxesOperatorConfig = boxes
+    ? { ...shared, ...(existing?.defaultBox !== undefined ? { defaultBox: existing.defaultBox } : {}), boxes }
+    : { ...shared, host };
+  progress.plan(input.dryRun ? 1 : 3 + boxCheckSteps(config.snapshotUrl));
 
   const seed = await step(
     progress,
@@ -192,25 +211,13 @@ export async function runInit(
   if (input.dryRun) {
     return {
       dryRun: true,
-      plan: makeInitPlan(home, config, seed, input.harnesses),
+      plan: makeInitPlan(home, config, host, seed, input.harnesses),
       leftovers: seed.leftovers,
     };
   }
 
-  if (snapshotTarget) {
-    const agent = await step(
-      progress,
-      "Checking the operator SSH agent",
-      dependencies.checkAgent ?? checkOperatorAgent,
-      (check) => !check.ok,
-    );
-    if (!agent.ok) {
-      throw new InitRefusal(
-        "agent-refusal",
-        `operator SSH agent is unavailable or has no identities: ${agent.message} Run ssh-add before ferry init.`,
-      );
-    }
-  }
+  const target = resolveLinkOptions(host);
+  await checkBoxAccess(dependencies.createLink?.(target) ?? new Link(target), config.snapshotUrl, dependencies);
 
   const uninstallState = captureInitState({
     home,
@@ -218,42 +225,6 @@ export async function runInit(
     skillNames: seed.skills.map((skill) => skill.name),
     rootPaths: seed.roots.map((root) => root.path),
   });
-
-  const target = resolveLinkOptions(config.host);
-  const link = dependencies.createLink?.(target) ?? new Link(target);
-  const probe = await step(
-    progress,
-    "Connecting to the box",
-    () =>
-      snapshotTarget
-        ? link.run(
-            'if [ -z "$SSH_AUTH_SOCK" ]; then printf "%s\\n" "SSH agent forwarding is unavailable" >&2; exit 1; fi; ssh-add -l',
-            { agentForwarding: "git" },
-          )
-        : link.run("true"),
-    (result) => !result.ok,
-  );
-  if (!probe.ok) {
-    throw new InitRefusal(
-      snapshotTarget ? "agent-refusal" : "link-refusal",
-      `${probe.error.origin}: ${probe.error.message}`,
-    );
-  }
-  if (snapshotTarget) {
-    await approveSnapshotHostKey(link, snapshotTarget, dependencies.approveHostKeys, progress);
-    const access = await step(
-      progress,
-      "Checking access to the snapshot",
-      () => link.run(`git ls-remote ${quoteShell(config.snapshotUrl)} HEAD`, { agentForwarding: "git" }),
-      (result) => !result.ok,
-    );
-    if (!access.ok) {
-      throw new InitRefusal(
-        "snapshot-access-refusal",
-        `${access.error.origin}: could not read ${config.snapshotUrl} through the forwarded agent: ${access.error.message}`,
-      );
-    }
-  }
 
   const { store, publication } = await step(
     progress,
@@ -292,9 +263,77 @@ export async function runInit(
   };
 }
 
+/** The progress steps of `checkBoxAccess`. */
+export function boxCheckSteps(snapshotUrl: string): number {
+  return snapshotSshTarget(snapshotUrl) ? 5 : 1;
+}
+
+/**
+ * The checks of init for a box. For an SSH snapshot: the operator SSH agent,
+ * agent forwarding to the box, the Git host key on the box, and read access to
+ * the snapshot through the forwarded agent. Else: an SSH connection to the box.
+ */
+export async function checkBoxAccess(
+  link: InitLink,
+  snapshotUrl: string,
+  dependencies: Pick<InitDependencies, "checkAgent" | "approveHostKeys" | "progress">,
+): Promise<void> {
+  const progress = dependencies.progress ?? noProgress;
+  const snapshotTarget = snapshotSshTarget(snapshotUrl);
+  if (snapshotTarget) {
+    const agent = await step(
+      progress,
+      "Checking the operator SSH agent",
+      dependencies.checkAgent ?? checkOperatorAgent,
+      (check) => !check.ok,
+    );
+    if (!agent.ok) {
+      throw new InitRefusal(
+        "agent-refusal",
+        `operator SSH agent is unavailable or has no identities: ${agent.message} Run ssh-add before ferry init.`,
+      );
+    }
+  }
+
+  const probe = await step(
+    progress,
+    "Connecting to the box",
+    () =>
+      snapshotTarget
+        ? link.run(
+            'if [ -z "$SSH_AUTH_SOCK" ]; then printf "%s\\n" "SSH agent forwarding is unavailable" >&2; exit 1; fi; ssh-add -l',
+            { agentForwarding: "git" },
+          )
+        : link.run("true"),
+    (result) => !result.ok,
+  );
+  if (!probe.ok) {
+    throw new InitRefusal(
+      snapshotTarget ? "agent-refusal" : "link-refusal",
+      `${probe.error.origin}: ${probe.error.message}`,
+    );
+  }
+  if (snapshotTarget) {
+    await approveSnapshotHostKey(link, snapshotTarget, dependencies.approveHostKeys, progress);
+    const access = await step(
+      progress,
+      "Checking access to the snapshot",
+      () => link.run(`git ls-remote ${quoteShell(snapshotUrl)} HEAD`, { agentForwarding: "git" }),
+      (result) => !result.ok,
+    );
+    if (!access.ok) {
+      throw new InitRefusal(
+        "snapshot-access-refusal",
+        `${access.error.origin}: could not read ${snapshotUrl} through the forwarded agent: ${access.error.message}`,
+      );
+    }
+  }
+}
+
 function makeInitPlan(
   home: string,
-  config: OperatorConfig,
+  config: OperatorConfig | BoxesOperatorConfig,
+  host: OperatorHostConfig,
   seed: Seed,
   harnesses: readonly HarnessDescriptor[],
 ): InitPlan {
@@ -333,10 +372,7 @@ function makeInitPlan(
 
   return {
     operator: config.publisher,
-    box:
-      config.host.transport === "ssh"
-        ? config.host.destination
-        : `${config.host.sshUser}@${config.host.tailscale}`,
+    box: host.transport === "ssh" ? host.destination : `${host.sshUser}@${host.tailscale}`,
     gitRemote: config.snapshotUrl,
     localCheckout,
     configPath: configPath(home),

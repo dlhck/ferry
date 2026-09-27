@@ -821,6 +821,97 @@ describe("ferry init", () => {
     ).rejects.toMatchObject({ code: "invalid-values" });
   });
 
+  describe("with [box.<name>] tables", () => {
+    const BOXES = [
+      "version = 1",
+      'publisher = "first-operator"',
+      'snapshot_url = "snapshot.git"',
+      'default_box = "b"',
+      "",
+      "[integrations]",
+      "paseo = true",
+      "",
+      "[box.a]",
+      'transport = "ssh"',
+      'destination = "dev@box-a.example"',
+      "",
+      "[box.b]",
+      'tailscale = "box-b"',
+      'ssh_user = "dev"',
+      "",
+      "[box.b.integrations]",
+      "paseo = false",
+      "",
+    ].join("\n");
+
+    function boxesDependencies(home: string) {
+      const targets: unknown[] = [];
+      const { deps } = dependencies(home);
+      return {
+        targets,
+        deps: {
+          ...deps,
+          createLink: (options) => {
+            targets.push(options);
+            return deps.createLink!(options);
+          },
+        } satisfies InitDependencies,
+      };
+    }
+
+    test("a second run probes default_box and keeps the box tables and default_box", async () => {
+      const home = makeHome();
+      write(join(home, ".ferry/config.toml"), BOXES);
+      const before = readConfig(home);
+      const { deps, targets } = boxesDependencies(home);
+
+      await runInit({ home, harnesses: BUILTIN_HARNESSES }, deps);
+
+      expect(targets).toEqual([{ host: "box-b", user: "dev" }]);
+      expect(readConfig(home)).toEqual(before);
+    });
+
+    test("--box selects the box to probe", async () => {
+      const home = makeHome();
+      write(join(home, ".ferry/config.toml"), BOXES);
+      const { deps, targets } = boxesDependencies(home);
+
+      const result = await runInit({ home, harnesses: BUILTIN_HARNESSES, box: "a", dryRun: true }, deps);
+      await runInit({ home, harnesses: BUILTIN_HARNESSES, box: "a" }, deps);
+
+      expect(result.plan.box).toBe("dev@box-a.example");
+      expect(targets).toEqual([{ destination: "dev@box-a.example" }]);
+    });
+
+    test("refuses host flags and points to ferry box add", async () => {
+      const home = makeHome();
+      write(join(home, ".ferry/config.toml"), BOXES);
+      const { deps } = boxesDependencies(home);
+
+      await expect(
+        runInit({ home, harnesses: BUILTIN_HARNESSES, sshDestination: "dev@box-c.example" }, deps),
+      ).rejects.toThrow("Use ferry box add to add a box.");
+    });
+
+    test("asks for --box when there is more than one box and no default_box", async () => {
+      const home = makeHome();
+      write(join(home, ".ferry/config.toml"), BOXES.replace('default_box = "b"\n', ""));
+      const { deps } = boxesDependencies(home);
+
+      await expect(runInit({ home, harnesses: BUILTIN_HARNESSES }, deps)).rejects.toThrow("Add --box <name>");
+    });
+
+    test("--box with a [host] config is refused", async () => {
+      const home = makeHome();
+      write(join(home, ".ferry/config.toml"), 'version = 1\nsnapshot_url = "snapshot.git"\n\n[host]\ntailscale = "box"\nssh_user = "david"\n');
+      const { deps } = boxesDependencies(home);
+
+      await expect(runInit({ home, harnesses: BUILTIN_HARNESSES, box: "default" }, deps)).rejects.toThrow(
+        "--box needs [box.<name>] tables in the config.",
+      );
+    });
+  });
+
   test("refuses when Link cannot run Tailscale", async () => {
     const home = makeHome();
     const { deps } = dependencies(home);

@@ -560,6 +560,15 @@ describe("setIntegration", () => {
     expect(readConfig(home)).toEqual({ ...before, integrations: { paseo: true } });
   });
 
+  test("with a box, sets the key in [box.<name>.integrations] and keeps [integrations]", () => {
+    const home = homeWithConfig([...TOP, 'default_box = "a"', "", "[integrations]", "paseo = true", "", ...BOX_A, "", ...BOX_B]);
+
+    setIntegration("paseo", false, home, "b");
+    expect(readConfig(home)?.integrations).toEqual({ paseo: true });
+    expect(readConfig(home)?.boxes?.map((box) => box.integrations)).toEqual([undefined, { paseo: false }]);
+    expect(readConfig(home)?.defaultBox).toBe("a");
+  });
+
   test("refuses an incomplete config", () => {
     const home = homeWithConfig(["version = 1"]);
 
