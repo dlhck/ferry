@@ -8,6 +8,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -119,6 +120,34 @@ async function move(w: World, input: Partial<MoveInput> & { path: string }, over
     error = caught;
   }
   return { lines, events: progress.events, error: error as Error | null };
+}
+
+function commit(repo: string, path: string, body: string, message: string): string {
+  write(join(repo, path), body);
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", message);
+  return git(repo, "rev-parse", "HEAD");
+}
+
+/** A feature branch of three commits in `app` that origin gets as one squash commit. */
+function squashMerged(w: World, app: string): { other: string; tip: string } {
+  git(app, "switch", "-q", "-c", "feature");
+  commit(app, "feature.ts", "export const a = 0;\n", "Start feature");
+  commit(app, "feature.ts", "export const a = 1;\n", "Change feature");
+  const tip = commit(app, "helper.ts", "export {};\n", "Add helper");
+  const other = join(w.root, "other");
+  git(w.root, "clone", "-q", w.origin, other);
+  git(other, "fetch", "-q", app, "feature");
+  git(other, "merge", "-q", "--squash", "FETCH_HEAD");
+  git(other, "commit", "-q", "-m", "Feature (#12)");
+  commit(other, "later.md", "later\n", "Later");
+  git(other, "push", "-q", "origin", "HEAD:main");
+  git(app, "fetch", "-q", "origin");
+  return { other, tip };
+}
+
+function looseObjects(repo: string): string[] {
+  return readdirSync(join(repo, ".git/objects"), { recursive: true }).map(String).sort();
 }
 
 function listTree(dir: string): string[] {
@@ -236,11 +265,44 @@ describe("ferry move to the box", () => {
     const result = await move(w, { path: "Developer/app" });
 
     expect(result.error).toBeNull();
-    expect(result.lines.find((line) => line.startsWith("Note: Branch feature has commit"))).toContain(
-      "an equivalent patch is on origin",
+    expect(result.lines).toContain(
+      "Note: Branch feature: Ferry accepts 1 commit that is not on origin, because git cherry finds an equivalent patch on origin.",
     );
     expect(result.lines).toContain("Note: Branch feature is not on origin. The clone uses the default branch.");
     expect(existsSync(join(w.box, "Developer/app/feature.ts"))).toBe(true);
+  });
+
+  test("accepts a squash-merged branch of several commits, and --dry-run names the rule", async () => {
+    const w = world();
+    const app = project(w, w.operator);
+    squashMerged(w, app);
+
+    const result = await move(w, { path: "Developer/app", dryRun: true });
+
+    expect(result.error).toBeNull();
+    expect(result.lines).toContain(
+      "Note: Branch feature: Ferry accepts 3 commits that are not on origin, because git merge-tree shows that the default branch of origin has their changes.",
+    );
+    expect(result.lines.some((line) => line.startsWith("Problem:"))).toBe(false);
+  });
+
+  test("refuses and names a commit after the squash merge, and accepts the commits before it", async () => {
+    const w = world();
+    const app = project(w, w.operator);
+    squashMerged(w, app);
+    commit(app, "extra.ts", "export {};\n", "Extra work");
+    const objects = looseObjects(app);
+
+    const result = await move(w, { path: "Developer/app", dryRun: true });
+
+    expect(result.error?.message).toContain("Ferry refused to move ~/Developer/app: 1 problem.");
+    expect(result.lines.find((line) => line.startsWith("Problem: Branch feature has commit"))).toContain(
+      '"Extra work" that is not on origin',
+    );
+    expect(result.lines).toContain(
+      "Note: Branch feature: Ferry accepts 3 commits that are not on origin, because git merge-tree shows that the default branch of origin has their changes.",
+    );
+    expect(looseObjects(app)).toEqual(objects);
   });
 
   test("refuses an uncommitted change to a tracked file", async () => {
@@ -389,6 +451,55 @@ describe("ferry move --from-box", () => {
     expect(existsSync(boxApp)).toBe(false);
     expect(existsSync(join(w.box, ".ferry/trash/app-20260927T101112Z/AGENTS.md"))).toBe(true);
     expect(result.events).toContain("start:Moving the box copy to the Ferry trash");
+  });
+
+  test("accepts a branch whose pull request is merged, with gh on the box", async () => {
+    const w = world();
+    const boxApp = project(w, w.box);
+    const { other, tip } = squashMerged(w, boxApp);
+    commit(other, "feature.ts", "export const a = 2;\n", "Change feature again");
+    git(other, "push", "-q", "origin", "HEAD:main");
+    git(boxApp, "fetch", "-q", "origin");
+    const ghLog = join(w.root, "gh.log");
+    write(
+      join(w.root, "box-bin/gh"),
+      `#!/bin/sh\necho "$@" >> '${ghLog}'\necho '[{"number":12,"headRefOid":"${tip}"}]'\n`,
+    );
+    chmodSync(join(w.root, "box-bin/gh"), 0o755);
+
+    const result = await move(w, { path: "Developer/app", fromBox: true, dryRun: true });
+
+    expect(result.error).toBeNull();
+    expect(result.lines).toContain(
+      "Note: Branch feature: Ferry accepts 3 commits that are not on origin, because gh finds merged pull request #12 with the branch tip as its head.",
+    );
+    expect(readFileSync(ghLog, "utf8")).toContain(`--state merged --search ${tip}`);
+  });
+
+  test("skips the pull request check when the box has no gh", async () => {
+    const w = world();
+    const boxApp = project(w, w.box);
+    const { other } = squashMerged(w, boxApp);
+    commit(other, "feature.ts", "export const a = 2;\n", "Change feature again");
+    git(other, "push", "-q", "origin", "HEAD:main");
+    git(boxApp, "fetch", "-q", "origin");
+    const shim = join(w.root, "shim");
+    mkdirSync(shim);
+    for (const tool of ["sh", "git", "mktemp", "rm", "tar", "base64"]) {
+      const found = Bun.which(tool);
+      if (found) symlinkSync(found, join(shim, tool));
+    }
+    const noGh: Pick<Link, "run"> = {
+      run: (command, options) => w.link.run(`PATH='${shim}'; export PATH; ${command}`, options),
+    };
+
+    const result = await move(w, { path: "Developer/app", fromBox: true, dryRun: true }, { createLink: () => noGh });
+
+    expect(result.error?.message).toContain("Ferry refused to move ~/Developer/app: 3 problems.");
+    expect(result.lines).toContain(
+      "Note: gh is missing or cannot read origin, so Ferry did not look for merged pull requests.",
+    );
+    expect(result.lines.filter((line) => line.startsWith("Problem: Branch feature has commit"))).toHaveLength(3);
   });
 
   test("refuses an unpushed commit on the box", async () => {
