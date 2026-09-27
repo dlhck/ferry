@@ -47,6 +47,28 @@ Ferry adds `-g` and `--copy` if you do not pass them. The example runs `npx skil
 
 The install does not publish the skill. Run `ferry sync` or keep `ferry watch` running to publish it to the snapshot and apply it on the box.
 
+## Update the agent tools
+
+`ferry update` runs the update command of each agent tool on the box and on this machine:
+
+| Tool | Update command | On this machine |
+| --- | --- | --- |
+| `gh` | `sudo apt update && sudo apt install gh -y` | Skipped. `gh` has no own update command, and Ferry does not guess the package manager here. |
+| Claude | `claude update` | Runs if `claude` is installed. |
+| Codex | `codex update` | Runs if `codex` is installed. |
+| Pi | `pi update` | Runs if `pi` is installed. This updates Pi only, not its packages. |
+| Cursor Agent | `cursor-agent update` | Runs if `cursor-agent` is installed. |
+
+On this machine, Ferry uses `command -v` to find each tool. It updates only a tool that is already installed. It never installs a tool here.
+
+Ferry prints the plan first and asks for confirmation. Add `--yes` to skip the prompt. Add `--dry-run` to print the plan and change nothing:
+
+```sh
+ferry update --dry-run
+```
+
+A failed update does not stop the other updates. After all updates, Ferry names each failed update and exits with a non-zero code.
+
 ## What Ferry carries
 
 Ferry carries these items from the operator machine to the box:
@@ -69,6 +91,15 @@ Claude writes a marketplace to `extraKnownMarketplaces` when you add it with `cl
 ## Automatic sync
 
 `ferry watch` runs in the foreground. It watches the Manifest identity for every configured global skill root, `~/AGENTS.md`, the Claude subagents and commands, and the carried Claude settings keys. It does not watch project-local skills. After an accepted change stays stable for one second, Ferry runs the normal sync without `--force`. Network, SSH, and Git failures retry with a backoff capped at 60 seconds. Manifest refusals name the local path and wait for another edit.
+
+`ferry watch` can also run `ferry update --yes` once each day. This is off by default. To turn it on, add this section to `~/.ferry/config.toml`:
+
+```toml
+[update]
+watch = true
+```
+
+When the key is `true`, the watch runs the update when 24 hours have passed since the last update, or when no update ran before. The update runs next to the sync loop, so it does not delay a sync. A failed update prints a warning, and the watch continues. Ferry records the start time of the last update in `~/.ferry/update-state.json`, so a restart of the watch does not start an extra update. This file is not part of the snapshot. Restart the watch after you change the key.
 
 Install and start the user service from the operator machine:
 

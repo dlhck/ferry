@@ -422,6 +422,34 @@ describe("ferry --help", () => {
     expect(signal?.aborted).toBe(false);
   });
 
+  test("passes the watch update switch from the config to watch", async () => {
+    let received: boolean | undefined;
+    const program = buildProgram({
+      readConfig: () => ({ update: { watch: true } }),
+      runWatch: async (input) => {
+        received = input.dailyUpdate;
+      },
+    });
+
+    await program.parseAsync(["watch"], { from: "user" });
+
+    expect(received).toBe(true);
+  });
+
+  test("wires update --yes --dry-run to the update command", async () => {
+    let received: { yes: boolean; dryRun: boolean } | undefined;
+    const program = buildProgram({
+      readConfig: () => null,
+      runUpdate: async (input) => {
+        received = input;
+      },
+    });
+
+    await program.parseAsync(["update", "--yes", "--dry-run"], { from: "user" });
+
+    expect(received).toEqual({ yes: true, dryRun: true });
+  });
+
   test("installs the platform watch service", async () => {
     const output: string[] = [];
     let calls = 0;

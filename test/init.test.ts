@@ -476,6 +476,28 @@ describe("ferry init", () => {
     ]);
   });
 
+  test("a second run keeps the watch update switch", async () => {
+    const home = makeHome();
+    write(join(home, ".ferry/config.toml"), [
+      "version = 1",
+      'publisher = "first-operator"',
+      'snapshot_url = "snapshot.git"',
+      "",
+      "[host]",
+      'tailscale = "box"',
+      'ssh_user = "david"',
+      "",
+      "[update]",
+      "watch = true",
+      "",
+    ].join("\n"));
+    const { deps } = dependencies(home);
+
+    await runInit({ home, harnesses: BUILTIN_HARNESSES }, deps);
+
+    expect(readConfig(home)?.update).toEqual({ watch: true });
+  });
+
   test("records and probes an explicit SSH destination", async () => {
     const home = makeHome();
     let target: unknown;

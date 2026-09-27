@@ -70,6 +70,10 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
         "&& sudo apt update \\\n" +
         "&& sudo apt install gh -y",
     },
+    // gh has no own update command. The install added the apt source, so apt
+    // upgrades it on the box. The operator machine can use another package
+    // manager, so ferry does not update gh there.
+    update: { command: "sudo apt update && sudo apt install gh -y" },
     auth: {
       probe: "gh auth status --hostname github.com",
       login: "gh auth login --hostname github.com --git-protocol https --web",
@@ -83,6 +87,7 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
   {
     id: "claude",
     install: { command: "curl -fsSL https://claude.ai/install.sh | bash" },
+    update: { command: "claude update", binary: "claude" },
     auth: {
       probe: "claude auth status",
       login: "claude auth login",
@@ -92,6 +97,7 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
   {
     id: "codex",
     install: { command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh" },
+    update: { command: "codex update", binary: "codex" },
     auth: {
       probe: "codex login status",
       login: "codex login --device-auth",
@@ -123,6 +129,8 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
         "|| (sudo apt update && sudo apt install nodejs npm -y)) \\\n" +
         "&& curl -fsSL https://pi.dev/install.sh | sh",
     },
+    // Without a target, pi update updates pi only, not its packages.
+    update: { command: "pi update", binary: "pi" },
     // Pi has no remote login ferry can drive, so it carries no probe or login.
     auth: {
       completion: {
@@ -135,6 +143,7 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
   {
     id: "cursor",
     install: { command: "curl https://cursor.com/install -fsS | bash" },
+    update: { command: "cursor-agent update", binary: "cursor-agent" },
     auth: {
       probe: "cursor-agent status",
       login: "cursor-agent login",

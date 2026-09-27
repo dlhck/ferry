@@ -175,6 +175,7 @@ export async function runInit(
       ? { transport: "ssh", destination: values.sshDestination }
       : { tailscale: required(values.host), sshUser: required(values.sshUser) },
     harness: existing?.harness,
+    update: existing?.update,
   };
 
   const seed = (dependencies.readSeed ?? readManifest)(home, input.harnesses);

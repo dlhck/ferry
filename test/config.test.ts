@@ -82,6 +82,32 @@ describe("operator config", () => {
     expect(readConfig(home)?.harness).toEqual(harness);
   });
 
+  test("reads the watch update switch", () => {
+    expect(readConfig(homeWithConfig([...BASE, "", "[update]", "watch = true"]))?.update).toEqual({ watch: true });
+    expect(readConfig(homeWithConfig([...BASE, "", "[update]", "watch = false"]))?.update).toEqual({ watch: false });
+    expect(readConfig(homeWithConfig(BASE))?.update).toBeUndefined();
+  });
+
+  test("refuses a watch update value that is not a boolean", () => {
+    const home = homeWithConfig([...BASE, "", "[update]", 'watch = "yes"']);
+
+    expect(() => readConfig(home)).toThrow("invalid boolean");
+  });
+
+  test("writing the config keeps the watch update switch", () => {
+    const home = homeWithConfig(BASE);
+
+    writeConfig({
+      version: 1,
+      publisher: "operator",
+      snapshotUrl: "snapshot.git",
+      host: { tailscale: "box", sshUser: "ferry" },
+      update: { watch: true },
+    }, home);
+
+    expect(readConfig(home)?.update).toEqual({ watch: true });
+  });
+
   test("refuses an unknown key and names it", () => {
     const home = homeWithConfig([...BASE, "", "[[harness]]", 'id = "opencode"', 'skil_root = ".config/opencode/skills"']);
 

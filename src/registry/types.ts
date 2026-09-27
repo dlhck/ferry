@@ -77,9 +77,22 @@ export type ToolAuth = {
   readonly fallback?: AuthFallback;
 };
 
+/** How ferry updates a tool. */
+export type ToolUpdate = {
+  /** The update command. Ferry runs it on the box. */
+  readonly command: string;
+  /**
+   * The executable of the tool. When set, ferry also runs `command` on the
+   * operator machine if this executable is there. Leave it unset when
+   * `command` works only on the box, such as an apt command.
+   */
+  readonly binary?: string;
+};
+
 /** One vendor CLI on the box. */
 export type ToolDescriptor = {
   readonly id: string;
   readonly install?: { readonly command: string };
+  readonly update?: ToolUpdate;
   readonly auth?: ToolAuth;
 };
