@@ -19,7 +19,7 @@ import { isAbsolute, join, posix, relative, resolve } from "node:path";
 import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
 import { Link, type LinkOptions } from "./link.ts";
 import { carriedContentHits, carriedNameHit } from "./manifest.ts";
-import { noProgress, step, type Progress } from "./progress.ts";
+import { noProgress, plural, step, type Progress } from "./progress.ts";
 
 export type MoveInput = {
   /** The project path on the operator machine, or the same path for the box with `fromBox`. */
@@ -121,8 +121,21 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
   const writeLine = dependencies.writeLine;
   const progress = dependencies.progress;
 
-  const plan = await step(progress, "Preflight", () =>
-    preflight(input, rel, source, sourcePath, destination, destinationPath, input.fromBox ? null : join(home, rel)),
+  progress.plan(input.dryRun ? 1 : input.remove ? 5 : 4);
+  const plan = await step(
+    progress,
+    "Preflight",
+    () => preflight(input, rel, source, sourcePath, destination, destinationPath, input.fromBox ? null : join(home, rel)),
+    undefined,
+    (plan) =>
+      [
+        `carry ${plan.carry.length}`,
+        `refuse ${plan.refused.length}`,
+        `skip ${plan.skipped.length}`,
+        plan.problems.length > 0 && plural(plan.problems.length, "problem"),
+      ]
+        .filter(Boolean)
+        .join(", "),
   );
   try {
     writeLine(input.dryRun ? "Move plan (no changes will be made):" : "Move plan:");
@@ -154,7 +167,10 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       await must(destination.run(command, { timeoutMs: TRANSFER_TIMEOUT_MS }), "The clone failed");
     });
 
-    if (plan.carry.length > 0) {
+    if (plan.carry.length === 0) {
+      progress.skip("Carrying files", "no files to carry");
+      progress.skip("Verifying", "no files to carry");
+    } else {
       await step(progress, `Carrying ${plan.carry.length} ${plan.carry.length === 1 ? "file" : "files"}`, async () => {
         const archive = await createArchive(plan.stage, plan.carry.map((file) => file.path));
         await must(

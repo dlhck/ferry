@@ -9,7 +9,7 @@ import {
   runStatusCommand,
   type StatusCommandDependencies,
 } from "../src/status-command.ts";
-import { recordProgress } from "./fake-progress.ts";
+import { fakeTerminal, recordProgress } from "./fake-progress.ts";
 
 const registry: Registry = {
   harnesses: [
@@ -428,9 +428,43 @@ describe("ferry status progress", () => {
     expect(progress.events).toEqual([
       "start:Connecting to the box",
       "fail",
+      "skip:Reading the box store tip",
+      "skip:Reading the box checkout changes",
+      "skip:Reading the box git identity",
+      "skip:Checking sudo on the box",
       "start:Comparing the store tips",
       "done",
+      "skip:Checking managed links on the box",
+      "skip:Checking logins on the box",
+      "skip:Checking MCP logins on the box",
     ]);
+  });
+
+  test("prints a summary table with the failed probe and the skipped box steps, then the report", async () => {
+    const stack = fakeStack(false);
+    const terminal = fakeTerminal();
+    const lines: string[] = [];
+
+    await runStatusCommand(
+      { json: false },
+      { ...stack.dependencies, progress: terminal.progress, writeLine: terminal.progress.hold((line) => lines.push(line)) },
+    );
+    expect(lines).toEqual([]);
+    terminal.progress.finish();
+
+    expect(terminal.table()).toEqual([
+      "Step                               Result     Detail                  Time",
+      "Connecting to the box              ✖ failed   network/host-offline    0.1s",
+      "Reading the box store tip          – skipped  host offline",
+      "Reading the box checkout changes   – skipped  host offline",
+      "Reading the box git identity       – skipped  host offline",
+      "Checking sudo on the box           – skipped  host offline",
+      "Comparing the store tips           ✔ done                             0.1s",
+      "Checking managed links on the box  – skipped  host offline",
+      "Checking logins on the box         – skipped  host offline",
+      "Checking MCP logins on the box     – skipped  host offline",
+    ]);
+    expect(lines[0]).toStartWith("Host: OFFLINE");
   });
 
   test("progress does not change the JSON output", async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { HostCommand, HostCommandResult, LinkResult } from "../src/link.ts";
+import { noProgress } from "../src/progress.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 import type { ToolDescriptor } from "../src/registry/types.ts";
 import {
@@ -207,6 +208,7 @@ describe("update command", () => {
     const { recorder, deps } = dependencies({ boxFails: ["claude update"] });
     const events = recorder.output;
     const progress = {
+      ...noProgress,
       start: (step: string) => events.push(`start:${step}`),
       count: () => {},
       done: () => events.push("done"),

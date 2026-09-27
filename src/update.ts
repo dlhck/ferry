@@ -7,7 +7,7 @@
 import * as prompts from "@clack/prompts";
 import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
 import { BunHostAdapter, Link, type HostAdapter, type LinkOptions } from "./link.ts";
-import { noProgress, step, type Progress } from "./progress.ts";
+import { noProgress, plural, step, type Progress } from "./progress.ts";
 import { BUILTIN_TOOLS } from "./registry/builtin.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
 
@@ -85,9 +85,14 @@ export async function runUpdateCommand(
 ): Promise<void> {
   const resolved = { ...defaultDependencies, ...dependencies };
   const target = loadTarget(resolved.readConfig);
-  const plan = await step(resolved.progress, "Checking the installed tools", () =>
-    planUpdate(resolved.tools, resolved.local),
+  const plan = await step(
+    resolved.progress,
+    "Checking the installed tools",
+    () => planUpdate(resolved.tools, resolved.local),
+    undefined,
+    (plan) => `${plural(plan.steps.length, "update")}, ${plan.skipped.length} skipped`,
   );
+  resolved.progress.plan(input.dryRun ? 1 : 1 + plan.steps.length);
 
   // One line for each tool on each side, in registry order.
   for (const side of ["box", "operator"] as const) {
@@ -99,9 +104,12 @@ export async function runUpdateCommand(
     }
   }
   if (input.dryRun) return;
-  if (!input.yes && (await resolved.confirm()) !== true) {
-    resolved.writeLine("Update cancelled.");
-    return;
+  if (!input.yes) {
+    resolved.progress.pause();
+    if ((await resolved.confirm()) !== true) {
+      resolved.writeLine("Update cancelled.");
+      return;
+    }
   }
 
   const link = resolved.createLink(target);
@@ -116,7 +124,7 @@ export async function runUpdateCommand(
       resolved.progress.done();
       resolved.writeLine(`Updated ${step.target} ${step.tool}.`);
     } else {
-      resolved.progress.fail();
+      resolved.progress.fail(failure);
       failed.push(step);
       resolved.writeLine(`Failed to update ${step.target} ${step.tool}: ${failure}`);
     }

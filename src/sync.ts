@@ -24,7 +24,7 @@ import { openStore as openSnapshotStore, skillChanged, type PublishResult } from
 import { adoptPublishedSkills } from "./adopt.ts";
 import { installBoxPlugins, mergeBoxSettings } from "./box-settings.ts";
 import { registerBoxMcp } from "./box-mcp.ts";
-import { noProgress, step, type Progress } from "./progress.ts";
+import { noProgress, plural, step, type Progress } from "./progress.ts";
 
 export type SyncInput = {
   readonly home?: string;
@@ -130,20 +130,29 @@ export async function runSync(
 ): Promise<SyncResult> {
   const home = input.home ?? homedir();
   const progress = dependencies.progress ?? noProgress;
-  const { config, registry, seed } = await step(progress, "Reading the portable set", async () => {
-    const source = inspectSyncSource(home, dependencies);
-    await refuseChangedStoreCopies(home, source.config, source.seed);
-    return source;
-  });
+  const writeLine = dependencies.writeLine ?? console.log;
+  const writePlan = dependencies.writePlan ?? ((plan: SyncPlan) => printPlan(plan, writeLine));
+  progress.plan(input.dryRun ? 1 : 9);
+  const { config, registry, seed } = await step(
+    progress,
+    "Reading the portable set",
+    async () => {
+      const source = inspectSyncSource(home, dependencies);
+      await refuseChangedStoreCopies(home, source.config, source.seed);
+      return source;
+    },
+    undefined,
+    (source) => plural(source.seed.skills.length, "skill"),
+  );
   for (const leftover of seed.leftovers) {
     const label = leftover.code === "hook-path" ? "hook" : leftover.code === "mcp-local" ? "MCP server" : null;
     if (!label) continue;
-    (dependencies.writeLine ?? console.log)(`Skipped ${label}: ${leftover.reason}: ${leftover.path}`);
+    writeLine(`Skipped ${label}: ${leftover.reason}: ${leftover.path}`);
   }
 
   if (input.dryRun) {
     const plan = makePlan(input, config, home, null, registry, seed);
-    (dependencies.writePlan ?? printPlan)(plan);
+    writePlan(plan);
     return { dryRun: true, published: false, plan };
   }
 
@@ -153,25 +162,32 @@ export async function runSync(
     resolveRemoteHome(link, config),
   );
   const plan = makePlan(input, config, home, remoteHome, registry, seed);
-  (dependencies.writePlan ?? printPlan)(plan);
+  writePlan(plan);
 
   const release = takeLock(dependencies, home, targetKey(config));
   try {
     let store: SyncStore;
     let publication: PublishResult;
     try {
-      ({ store, publication } = await step(progress, "Publishing the snapshot", async () => {
-        const store = dependencies.openStore
-          ? await dependencies.openStore(config.snapshotUrl, seed, {
-              home,
-              harnesses: registry.harnesses,
-            })
-          : await openSnapshotStore(config.snapshotUrl, seed, {
-              home,
-              harnesses: registry.harnesses,
-            });
-        return { store, publication: await store.publish(seed, input.message) };
-      }));
+      ({ store, publication } = await step(
+        progress,
+        "Publishing the snapshot",
+        async () => {
+          const store = dependencies.openStore
+            ? await dependencies.openStore(config.snapshotUrl, seed, {
+                home,
+                harnesses: registry.harnesses,
+              })
+            : await openSnapshotStore(config.snapshotUrl, seed, {
+                home,
+                harnesses: registry.harnesses,
+              });
+          return { store, publication: await store.publish(seed, input.message) };
+        },
+        undefined,
+        ({ publication }) =>
+          publication.published ? `published ${publication.tip?.slice(0, 7) ?? ""}`.trim() : "no changes",
+      ));
     } catch (cause) {
       throw new SyncError(
         "publish-failure",
@@ -181,41 +197,53 @@ export async function runSync(
       );
     }
     for (const update of seed.storeUpdates) {
-      (dependencies.writeLine ?? console.log)(`Updated store skill ${update.name} from ${update.path}`);
+      writeLine(`Updated store skill ${update.name} from ${update.path}`);
     }
 
-    const update = await step(progress, "Updating the box checkout", async () => {
-      const result = await link.run(
-        remoteUpdateCommand(required(plan.remoteCheckout), config.snapshotUrl, publication.tip),
-        { agentForwarding: "git" },
-      );
-      if (!result.ok) {
-        throw new SyncError(
-          "remote-update-failure",
-          "box",
-          `failed to update ${plan.box} from ${config.snapshotUrl}: ${result.error.origin}/${result.error.code}: ${result.error.message}`,
+    const update = await step(
+      progress,
+      "Updating the box checkout",
+      async () => {
+        const result = await link.run(
+          remoteUpdateCommand(required(plan.remoteCheckout), config.snapshotUrl, publication.tip),
+          { agentForwarding: "git" },
         );
-      }
-      return result;
-    });
+        if (!result.ok) {
+          throw new SyncError(
+            "remote-update-failure",
+            "box",
+            `failed to update ${plan.box} from ${config.snapshotUrl}: ${result.error.origin}/${result.error.code}: ${result.error.message}`,
+          );
+        }
+        return result;
+      },
+      undefined,
+      (result) => {
+        const discarded = changedPaths(result.stdout).length;
+        return discarded > 0 ? `discarded ${plural(discarded, "box change")}` : undefined;
+      },
+    );
     const discarded = changedPaths(update.stdout);
     for (const path of discarded) {
-      (dependencies.writeLine ?? console.log)(
-        `Discarded box change: ${posix.join(required(plan.remoteCheckout), path)}`,
-      );
+      writeLine(`Discarded box change: ${posix.join(required(plan.remoteCheckout), path)}`);
     }
 
     let applyPlan: ApplyPlan;
     try {
-      applyPlan = await step(progress, "Applying the snapshot on the box", () =>
-        (dependencies.apply ?? applyStore)({
-          checkout: required(plan.remoteCheckout),
-          targetHome: required(plan.remoteHome),
-          harnesses: registry.harnesses,
-          force: input.force === true,
-          dryRun: false,
-          link,
-        }),
+      applyPlan = await step(
+        progress,
+        "Applying the snapshot on the box",
+        () =>
+          (dependencies.apply ?? applyStore)({
+            checkout: required(plan.remoteCheckout),
+            targetHome: required(plan.remoteHome),
+            harnesses: registry.harnesses,
+            force: input.force === true,
+            dryRun: false,
+            link,
+          }),
+        undefined,
+        (result) => plural(result.actions.length, "change"),
       );
     } catch (cause) {
       throw new SyncError(
@@ -228,10 +256,14 @@ export async function runSync(
 
     // Claude rewrites a marketplace entry when it adds one, so the merge runs last.
     try {
-      const warnings = await step(progress, "Installing Claude plugins", () =>
-        installBoxPlugins({ settings: seed.settings, link, progress }),
+      const warnings = await step(
+        progress,
+        "Installing Claude plugins",
+        () => installBoxPlugins({ settings: seed.settings, link, progress }),
+        undefined,
+        (warnings) => (warnings.length > 0 ? plural(warnings.length, "warning") : undefined),
       );
-      for (const warning of warnings) (dependencies.writeLine ?? console.log)(`Box plugins: ${warning}`);
+      for (const warning of warnings) writeLine(`Box plugins: ${warning}`);
       await step(progress, "Merging settings on the box", () =>
         mergeBoxSettings({
           remoteHome: required(plan.remoteHome),
@@ -250,17 +282,25 @@ export async function runSync(
     }
 
     try {
-      const warnings = await step(progress, "Declaring MCP servers", () =>
-        registerBoxMcp({
-          remoteHome: required(plan.remoteHome),
-          harnesses: registry.harnesses,
-          tools: registry.tools,
-          mcp: seed.mcp,
-          link,
-          progress,
-        }),
+      const warnings = await step(
+        progress,
+        "Declaring MCP servers",
+        () =>
+          registerBoxMcp({
+            remoteHome: required(plan.remoteHome),
+            harnesses: registry.harnesses,
+            tools: registry.tools,
+            mcp: seed.mcp,
+            link,
+            progress,
+          }),
+        undefined,
+        (warnings) =>
+          [plural(plan.mcpServers.length, "server"), warnings.length > 0 && plural(warnings.length, "warning")]
+            .filter(Boolean)
+            .join(", "),
       );
-      for (const warning of warnings) (dependencies.writeLine ?? console.log)(`Box MCP: ${warning}`);
+      for (const warning of warnings) writeLine(`Box MCP: ${warning}`);
     } catch (cause) {
       throw new SyncError(
         "apply-failure",
@@ -396,10 +436,10 @@ function settingsChanges(
   return changes;
 }
 
-function printPlan(plan: SyncPlan): void {
+function printPlan(plan: SyncPlan, writeLine: (line: string) => void): void {
   const remoteCheckout = plan.remoteCheckout ?? "$HOME/.ferry/store";
   const remoteHome = plan.remoteHome ?? "$HOME";
-  console.log(
+  writeLine(
     [
       "Sync plan:",
       `Operator: ${plan.operator}`,
