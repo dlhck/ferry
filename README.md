@@ -181,6 +181,69 @@ Adopting published local skills   ✔ done                          0.0s
 
 In other cases, Ferry writes one plain line when a step starts or its count changes, with no control characters and no table. `ferry watch` always writes plain lines, so its log stays readable. `ferry status --json` shows no progress, and its stdout is only the JSON report.
 
+### Status
+
+`ferry status` reads the local store, the git remote, and each box. It does not change a machine. It checks at most 4 boxes at the same time. An offline box shows `unavailable` lines and does not stop the other boxes.
+
+The text output has a shared block first: the local and remote store tips and the deny list. Then it has one block for each box, in config order, with the header `Box <name> (<destination>)`. A box block shows only the integrations that are on for that box. With a `[host]` config, the one box has the name `default`.
+
+With more than one box, each progress step starts with the box name, for example `[a] Checking logins on the box`. The summary table has one row for each box and step, grouped by box.
+
+`ferry status --json` prints schema version 2, also for one box. The shared part is at the top. The `boxes` array has one entry for each box, in config order:
+
+```json
+{
+  "schemaVersion": 2,
+  "store": { "local": "1a2b3c4", "remote": "1a2b3c4", "localMatchesRemote": true, "error": null },
+  "operator": { "gitIdentity": { "name": "Operator", "email": "operator@example.com" }, "error": null },
+  "denyList": [{ "code": "dotenv", "description": "environment file", "behavior": "refuse" }],
+  "boxes": [
+    {
+      "name": "a",
+      "host": "dev@box-a.example",
+      "link": { "online": true, "address": "100.64.0.1", "error": null },
+      "tip": "1a2b3c4",
+      "remoteMatchesBox": true,
+      "allMatch": true,
+      "boxCheckout": { "dirty": false, "changes": [], "error": null },
+      "gitIdentity": {
+        "box": { "name": "Operator", "email": "operator@example.com" },
+        "boxConfigured": true,
+        "matchesOperator": true,
+        "error": null
+      },
+      "boxSudo": { "passwordless": true, "watchUpdateBlocked": false, "error": null },
+      "managedPaths": { "allHealthy": true, "unhealthy": [], "error": null },
+      "auth": { "providers": [{ "provider": "gh", "status": "authenticated" }], "loginRequired": [], "error": null },
+      "mcpLogins": { "loginRequired": [], "error": null },
+      "errors": []
+    },
+    {
+      "name": "b",
+      "host": "dev@box-b.example",
+      "link": {
+        "online": false,
+        "address": null,
+        "error": { "code": "host-offline", "origin": "network", "message": "Tailscale host box-b is offline" }
+      },
+      "tip": null,
+      "remoteMatchesBox": false,
+      "allMatch": false,
+      "boxCheckout": { "dirty": null, "changes": [], "error": null },
+      "gitIdentity": { "box": null, "boxConfigured": null, "matchesOperator": null, "error": null },
+      "boxSudo": { "passwordless": null, "watchUpdateBlocked": false, "error": null },
+      "managedPaths": { "allHealthy": null, "unhealthy": [], "error": null },
+      "auth": { "providers": [], "loginRequired": [], "error": null },
+      "mcpLogins": { "loginRequired": [], "error": null },
+      "errors": [{ "code": "host-offline", "origin": "network", "message": "Tailscale host box-b is offline" }]
+    }
+  ],
+  "errors": []
+}
+```
+
+`host` is the SSH destination, or `<ssh_user>@<tailscale host>` for a Tailscale box. The top-level `errors` has only the operator and git remote errors. Each box has its own `errors`. A box entry has `integrations` only when an integration is on for that box.
+
 ## Several boxes
 
 Ferry can keep more than one box in the config. Each box has a `[box.<name>]` table. A config with only a `[host]` table is one box with the name `default`. It works as before, and no command needs `--box`.
@@ -206,7 +269,8 @@ Select a box with the `--box <name>` option:
 
 - `install`, `auth`, `move`, and `integrations enable|disable` change one box. They use the box of `--box`, else `default_box`, else the only box. If there is more than one box and no `default_box`, they stop and ask for `--box`. They accept one `--box` only.
 - With box tables, `integrations enable|disable` writes the key to `[box.<name>.integrations]` of that box.
-- `sync`, `status`, and `update` work on one box for now. With more than one box, give `--box <name>`. Support for more than one box at a time comes in a later version.
+- `status` works on all boxes, or on the boxes of `--box`. Give `--box` more than one time to select more boxes. See [Status](#status).
+- `sync` and `update` work on one box for now. With more than one box, give `--box <name>`. Support for more than one box at a time comes in a later version.
 - `ferry watch` works only with a `[host]` config for now.
 - With box tables, `ferry init` runs again for the box of `--box`, else `default_box`, else the only box. It keeps all box tables and `default_box`. It does not accept `--host`, `--ssh-user`, or `--ssh-destination`. Use `ferry box add` to add a box.
 - Other commands, such as `uninstall`, `tools`, and `skills add`, do not accept `--box`.
@@ -436,7 +500,7 @@ The `gh` update uses `sudo` on the box. The daily update of `ferry watch` update
 
 sudo compares the full command path and all arguments. The rule allows only these three commands, with these exact arguments. `/usr/bin/apt update` and `/usr/bin/apt install gh -y` are the two commands of the `gh` update. `/usr/bin/true` does nothing. `ferry status` runs `sudo -n /usr/bin/true` to find out if `sudo` asks for a password. Ferry does not write sudoers files on the box.
 
-`ferry status` shows `Box sudo: PASSWORDLESS` or `Box sudo: PASSWORD REQUIRED`, and `--json` has the result in `boxSudo`. When `[update] watch = true`, the `gh` policy is `"latest"`, and `sudo` asks for a password, `ferry status` shows a warning that the watch cannot update `gh`. With another `gh` policy, the watch does not update `gh`, so Ferry shows no warning.
+`ferry status` shows `Box sudo: PASSWORDLESS` or `Box sudo: PASSWORD REQUIRED`, and `--json` has the result in `boxSudo` of each box. When `[update] watch = true`, the `gh` policy is `"latest"`, and `sudo` asks for a password, `ferry status` shows a warning that the watch cannot update `gh`. With another `gh` policy, the watch does not update `gh`, so Ferry shows no warning.
 
 ## Log in to the agent tools
 
@@ -615,7 +679,7 @@ If there is no local Paseo app, the version line says `not pinned (no local Pase
 - Paseo is not installed on the box.
 - Ferry cannot read the output of `paseo daemon status --json`.
 
-`ferry status --json` adds `integrations.paseo` with `name`, `lines`, `warnings`, and `state`. `state` has the unit states, `localDaemon`, `connectedDaemon`, `daemonVersion`, `localVersion`, `pinned`, `listen`, `relay`, `providers`, and `error`. Ferry never shows the `serverId`, the hostname, or the values in `~/.paseo/config.json`. When the host is offline, Ferry skips the check.
+For each box with `paseo = true`, `ferry status --json` adds `integrations.paseo` to the box entry, with `name`, `lines`, `warnings`, and `state`. `state` has the unit states, `localDaemon`, `connectedDaemon`, `daemonVersion`, `localVersion`, `pinned`, `listen`, `relay`, `providers`, and `error`. Ferry never shows the `serverId`, the hostname, or the values in `~/.paseo/config.json`. When the host is offline, Ferry skips the check.
 
 When `paseo = true`, `ferry move` to the box adds a step called "Registering the project in Paseo" after the move. The step runs `paseo project create <path>` on the box. A repeat run is safe, because Paseo returns the existing project for a known directory. If the step fails, Ferry prints a warning and the move stays complete. `ferry move --from-box` does not register the project on this machine. With `--remove`, Ferry does not remove the source project from Paseo. It prints a line that tells you how to remove it: run `paseo project ls` to find its ID, then `paseo project delete <id>`. This does not delete files.
 

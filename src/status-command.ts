@@ -7,7 +7,8 @@ import {
   type AuthStatusReport,
   type McpLoginStatus,
 } from "./auth-start.ts";
-import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
+import { resolveBoxes, type ResolvedBox } from "./boxes.ts";
+import { readConfig, resolveLinkOptions, type OperatorHostConfig, type PartialOperatorConfig } from "./config.ts";
 import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
 import { Link, type LinkOptions } from "./link.ts";
 import {
@@ -24,7 +25,7 @@ import {
   type RegistryResult,
 } from "./registry/load.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
-import { composeStatus, type StatusReport } from "./status.ts";
+import { composeStatus, type BoxStatus, type BoxStatusDependencies, type StatusReport } from "./status.ts";
 import { effectivePolicy } from "./tools/resolve.ts";
 import { RealGitRunner, Store, type TipReport } from "./store.ts";
 import { boxChangesCommand } from "./sync.ts";
@@ -35,6 +36,8 @@ const BOX_SUDO_COMMAND = "sudo -n /usr/bin/true >/dev/null 2>&1 && echo yes || e
 
 export type StatusCommandInput = {
   readonly json: boolean;
+  /** Box names. An empty selection selects all boxes. */
+  readonly selection?: readonly string[];
 };
 
 type StatusConfig = PartialOperatorConfig & RegistryConfig;
@@ -66,22 +69,41 @@ export type StatusCommandDependencies = {
   readonly progress: Progress;
 };
 
-/** Read the configured box and print one report without changing either machine. */
+/** Read the selected boxes and print one report without changing any machine. */
 export async function runStatusCommand(
   input: StatusCommandInput,
   dependencies: Partial<StatusCommandDependencies> = {},
 ): Promise<StatusReport> {
   const resolved = { ...defaultDependencies, ...dependencies };
   const config = resolved.readConfig() ?? {};
-  const target = configuredTarget(config);
+  const boxes = resolveBoxes(config, input.selection ?? []);
   const registry = effectiveRegistry(config, resolved.loadRegistry);
   const home = resolved.home();
-  const link = resolved.createLink(target);
   const store = resolved.createStore(home);
-  const auth = resolved.createAuthStart(link, registry.tools);
-  let boxHome: string | null = null;
 
   const report = await composeStatus({
+    operator: { gitIdentity: () => resolved.readOperatorGitIdentity(home) },
+    store,
+    manifest: { denyRules: resolved.denyRules },
+    boxes: boxes.map((box) => boxDependencies(box, config, registry, resolved)),
+    progress: resolved.progress,
+  });
+
+  resolved.writeLine(input.json ? JSON.stringify(report) : formatStatus(report));
+  return report;
+}
+
+function boxDependencies(
+  box: ResolvedBox,
+  config: StatusConfig,
+  registry: Registry,
+  resolved: StatusCommandDependencies,
+): BoxStatusDependencies {
+  const link = resolved.createLink(resolveLinkOptions(box.host));
+  let boxHome: string | null = null;
+  return {
+    name: box.name,
+    host: destination(box.host),
     link: {
       async probe() {
         const result = await link.run(`printf '%s\\n' "$HOME"`);
@@ -103,9 +125,7 @@ export async function runStatusCommand(
         return link.run(BOX_SUDO_COMMAND);
       },
     },
-    watchUpdatesGh: config.update?.watch === true && watchUpdates(registry.tools, config, "gh"),
-    operator: { gitIdentity: () => resolved.readOperatorGitIdentity(home) },
-    store,
+    watchUpdatesGh: config.update?.watch === true && watchUpdates(registry.tools, box, "gh"),
     apply: {
       plan() {
         const remoteHome = required(boxHome);
@@ -118,49 +138,60 @@ export async function runStatusCommand(
         });
       },
     },
-    auth,
-    manifest: { denyRules: resolved.denyRules },
+    auth: resolved.createAuthStart(link, registry.tools),
     integrations: resolved.integrations
-      .filter((integration) => config.integrations?.[integration.id] === true)
+      .filter((integration) => box.integrations[integration.id] === true)
       .map((integration) => ({
         id: integration.id,
         name: integration.name,
         health: () => integration.health(link),
       })),
-    progress: resolved.progress,
-  });
-
-  resolved.writeLine(input.json ? JSON.stringify(report) : formatStatus(report));
-  return report;
+  };
 }
 
+/** The shared block, then one block for each box. */
 export function formatStatus(report: StatusReport): string {
   const lines = [
-    `Host: ${report.link.online ? "ONLINE" : "OFFLINE"}`,
-    `Address: ${report.link.address ?? "unavailable"}`,
-    "",
     "Store tips:",
     `  Local: ${tip(report.store.local)}`,
     `  Git remote: ${tip(report.store.remote)}`,
-    `  Box: ${tip(report.store.box)}`,
     `  Local = remote: ${yesNo(report.store.localMatchesRemote)}`,
-    `  Remote = box: ${yesNo(report.store.remoteMatchesBox)}`,
-    `  All agree: ${yesNo(report.store.allMatch)}`,
     "",
-    boxCheckout(report),
-    ...report.boxCheckout.changes.map((path) => `  - ${path}`),
+    "Deny list:",
+    ...report.denyList.map(
+      (rule) => `  ${rule.code}: ${rule.behavior} ${rule.description}`,
+    ),
+    ...errorLines(report.errors),
+    ...report.boxes.flatMap((box) => ["", ...boxLines(box, report.operator.gitIdentity)]),
+  ];
+  return lines.join("\n");
+}
+
+function boxLines(box: BoxStatus, operator: GitIdentity | null): string[] {
+  return [
+    `Box ${box.name} (${box.host})`,
+    `Host: ${box.link.online ? "ONLINE" : "OFFLINE"}`,
+    `Address: ${box.link.address ?? "unavailable"}`,
     "",
-    gitIdentity(report),
+    "Store tips:",
+    `  Box: ${tip(box.tip)}`,
+    `  Remote = box: ${yesNo(box.remoteMatchesBox)}`,
+    `  All agree: ${yesNo(box.allMatch)}`,
     "",
-    ...boxSudo(report),
+    boxCheckout(box),
+    ...box.boxCheckout.changes.map((path) => `  - ${path}`),
     "",
-    managedPaths(report),
-    ...report.managedPaths.unhealthy.map((action) => `  - ${managedPath(action)}`),
+    gitIdentity(box, operator),
+    "",
+    ...boxSudo(box),
+    "",
+    managedPaths(box),
+    ...box.managedPaths.unhealthy.map((action) => `  - ${managedPath(action)}`),
     "",
     "Authentication:",
-    ...(report.auth.providers.length === 0
+    ...(box.auth.providers.length === 0
       ? ["  unavailable while host is offline"]
-      : report.auth.providers.map((provider) => {
+      : box.auth.providers.map((provider) => {
           switch (provider.status) {
             case "authenticated":
               return `  ${provider.provider}: authenticated`;
@@ -174,23 +205,15 @@ export function formatStatus(report: StatusReport): string {
         })),
     "",
     "MCP logins:",
-    ...mcpLogins(report),
-    "",
-    ...integrations(report),
-    "Deny list:",
-    ...report.denyList.map(
-      (rule) => `  ${rule.code}: ${rule.behavior} ${rule.description}`,
-    ),
+    ...mcpLogins(box),
+    ...integrations(box),
+    ...errorLines(box.errors),
   ];
+}
 
-  if (report.errors.length > 0) {
-    lines.push(
-      "",
-      "Errors:",
-      ...report.errors.map((error) => `  ${error.origin}/${error.code}: ${error.message}`),
-    );
-  }
-  return lines.join("\n");
+function errorLines(errors: StatusReport["errors"]): string[] {
+  if (errors.length === 0) return [];
+  return ["", "Errors:", ...errors.map((error) => `  ${error.origin}/${error.code}: ${error.message}`)];
 }
 
 const defaultDependencies: StatusCommandDependencies = {
@@ -210,16 +233,15 @@ const defaultDependencies: StatusCommandDependencies = {
   progress: noProgress,
 };
 
-function configuredTarget(config: StatusConfig): LinkOptions {
-  const target = resolveLinkOptions(config.host);
-  if (!target) throw new Error("operator: Ferry config has no complete host. Run ferry init.");
-  return target;
+/** The SSH destination of a box, as the operator would type it. */
+function destination(host: OperatorHostConfig): string {
+  return host.transport === "ssh" ? host.destination : `${host.sshUser}@${host.tailscale}`;
 }
 
-/** The daily watch update changes only the tools whose policy is `latest`. */
-function watchUpdates(tools: readonly ToolDescriptor[], config: PartialOperatorConfig, id: string): boolean {
+/** The daily watch update changes only the tools whose policy is `latest` for the box. */
+function watchUpdates(tools: readonly ToolDescriptor[], box: ResolvedBox, id: string): boolean {
   const tool = tools.find((entry) => entry.id === id);
-  return tool !== undefined && effectivePolicy(tool, config.tools) === "latest";
+  return tool !== undefined && effectivePolicy(tool, box.tools) === "latest";
 }
 
 function effectiveRegistry(
@@ -262,15 +284,15 @@ function yesNo(value: boolean): string {
   return value ? "yes" : "no";
 }
 
-function boxCheckout(report: StatusReport): string {
-  if (report.boxCheckout.dirty === null) return "Box checkout: unavailable";
-  return report.boxCheckout.dirty
-    ? `Box checkout: DIRTY (${report.boxCheckout.changes.length}), the next sync discards these changes`
+function boxCheckout(box: BoxStatus): string {
+  if (box.boxCheckout.dirty === null) return "Box checkout: unavailable";
+  return box.boxCheckout.dirty
+    ? `Box checkout: DIRTY (${box.boxCheckout.changes.length}), the next sync discards these changes`
     : "Box checkout: CLEAN";
 }
 
-function gitIdentity(report: StatusReport): string {
-  const { box, operator, boxConfigured, matchesOperator } = report.gitIdentity;
+function gitIdentity(status: BoxStatus, operator: GitIdentity | null): string {
+  const { box, boxConfigured, matchesOperator } = status.gitIdentity;
   if (box === null) return "Box git identity: unavailable";
   if (!boxConfigured) {
     const missing = [box.name === null && "user.name", box.email === null && "user.email"];
@@ -281,8 +303,8 @@ function gitIdentity(report: StatusReport): string {
   return `Box git identity: DIFFERENT from operator (${person(box)}, operator: ${person(operator)})`;
 }
 
-function boxSudo(report: StatusReport): string[] {
-  const { passwordless, watchUpdateBlocked } = report.boxSudo;
+function boxSudo(box: BoxStatus): string[] {
+  const { passwordless, watchUpdateBlocked } = box.boxSudo;
   if (passwordless === null) return ["Box sudo: unavailable"];
   if (passwordless) return ["Box sudo: PASSWORDLESS"];
   return [
@@ -295,27 +317,27 @@ function boxSudo(report: StatusReport): string[] {
   ];
 }
 
-function mcpLogins(report: StatusReport): string[] {
-  if (!report.link.online) return ["  unavailable while host is offline"];
-  if (report.mcpLogins.error) return ["  unavailable"];
-  if (report.mcpLogins.loginRequired.length === 0) return ["  none required"];
-  return report.mcpLogins.loginRequired.map((entry) => {
+function mcpLogins(box: BoxStatus): string[] {
+  if (!box.link.online) return ["  unavailable while host is offline"];
+  if (box.mcpLogins.error) return ["  unavailable"];
+  if (box.mcpLogins.loginRequired.length === 0) return ["  none required"];
+  return box.mcpLogins.loginRequired.map((entry) => {
     const [tool, server] = entry.split("/");
     return `  ${entry}: LOGIN REQUIRED, run ferry auth ${tool} --mcp ${server}`;
   });
 }
 
-function integrations(report: StatusReport): string[] {
-  const entries = Object.values(report.integrations ?? {});
+function integrations(box: BoxStatus): string[] {
+  const entries = Object.values(box.integrations ?? {});
   if (entries.length === 0) return [];
   return [
+    "",
     "Integrations:",
     ...entries.flatMap((entry) => [
       `  ${entry.name}:`,
       ...entry.lines.map((line) => `    ${line}`),
       ...entry.warnings.map((warning) => `    WARNING: ${warning}`),
     ]),
-    "",
   ];
 }
 
@@ -323,16 +345,16 @@ function person(identity: GitIdentity): string {
   return `${identity.name ?? "no user.name"} <${identity.email ?? "no user.email"}>`;
 }
 
-function managedPaths(report: StatusReport): string {
-  if (report.managedPaths.allHealthy === null) {
+function managedPaths(box: BoxStatus): string {
+  if (box.managedPaths.allHealthy === null) {
     return "Managed links: unavailable while host is offline";
   }
-  return report.managedPaths.allHealthy
+  return box.managedPaths.allHealthy
     ? "Managed links: HEALTHY"
-    : `Managed links: UNHEALTHY (${report.managedPaths.unhealthy.length})`;
+    : `Managed links: UNHEALTHY (${box.managedPaths.unhealthy.length})`;
 }
 
-function managedPath(action: StatusReport["managedPaths"]["unhealthy"][number]): string {
+function managedPath(action: BoxStatus["managedPaths"]["unhealthy"][number]): string {
   if ("target" in action) return `${action.harness}: ${action.path} -> ${action.target}`;
   return `${action.harness}: ${action.path} (${action.kind})`;
 }

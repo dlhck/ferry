@@ -16,7 +16,11 @@ export type StatusDependencyError = {
 
 export type StatusError = LinkError | StatusDependencyError;
 
-export type StatusDependencies = {
+/** The read-only inspections of one box. */
+export type BoxStatusDependencies = {
+  readonly name: string;
+  /** The destination of the box, for example `dev@box-a.example`. */
+  readonly host: string;
   readonly link: {
     probe(): Promise<LinkResult>;
     readBoxTip(): Promise<LinkResult>;
@@ -25,14 +29,8 @@ export type StatusDependencies = {
     /** Print `yes` when sudo on the box runs without a password, else `no`. */
     readBoxSudo(): Promise<LinkResult>;
   };
-  /** True when `[update] watch = true` and the policy of gh is `latest`, so the daily watch update runs the gh update. */
+  /** True when `[update] watch = true` and the policy of gh is `latest` for this box, so the daily watch update runs the gh update. */
   readonly watchUpdatesGh: boolean;
-  readonly operator: {
-    gitIdentity(): Promise<GitIdentity>;
-  };
-  readonly store: {
-    inspectTips(boxTip: string | null): Promise<TipReport>;
-  };
   readonly apply: {
     plan(): ApplyPlan | Promise<ApplyPlan>;
   };
@@ -40,15 +38,26 @@ export type StatusDependencies = {
     status(): Promise<AuthStatusReport>;
     mcpStatus(): Promise<readonly McpLoginStatus[]>;
   };
-  readonly manifest: {
-    denyRules(): readonly DenyRuleDescription[];
-  };
-  /** The enabled integrations only. */
+  /** The integrations that are enabled for this box only. */
   readonly integrations?: readonly {
     readonly id: IntegrationId;
     readonly name: string;
     health(): Promise<IntegrationHealth>;
   }[];
+};
+
+export type StatusDependencies = {
+  readonly operator: {
+    gitIdentity(): Promise<GitIdentity>;
+  };
+  readonly store: {
+    inspectTips(boxTip: string | null): Promise<TipReport>;
+  };
+  readonly manifest: {
+    denyRules(): readonly DenyRuleDescription[];
+  };
+  /** The selected boxes, in config order. */
+  readonly boxes: readonly BoxStatusDependencies[];
   readonly progress?: Progress;
 };
 
@@ -60,14 +69,19 @@ export type IntegrationStatus = {
   readonly state: Readonly<Record<string, unknown>>;
 };
 
-export type StatusReport = {
-  readonly schemaVersion: 1;
+export type BoxStatus = {
+  readonly name: string;
+  readonly host: string;
   readonly link: {
     readonly online: boolean;
     readonly address: string | null;
     readonly error: LinkError | StatusDependencyError | null;
   };
-  readonly store: TipReport & { readonly error: StatusDependencyError | null };
+  /** The store tip of the box checkout. */
+  readonly tip: string | null;
+  readonly remoteMatchesBox: boolean;
+  /** True when the local tip, the remote tip, and the box tip are the same. */
+  readonly allMatch: boolean;
   readonly boxCheckout: {
     readonly dirty: boolean | null;
     readonly changes: readonly string[];
@@ -75,7 +89,6 @@ export type StatusReport = {
   };
   readonly gitIdentity: {
     readonly box: GitIdentity | null;
-    readonly operator: GitIdentity | null;
     readonly boxConfigured: boolean | null;
     readonly matchesOperator: boolean | null;
     readonly error: LinkError | StatusDependencyError | null;
@@ -101,17 +114,41 @@ export type StatusReport = {
     readonly loginRequired: readonly string[];
     readonly error: StatusDependencyError | null;
   };
-  readonly denyList: readonly DenyRuleDescription[];
-  /** Present only when at least one integration is enabled. */
+  /** Present only when at least one integration is enabled for this box. */
   readonly integrations?: Readonly<Partial<Record<IntegrationId, IntegrationStatus>>>;
+  /** The errors of this box. */
   readonly errors: readonly StatusError[];
 };
+
+export type StatusReport = {
+  readonly schemaVersion: 2;
+  /** The local and remote store tips. Each box has its own tip. */
+  readonly store: {
+    readonly local: string | null;
+    readonly remote: string | null;
+    readonly localMatchesRemote: boolean;
+    readonly error: StatusDependencyError | null;
+  };
+  readonly operator: {
+    readonly gitIdentity: GitIdentity | null;
+    readonly error: StatusDependencyError | null;
+  };
+  readonly denyList: readonly DenyRuleDescription[];
+  /** One entry for each selected box, in config order. */
+  readonly boxes: readonly BoxStatus[];
+  /** The operator and git remote errors only. Each box has its own errors. */
+  readonly errors: readonly StatusError[];
+};
+
+/** Boxes that status inspects at the same time. */
+const BOX_LIMIT = 4;
 
 /** Compose one read-only report from module-owned inspection methods. */
 export async function composeStatus(dependencies: StatusDependencies): Promise<StatusReport> {
   const progress = dependencies.progress ?? noProgress;
-  const enabledIntegrations = dependencies.integrations ?? [];
-  progress.plan(9 + enabledIntegrations.length);
+  progress.plan(
+    1 + dependencies.boxes.reduce((total, box) => total + BOX_STEPS + (box.integrations?.length ?? 0), 0),
+  );
   const errors: StatusError[] = [];
   let denyList: readonly DenyRuleDescription[] = [];
   try {
@@ -119,6 +156,64 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
   } catch (cause) {
     errors.push(dependencyError("operator", cause));
   }
+
+  let operatorIdentity: GitIdentity | null = null;
+  let operatorError: StatusDependencyError | null = null;
+  try {
+    operatorIdentity = await dependencies.operator.gitIdentity();
+  } catch (cause) {
+    operatorError = dependencyError("operator", cause);
+    errors.push(operatorError);
+  }
+
+  let storeError: StatusDependencyError | null = null;
+  let local: string | null = null;
+  let remote: string | null = null;
+  try {
+    ({ local, remote } = await inspect(progress, "Comparing the store tips", () =>
+      dependencies.store.inspectTips(null),
+    ));
+  } catch (cause) {
+    storeError = dependencyError("git-remote", cause);
+    errors.push(storeError);
+  }
+
+  const shared: SharedStatus = { local, remote, operatorIdentity };
+  const boxProgress = orderedProgress(progress, dependencies.boxes.map((box) => box.name));
+  const boxes = await mapLimit(dependencies.boxes, BOX_LIMIT, async (box, index) => {
+    try {
+      return await composeBoxStatus(box, shared, boxProgress.views[index]!);
+    } finally {
+      boxProgress.end(index);
+    }
+  });
+
+  return {
+    schemaVersion: 2,
+    store: { local, remote, localMatchesRemote: local !== null && local === remote, error: storeError },
+    operator: { gitIdentity: operatorIdentity, error: operatorError },
+    denyList,
+    boxes,
+    errors,
+  };
+}
+
+type SharedStatus = {
+  readonly local: string | null;
+  readonly remote: string | null;
+  readonly operatorIdentity: GitIdentity | null;
+};
+
+/** The steps of one box without its integrations. */
+const BOX_STEPS = 8;
+
+async function composeBoxStatus(
+  dependencies: BoxStatusDependencies,
+  shared: SharedStatus,
+  progress: Progress,
+): Promise<BoxStatus> {
+  const enabledIntegrations = dependencies.integrations ?? [];
+  const errors: StatusError[] = [];
 
   let online = false;
   let address: string | null = null;
@@ -203,14 +298,7 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     progress.skip("Checking sudo on the box", OFFLINE);
   }
 
-  let operatorIdentity: GitIdentity | null = null;
-  try {
-    operatorIdentity = await dependencies.operator.gitIdentity();
-  } catch (cause) {
-    const operatorError = dependencyError("operator", cause);
-    gitIdentityError ??= operatorError;
-    errors.push(operatorError);
-  }
+  const operatorIdentity = shared.operatorIdentity;
   const boxConfigured = boxIdentity && boxIdentity.name !== null && boxIdentity.email !== null;
   const matchesOperator =
     boxIdentity && operatorIdentity
@@ -218,15 +306,6 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
         boxIdentity.name === operatorIdentity.name &&
         boxIdentity.email === operatorIdentity.email
       : null;
-
-  let storeError: StatusDependencyError | null = null;
-  let store = emptyTips(boxTip);
-  try {
-    store = await inspect(progress, "Comparing the store tips", () => dependencies.store.inspectTips(boxTip));
-  } catch (cause) {
-    storeError = dependencyError("git-remote", cause);
-    errors.push(storeError);
-  }
 
   let managedPathsError: StatusDependencyError | null = null;
   let unhealthy: readonly ApplyAction[] = [];
@@ -316,18 +395,17 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     }
   }
 
+  const localMatchesRemote = shared.local !== null && shared.local === shared.remote;
+  const remoteMatchesBox = shared.remote !== null && shared.remote === boxTip;
   return {
-    schemaVersion: 1,
+    name: dependencies.name,
+    host: dependencies.host,
     link: { online, address, error: linkError },
-    store: { ...store, error: storeError },
+    tip: boxTip,
+    remoteMatchesBox,
+    allMatch: localMatchesRemote && remoteMatchesBox,
     boxCheckout: { dirty, changes, error: boxCheckoutError },
-    gitIdentity: {
-      box: boxIdentity,
-      operator: operatorIdentity,
-      boxConfigured,
-      matchesOperator,
-      error: gitIdentityError,
-    },
+    gitIdentity: { box: boxIdentity, boxConfigured, matchesOperator, error: gitIdentityError },
     boxSudo: {
       passwordless,
       watchUpdateBlocked: dependencies.watchUpdatesGh && passwordless === false,
@@ -336,9 +414,69 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     managedPaths: { allHealthy, unhealthy, error: managedPathsError },
     auth: { providers, loginRequired, error: authError },
     mcpLogins: { loginRequired: mcpLoginRequired, error: mcpError },
-    denyList,
     ...(enabledIntegrations.length > 0 ? { integrations } : {}),
     errors,
+  };
+}
+
+/**
+ * Run `work` for each item, with at most `limit` items at the same time.
+ * The results keep the order of the items.
+ */
+async function mapLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  work: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await work(items[index]!, index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+/**
+ * One Progress for each box. A reporter shows one step at a time, so only the
+ * first box that has not ended writes to it. The other boxes keep their
+ * events, and write them in box order when the boxes before them end. With
+ * more than one box, each step name starts with `[<name>] `.
+ */
+function orderedProgress(
+  progress: Progress,
+  names: readonly string[],
+): { readonly views: readonly Progress[]; end(index: number): void } {
+  if (names.length === 1) return { views: [progress], end() {} };
+  let head = 0;
+  const queues = names.map((): Array<() => void> => []);
+  const ended = names.map(() => false);
+  const views = names.map((box, index): Progress => {
+    const send = (event: () => void) => {
+      if (index === head) event();
+      else queues[index]!.push(event);
+    };
+    return {
+      ...noProgress,
+      start: (name) => send(() => progress.start(`[${box}] ${name}`)),
+      count: (current, total) => send(() => progress.count(current, total)),
+      done: (detail) => send(() => progress.done(detail)),
+      fail: (detail) => send(() => progress.fail(detail)),
+      skip: (name, detail) => send(() => progress.skip(`[${box}] ${name}`, detail)),
+    };
+  });
+  return {
+    views,
+    end(index) {
+      ended[index] = true;
+      while (head < names.length && ended[head]) {
+        head += 1;
+        for (const event of queues[head]?.splice(0) ?? []) event();
+      }
+    },
   };
 }
 
@@ -369,17 +507,6 @@ function parseSudoCheck(stdout: string): boolean {
   if (answer === "yes") return true;
   if (answer === "no") return false;
   throw new Error("unexpected sudo check output");
-}
-
-function emptyTips(box: string | null): TipReport {
-  return {
-    local: null,
-    remote: null,
-    box,
-    localMatchesRemote: false,
-    remoteMatchesBox: false,
-    allMatch: false,
-  };
 }
 
 function dependencyError(
