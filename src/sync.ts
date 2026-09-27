@@ -24,8 +24,15 @@ import { openStore as openSnapshotStore, skillChanged, type PublishResult } from
 import { adoptPublishedSkills } from "./adopt.ts";
 import { installBoxPlugins, mergeBoxSettings } from "./box-settings.ts";
 import { registerBoxMcp } from "./box-mcp.ts";
-import { carryAgentProfiles, profileName, readAgentProfiles, type AgentProfile } from "./integrations/paseo.ts";
+import {
+  carryAgentProfiles,
+  profileName,
+  readAgentProfiles,
+  refreshUnitPath,
+  type AgentProfile,
+} from "./integrations/paseo.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
+import { boxPathDirs, profileBlockCommand } from "./tools/path.ts";
 
 export type SyncInput = {
   readonly home?: string;
@@ -86,6 +93,8 @@ export type SyncPlan = {
   readonly storeUpdates: readonly StoreUpdate[];
   /** The names of the local Paseo agent profiles, or `null` when the Paseo integration is off. */
   readonly paseoProfiles: readonly string[] | null;
+  /** The box PATH directories, relative to the home, for the `~/.profile` block and the Paseo unit. */
+  readonly pathDirs: readonly string[];
 };
 
 export type SettingsChange = { readonly harness: string; readonly keys: readonly string[] };
@@ -135,19 +144,23 @@ export async function runSync(
   const progress = dependencies.progress ?? noProgress;
   const writeLine = dependencies.writeLine ?? console.log;
   const writePlan = dependencies.writePlan ?? ((plan: SyncPlan) => printPlan(plan, writeLine));
-  progress.plan(input.dryRun ? 1 : 9);
-  const { config, registry, seed, profiles } = await step(
+  progress.plan(input.dryRun ? 1 : 10);
+  const { config, registry, seed, profiles, pathDirs } = await step(
     progress,
     "Reading the portable set",
     async () => {
       const source = inspectSyncSource(home, dependencies);
       await refuseChangedStoreCopies(home, source.config, source.seed);
-      return { ...source, profiles: source.config.integrations?.paseo === true ? paseoProfiles(home) : null };
+      return {
+        ...source,
+        profiles: source.config.integrations?.paseo === true ? paseoProfiles(home) : null,
+        pathDirs: pathDirsOf(source.registry),
+      };
     },
     undefined,
     (source) => plural(source.seed.skills.length, "skill"),
   );
-  if (!input.dryRun && profiles !== null) progress.plan(10);
+  if (!input.dryRun && profiles !== null) progress.plan(12);
   for (const leftover of seed.leftovers) {
     const label = leftover.code === "hook-path" ? "hook" : leftover.code === "mcp-local" ? "MCP server" : null;
     if (!label) continue;
@@ -155,17 +168,17 @@ export async function runSync(
   }
 
   if (input.dryRun) {
-    const plan = makePlan(input, config, home, null, registry, seed, profiles);
+    const plan = makePlan(input, config, home, null, registry, seed, profiles, pathDirs);
     writePlan(plan);
     return { dryRun: true, published: false, plan };
   }
 
-  const target = resolveLinkOptions(config.host);
+  const target = { ...resolveLinkOptions(config.host), pathDirs };
   const link = dependencies.createLink?.(target) ?? new Link(target);
   const remoteHome = await step(progress, `Connecting to ${targetLabel(config)}`, () =>
     resolveRemoteHome(link, config),
   );
-  const plan = makePlan(input, config, home, remoteHome, registry, seed, profiles);
+  const plan = makePlan(input, config, home, remoteHome, registry, seed, profiles, pathDirs);
   writePlan(plan);
 
   const release = takeLock(dependencies, home, targetKey(config));
@@ -327,7 +340,25 @@ export async function runSync(
       );
     }
 
-    // The carry runs last and only warns on failure, so the Paseo daemon never blocks the core sync.
+    await step(
+      progress,
+      "Writing the box PATH",
+      async () => {
+        const result = await link.run(profileBlockCommand(pathDirs));
+        if (!result.ok) {
+          throw new SyncError(
+            "apply-failure",
+            "box",
+            `could not write the PATH block of ~/.profile on ${plan.box}: ${result.error.origin}/${result.error.code}: ${result.error.message}`,
+          );
+        }
+        return result.stdout.trim() === "unchanged" ? "no changes" : "updated ~/.profile";
+      },
+      undefined,
+      (detail) => detail,
+    );
+
+    // The Paseo steps run last and only warn on failure, so the Paseo daemon never blocks the core sync.
     if (profiles !== null) {
       try {
         const carry = await step(
@@ -349,6 +380,23 @@ export async function runSync(
         for (const warning of carry.warnings) writeLine(`Warning: ${warning}`);
       } catch (cause) {
         writeLine(`Warning: Ferry could not carry the Paseo agent profiles: ${messageOf(cause)}. The sync is complete.`);
+      }
+      // The restart also applies the profiles, so it runs after the carry.
+      try {
+        const restarted = await step(
+          progress,
+          "Updating the Paseo unit PATH",
+          () => refreshUnitPath(link, pathDirs),
+          undefined,
+          (restarted) => (restarted ? "restarted" : "no changes"),
+        );
+        if (restarted) {
+          writeLine(
+            "The box PATH changed, so Ferry updated ferry-paseo.service and restarted the Paseo daemon. The restart stopped the agents that ran on the box.",
+          );
+        }
+      } catch (cause) {
+        writeLine(`Warning: Ferry could not update the PATH of ferry-paseo.service: ${messageOf(cause)}. The sync is complete.`);
       }
     }
 
@@ -432,6 +480,7 @@ function makePlan(
   registry: Registry,
   seed: Seed,
   profiles: readonly AgentProfile[] | null,
+  pathDirs: readonly string[],
 ): SyncPlan {
   const localCheckout = join(home, ".ferry", "store");
   return {
@@ -447,6 +496,7 @@ function makePlan(
     mcpServers: seed.mcp.flatMap((entry) => entry.servers.map((server) => `${entry.harness}/${server.name}`)),
     storeUpdates: seed.storeUpdates,
     paseoProfiles: profiles === null ? null : profiles.map(profileName),
+    pathDirs,
   };
 }
 
@@ -496,6 +546,9 @@ function printPlan(plan: SyncPlan, writeLine: (line: string) => void): void {
         "none"
       }`,
       `MCP servers: declare on the box, and keep the other box servers: ${plan.mcpServers.join(", ") || "none"}`,
+      `Box PATH: ${plan.pathDirs.map((dir) => `~/${dir}`).join(", ")} -> the ferry block of ~/.profile${
+        plan.paseoProfiles === null ? "" : " and the PATH of ferry-paseo.service. A PATH change restarts the Paseo daemon and stops its agents"
+      }`,
       `Store updates from a harness root: ${
         plan.storeUpdates.map((update) => `${update.name} (${update.path})`).join(", ") || "none"
       }`,
@@ -698,6 +751,14 @@ function resolveRegistry(
     );
   }
   return result;
+}
+
+function pathDirsOf(registry: Registry): readonly string[] {
+  try {
+    return boxPathDirs(registry.tools);
+  } catch (cause) {
+    throw new SyncError("registry-refusal", "operator", `registry refused the operator config: ${messageOf(cause)}`, { cause });
+  }
 }
 
 function completeConfig(config: PartialOperatorConfig | null): OperatorConfig {

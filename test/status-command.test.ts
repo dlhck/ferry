@@ -246,6 +246,7 @@ describe("ferry status command", () => {
               ...stack.dependencies,
               readConfig: () => ({ ...readConfig(), ...integrations }),
               ...dependencies,
+              createLink: stack.dependencies.createLink!,
             }),
           writeLine: (line) => lines.push(line),
           createProgress: () => terminal.progress,

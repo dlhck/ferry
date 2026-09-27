@@ -1,5 +1,7 @@
 /** Link resolves a configured target and owns ordinary OpenSSH transport. */
 
+import { BUILTIN_BOX_PATH_DIRS, pathExport } from "./tools/path.ts";
+
 export type HostCommand = {
   readonly argv: readonly string[];
   readonly timeoutMs: number;
@@ -63,6 +65,8 @@ type LinkTimeouts = {
   readonly probeTimeoutMs?: number;
   readonly connectTimeoutMs?: number;
   readonly commandTimeoutMs?: number;
+  /** The box PATH directories from `boxPathDirs`. The default is the directories of the built-in tools. */
+  readonly pathDirs?: readonly string[];
 };
 
 type TailscaleLinkOptions = LinkTimeouts & {
@@ -98,21 +102,16 @@ const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 
-/**
- * A non-interactive SSH command does not read the shell profile, so PATH does not
- * contain the user install directories of the vendor CLIs. The Claude, Codex and
- * Cursor installers use ~/.local/bin. The managed Pi installer uses ~/.pi/agent/bin
- * when no user bin directory is on PATH. Child processes get the same PATH.
- * The directories are relative to the home directory.
- */
-export const BOX_PATH_DIRS: readonly string[] = [".local/bin", ".pi/agent/bin"];
-const BOX_PATH = `export PATH="${BOX_PATH_DIRS.map((dir) => `$HOME/${dir}`).join(":")}:$PATH"; `;
-
 export class Link {
   constructor(
     private readonly options: LinkOptions,
     private readonly adapter: HostAdapter = new BunHostAdapter(),
   ) {}
+
+  /** The directories, relative to the home, that each box command puts in front of PATH. Child processes get the same PATH. */
+  get pathDirs(): readonly string[] {
+    return this.options.pathDirs ?? BUILTIN_BOX_PATH_DIRS;
+  }
 
   async run(command: string, options: RunOptions = {}): Promise<LinkResult> {
     const invalid = this.validateConfig();
@@ -123,7 +122,7 @@ export class Link {
 
     const argv = this.sshBase(resolved.destination);
     if (options.agentForwarding === "git") argv.splice(1, 0, "-A");
-    argv.push(BOX_PATH + command);
+    argv.push(`${pathExport(this.pathDirs)}; ${command}`);
 
     let execution: HostCommandResult;
     try {
