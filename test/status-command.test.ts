@@ -63,7 +63,11 @@ type FakeStack = {
   readonly dependencies: Partial<StatusCommandDependencies>;
 };
 
-function fakeStack(online = true, boxChanges = ""): FakeStack {
+function fakeStack(
+  online = true,
+  boxChanges = "",
+  boxIdentity = "user.name Operator\nuser.email operator@example.com\n",
+): FakeStack {
   const output: string[] = [];
   const reads: string[] = [];
   const mutations: string[] = [];
@@ -88,7 +92,9 @@ function fakeStack(online = true, boxChanges = ""): FakeStack {
           ? "/box/home\n"
           : command.includes(" status ")
             ? boxChanges
-            : "same-tip\n",
+            : command.includes("--get-regexp")
+              ? boxIdentity
+              : "same-tip\n",
         stderr: "",
       };
     },
@@ -133,6 +139,10 @@ function fakeStack(online = true, boxChanges = ""): FakeStack {
     home: () => "/operator/home",
     createLink: () => link,
     createStore: () => store,
+    readOperatorGitIdentity: async (home: string) => {
+      reads.push(`operator.gitIdentity:${home}`);
+      return { name: "Operator", email: "operator@example.com" };
+    },
     inspectApply: async (input: RemoteApplyInput): Promise<ApplyPlan> => {
       reads.push("apply.inspect");
       if (input.dryRun !== true) mutations.push("apply.commit");
@@ -192,6 +202,9 @@ describe("ferry status command", () => {
     expect(stack.output[0]).toContain("Host: ONLINE");
     expect(stack.output[0]).toContain("All agree: yes");
     expect(stack.output[0]).toContain("Box checkout: CLEAN");
+    expect(stack.output[0]).toContain(
+      "Box git identity: MATCHES operator (Operator <operator@example.com>)",
+    );
     expect(stack.output[0]).toContain("Managed links: UNHEALTHY (1)");
     expect(stack.output[0]).toContain("codex: LOGIN REQUIRED");
     expect(stack.output[0]).toContain("pi: MANUAL LOGIN REQUIRED. SSH to the box");
@@ -237,6 +250,35 @@ describe("ferry status command", () => {
     expect(json.mutations).toEqual([]);
   });
 
+  test("shows a missing or different box git identity in text and JSON", async () => {
+    const missing = fakeStack(true, "", "");
+    const different = fakeStack(true, "", "user.name Box Agent\nuser.email box@example.com\n");
+    const json = fakeStack(true, "", "");
+
+    await runStatusCommand({ json: false }, missing.dependencies);
+    await runStatusCommand({ json: false }, different.dependencies);
+    await runStatusCommand({ json: true }, json.dependencies);
+
+    expect(missing.output[0]).toContain(
+      "Box git identity: MISSING user.name and user.email, run ferry install",
+    );
+    expect(missing.reads).toContain(
+      "link.run:git config --global --get-regexp '^user\\.(name|email)$' 2>/dev/null || true",
+    );
+    expect(missing.reads).toContain("operator.gitIdentity:/operator/home");
+    expect(different.output[0]).toContain(
+      "Box git identity: DIFFERENT from operator (Box Agent <box@example.com>, operator: Operator <operator@example.com>)",
+    );
+    expect(JSON.parse(json.output[0]!).gitIdentity).toEqual({
+      box: { name: null, email: null },
+      operator: { name: "Operator", email: "operator@example.com" },
+      boxConfigured: false,
+      matchesOperator: false,
+      error: null,
+    });
+    expect(missing.mutations).toEqual([]);
+  });
+
   test("constructs Link from a direct SSH destination", async () => {
     const stack = fakeStack();
     let linkOptions: unknown;
@@ -265,6 +307,7 @@ describe("ferry status command", () => {
 
     expect(stack.output[0]).toContain("Host: OFFLINE");
     expect(stack.output[0]).toContain("Managed links: unavailable while host is offline");
+    expect(stack.output[0]).toContain("Box git identity: unavailable");
     expect(stack.output[0]).toContain("Paseo listen hint: unavailable while host is offline");
     expect(stack.output[0]).toContain("network/host-offline");
     expect(stack.reads).not.toContain("apply.inspect");

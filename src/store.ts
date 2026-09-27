@@ -211,7 +211,7 @@ function tipReport(local: string | null, remote: string | null, box: string | nu
   };
 }
 
-async function configuredValue(git: GitRunner, cwd: string, key: string): Promise<string | null> {
+export async function configuredValue(git: GitRunner, cwd: string, key: string): Promise<string | null> {
   const result = await git.run({ args: ["config", "--get", key], cwd });
   if (result.status !== 0) return null;
   return decode(result.stdout).trim() || null;

@@ -1,6 +1,13 @@
 import * as prompts from "@clack/prompts";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { AuthStart, authTools, type AuthLink, type AuthStartResult } from "./auth-start.ts";
 import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
+import {
+  readOperatorGitIdentity,
+  setBoxGitIdentityCommand,
+  type GitIdentity,
+} from "./git-identity.ts";
 import {
   Install,
   type InstallProgress,
@@ -10,6 +17,9 @@ import {
 import { Link, type LinkError, type LinkOptions } from "./link.ts";
 import { BUILTIN_TOOLS } from "./registry/builtin.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
+import { RealGitRunner } from "./store.ts";
+
+const STORE_RELATIVE_PATH = ".ferry/store";
 
 export type InstallCommandInput = { readonly yes: boolean };
 export type AuthCommandInput = { readonly provider?: string };
@@ -37,6 +47,7 @@ export type InstallCommandDependencies = {
   readonly tools: readonly ToolDescriptor[];
   readonly readConfig: () => PartialOperatorConfig | null;
   readonly createLink: (options: LinkOptions) => CommandLink;
+  readonly readOperatorGitIdentity: () => Promise<GitIdentity>;
   readonly createInstall: (link: CommandLink, tools: readonly ToolDescriptor[]) => InstallCommand;
   readonly createProgress: (total: number) => InstallProgressIndicator;
   readonly confirm: () => Promise<boolean | symbol | undefined>;
@@ -65,12 +76,21 @@ export async function runInstallCommand(
 ): Promise<void> {
   const resolved = { ...defaultInstallDependencies, ...dependencies };
   const target = loadTarget(resolved.readConfig, resolved.writeLine);
-  const install = resolved.createInstall(resolved.createLink(target), resolved.tools);
+  const link = resolved.createLink(target);
+  const install = resolved.createInstall(link, resolved.tools);
 
   const plan = install.plan();
   for (const recipe of plan) {
     resolved.writeLine(`${recipe.tool}: ${recipe.command}`);
   }
+  const { name, email } = await resolved.readOperatorGitIdentity();
+  const identityCommand =
+    name !== null && email !== null ? setBoxGitIdentityCommand({ name, email }) : null;
+  resolved.writeLine(
+    identityCommand
+      ? `git identity: ${identityCommand}`
+      : "git identity: skipped, the operator machine has no git user.name and user.email",
+  );
 
   if (!input.yes) {
     const confirmed = await resolved.confirm();
@@ -108,6 +128,11 @@ export async function runInstallCommand(
     failLink("Install", result.error, resolved.writeLine);
   }
   progress?.stop(`Installed ${plan.length} tools`);
+
+  if (identityCommand) {
+    const identity = await link.run(identityCommand);
+    if (!identity.ok) failLink("Install", identity.error, resolved.writeLine);
+  }
 }
 
 export async function runAuthCommand(
@@ -140,6 +165,8 @@ const defaultInstallDependencies: InstallCommandDependencies = {
   tools: BUILTIN_TOOLS,
   readConfig,
   createLink: (options) => new Link(options),
+  readOperatorGitIdentity: () =>
+    readOperatorGitIdentity(new RealGitRunner(), join(homedir(), STORE_RELATIVE_PATH)),
   createInstall: (link, tools) => new Install(link, tools),
   createProgress: (total) => prompts.progress({ max: total }),
   confirm: () => prompts.confirm({ message: "Run these commands on the box?" }),
