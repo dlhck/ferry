@@ -48,6 +48,7 @@ import {
   type UninstallResult,
 } from "./uninstall.ts";
 import { runSkillsAdd, SkillsAddError, type RunProcess } from "./skills-add.ts";
+import { runMove, type MoveDependencies, type MoveInput } from "./move.ts";
 import {
   runUpdateCommand,
   type UpdateCommandDependencies,
@@ -77,6 +78,7 @@ type CliDependencies = {
     dependencies?: Partial<UpdateCommandDependencies>,
   ) => Promise<void>;
   readonly runSync?: (input: SyncInput, dependencies?: SyncDependencies) => Promise<SyncResult>;
+  readonly runMove?: (input: MoveInput, dependencies?: Partial<MoveDependencies>) => Promise<void>;
   readonly runStatus?: (
     input: StatusCommandInput,
     dependencies?: Partial<StatusCommandDependencies>,
@@ -219,6 +221,32 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
         { progress: progress() },
       );
     });
+
+  program
+    .command("move")
+    .description("Continue a project on the box, or with --from-box on this machine")
+    .argument("<path>", "project folder inside the home directory")
+    .option("--from-box", "move the project from the box to this machine")
+    .option("--dry-run", "print what Ferry would carry, refuse, and skip without changes")
+    .option("--remove", "after verification, move the source copy to a trash directory")
+    .option("--include-env", "also carry .env files that pass the token and secret rules")
+    .action(
+      async (
+        path: string,
+        options: { fromBox?: boolean; dryRun?: boolean; remove?: boolean; includeEnv?: boolean },
+      ) => {
+        await (dependencies.runMove ?? runMove)(
+          {
+            path,
+            fromBox: options.fromBox === true,
+            dryRun: options.dryRun === true,
+            remove: options.remove === true,
+            includeEnv: options.includeEnv === true,
+          },
+          { writeLine: dependencies.writeLine ?? console.log, progress: progress() },
+        );
+      },
+    );
 
   program
     .command("status")

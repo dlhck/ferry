@@ -473,6 +473,29 @@ describe("ferry --help", () => {
     expect(received).toEqual({ yes: true, dryRun: true });
   });
 
+  test("wires every move flag to the move module", async () => {
+    let received: unknown;
+    const program = buildProgram({
+      readConfig: () => null,
+      runMove: async (input) => {
+        received = input;
+      },
+    });
+
+    await program.parseAsync(
+      ["move", "Developer/app", "--from-box", "--dry-run", "--remove", "--include-env"],
+      { from: "user" },
+    );
+
+    expect(received).toEqual({
+      path: "Developer/app",
+      fromBox: true,
+      dryRun: true,
+      remove: true,
+      includeEnv: true,
+    });
+  });
+
   test("installs the platform watch service", async () => {
     const output: string[] = [];
     let calls = 0;
