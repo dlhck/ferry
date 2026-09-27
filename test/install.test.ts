@@ -7,7 +7,8 @@ import type { ToolDescriptor } from "../src/registry/types.ts";
 
 const PREFIX_END = 'cd "$HOME" || exit 1; ';
 
-const GH_INSTALL =
+/** The gh version recipe: the apt source, then the pinned version, or the latest gh with a warning. */
+const GH_RECIPE_INSTALL =
   "(type -p wget >/dev/null || (sudo apt update && sudo apt install wget -y)) \\\n" +
   "&& sudo mkdir -p -m 755 /etc/apt/keyrings \\\n" +
   "&& out=$(mktemp) && wget -nv -O$out https://cli.github.com/packages/githubcli-archive-keyring.gpg \\\n" +
@@ -16,7 +17,12 @@ const GH_INSTALL =
   "&& sudo mkdir -p -m 755 /etc/apt/sources.list.d \\\n" +
   '&& echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \\\n' +
   "&& sudo apt update \\\n" +
-  "&& sudo apt install gh -y";
+  "&& if apt-cache madison gh | cut -d \"|\" -f 2 | tr -d \" \" | grep -qxF -- '2.92.0'; then\n" +
+  "  sudo apt install gh='2.92.0' -y --allow-downgrades\n" +
+  "else\n" +
+  "  echo 'Warning: the GitHub apt repository has no gh 2.92.0. Ferry installs the latest gh.'\n" +
+  "  sudo apt install gh -y\n" +
+  "fi";
 
 const AGENT_INSTALLS = {
   claude: "curl -fsSL https://claude.ai/install.sh | bash",
@@ -96,7 +102,7 @@ describe("Install plan", () => {
     const plan = await install.plan();
 
     expect(plan.map(({ tool, policy, version, action, command }) => ({ tool, policy, version, action, command }))).toEqual([
-      { tool: "gh", policy: "operator", version: "2.92.0", action: "install", command: GH_INSTALL },
+      { tool: "gh", policy: "operator", version: "2.92.0", action: "install", command: GH_RECIPE_INSTALL },
       ...Object.entries(AGENT_INSTALLS).map(([tool, command]) => ({
         tool,
         policy: "latest",
@@ -190,13 +196,13 @@ describe("Install run", () => {
   });
 
   test("reports the standard output of each installer", async () => {
-    const box = new FakeBox({}, [success("Warning: gh 2.92.0 is not in the apt repository. Installing the latest version.\n"), success("")]);
+    const box = new FakeBox({}, [success("Warning: the GitHub apt repository has no gh 2.92.0. Ferry installs the latest gh.\n"), success("")]);
     const install = new Install(box, tools, undefined, local);
     const progress: InstallProgress[] = [];
 
     await install.run(true, await install.plan(), (update) => progress.push(update));
 
-    expect(progress[1]?.stdout).toBe("Warning: gh 2.92.0 is not in the apt repository. Installing the latest version.\n");
+    expect(progress[1]?.stdout).toBe("Warning: the GitHub apt repository has no gh 2.92.0. Ferry installs the latest gh.\n");
   });
 
   test("a failed dependency stops the install before the tools that depend on it", async () => {

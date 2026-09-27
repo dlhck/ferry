@@ -2,9 +2,9 @@
  * Descriptors for the harnesses ferry manages and the tools it installs and
  * logs in.
  *
- * A descriptor is data. Ferry never loads code from one. Only a tool that the
- * operator defines in a `[tools.<id>]` table of the config has a `recipe`,
- * which builds a command from a version. A descriptor names paths and
+ * A descriptor is data. Ferry never loads code from one. Only gh and a tool
+ * that the operator defines in a `[tools.<id>]` table of the config have a
+ * `recipe`, which builds a command from a version. A descriptor names paths and
  * commands; it cannot widen the deny set, which stays in Manifest.
  */
 
@@ -191,8 +191,8 @@ export type ToolDescriptor = {
   readonly install?: { readonly command: string };
   readonly update?: ToolUpdate;
   /**
-   * Recipes for one version. Each one puts the shell-quoted version in place
-   * of `{version}` in the command of the config. A tool without them can
+   * Recipes for one version. For a config tool, each one puts the
+   * shell-quoted version in place of `{version}` in the command of the config. A tool without them can
    * follow only the `latest` policy.
    */
   readonly recipe?: {

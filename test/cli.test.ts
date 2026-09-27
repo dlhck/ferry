@@ -12,6 +12,7 @@ import type {
 import { createPaseo } from "../src/integrations/paseo.ts";
 import { denyRules } from "../src/manifest.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
+import { Link } from "../src/link.ts";
 import type { SyncInput, SyncResult } from "../src/sync.ts";
 import type { UninstallInput, UninstallResult } from "../src/uninstall.ts";
 import { lineProgress, noProgress, type Progress } from "../src/progress.ts";
@@ -413,6 +414,30 @@ describe("ferry --help", () => {
     expect(flags).not.toMatch(/credential|auth-file|token-file|session-file|local-path/i);
   });
 
+  test("the box commands get a Link with the PATH directories of the config tools", async () => {
+    const links: unknown[] = [];
+    const tools = { bun: { local: "bun --version", install: "curl -fsSL https://bun.sh/install | bash", path: [".bun/bin"] } };
+    await buildProgram({
+      readConfig: () => ({ tools }),
+      runStatus: async (_input, dependencies) => links.push(dependencies?.createLink?.({ destination: "user@box.example" })),
+      writeLine: () => {},
+      createProgress: () => noProgress,
+    }).parseAsync(["status"], { from: "user" });
+    await buildProgram({
+      readConfig: () => ({ tools }),
+      runInstall: async (_input, dependencies) => {
+        links.push(dependencies?.createLink?.({ destination: "user@box.example" }));
+      },
+      createProgress: () => noProgress,
+    }).parseAsync(["install", "--yes"], { from: "user" });
+
+    expect(links).toHaveLength(2);
+    for (const link of links) {
+      expect(link).toBeInstanceOf(Link);
+      expect((link as Link).pathDirs).toEqual([".local/bin", ".pi/agent/bin", ".bun/bin"]);
+    }
+  });
+
   test("wires every sync flag to the sync module", async () => {
     let received: SyncInput | undefined;
     const result: SyncResult = {
@@ -431,6 +456,7 @@ describe("ferry --help", () => {
         mcpServers: [],
         storeUpdates: [],
         paseoProfiles: null,
+        pathDirs: [".local/bin"],
       },
     };
     const program = buildProgram({

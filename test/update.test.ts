@@ -278,7 +278,7 @@ describe("update command", () => {
 
   test("prints the output of an update after its step, such as the gh fallback warning", async () => {
     const { recorder, deps } = dependencies();
-    const warning = "Warning: gh 2.92.0 is not in the apt repository. Installing the latest version.";
+    const warning = "Warning: the GitHub apt repository has no gh 2.92.0. Ferry installs the latest gh.";
 
     await runUpdateCommand({ yes: true, dryRun: false }, {
       ...deps,

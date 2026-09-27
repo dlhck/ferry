@@ -100,7 +100,7 @@ describe("install command", () => {
               tool: "gh",
               current: 1,
               total: 1,
-              stdout: "Warning: gh 2.92.0 is not in the apt repository. Installing the latest version.\n\nReading package lists...\n",
+              stdout: "Warning: the GitHub apt repository has no gh 2.92.0. Ferry installs the latest gh.\n\nReading package lists...\n",
             });
             return { ok: true };
           },
@@ -112,10 +112,10 @@ describe("install command", () => {
       },
     );
 
-    expect(output).toContain("  Warning: gh 2.92.0 is not in the apt repository. Installing the latest version.");
+    expect(output).toContain("  Warning: the GitHub apt repository has no gh 2.92.0. Ferry installs the latest gh.");
     expect(output).toContain("  Reading package lists...");
     expect(output).not.toContain("  ");
-    const warning = progress.indexOf("line:  Warning: gh 2.92.0 is not in the apt repository. Installing the latest version.");
+    const warning = progress.indexOf("line:  Warning: the GitHub apt repository has no gh 2.92.0. Ferry installs the latest gh.");
     expect(progress.slice(warning - 2, warning)).toEqual(["start:Installing gh (1/1)", "done"]);
   });
 
