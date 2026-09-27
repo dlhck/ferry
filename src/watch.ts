@@ -21,7 +21,10 @@ export type WatchInput = {
   readonly pollMs?: number;
   readonly debounceMs?: number;
   readonly maxBackoffMs?: number;
-  /** Run the tool update once each 24 hours. The `[update]` config key `watch` sets it. */
+  /**
+   * Run the update of the `latest` tools once each 24 hours. The `[update]`
+   * config key `watch` sets it.
+   */
   readonly dailyUpdate?: boolean;
 };
 
@@ -67,9 +70,10 @@ export async function runWatch(
   let accepted = readState(home);
   let refusal = "";
   // The daily update never includes the integrations. A Paseo restart stops the agents on the box.
+  // It updates only the tools whose policy is `latest`. Other versions change only with `ferry update`.
   const update = dependencies.update ??
     (() => (dependencies.runUpdate ?? runUpdateCommand)(
-      { yes: true, dryRun: false, includeIntegrations: false },
+      { yes: true, dryRun: false, includeIntegrations: false, latestOnly: true },
       { writeLine, progress },
     ));
   const now = dependencies.now ?? Date.now;
