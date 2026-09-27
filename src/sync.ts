@@ -12,7 +12,7 @@ import {
   type OperatorConfig,
   type PartialOperatorConfig,
 } from "./config.ts";
-import { denyRules, readSeed as readManifest } from "./manifest.ts";
+import { denyRules, readSeed as readManifest, type StoreUpdate } from "./manifest.ts";
 import { Link, type LinkOptions, type LinkResult, type RunOptions } from "./link.ts";
 import {
   loadRegistry as loadEffectiveRegistry,
@@ -20,7 +20,7 @@ import {
   type RegistryConfig,
 } from "./registry/load.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
-import { openStore as openSnapshotStore, type PublishResult } from "./store.ts";
+import { openStore as openSnapshotStore, skillChanged, type PublishResult } from "./store.ts";
 import { adoptPublishedSkills } from "./adopt.ts";
 import { installBoxPlugins, mergeBoxSettings } from "./box-settings.ts";
 import { registerBoxMcp } from "./box-mcp.ts";
@@ -79,6 +79,8 @@ export type SyncPlan = {
   readonly settingsChanges: readonly SettingsChange[];
   /** The carried remote MCP servers, as `harness/server`. */
   readonly mcpServers: readonly string[];
+  /** Skills whose store copy the publish replaces with a real directory in one harness root. */
+  readonly storeUpdates: readonly StoreUpdate[];
 };
 
 export type SettingsChange = { readonly harness: string; readonly keys: readonly string[] };
@@ -126,6 +128,7 @@ export async function runSync(
 ): Promise<SyncResult> {
   const home = input.home ?? homedir();
   const { config, registry, seed } = inspectSyncSource(home, dependencies);
+  await refuseChangedStoreCopies(home, config, seed);
   for (const leftover of seed.leftovers) {
     const label = leftover.code === "hook-path" ? "hook" : leftover.code === "mcp-local" ? "MCP server" : null;
     if (!label) continue;
@@ -166,6 +169,9 @@ export async function runSync(
         `failed to publish ${config.snapshotUrl}: ${messageOf(cause)}`,
         { cause },
       );
+    }
+    for (const update of seed.storeUpdates) {
+      (dependencies.writeLine ?? console.log)(`Updated store skill ${update.name} from ${update.path}`);
     }
 
     const update = await link.run(
@@ -276,7 +282,7 @@ export function inspectSyncSource(
   const registry = resolveRegistry(loadedConfig.source, dependencies.loadRegistry ?? loadEffectiveRegistry);
   let seed: ReturnType<typeof readManifest>;
   try {
-    seed = (dependencies.readSeed ?? readManifest)(home, registry.harnesses);
+    seed = (dependencies.readSeed ?? readManifest)(home, registry.harnesses, { storeUpdates: true });
   } catch (cause) {
     throw new SyncError("manifest-failure", "operator", `Manifest could not read publisher ${config.publisher}: ${messageOf(cause)}`, { cause });
   }
@@ -288,6 +294,32 @@ export function inspectSyncSource(
     throw new SyncError("manifest-refusal", "operator", `Manifest refused publisher ${config.publisher}: ${details.join("; ")}`);
   }
   return { config, registry, seed };
+}
+
+/**
+ * A store update replaces the store copy, so the store copy must hold no
+ * unpublished changes. Otherwise the update is a clash, as Manifest reports it
+ * without store updates.
+ */
+async function refuseChangedStoreCopies(home: string, config: OperatorConfig, seed: Seed): Promise<void> {
+  const checkout = join(home, ".ferry", "store");
+  const changed: string[] = [];
+  for (const update of seed.storeUpdates) {
+    let dirty: boolean;
+    try {
+      dirty = await skillChanged(checkout, update.name);
+    } catch (cause) {
+      throw new SyncError("manifest-failure", "operator", `could not read the store state of skill ${update.name}: ${messageOf(cause)}`, { cause });
+    }
+    if (dirty) {
+      changed.push(
+        `clash ${update.name}: ${update.path}, ${join(checkout, "skills", update.name)} (the store copy has unpublished changes)`,
+      );
+    }
+  }
+  if (changed.length > 0) {
+    throw new SyncError("manifest-refusal", "operator", `Manifest refused publisher ${config.publisher}: ${changed.join("; ")}`);
+  }
 }
 
 function makePlan(
@@ -310,6 +342,7 @@ function makePlan(
     force: input.force === true,
     settingsChanges: settingsChanges(localCheckout, registry.harnesses, seed),
     mcpServers: seed.mcp.flatMap((entry) => entry.servers.map((server) => `${entry.harness}/${server.name}`)),
+    storeUpdates: seed.storeUpdates,
   };
 }
 
@@ -359,6 +392,9 @@ function printPlan(plan: SyncPlan): void {
         "none"
       }`,
       `MCP servers: declare on the box, and keep the other box servers: ${plan.mcpServers.join(", ") || "none"}`,
+      `Store updates from a harness root: ${
+        plan.storeUpdates.map((update) => `${update.name} (${update.path})`).join(", ") || "none"
+      }`,
       ...denyListLines(),
     ].join("\n"),
   );

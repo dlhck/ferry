@@ -149,6 +149,59 @@ describe("union of the managed harnesses", () => {
     expect(refusalOf(home).clashes.map((clash) => clash.name)).toEqual(["unslop"]);
   });
 
+  describe("a store update from one harness root", () => {
+    /** The store copy is v1. `.agents/skills` has a real v2; `.claude` links to the store, `.codex` chains through `.claude`. */
+    function installerHome(): { home: string; real: string } {
+      const home = makeHome();
+      const stored = writeSkill(home, ".ferry/store/skills", "unslop", { "SKILL.md": "v1" });
+      const real = writeSkill(home, ".agents/skills", "unslop", { "SKILL.md": "v2", ".ai-stack-source": "stack" });
+      mkdirSync(join(home, ".claude", "skills"), { recursive: true });
+      symlinkSync(stored, join(home, ".claude", "skills", "unslop"));
+      mkdirSync(join(home, ".codex", "skills"), { recursive: true });
+      symlinkSync(join(home, ".claude", "skills", "unslop"), join(home, ".codex", "skills", "unslop"));
+      return { home, real };
+    }
+
+    test("carries the real directory and names it as a store update", () => {
+      const { home, real } = installerHome();
+
+      const seed = readSeed(home, BUILTIN_HARNESSES, { storeUpdates: true });
+
+      if (!seed.ok) throw new Error(`expected a seed, got a refusal: ${JSON.stringify(seed)}`);
+      expect(seed.storeUpdates).toEqual([{ name: "unslop", path: real }]);
+      expect(bodyOf(seed, "unslop", "SKILL.md")).toBe("v2");
+      expect(bodyOf(seed, "unslop", ".ai-stack-source")).toBe("stack");
+    });
+
+    test("is a clash when the caller does not ask for store updates", () => {
+      const { home } = installerHome();
+
+      expect(refusalOf(home).clashes.map((clash) => clash.name)).toEqual(["unslop"]);
+    });
+
+    test("is a clash when two harness roots have different real directories", () => {
+      const { home } = installerHome();
+      rmSync(join(home, ".codex", "skills", "unslop"));
+      writeSkill(home, ".codex/skills", "unslop", { "SKILL.md": "v3" });
+
+      const result = readSeed(home, BUILTIN_HARNESSES, { storeUpdates: true });
+
+      if (result.ok) throw new Error("expected a refusal, got a seed");
+      expect(result.clashes.map((clash) => clash.name)).toEqual(["unslop"]);
+    });
+
+    test("is a clash when a second root links to the real directory, not to the store", () => {
+      const { home, real } = installerHome();
+      rmSync(join(home, ".codex", "skills", "unslop"));
+      symlinkSync(real, join(home, ".codex", "skills", "unslop"));
+
+      const result = readSeed(home, BUILTIN_HARNESSES, { storeUpdates: true });
+
+      if (result.ok) throw new Error("expected a refusal, got a seed");
+      expect(result.clashes.map((clash) => clash.name)).toEqual(["unslop"]);
+    });
+  });
+
   test("project-local skill directories are ignored", () => {
     const home = makeHome();
     writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "home" });

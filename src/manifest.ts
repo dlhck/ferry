@@ -16,6 +16,8 @@ import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
 
 /** The one instruction file of the seed, relative to the source home. */
 const INSTRUCTION_FILE = "AGENTS.md";
+/** The skills of the local store checkout, relative to the source home. */
+const STORE_SKILLS = ".ferry/store/skills";
 
 type DenyVerdict = "refuse" | "skip";
 
@@ -206,7 +208,16 @@ export type Seed = {
   /** Content hash of the whole seed. Changes when any skill or byte changes. */
   readonly identity: string;
   readonly leftovers: readonly Leftover[];
+  /** Skills that one harness root has as a newer real directory. Empty unless the caller asks. */
+  readonly storeUpdates: readonly StoreUpdate[];
 };
+
+/**
+ * One skill whose store copy the seed replaces with the real directory at
+ * `path`. Only Sync asks for these, because only Sync checks that the store
+ * copy has no unpublished changes before it publishes.
+ */
+export type StoreUpdate = { readonly name: string; readonly path: string };
 
 /** One skill name found with different bytes in more than one harness. */
 export type Clash = { readonly name: string; readonly paths: readonly string[] };
@@ -225,9 +236,19 @@ export type Refusal = {
  * Only the skill roots and extra roots of `harnesses` and the home instruction
  * file are read. Project skill directories sit outside those roots, so they
  * are never seen.
+ *
+ * With `storeUpdates`, a skill is not a clash when exactly one directory is a
+ * real directory in a harness root and every other root reaches the store copy
+ * in `.ferry/store/skills`. The seed then carries the real directory and names
+ * it in `storeUpdates`.
  */
-export function readSeed(home: string, harnesses: readonly HarnessDescriptor[]): Seed | Refusal {
+export function readSeed(
+  home: string,
+  harnesses: readonly HarnessDescriptor[],
+  options: { readonly storeUpdates?: boolean } = {},
+): Seed | Refusal {
   const clashes: Clash[] = [];
+  const storeUpdates: StoreUpdate[] = [];
   const forbidden: ForbiddenHit[] = [];
   const leftovers: Leftover[] = [];
   const occurrences = collectOccurrences(home, harnesses, leftovers);
@@ -241,16 +262,24 @@ export function readSeed(home: string, harnesses: readonly HarnessDescriptor[]):
     }
 
     const variants = new Map<string, SeedFile[]>();
+    const byInode = new Map<string, SeedFile[]>();
     for (const occurrence of distinct.values()) {
       const scan = scanSkill(occurrence.path);
       forbidden.push(...scan.forbidden);
       leftovers.push(...scan.leftovers);
+      byInode.set(occurrence.inode, scan.files);
       const key = contentKey(scan.files);
       if (!variants.has(key)) variants.set(key, scan.files);
     }
 
     if (variants.size > 1) {
-      clashes.push({ name, paths: found.map((o) => o.path).sort(compare) });
+      const update = options.storeUpdates ? storeUpdateSource(home, name, found) : null;
+      if (!update) {
+        clashes.push({ name, paths: found.map((o) => o.path).sort(compare) });
+        continue;
+      }
+      storeUpdates.push({ name, path: update.path });
+      skills.push({ name, files: byInode.get(update.inode) ?? [] });
       continue;
     }
     skills.push({ name, files: [...variants.values()][0] ?? [] });
@@ -304,10 +333,33 @@ export function readSeed(home: string, harnesses: readonly HarnessDescriptor[]):
     mcp,
     identity: identify(skills, instructions, roots, settings, mcp, harnesses),
     leftovers,
+    storeUpdates,
   };
 }
 
-type Occurrence = { readonly path: string; readonly inode: string };
+/** `link` is true when the root entry itself is a symlink. */
+type Occurrence = { readonly path: string; readonly inode: string; readonly link: boolean };
+
+/**
+ * The one real directory that may replace the store copy of `name`, or `null`.
+ * Every occurrence must be that directory or reach the store copy. A link to the
+ * real directory is not allowed, because that root does not link into the store.
+ */
+function storeUpdateSource(home: string, name: string, found: readonly Occurrence[]): Occurrence | null {
+  let stat;
+  try {
+    stat = statSync(join(home, STORE_SKILLS, name));
+  } catch {
+    return null;
+  }
+  const storeInode = `${stat.dev}:${stat.ino}`;
+  const local = found.filter((occurrence) => occurrence.inode !== storeInode);
+  const source = local[0];
+  if (!source || local.some((occurrence) => occurrence.link || occurrence.inode !== source.inode)) {
+    return null;
+  }
+  return source;
+}
 
 function collectOccurrences(
   home: string,
@@ -350,7 +402,7 @@ function collectOccurrences(
         continue;
       }
       const found = occurrences.get(entry.name) ?? [];
-      found.push({ path, inode: `${stat.dev}:${stat.ino}` });
+      found.push({ path, inode: `${stat.dev}:${stat.ino}`, link: entry.isSymbolicLink() });
       occurrences.set(entry.name, found);
     }
   }
