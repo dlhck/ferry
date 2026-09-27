@@ -353,7 +353,7 @@ describe("ferry status command", () => {
       ...stack.dependencies,
       readConfig: () => ({
         version: 1 as const,
-        host: { transport: "ssh" as const, destination: "ubuntu@orb" },
+        host: { transport: "ssh" as const, destination: "user@box.example" },
         harness: [{ id: "custom" }],
       }),
       createLink: (options: unknown) => {
@@ -364,7 +364,7 @@ describe("ferry status command", () => {
 
     await runStatusCommand({ json: false }, dependencies);
 
-    expect(linkOptions).toEqual({ destination: "ubuntu@orb" });
+    expect(linkOptions).toEqual({ destination: "user@box.example" });
   });
 
   test("makes an offline host obvious and skips every box inspection", async () => {

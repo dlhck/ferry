@@ -569,7 +569,7 @@ describe("runSync", () => {
   test("uses a direct SSH destination for Link, plans, and locking", async () => {
     const directConfig: OperatorConfig = {
       ...config,
-      host: { transport: "ssh", destination: "ubuntu@orb" },
+      host: { transport: "ssh", destination: "user@box.example" },
     };
     let linkOptions: unknown;
     let linkCalls = 0;
@@ -587,8 +587,8 @@ describe("runSync", () => {
               linkCalls += 1;
               return {
                 ok: true,
-                address: "ubuntu@orb",
-                stdout: linkCalls === 1 ? "/home/davidhoeck\n" : "",
+                address: "user@box.example",
+                stdout: linkCalls === 1 ? "/home/user\n" : "",
                 stderr: "",
               };
             },
@@ -609,11 +609,11 @@ describe("runSync", () => {
       },
     );
 
-    expect(linkOptions).toEqual({ destination: "ubuntu@orb" });
+    expect(linkOptions).toEqual({ destination: "user@box.example" });
     expect(result.plan).toMatchObject({
-      box: "ubuntu@orb",
-      remoteHome: "/home/davidhoeck",
-      remoteCheckout: "/home/davidhoeck/.ferry/store",
+      box: "user@box.example",
+      remoteHome: "/home/user",
+      remoteCheckout: "/home/user/.ferry/store",
     });
   });
 
@@ -1184,7 +1184,7 @@ describe("a store update from one harness root", () => {
     const real = join(home, ".agents", "skills", "tdd");
     mkdirSync(real, { recursive: true });
     writeFileSync(join(real, "SKILL.md"), "v2\n");
-    writeFileSync(join(real, ".ai-stack-source"), "stack\n");
+    writeFileSync(join(real, ".installer-source"), "stack\n");
     mkdirSync(join(home, ".claude", "skills"), { recursive: true });
     symlinkSync(join(store, "skills", "tdd"), join(home, ".claude", "skills", "tdd"));
     mkdirSync(join(home, ".codex", "skills"), { recursive: true });
@@ -1233,7 +1233,7 @@ describe("a store update from one harness root", () => {
       expect(plans[0]?.storeUpdates).toEqual([{ name: "tdd", path: real }]);
       expect(lines).toContain(`Updated store skill tdd from ${real}`);
       expect(await sh(remote, "git show HEAD:skills/tdd/SKILL.md")).toBe("v2\n");
-      expect(await sh(remote, "git show HEAD:skills/tdd/.ai-stack-source")).toBe("stack\n");
+      expect(await sh(remote, "git show HEAD:skills/tdd/.installer-source")).toBe("stack\n");
       expect(readFileSync(join(home, ".codex", "skills", "tdd", "SKILL.md"), "utf8")).toBe("v2\n");
       expect(lstatSync(real).isSymbolicLink()).toBe(true);
       expect(realpathSync(real)).toBe(join(store, "skills", "tdd"));

@@ -196,7 +196,7 @@ describe("ferry init", () => {
         {
           home,
           harnesses: BUILTIN_HARNESSES,
-          sshDestination: "ubuntu@orb",
+          sshDestination: "user@box.example",
           snapshotUrl: "git@github.com:operator/ferry-store.git",
         },
         {
@@ -224,7 +224,7 @@ describe("ferry init", () => {
         {
           home,
           harnesses: BUILTIN_HARNESSES,
-          sshDestination: "ubuntu@orb",
+          sshDestination: "user@box.example",
           snapshotUrl: "git@github.com:operator/ferry-store.git",
         },
         {
@@ -269,7 +269,7 @@ describe("ferry init", () => {
         {
           home,
           harnesses: BUILTIN_HARNESSES,
-          sshDestination: "ubuntu@orb",
+          sshDestination: "user@box.example",
           snapshotUrl: "git@github.com:operator/ferry-store.git",
         },
         {
@@ -284,14 +284,14 @@ describe("ferry init", () => {
               calls.linked++;
               linkCall++;
               if (linkCall === 1) {
-                return { ok: true, address: "ubuntu@orb", stdout: "identity\n", stderr: "" };
+                return { ok: true, address: "user@box.example", stdout: "identity\n", stderr: "" };
               }
               if (linkCall === 2) {
-                return { ok: true, address: "ubuntu@orb", stdout: "missing\n", stderr: "" };
+                return { ok: true, address: "user@box.example", stdout: "missing\n", stderr: "" };
               }
               return {
                 ok: true,
-                address: "ubuntu@orb",
+                address: "user@box.example",
                 stdout:
                   "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n",
                 stderr: "",
@@ -328,7 +328,7 @@ describe("ferry init", () => {
       {
         home,
         harnesses: BUILTIN_HARNESSES,
-        sshDestination: "ubuntu@orb",
+        sshDestination: "user@box.example",
         snapshotUrl: "git@github.com:operator/ferry-store.git",
       },
       {
@@ -340,15 +340,15 @@ describe("ferry init", () => {
             calls.linked++;
             linkCall++;
             if (linkCall === 1) {
-              return { ok: true, address: "ubuntu@orb", stdout: "identity\n", stderr: "" };
+              return { ok: true, address: "user@box.example", stdout: "identity\n", stderr: "" };
             }
             if (linkCall === 2) {
-              return { ok: true, address: "ubuntu@orb", stdout: "missing\n", stderr: "" };
+              return { ok: true, address: "user@box.example", stdout: "missing\n", stderr: "" };
             }
             if (linkCall === 3) {
               return {
                 ok: true,
-                address: "ubuntu@orb",
+                address: "user@box.example",
                 stdout:
                   "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n",
                 stderr: "",
@@ -360,7 +360,7 @@ describe("ferry init", () => {
                 "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
               );
               installed = true;
-              return { ok: true, address: "ubuntu@orb", stdout: "", stderr: "" };
+              return { ok: true, address: "user@box.example", stdout: "", stderr: "" };
             }
             expect(installed).toBe(true);
             expect(command).toBe(
@@ -368,7 +368,7 @@ describe("ferry init", () => {
             );
             expect(options).toEqual({ agentForwarding: "git" });
             repositoryChecked = true;
-            return { ok: true, address: "ubuntu@orb", stdout: "tip\tHEAD\n", stderr: "" };
+            return { ok: true, address: "user@box.example", stdout: "tip\tHEAD\n", stderr: "" };
           },
         }),
       },
@@ -376,7 +376,7 @@ describe("ferry init", () => {
 
     expect(repositoryChecked).toBe(true);
     expect(calls).toEqual({ opened: 1, published: 1, linked: 5 });
-    expect(result).toMatchObject({ dryRun: false, address: "ubuntu@orb", published: true });
+    expect(result).toMatchObject({ dryRun: false, address: "user@box.example", published: true });
   });
 
   test("an SSH snapshot refuses when the forwarded identity cannot read the repository", async () => {
@@ -389,7 +389,7 @@ describe("ferry init", () => {
         {
           home,
           harnesses: BUILTIN_HARNESSES,
-          sshDestination: "ubuntu@orb",
+          sshDestination: "user@box.example",
           snapshotUrl: "git@github.com:operator/ferry-store.git",
         },
         {
@@ -400,10 +400,10 @@ describe("ferry init", () => {
               calls.linked++;
               linkCall++;
               if (linkCall === 1) {
-                return { ok: true, address: "ubuntu@orb", stdout: "identity\n", stderr: "" };
+                return { ok: true, address: "user@box.example", stdout: "identity\n", stderr: "" };
               }
               if (linkCall === 2) {
-                return { ok: true, address: "ubuntu@orb", stdout: "trusted\n", stderr: "" };
+                return { ok: true, address: "user@box.example", stdout: "trusted\n", stderr: "" };
               }
               return {
                 ok: false,
@@ -438,7 +438,7 @@ describe("ferry init", () => {
       {
         home,
         harnesses: BUILTIN_HARNESSES,
-        sshDestination: "ubuntu@orb",
+        sshDestination: "user@box.example",
         snapshotUrl: "git@github.com:operator/ferry-store.git",
       },
       {
@@ -457,7 +457,7 @@ describe("ferry init", () => {
                 : linkCall === 3
                   ? "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"
                   : "";
-            return { ok: true, address: "ubuntu@orb", stdout, stderr: "" };
+            return { ok: true, address: "user@box.example", stdout, stderr: "" };
           },
         }),
       },
@@ -564,7 +564,7 @@ describe("ferry init", () => {
       {
         home,
         harnesses: BUILTIN_HARNESSES,
-        sshDestination: "ubuntu@orb",
+        sshDestination: "user@box.example",
         snapshotUrl: "snapshot.git",
       },
       {
@@ -573,19 +573,19 @@ describe("ferry init", () => {
           target = value;
           return {
             async run() {
-              return { ok: true, address: "ubuntu@orb", stdout: "", stderr: "" };
+              return { ok: true, address: "user@box.example", stdout: "", stderr: "" };
             },
           };
         },
       },
     );
 
-    expect(target).toEqual({ destination: "ubuntu@orb" });
+    expect(target).toEqual({ destination: "user@box.example" });
     expect(readConfig(home)).toEqual({
       version: 1,
       publisher: "operator.test",
       snapshotUrl: "snapshot.git",
-      host: { transport: "ssh", destination: "ubuntu@orb" },
+      host: { transport: "ssh", destination: "user@box.example" },
     });
   });
 
@@ -600,23 +600,23 @@ describe("ferry init", () => {
         ...deps,
         prompt: async (missing) => {
           expect(missing).toEqual(["host", "sshUser", "snapshotUrl"]);
-          return { sshDestination: "ubuntu@orb", snapshotUrl: "snapshot.git" };
+          return { sshDestination: "user@box.example", snapshotUrl: "snapshot.git" };
         },
         createLink(options) {
           target = options;
           return {
             async run() {
-              return { ok: true, address: "ubuntu@orb", stdout: "", stderr: "" };
+              return { ok: true, address: "user@box.example", stdout: "", stderr: "" };
             },
           };
         },
       },
     );
 
-    expect(target).toEqual({ destination: "ubuntu@orb" });
+    expect(target).toEqual({ destination: "user@box.example" });
     expect(readConfig(home)?.host).toEqual({
       transport: "ssh",
-      destination: "ubuntu@orb",
+      destination: "user@box.example",
     });
   });
 
@@ -626,7 +626,7 @@ describe("ferry init", () => {
     const { deps } = dependencies(home);
 
     await runInit(
-      { home, harnesses: BUILTIN_HARNESSES, sshDestination: "ubuntu@orb" },
+      { home, harnesses: BUILTIN_HARNESSES, sshDestination: "user@box.example" },
       {
         ...deps,
         prompt: async (missing) => {
@@ -637,17 +637,17 @@ describe("ferry init", () => {
           target = options;
           return {
             async run() {
-              return { ok: true, address: "ubuntu@orb", stdout: "", stderr: "" };
+              return { ok: true, address: "user@box.example", stdout: "", stderr: "" };
             },
           };
         },
       },
     );
 
-    expect(target).toEqual({ destination: "ubuntu@orb" });
+    expect(target).toEqual({ destination: "user@box.example" });
     expect(readConfig(home)?.host).toEqual({
       transport: "ssh",
-      destination: "ubuntu@orb",
+      destination: "user@box.example",
     });
   });
 
@@ -659,7 +659,7 @@ describe("ferry init", () => {
       "",
       "[host]",
       'transport = "ssh"',
-      'destination = "ubuntu@orb"',
+      'destination = "user@box.example"',
       "",
     ].join("\n"));
     const { deps } = dependencies(home);
@@ -679,7 +679,7 @@ describe("ferry init", () => {
       version: 1,
       publisher: "first-operator",
       snapshotUrl: "snapshot.git",
-      host: { transport: "ssh", destination: "ubuntu@orb" },
+      host: { transport: "ssh", destination: "user@box.example" },
     });
   });
 
@@ -698,13 +698,13 @@ describe("ferry init", () => {
     const { deps } = dependencies(home);
 
     await runInit(
-      { home, harnesses: BUILTIN_HARNESSES, sshDestination: "ubuntu@orb" },
+      { home, harnesses: BUILTIN_HARNESSES, sshDestination: "user@box.example" },
       deps,
     );
 
     expect(readConfig(home)?.host).toEqual({
       transport: "ssh",
-      destination: "ubuntu@orb",
+      destination: "user@box.example",
     });
   });
 
@@ -719,7 +719,7 @@ describe("ferry init", () => {
           harnesses: BUILTIN_HARNESSES,
           host: "box",
           sshUser: "david",
-          sshDestination: "ubuntu@orb",
+          sshDestination: "user@box.example",
           snapshotUrl: "snapshot.git",
         },
         deps,

@@ -482,7 +482,7 @@ const STUBS: Record<string, string> = {
   nohup: 'exec "$@"',
   timeout: 'shift; exec "$@"',
   hostname: "echo box1",
-  id: "echo ploi",
+  id: "echo agent",
   gh: `
 echo "gh $*" >> "$HOME/calls"
 case "$1 $2" in
@@ -504,7 +504,7 @@ echo "ssh-keygen $*" >> "$HOME/calls"
 case "$1" in
   -F) grep -q "^github.com " "$HOME/.ssh/known_hosts" 2>/dev/null ;;
   -lf) read -r host type key; echo "256 SHA256:GHFP $host ($type)" ;;
-  *) for f; do file=$f; done; echo private > "$file"; echo "ssh-ed25519 AAAABOXKEY ploi@box1 ferry" > "$file.pub" ;;
+  *) for f; do file=$f; done; echo private > "$file"; echo "ssh-ed25519 AAAABOXKEY agent@box1 ferry" > "$file.pub" ;;
 esac`,
   "ssh-keyscan": "echo 'github.com ssh-ed25519 AAAAGITHUB'",
   ssh: `echo "ssh $*" >> "$HOME/calls"; echo "Hi op! You've successfully authenticated, but GitHub does not provide shell access." >&2; exit 1`,
@@ -577,7 +577,7 @@ describe("AuthStart vendor logins against stub CLIs", () => {
     expect(calls(home)).toContain(
       "gh auth login --hostname github.com --git-protocol ssh --skip-ssh-key --scopes admin:public_key --web",
     );
-    expect(calls(home)).toContain(`ssh-keygen -q -t ed25519 -N  -C ploi@box1 ferry -f ${home}/.ssh/id_ed25519`);
+    expect(calls(home)).toContain(`ssh-keygen -q -t ed25519 -N  -C agent@box1 ferry -f ${home}/.ssh/id_ed25519`);
 
     const finished = await auth.finish(started);
 

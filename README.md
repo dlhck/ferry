@@ -23,7 +23,7 @@ Or use an explicit OpenSSH destination:
 
 ```sh
 ferry init \
-  --ssh-destination ubuntu@orb \
+  --ssh-destination user@box.example \
   --snapshot-url git@github.com:you/ferry-snapshot.git
 ```
 
@@ -51,7 +51,7 @@ Ferry adds `-g` and `--copy` if you do not pass them. The example runs `npx skil
 
 The install does not publish the skill. Run `ferry sync` or keep `ferry watch` running to publish it to the snapshot and apply it on the box.
 
-Some installers replace the store link of a skill in one harness root with a real directory that holds a newer version. For example, `vendurehq/ai-stack` does this in `~/.agents/skills`. Sync then updates the store copy from that directory, publishes it, and links the directory to the store. Sync does this only when all of these conditions are true:
+Some installers replace the store link of a skill in one harness root with a real directory that holds a newer version, for example in `~/.agents/skills`. Sync then updates the store copy from that directory, publishes it, and links the directory to the store. Sync does this only when all of these conditions are true:
 
 - Exactly one harness root has a real directory for the skill.
 - Each other harness root that has the skill links to `~/.ferry/store/skills/<name>`, directly or through a chain of links.
