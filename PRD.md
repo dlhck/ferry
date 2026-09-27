@@ -30,7 +30,7 @@ Ferry is a small CLI I run on the operator machine (macOS or Linux). It is MIT l
 
 `ferry status` reports link reachability, whether the store tip matches the box clone, whether harness paths are the expected symlinks, which CLIs still need a login, and the resolved address or destination plus the usual Paseo daemon port. It writes nothing. `--json` exists for scripts.
 
-The portable set is user-global skills, one `AGENTS.md`, the Claude subagents and commands (`~/.claude/agents`, `~/.claude/commands`), and the Claude plugin declarations (the `enabledPlugins` and `extraKnownMarketplaces` keys of `~/.claude/settings.json`). The forbidden set is credentials, host tokens, session history, caches, databases, MCP tokens, and whole settings files. Project-local skill directories stay in the project git repo.
+The portable set is user-global skills, one `AGENTS.md`, the Claude subagents and commands (`~/.claude/agents`, `~/.claude/commands`), and an allowlist of Claude settings keys (`enabledPlugins`, `extraKnownMarketplaces`, `permissions`, and `hooks` of `~/.claude/settings.json`). The forbidden set is credentials, host tokens, session history, caches, databases, MCP tokens, and whole settings files. Project-local skill directories stay in the project git repo.
 
 First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link and apply. I add the Paseo host myself.
 
@@ -262,7 +262,7 @@ First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link
 
 - Secrets. No age vault, no 1Password. Token values stay out of ferry output.
 
-- MCP is not in the snapshot. Of the settings files, only an explicit key list of a builtin harness is in the snapshot. For Claude, the list is `enabledPlugins` and `extraKnownMarketplaces`. The box merges these keys into its settings file, keeps its other keys, and installs the declared plugins with the `claude` CLI.
+- MCP is not in the snapshot. Of the settings files, only an explicit key list of a builtin harness is in the snapshot. For Claude, the list is `enabledPlugins`, `extraKnownMarketplaces`, `permissions`, and `hooks`. Keys that can hold secrets, such as `env` and `apiKeyHelper`, are not on the list. The box merges these keys into its settings file, keeps its other keys, removes a listed key the operator does not have, and installs the declared plugins with the `claude` CLI. Manifest refuses a hook command that refers to a home path outside the managed set: a `~/`, `$HOME/`, or `${HOME}/` word outside the managed skill roots, extra roots, and instruction files, or an absolute path under the operator home. `ferry sync --dry-run` lists the carried keys that differ from the last publish in the local store, without a remote call.
 
 - Concurrency. One sync at a time per host.
 

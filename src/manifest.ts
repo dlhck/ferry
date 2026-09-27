@@ -11,8 +11,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
-import { join, relative, sep } from "node:path";
-import type { HarnessDescriptor } from "./registry/types.ts";
+import { join, posix, relative, sep } from "node:path";
+import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
 
 /** The one instruction file of the seed, relative to the source home. */
 const INSTRUCTION_FILE = "AGENTS.md";
@@ -56,6 +56,11 @@ const DENY_RULES = {
   "settings-credential": {
     code: "settings-credential",
     reason: "request headers in a carried settings key",
+    verdict: "refuse",
+  },
+  "hook-path": {
+    code: "hook-path",
+    reason: "hook command that refers to a home path outside the managed set",
     verdict: "refuse",
   },
   history: { code: "history", reason: "session history", verdict: "skip" },
@@ -117,6 +122,10 @@ const TOKEN_PATTERNS = [
   [/\bxox[bp]-[A-Za-z0-9-]{20,}/, DENY_RULES["slack-token"]],
   [/\bAKIA[0-9A-Z]{16}\b/, DENY_RULES["aws-access-key"]],
 ] as const satisfies readonly (readonly [RegExp, DenyRule])[];
+/** Words in a hook command that name a file under the home: `~/x`, `$HOME/x`, `${HOME}/x`. */
+const HOME_REFERENCE = /^(?:~|\$HOME|\$\{HOME\})\/(.*)$/;
+/** Shell quotes, operators, and `=` separate the words of a hook command. */
+const COMMAND_SEPARATORS = /[\s"'`;|&()<>=]+/;
 
 /** A file whose path relative to its skill directory is `path`. */
 export type SeedFile = { readonly path: string; readonly bytes: Uint8Array };
@@ -217,7 +226,7 @@ export function readSeed(home: string, harnesses: readonly HarnessDescriptor[]):
   const settings: SeedSettings[] = [];
   for (const harness of harnesses) {
     if (!harness.settings) continue;
-    const carried = readSettings(join(home, harness.settings.file), harness.settings.keys, forbidden);
+    const carried = readSettings(home, harness.settings, harnesses, forbidden);
     if (carried) settings.push({ harness: harness.id, bytes: carried });
   }
 
@@ -395,14 +404,16 @@ function denyRuleFor(entryName: string, isDirectory: boolean): DenyRule | null {
 }
 
 /**
- * Read only `keys` from a JSON settings file. The file itself never leaves the
- * machine. `null` means the file is missing or refused.
+ * Read only the listed keys from a JSON settings file. The file itself never
+ * leaves the machine. `null` means the file is missing or refused.
  */
 function readSettings(
-  path: string,
-  keys: readonly string[],
+  home: string,
+  settings: { readonly file: string; readonly keys: readonly string[] },
+  harnesses: readonly HarnessDescriptor[],
   forbidden: ForbiddenHit[],
 ): Uint8Array | null {
+  const path = join(home, settings.file);
   let text: string;
   try {
     text = readFileSync(path, "utf8");
@@ -421,7 +432,7 @@ function readSettings(
   }
 
   const carried: Record<string, unknown> = {};
-  for (const key of keys) {
+  for (const key of settings.keys) {
     if (Object.hasOwn(parsed, key)) carried[key] = (parsed as Record<string, unknown>)[key];
   }
   const bytes = Buffer.from(`${JSON.stringify(carried, null, 2)}\n`);
@@ -430,12 +441,68 @@ function readSettings(
     forbidden.push(note(path, DENY_RULES["settings-credential"]));
     return null;
   }
-  const tokens = tokenHits(path, bytes);
-  if (tokens.length > 0) {
-    forbidden.push(...tokens);
+  const hits = [...tokenHits(path, bytes), ...hookPathHits(path, carried.hooks, home, harnesses)];
+  if (hits.length > 0) {
+    forbidden.push(...hits);
     return null;
   }
   return bytes;
+}
+
+/**
+ * Name each hook command word that refers to a file the box will not have.
+ *
+ * A `~/`, `$HOME/`, or `${HOME}/` word must lead into a managed skill root,
+ * extra root, or instruction file. An absolute path under the operator home is
+ * always refused, because the box home has a different path. Programs on PATH,
+ * `$CLAUDE_PROJECT_DIR` paths, and absolute paths outside the home pass.
+ */
+function hookPathHits(
+  path: string,
+  hooks: unknown,
+  home: string,
+  harnesses: readonly HarnessDescriptor[],
+): ForbiddenHit[] {
+  const hits: ForbiddenHit[] = [];
+  for (const { at, command } of hookCommands(hooks, "hooks")) {
+    for (const word of command.split(COMMAND_SEPARATORS)) {
+      const relativePath = word.match(HOME_REFERENCE)?.[1];
+      const unmanaged =
+        relativePath === undefined
+          ? word === home || word.startsWith(`${home}/`)
+          : !managedPath(relativePath, harnesses);
+      if (!unmanaged) continue;
+      hits.push({
+        path,
+        code: DENY_RULES["hook-path"].code,
+        reason: `hook command ${at} refers to ${word}, outside the managed set`,
+      });
+    }
+  }
+  return hits;
+}
+
+/** Every string `command` property under `value`, with its JSON location. */
+function hookCommands(value: unknown, at: string): { at: string; command: string }[] {
+  if (typeof value !== "object" || value === null) return [];
+  const found: { at: string; command: string }[] = [];
+  for (const [key, child] of Object.entries(value)) {
+    const next = Array.isArray(value) ? `${at}[${key}]` : `${at}.${key}`;
+    if (key === "command" && typeof child === "string") found.push({ at: next, command: child });
+    else found.push(...hookCommands(child, next));
+  }
+  return found;
+}
+
+/** True when a home-relative path is inside a root or file ferry puts on the box. */
+function managedPath(path: string, harnesses: readonly HarnessDescriptor[]): boolean {
+  const normal = posix.normalize(path);
+  const files = [INSTRUCTION_FILE, ...harnesses.flatMap((harness) => harness.instructionFile ?? [])];
+  const roots = harnesses.flatMap((harness) => [
+    ...(ownsSkills(harness) ? [harness.skillRoot as string] : []),
+    ...(harness.extraRoots ?? []),
+  ]);
+  return files.includes(normal) || roots.some((root) => normal.startsWith(`${root}/`));
 }
 
 function hasKey(value: unknown, key: string): boolean {

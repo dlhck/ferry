@@ -24,11 +24,12 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
     instructionFile: ".claude/CLAUDE.md",
     // Subagents and custom commands are plain markdown files.
     extraRoots: [".claude/agents", ".claude/commands"],
-    // The plugin declarations. The box installs the plugins. Keys such as env
-    // and apiKeyHelper can hold secrets, so they stay on this machine.
+    // The plugin declarations, permissions, and hooks. The box installs the
+    // plugins. Keys such as env and apiKeyHelper can hold secrets, so they
+    // stay on this machine.
     settings: {
       file: ".claude/settings.json",
-      keys: ["enabledPlugins", "extraKnownMarketplaces"],
+      keys: ["enabledPlugins", "extraKnownMarketplaces", "permissions", "hooks"],
     },
   },
   {

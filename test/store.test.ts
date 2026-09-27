@@ -64,7 +64,10 @@ const expectedMetadata = {
       skillRoot: ".claude/skills",
       instructionFile: ".claude/CLAUDE.md",
       extraRoots: [".claude/agents", ".claude/commands"],
-      settings: { file: ".claude/settings.json", keys: ["enabledPlugins", "extraKnownMarketplaces"] },
+      settings: {
+        file: ".claude/settings.json",
+        keys: ["enabledPlugins", "extraKnownMarketplaces", "permissions", "hooks"],
+      },
     },
     {
       id: "codex",
@@ -391,7 +394,7 @@ function sameFiles(a: Map<string, Uint8Array>, b: Map<string, Uint8Array>): bool
 }
 
 describe("store layout of carried settings keys", () => {
-  test("env, apiKeyHelper, permissions, and hooks never enter a commit", async () => {
+  test("env and apiKeyHelper never enter a commit; permissions and hooks do", async () => {
     const home = mkdtempSync(join(tmpdir(), "ferry-store-home-"));
     homes.push(home);
     mkdirSync(join(home, ".claude"), { recursive: true });
@@ -420,15 +423,16 @@ describe("store layout of carried settings keys", () => {
       extraKnownMarketplaces: {
         team: { source: { source: "github", repo: "example/claude-plugins" } },
       },
+      permissions: { allow: ["Bash(git status)"] },
+      hooks: { Stop: [{ hooks: [{ type: "command", command: "notify" }] }] },
     });
     expect([...git.remoteFiles.keys()].some((path) => path.endsWith("settings.json"))).toBe(false);
     for (const [path, bytes] of git.remoteFiles) {
       if (path === "ferry.json") continue;
       const text = Buffer.from(bytes).toString();
-      for (const key of ["env", "apiKeyHelper", "permissions", "hooks", "env-secret-value"]) {
-        expect(text).not.toContain(`"${key}"`);
+      for (const secret of ["env", "apiKeyHelper", "env-secret-value", "print-key"]) {
+        expect(text).not.toContain(secret);
       }
-      expect(text).not.toContain("env-secret-value");
     }
     expect(git.invocations.find((invocation) => invocation.args[0] === "add")?.args).toContain(
       "settings",
