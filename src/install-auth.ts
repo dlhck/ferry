@@ -22,7 +22,11 @@ import { RealGitRunner } from "./store.ts";
 const STORE_RELATIVE_PATH = ".ferry/store";
 
 export type InstallCommandInput = { readonly yes: boolean };
-export type AuthCommandInput = { readonly provider?: string };
+export type AuthCommandInput = {
+  readonly provider?: string;
+  /** An MCP server on the box. The provider names the tool whose MCP login starts. */
+  readonly mcp?: string;
+};
 
 type CommandLink = AuthLink;
 type InstallCommand = {
@@ -32,7 +36,7 @@ type InstallCommand = {
     reportProgress?: (progress: InstallProgress) => void,
   ): Promise<InstallResult>;
 };
-type AuthCommand = { start(provider: string): Promise<AuthStartResult> };
+type AuthCommand = Pick<AuthStart, "start" | "startMcp" | "finishMcp">;
 
 export type InstallProgressIndicator = {
   start(message: string): void;
@@ -148,6 +152,27 @@ export async function runAuthCommand(
     return;
   }
 
+  if (input.mcp !== undefined) {
+    if (!resolved.tools.some((tool) => tool.id === input.provider && tool.mcp)) {
+      fail(
+        "operator/invalid-provider",
+        `The ${input.provider} tool has no MCP login. Use claude, codex, or cursor.`,
+        resolved.writeLine,
+      );
+    }
+    const target = loadTarget(resolved.readConfig, resolved.writeLine);
+    const auth = resolved.createAuthStart(resolved.createLink(target), resolved.tools);
+    const started = await auth.startMcp(input.provider, input.mcp);
+    if (started.kind !== "local-port-forward") return reportAuth(started, resolved.writeLine);
+    resolved.writeLine(`URL: ${started.url}`);
+    resolved.writeLine("Open the URL in a browser on this machine.");
+    resolved.writeLine(
+      `Ferry forwards local port ${started.localPort} to the box for ${started.timeoutMs / 1000} s. Press Ctrl-C after the browser reports success.`,
+    );
+    reportAuth(await auth.finishMcp(started), resolved.writeLine);
+    return;
+  }
+
   if (!isAuthProvider(input.provider, resolved.tools)) {
     fail(
       "operator/invalid-provider",
@@ -213,6 +238,9 @@ function reportAuth(result: AuthStartResult, writeLine: (line: string) => void):
   switch (result.kind) {
     case "already-done":
       writeLine(`${result.provider}: already authenticated`);
+      return;
+    case "logged-in":
+      writeLine(`${result.provider}: logged in`);
       return;
     case "device-url":
       writeLine(`URL: ${result.url}`);

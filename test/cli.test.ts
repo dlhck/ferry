@@ -314,6 +314,20 @@ describe("ferry --help", () => {
     expect(received).toEqual({ provider: "codex" });
   });
 
+  test("wires an MCP server to the auth command", async () => {
+    let received: unknown;
+    const program = buildProgram({
+      readConfig: () => null,
+      runAuth: async (input) => {
+        received = input;
+      },
+    });
+
+    await program.parseAsync(["auth", "claude", "--mcp", "linear"], { from: "user" });
+
+    expect(received).toEqual({ provider: "claude", mcp: "linear" });
+  });
+
   test("rejects a credential-file flag before auth execution", async () => {
     let calls = 0;
     const program = buildProgram({

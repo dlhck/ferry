@@ -13,7 +13,20 @@ import type {
   LinkResult,
   RunOptions,
 } from "./link.ts";
+import { mcpBinary, mcpCommand } from "./box-mcp.ts";
+import { quoteShell } from "./box-settings.ts";
 import type { AuthFallback, ToolAuth, ToolDescriptor } from "./registry/types.ts";
+
+/** Same rule as Manifest: an MCP server name reaches a remote shell command. */
+const MCP_SERVER_NAME = /^[A-Za-z0-9._-]+$/;
+/** `mcp list` checks the health of every server, so it gets more time than one command. */
+const MCP_LIST_TIMEOUT_MS = 120_000;
+/** How long ferry keeps the callback forward open. */
+const MCP_FORWARD_TIMEOUT_MS = 300_000;
+/** The box login outlives the forward a little, then stops. */
+const MCP_LOGIN_LIFETIME_S = 330;
+/** The box polls this long for the login URL. */
+const MCP_URL_WAIT_S = 30;
 
 /** A tool ferry has a login recipe for. */
 export type AuthTool = ToolDescriptor & { readonly auth: ToolAuth };
@@ -46,6 +59,11 @@ export type AuthProviderStatus =
 
 export type AuthStatusReport = { readonly providers: readonly AuthProviderStatus[] };
 
+/** The MCP servers on the box that need a login, for one tool. */
+export type McpLoginStatus =
+  | { readonly tool: string; readonly loginRequired: readonly string[] }
+  | { readonly tool: string; readonly error: LinkError };
+
 export interface AuthLink {
   run(command: string, options?: RunOptions): Promise<LinkResult>;
   forward(options: ForwardOptions): Promise<LinkResult>;
@@ -53,6 +71,7 @@ export interface AuthLink {
 
 export type AuthStartResult =
   | { readonly kind: "already-done"; readonly provider: string }
+  | { readonly kind: "logged-in"; readonly provider: string }
   | {
       readonly kind: "device-url";
       readonly provider: string;
@@ -91,7 +110,7 @@ export type AuthStartResult =
     }
   | {
       readonly kind: "refused";
-      readonly code: "credential-input" | "invalid-provider";
+      readonly code: "credential-input" | "invalid-provider" | "invalid-server";
       readonly message: string;
     };
 
@@ -203,6 +222,110 @@ export class AuthStart {
     return url ? { kind: "printed-url", provider, url } : missingUrl(provider);
   }
 
+  /**
+   * List the MCP servers on the box that need a login. Only the list command
+   * of each tool runs. A tool whose CLI is not on the box lists no servers.
+   */
+  async mcpStatus(): Promise<readonly McpLoginStatus[]> {
+    const statuses: McpLoginStatus[] = [];
+    for (const tool of this.tools) {
+      if (!tool.mcp) continue;
+      const result = await this.link.run(
+        `command -v ${mcpBinary(tool.mcp)} >/dev/null 2>&1 || exit 0; ${tool.mcp.list} 2>/dev/null || true`,
+        { timeoutMs: MCP_LIST_TIMEOUT_MS },
+      );
+      if (!result.ok) {
+        statuses.push({ tool: tool.id, error: safeError(result.error) });
+        continue;
+      }
+      const pattern = new RegExp(tool.mcp.loginRequired);
+      const loginRequired = plainText(result.stdout)
+        .split("\n")
+        .flatMap((line) => line.match(pattern)?.[1] ?? []);
+      statuses.push({ tool: tool.id, loginRequired });
+    }
+    return statuses;
+  }
+
+  /**
+   * Start the MCP login of `server` on the box and return its authorize URL
+   * and callback port. The login runs detached under a pseudo terminal and
+   * stops by itself. Call `finishMcp` after the operator has the URL.
+   */
+  async startMcp(tool: string, server: string): Promise<AuthStartResult> {
+    if (arguments.length !== 2) {
+      return {
+        kind: "refused",
+        code: "credential-input",
+        message: "AuthStart accepts only a tool and a server. Logins are not copied.",
+      };
+    }
+    const recipe = this.tools.find((candidate) => candidate.id === tool)?.mcp;
+    if (!recipe) {
+      return {
+        kind: "refused",
+        code: "invalid-provider",
+        message: "AuthStart received a tool without MCP support.",
+      };
+    }
+    if (!MCP_SERVER_NAME.test(server)) {
+      return {
+        kind: "refused",
+        code: "invalid-server",
+        message: "An MCP server name has only letters, digits, dot, underscore, and hyphen.",
+      };
+    }
+
+    const provider = `${tool}/${server}`;
+    const login = await this.link.run(
+      mcpLoginCommand(mcpCommand(recipe.login, { name: server }), MCP_LOGIN_LIFETIME_S),
+      { timeoutMs: (MCP_URL_WAIT_S + 30) * 1000 },
+    );
+    if (!login.ok) return linkFailure(provider, login);
+
+    const callback = loopbackLoginUrl(login.stdout);
+    if (!callback) return missingUrl(provider);
+    return {
+      kind: "local-port-forward",
+      provider,
+      url: callback.url,
+      localPort: callback.port,
+      remotePort: callback.port,
+      timeoutMs: MCP_FORWARD_TIMEOUT_MS,
+    };
+  }
+
+  /**
+   * Forward the callback port of a started MCP login until the forward times
+   * out, then report whether the box still lists the server as needing a login.
+   */
+  async finishMcp(
+    started: Extract<AuthStartResult, { kind: "local-port-forward" }>,
+  ): Promise<AuthStartResult> {
+    const forward = await this.link.forward({
+      localPort: started.localPort,
+      remotePort: started.remotePort,
+      remoteHost: "127.0.0.1",
+      timeoutMs: started.timeoutMs,
+    });
+    // The forward holds until its timeout, so a timeout is the usual end.
+    if (!forward.ok && forward.error.code !== "forward-timeout") {
+      return linkFailure(started.provider, forward);
+    }
+
+    const [tool, server] = started.provider.split("/");
+    const status = (await this.mcpStatus()).find((entry) => entry.tool === tool);
+    if (status && "loginRequired" in status && !status.loginRequired.includes(server as string)) {
+      return { kind: "logged-in", provider: started.provider };
+    }
+    return {
+      kind: "failed",
+      provider: started.provider,
+      code: "login-output",
+      message: `The ${started.provider} MCP login did not finish before the port forward closed.`,
+    };
+  }
+
   /** The declared callback path: a second login command plus a local forward. */
   private async startFallback(
     provider: string,
@@ -236,15 +359,77 @@ function safeUrl(output: string, allowedHosts: readonly string[]): string | null
       if (!allowedHosts.some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`))) {
         continue;
       }
-      if (url.hash || [...url.searchParams.keys()].some((key) => /token|secret|credential|api.?key/i.test(key))) {
-        continue;
-      }
+      if (carriesSecret(url)) continue;
       return url.toString();
     } catch {
       continue;
     }
   }
   return null;
+}
+
+function carriesSecret(url: URL): boolean {
+  return (
+    Boolean(url.hash) ||
+    [...url.searchParams.keys()].some((key) => /token|secret|credential|api.?key/i.test(key))
+  );
+}
+
+/**
+ * The box command that starts an MCP login detached and prints its output
+ * once the authorize URL appears. `script` gives the login a terminal, and a
+ * `sleep` pipe keeps its input open. The login and its log end after
+ * `lifetimeSeconds`.
+ */
+export function mcpLoginCommand(login: string, lifetimeSeconds: number): string {
+  const inner = `stty cols 4096 2>/dev/null; BROWSER=true COLUMNS=4096 exec ${login}`;
+  const runner = `sleep "$1" | timeout "$1" script -qfec "$2" /dev/null > "$3" 2>&1; rm -f "$3"`;
+  return [
+    'log=$(mktemp "${TMPDIR:-/tmp}/ferry-mcp-login.XXXXXX") || exit 1',
+    `setsid nohup sh -c ${quoteShell(runner)} ferry-mcp-login ${lifetimeSeconds} ${quoteShell(inner)} "$log" </dev/null >/dev/null 2>&1 &`,
+    "i=0",
+    `while [ "$i" -lt ${MCP_URL_WAIT_S} ] && ! grep -q redirect_uri "$log" 2>/dev/null; do sleep 1; i=$((i+1)); done`,
+    "sleep 1",
+    'cat "$log"',
+  ].join("\n");
+}
+
+/**
+ * The first https URL in the login output whose `redirect_uri` is a loopback
+ * callback, with the callback port. The URL goes to the operator browser and
+ * the port is forwarded, so any other URL is refused.
+ */
+export function loopbackLoginUrl(output: string): { url: string; port: number } | null {
+  for (const match of plainText(output).matchAll(/https:\/\/[^\s<>"']+/g)) {
+    try {
+      const url = new URL(match[0]);
+      const redirect = new URL(url.searchParams.get("redirect_uri") ?? "");
+      if (carriesSecret(url) || redirect.protocol !== "http:") continue;
+      if (redirect.hostname !== "localhost" && redirect.hostname !== "127.0.0.1") continue;
+      const port = Number(redirect.port);
+      if (!Number.isInteger(port) || port <= 0) continue;
+      return { url: url.toString(), port };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/** Terminal output without escape sequences and carriage returns. */
+function plainText(output: string): string {
+  return output
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/\r/g, "");
+}
+
+function safeError(error: LinkError): LinkError {
+  return {
+    code: error.code,
+    origin: error.origin,
+    message: safeLinkMessage(error.code, error.origin),
+  };
 }
 
 function missingUrl(provider: string): AuthStartResult {
