@@ -45,6 +45,11 @@ import {
   type UninstallResult,
 } from "./uninstall.ts";
 import { runSkillsAdd, SkillsAddError, type RunProcess } from "./skills-add.ts";
+import {
+  runUpdateCommand,
+  type UpdateCommandDependencies,
+  type UpdateCommandInput,
+} from "./update.ts";
 
 const DESCRIPTION = `Ferry keeps a remote Linux agent box in the same shape as this machine.
 
@@ -63,6 +68,10 @@ type CliDependencies = {
   readonly runAuth?: (
     input: AuthCommandInput,
     dependencies?: Partial<AuthCommandDependencies>,
+  ) => Promise<void>;
+  readonly runUpdate?: (
+    input: UpdateCommandInput,
+    dependencies?: Partial<UpdateCommandDependencies>,
   ) => Promise<void>;
   readonly runSync?: (input: SyncInput) => Promise<SyncResult>;
   readonly runStatus?: (
@@ -140,6 +149,18 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .action(async (options: { yes?: boolean }) => {
       await (dependencies.runInstall ?? runInstallCommand)(
         { yes: options.yes === true },
+        { tools: registry().tools },
+      );
+    });
+
+  program
+    .command("update")
+    .description("Update the agent tools on the configured box and on this machine")
+    .option("--yes", "run without a confirmation prompt")
+    .option("--dry-run", "print the update plan without running it")
+    .action(async (options: { yes?: boolean; dryRun?: boolean }) => {
+      await (dependencies.runUpdate ?? runUpdateCommand)(
+        { yes: options.yes === true, dryRun: options.dryRun === true },
         { tools: registry().tools },
       );
     });
