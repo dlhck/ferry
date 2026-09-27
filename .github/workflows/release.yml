@@ -122,6 +122,11 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # install.sh verifies the downloaded binary against this file.
+      - name: Write checksums
+        working-directory: dist
+        run: sha256sum ferry-* > SHA256SUMS
+
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
