@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { recordProgress } from "./fake-progress.ts";
 import {
   chmodSync,
   mkdirSync,
@@ -235,7 +236,10 @@ describe("installBoxPlugins", () => {
     const claude = fakeClaude(root);
     const link = new ShellLink(claude.path);
 
+    const progress = recordProgress();
+
     const warnings = await installBoxPlugins({
+      progress,
       settings: carried({
         enabledPlugins: { "review@team": true, "old@team": false, "broken@team": true },
         extraKnownMarketplaces: {
@@ -257,8 +261,9 @@ describe("installBoxPlugins", () => {
       "marketplace local has a directory source; add it on the box by hand",
       "could not install plugin broken@team: Plugin not found in marketplace team",
     ]);
-    expect(link.calls).toHaveLength(1);
-    expect(link.calls[0]?.options?.agentForwarding).toBe("git");
+    expect(link.calls).toHaveLength(4);
+    expect(link.calls.every((call) => call.options?.agentForwarding === "git")).toBe(true);
+    expect(progress.events).toEqual(["count:1/4", "count:2/4", "count:3/4", "count:4/4"]);
   });
 
   test("reports a box without the claude CLI and changes nothing", async () => {
@@ -266,11 +271,12 @@ describe("installBoxPlugins", () => {
     const link = new ShellLink(`${join(root, "empty-bin")}:/usr/bin:/bin`);
 
     const warnings = await installBoxPlugins({
-      settings: carried({ enabledPlugins: { "review@team": true } }),
+      settings: carried({ enabledPlugins: { "review@team": true, "other@team": true } }),
       link,
     });
 
     expect(warnings).toEqual(["the claude CLI is not on the box PATH; no plugin was installed"]);
+    expect(link.calls).toHaveLength(1);
   });
 
   test("runs nothing when no Claude plugin declarations are carried", async () => {

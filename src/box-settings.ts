@@ -9,6 +9,7 @@
 import { posix } from "node:path";
 import type { LinkResult, RunOptions } from "./link.ts";
 import type { SeedSettings } from "./manifest.ts";
+import type { Progress } from "./progress.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
 
 /** The harness whose carried keys declare plugins for the `claude` CLI. */
@@ -83,12 +84,14 @@ export async function mergeBoxSettings(input: {
 
 /**
  * Add each carried marketplace and install each enabled plugin with the box
- * `claude` CLI. Claude does not install a plugin from settings alone. Return
- * one warning for each marketplace or plugin the box could not take.
+ * `claude` CLI. Claude does not install a plugin from settings alone. Each
+ * marketplace and plugin is one box command, so progress can count them.
+ * Return one warning for each marketplace or plugin the box could not take.
  */
 export async function installBoxPlugins(input: {
   readonly settings: readonly SeedSettings[];
   readonly link: BoxSettingsLink;
+  readonly progress?: Pick<Progress, "count">;
 }): Promise<readonly string[]> {
   const entry = input.settings.find((candidate) => candidate.harness === CLAUDE_HARNESS);
   if (!entry) return [];
@@ -116,23 +119,25 @@ export async function installBoxPlugins(input: {
   for (const [id, enabled] of Object.entries(record(carried.enabledPlugins))) {
     if (enabled === true) steps.push(step("P", id, `claude plugin install ${quoteShell(id)}`));
   }
-  if (steps.length === 0) return warnings;
 
-  const script = [
-    "command -v claude >/dev/null 2>&1 || { printf 'C\\n'; exit 0; }",
-    ...steps,
-  ].join("\n");
-  const result = await checked(input.link, `sh -c ${quoteShell(script)}`, {
-    agentForwarding: "git",
-    timeoutMs: PLUGIN_TIMEOUT_MS,
-  });
+  for (const [index, command] of steps.entries()) {
+    input.progress?.count(index + 1, steps.length);
+    const script = ["command -v claude >/dev/null 2>&1 || { printf 'C\\n'; exit 0; }", command].join("\n");
+    const result = await checked(input.link, `sh -c ${quoteShell(script)}`, {
+      agentForwarding: "git",
+      timeoutMs: PLUGIN_TIMEOUT_MS,
+    });
 
-  for (const line of result.stdout.split("\n")) {
-    const [kind, name, ...message] = line.split("\t");
-    const detail = message.join("\t").trim();
-    if (kind === "C") warnings.push("the claude CLI is not on the box PATH; no plugin was installed");
-    if (kind === "M") warnings.push(`could not add marketplace ${name}: ${detail}`);
-    if (kind === "P") warnings.push(`could not install plugin ${name}: ${detail}`);
+    for (const line of result.stdout.split("\n")) {
+      const [kind, name, ...message] = line.split("\t");
+      const detail = message.join("\t").trim();
+      if (kind === "C") {
+        warnings.push("the claude CLI is not on the box PATH; no plugin was installed");
+        return warnings;
+      }
+      if (kind === "M") warnings.push(`could not add marketplace ${name}: ${detail}`);
+      if (kind === "P") warnings.push(`could not install plugin ${name}: ${detail}`);
+    }
   }
   return warnings;
 }
