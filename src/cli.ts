@@ -99,7 +99,8 @@ type CliRuntime = {
 
 export function buildProgram(dependencies: CliDependencies = {}): Command {
   // Commands that need the registry resolve it when they run, so help never reads the config.
-  const registry = () => resolveRegistry((dependencies.readConfig ?? readConfig)() ?? {});
+  const config = () => (dependencies.readConfig ?? readConfig)() ?? {};
+  const registry = () => resolveRegistry(config());
   const program = new Command();
   program
     .name("ferry")
@@ -225,7 +226,10 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       process.once("SIGINT", stop);
       process.once("SIGTERM", stop);
       try {
-        await (dependencies.runWatch ?? runWatch)({ signal: controller.signal });
+        await (dependencies.runWatch ?? runWatch)({
+          signal: controller.signal,
+          dailyUpdate: config().update?.watch === true,
+        });
       } finally {
         process.off("SIGINT", stop);
         process.off("SIGTERM", stop);

@@ -202,6 +202,7 @@ export function runUninstall(input: UninstallInput): UninstallResult {
   }
   restoreConfig(home, state.config);
   rmSync(join(home, ".ferry", "watch-state.json"), { force: true });
+  rmSync(join(home, ".ferry", "update-state.json"), { force: true });
   rmSync(statePath(home), { force: true });
 
   for (const directory of state.absentDirectories) removeEmpty(fromRelative(home, directory));

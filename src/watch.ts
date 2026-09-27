@@ -7,10 +7,12 @@ import { inspectSyncSource, runSync, SyncError } from "./sync.ts";
 import { AdoptionRefusal } from "./adopt.ts";
 import { ApplyError } from "./apply.ts";
 import { StoreRefusal } from "./store.ts";
+import { runUpdateCommand } from "./update.ts";
 
 const DEFAULT_POLL_MS = 500;
 const DEFAULT_DEBOUNCE_MS = 1_000;
 const DEFAULT_MAX_BACKOFF_MS = 60_000;
+const UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 
 export type WatchInput = {
   readonly home?: string;
@@ -18,6 +20,8 @@ export type WatchInput = {
   readonly pollMs?: number;
   readonly debounceMs?: number;
   readonly maxBackoffMs?: number;
+  /** Run the tool update once each 24 hours. The `[update]` config key `watch` sets it. */
+  readonly dailyUpdate?: boolean;
 };
 
 export type WatchObservation =
@@ -32,6 +36,10 @@ export type WatchDependencies = {
   readonly readState?: (home: string) => string | null;
   readonly writeState?: (home: string, identity: string) => void;
   readonly writeLine?: (line: string) => void;
+  readonly update?: () => Promise<void>;
+  readonly now?: () => number;
+  readonly readUpdateState?: (home: string) => number | null;
+  readonly writeUpdateState?: (home: string, time: number) => void;
 };
 
 export async function runWatch(
@@ -51,6 +59,28 @@ export async function runWatch(
   const writeState = dependencies.writeState ?? writeWatchState;
   let accepted = readState(home);
   let refusal = "";
+  const update = dependencies.update ??
+    (() => runUpdateCommand({ yes: true, dryRun: false }, { writeLine }));
+  const now = dependencies.now ?? Date.now;
+  const readUpdateState = dependencies.readUpdateState ?? readUpdateTime;
+  const writeUpdateState = dependencies.writeUpdateState ?? writeUpdateTime;
+  let updating: Promise<void> | null = null;
+
+  // The update runs next to the sync loop, so a slow update never delays a
+  // sync. The start time is recorded first, so a restart does not run it again.
+  const startDueUpdate = () => {
+    if (input.dailyUpdate !== true || updating) return;
+    const time = now();
+    const last = readUpdateState(home);
+    if (last !== null && time - last < UPDATE_INTERVAL_MS) return;
+    writeUpdateState(home, time);
+    writeLine("Running the daily tool update.");
+    updating = update()
+      .catch((error) => writeLine(`Watch update failed: ${messageOf(error)}`))
+      .finally(() => {
+        updating = null;
+      });
+  };
 
   const initial = await observe(home);
   if (initial.ok) {
@@ -62,6 +92,7 @@ export async function runWatch(
   writeLine("Ferry watch is running.");
 
   while (!input.signal?.aborted) {
+    startDueUpdate();
     await sleep(pollMs, input.signal);
     if (input.signal?.aborted) break;
     const changed = await observe(home);
@@ -94,7 +125,7 @@ export async function runWatch(
         }
         writeLine(`Watch sync failed; retrying in ${backoff} ms: ${messageOf(error)}`);
         await sleep(backoff, input.signal);
-        if (input.signal?.aborted) return;
+        if (input.signal?.aborted) break;
         const latest = await observe(home);
         if (!latest.ok) {
           writeLine(`Watch refused content: ${latest.message}`);
@@ -110,6 +141,7 @@ export async function runWatch(
       }
     }
   }
+  await updating;
 }
 
 async function settle(
@@ -162,6 +194,30 @@ function isManifestReadFailure(error: unknown): boolean {
 
 function statePath(home: string): string {
   return join(home, ".ferry", "watch-state.json");
+}
+
+function updateStatePath(home: string): string {
+  return join(home, ".ferry", "update-state.json");
+}
+
+function readUpdateTime(home: string): number | null {
+  const path = updateStatePath(home);
+  if (!existsSync(path)) return null;
+  try {
+    const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+    const state = value as { version?: unknown; lastRun?: unknown };
+    return state.version === 1 && typeof state.lastRun === "number" ? state.lastRun : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeUpdateTime(home: string, time: number): void {
+  const path = updateStatePath(home);
+  const temporary = `${path}.tmp`;
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(temporary, `${JSON.stringify({ version: 1, lastRun: time })}\n`, { mode: 0o600 });
+  renameSync(temporary, path);
 }
 
 function readWatchState(home: string): string | null {

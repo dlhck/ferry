@@ -13,7 +13,11 @@ export type OperatorConfig = {
   readonly snapshotUrl: string;
   readonly host: OperatorHostConfig;
   readonly harness?: readonly unknown[];
+  readonly update?: UpdateConfig;
 };
+
+/** `watch` turns on the daily tool update in `ferry watch`. */
+export type UpdateConfig = { readonly watch?: boolean };
 
 export type OperatorHostConfig =
   | {
@@ -37,6 +41,7 @@ export type PartialOperatorConfig = {
     readonly destination?: string;
   };
   readonly harness?: readonly unknown[];
+  readonly update?: UpdateConfig;
 };
 
 /** TOML key to parsed property for each `[[harness]]` entry. */
@@ -51,6 +56,7 @@ const SECTION_KEYS: Record<string, readonly string[]> = {
   "": ["version", "publisher", "snapshot_url"],
   "[host]": ["transport", "tailscale", "ssh_user", "destination"],
   "[[harness]]": Object.keys(HARNESS_KEYS),
+  "[update]": ["watch"],
 };
 
 export class ConfigError extends Error {
@@ -79,6 +85,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       destination?: string;
     };
     harness: Record<string, string>[];
+    update?: { watch?: boolean };
   } = { host: {}, harness: [] };
   let section = "";
   let harness: Record<string, string> | null = null;
@@ -88,6 +95,11 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     if (line === "" || line.startsWith("#")) continue;
     if (line === "[host]") {
       section = "[host]";
+      harness = null;
+      continue;
+    }
+    if (line === "[update]") {
+      section = "[update]";
       harness = null;
       continue;
     }
@@ -107,6 +119,13 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     if (key === "version") {
       if (section !== "" || encoded !== "1") throw new ConfigError(`unsupported config at ${path}`);
       config.version = 1;
+      continue;
+    }
+    if (section === "[update]") {
+      if (encoded !== "true" && encoded !== "false") {
+        throw new ConfigError(`invalid boolean for ${key} in [update] of ${path}`);
+      }
+      config.update = { watch: encoded === "true" };
       continue;
     }
 
@@ -158,6 +177,9 @@ export function writeConfig(config: OperatorConfig, home = homedir()): void {
         }),
         "",
       ]),
+      ...(config.update?.watch !== undefined
+        ? ["[update]", `watch = ${config.update.watch}`, ""]
+        : []),
     ].join("\n"),
     { mode: 0o600 },
   );
