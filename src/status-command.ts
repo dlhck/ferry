@@ -1,7 +1,12 @@
 import { homedir } from "node:os";
 import { join, posix } from "node:path";
 import { apply, type ApplyPlan, type RemoteApplyInput } from "./apply.ts";
-import { AuthStart, type AuthLink, type AuthStatusReport } from "./auth-start.ts";
+import {
+  AuthStart,
+  type AuthLink,
+  type AuthStatusReport,
+  type McpLoginStatus,
+} from "./auth-start.ts";
 import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
 import { Link, type LinkOptions } from "./link.ts";
 import {
@@ -36,6 +41,7 @@ type StatusStore = {
 };
 type StatusAuth = {
   status(): Promise<AuthStatusReport>;
+  mcpStatus(): Promise<readonly McpLoginStatus[]>;
 };
 
 export type StatusCommandDependencies = {
@@ -153,6 +159,9 @@ export function formatStatus(report: StatusReport): string {
           }
         })),
     "",
+    "MCP logins:",
+    ...mcpLogins(report),
+    "",
     `Paseo listen hint: ${report.paseo.listen ?? "unavailable while host is offline"}`,
     "",
     "Deny list:",
@@ -263,6 +272,16 @@ function boxSudo(report: StatusReport): string[] {
         ]
       : []),
   ];
+}
+
+function mcpLogins(report: StatusReport): string[] {
+  if (!report.link.online) return ["  unavailable while host is offline"];
+  if (report.mcpLogins.error) return ["  unavailable"];
+  if (report.mcpLogins.loginRequired.length === 0) return ["  none required"];
+  return report.mcpLogins.loginRequired.map((entry) => {
+    const [tool, server] = entry.split("/");
+    return `  ${entry}: LOGIN REQUIRED, run ferry auth ${tool} --mcp ${server}`;
+  });
 }
 
 function person(identity: GitIdentity): string {

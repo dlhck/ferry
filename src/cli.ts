@@ -187,8 +187,12 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
   program
     .command("auth [provider]")
     .description("Start a login on the configured box without copying credentials")
-    .action(async (provider?: string) => {
-      await (dependencies.runAuth ?? runAuthCommand)({ provider }, { tools: registry().tools });
+    .option("--mcp <server>", "start the MCP server login of the provider CLI on the box")
+    .action(async (provider: string | undefined, options: { mcp?: string }) => {
+      await (dependencies.runAuth ?? runAuthCommand)(
+        options.mcp === undefined ? { provider } : { provider, mcp: options.mcp },
+        { tools: registry().tools },
+      );
     });
 
   program

@@ -112,6 +112,13 @@ function dependencies(
         calls.reads.push("auth.status");
         return auth;
       },
+      async mcpStatus() {
+        calls.reads.push("auth.mcpStatus");
+        return [
+          { tool: "claude", loginRequired: ["linear"] },
+          { tool: "codex", loginRequired: [] },
+        ];
+      },
     },
     manifest: {
       denyRules() {
@@ -163,6 +170,7 @@ describe("Status composer", () => {
         loginRequired: ["codex", "pi"],
         error: null,
       },
+      mcpLogins: { loginRequired: ["claude/linear"], error: null },
       paseo: { address: "100.64.0.8", port: 6767, listen: "100.64.0.8:6767" },
       denyList: denyRules,
       errors: [],
@@ -195,6 +203,7 @@ describe("Status composer", () => {
       "store.inspectTips",
       "apply.plan",
       "auth.status",
+      "auth.mcpStatus",
     ]);
     expect(calls.mutations).toEqual([]);
   });
@@ -249,6 +258,10 @@ describe("Status composer", () => {
         async status() {
           calls.mutations.push("offline auth read");
           return auth;
+        },
+        async mcpStatus() {
+          calls.mutations.push("offline MCP read");
+          return [];
         },
       },
     });
@@ -312,6 +325,9 @@ describe("Status composer", () => {
         async status() {
           throw new Error("auth probe failed");
         },
+        async mcpStatus() {
+          throw new Error("MCP list failed");
+        },
       },
     });
 
@@ -334,7 +350,23 @@ describe("Status composer", () => {
       },
       { code: "inspection-failed", origin: "box", message: "box: link inspection failed" },
       { code: "inspection-failed", origin: "box", message: "box: auth probe failed" },
+      { code: "inspection-failed", origin: "box", message: "box: MCP list failed" },
     ]);
+  });
+
+  test("an MCP list the box could not run is an error, and the other tools still count", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const deps = dependencies(calls);
+    const failure = { code: "command-timeout", origin: "box", message: "timed out" } as const;
+    deps.auth.mcpStatus = async () => [
+      { tool: "claude", error: failure },
+      { tool: "cursor", loginRequired: ["linear", "workos"] },
+    ];
+
+    const report = await composeStatus(deps);
+
+    expect(report.mcpLogins).toEqual({ loginRequired: ["cursor/linear", "cursor/workos"], error: null });
+    expect(report.errors).toContainEqual(failure);
   });
 
   test("reports a missing box git identity", async () => {

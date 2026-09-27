@@ -88,6 +88,7 @@ Ferry carries these items from the operator machine to the box:
 - `~/AGENTS.md`, linked as the instruction file of each harness.
 - The Claude subagents in `~/.claude/agents` and the Claude commands in `~/.claude/commands`. Ferry links each directory whole into the store. On the box, a live directory at one of these paths stops the sync. `ferry sync --force` moves it to `~/.ferry/backups` and then links it.
 - An allowlist of keys from `~/.claude/settings.json`: the plugin declarations `enabledPlugins` and `extraKnownMarketplaces`, and `permissions` and `hooks`. The snapshot holds these keys in `settings/claude.json`. It holds no other settings key and no plugin cache. Keys that can hold secrets, such as `env` and `apiKeyHelper`, stay on the operator machine.
+- The remote MCP servers of Claude (`mcpServers` in `~/.claude.json`), Codex (`[mcp_servers]` in `~/.codex/config.toml`), and Cursor Agent (`mcpServers` in `~/.cursor/mcp.json`). Ferry carries only the name, the transport, and the HTTPS URL of each server. See [Remote MCP servers](#remote-mcp-servers).
 
 The deny rules apply to every carried directory. A file such as `.env` or `credentials.json`, or a file that holds a token, stops the sync. Ferry also stops the sync if a carried settings key holds a token or request headers. A documentation placeholder is not a token. Ferry ignores a token whose part after the prefix is only `x`, only `X`, or only `0`, such as `ghs_xxxx...`. It also ignores a part of only `x` and `X` with the `-` or `_` separators of the token format, such as `xoxb-xxxx-xxxx-...`.
 
@@ -98,6 +99,30 @@ On the box, `ferry sync` runs `claude plugin marketplace add` for each carried m
 `ferry sync --dry-run` lists the carried settings keys that sync will change. It compares your carried keys with the keys of the last publish in `~/.ferry/store/settings`. It does not connect to the box, so a key that someone changed on the box does not show.
 
 Claude writes a marketplace to `extraKnownMarketplaces` when you add it with `claude plugin marketplace add`. Older Claude versions recorded marketplaces only in `~/.claude/plugins`. If a plugin in `enabledPlugins` comes from a marketplace that `extraKnownMarketplaces` does not list, such as `claude-plugins-official`, run `claude plugin marketplace add` for it once on the operator machine. For example: `claude plugin marketplace add anthropics/claude-plugins-official`.
+
+## Remote MCP servers
+
+A remote MCP server, such as Linear, has a name and an HTTPS URL and logs in with OAuth. Ferry declares these servers on the box. Ferry never copies an MCP token. You log in to each server on the box.
+
+Ferry reads only the MCP key of each file. It does not read the other keys of `~/.claude.json`, such as the account data. Ferry does not carry a local server, which has a `command`, or a server with a plain `http://` URL. `ferry sync` and `ferry sync --dry-run` print one `Skipped MCP server:` line for each. Ferry stops the sync if a remote server has request headers (`headers`, `headersHelper`, `http_headers`, `env_http_headers`, `http_headers_helper`), a `bearer_token_env_var`, an `env` or `env_vars` value, or `args`. Ferry also stops the sync if the URL has a user name, a password, a query parameter such as `api_key` or `token`, or a token. A server name can have only letters, digits, `.`, `_`, and `-`, because the name goes into commands on the box. Ferry stops the sync for any other name.
+
+On the box, `ferry sync` declares each carried server:
+
+- Claude: `claude mcp add --transport http --scope user <name> <url>`.
+- Codex: `codex mcp add <name> --url <url>`. This command also starts a login and waits for it, so Ferry stops it after 20 seconds. Codex writes the declaration before the login starts.
+- Cursor Agent: Ferry writes the server into `mcpServers` of the box `~/.cursor/mcp.json`, because Cursor Agent has no add command.
+
+If the box already declares a server with the same URL, Ferry does not change it, so its login stays. If the URL is different, Ferry replaces the declaration. You must then log in again. Ferry never removes a server from the box. If you remove a server on your machine, remove it on the box yourself. A missing CLI or a server that the box does not take gives a `Box MCP:` warning and does not stop the sync.
+
+`ferry status` lists each box MCP server that needs a login, from `claude mcp list`, `codex mcp list`, and `cursor-agent mcp list`.
+
+To log in, run the command that status prints:
+
+```sh
+ferry auth claude --mcp linear
+```
+
+Ferry starts the login of the tool on the box. Claude and Codex need a terminal, so Ferry runs the login under `script`, detached from the SSH session. Ferry prints the authorize URL. Open it in a browser on your machine. The browser then goes to a `localhost` callback port. Ferry forwards that port to the box for 300 seconds, so the tool on the box gets the callback and keeps the token. Press Ctrl-C when the browser reports success. If the forward stays open until the end, Ferry checks the login on the box and reports it. The login on the box stops after 330 seconds. The callback port must be free on your machine. For example, Claude uses port 3118. Pi has no MCP support of its own, so Ferry does not declare Pi MCP servers.
 
 ## Automatic sync
 

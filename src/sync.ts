@@ -23,6 +23,7 @@ import type { HarnessDescriptor } from "./registry/types.ts";
 import { openStore as openSnapshotStore, type PublishResult } from "./store.ts";
 import { adoptPublishedSkills } from "./adopt.ts";
 import { installBoxPlugins, mergeBoxSettings } from "./box-settings.ts";
+import { registerBoxMcp } from "./box-mcp.ts";
 
 export type SyncInput = {
   readonly home?: string;
@@ -76,6 +77,8 @@ export type SyncPlan = {
   readonly force: boolean;
   /** Carried settings keys whose local value differs from the local store checkout. */
   readonly settingsChanges: readonly SettingsChange[];
+  /** The carried remote MCP servers, as `harness/server`. */
+  readonly mcpServers: readonly string[];
 };
 
 export type SettingsChange = { readonly harness: string; readonly keys: readonly string[] };
@@ -124,8 +127,9 @@ export async function runSync(
   const home = input.home ?? homedir();
   const { config, registry, seed } = inspectSyncSource(home, dependencies);
   for (const leftover of seed.leftovers) {
-    if (leftover.code !== "hook-path") continue;
-    (dependencies.writeLine ?? console.log)(`Skipped hook: ${leftover.reason}: ${leftover.path}`);
+    const label = leftover.code === "hook-path" ? "hook" : leftover.code === "mcp-local" ? "MCP server" : null;
+    if (!label) continue;
+    (dependencies.writeLine ?? console.log)(`Skipped ${label}: ${leftover.reason}: ${leftover.path}`);
   }
 
   if (input.dryRun) {
@@ -221,6 +225,24 @@ export async function runSync(
     }
 
     try {
+      const warnings = await registerBoxMcp({
+        remoteHome: required(plan.remoteHome),
+        harnesses: registry.harnesses,
+        tools: registry.tools,
+        mcp: seed.mcp,
+        link,
+      });
+      for (const warning of warnings) (dependencies.writeLine ?? console.log)(`Box MCP: ${warning}`);
+    } catch (cause) {
+      throw new SyncError(
+        "apply-failure",
+        "box",
+        `could not declare the carried MCP servers on ${plan.box}: ${messageOf(cause)}`,
+        { cause },
+      );
+    }
+
+    try {
       (dependencies.adopt ?? adoptPublishedSkills)(home, store.path, registry.harnesses, seed);
     } catch (cause) {
       throw new SyncError(
@@ -287,6 +309,7 @@ function makePlan(
     message: input.message ?? null,
     force: input.force === true,
     settingsChanges: settingsChanges(localCheckout, registry.harnesses, seed),
+    mcpServers: seed.mcp.flatMap((entry) => entry.servers.map((server) => `${entry.harness}/${server.name}`)),
   };
 }
 
@@ -335,6 +358,7 @@ function printPlan(plan: SyncPlan): void {
         plan.settingsChanges.map((change) => `${change.harness}: ${change.keys.join(", ")}`).join("; ") ||
         "none"
       }`,
+      `MCP servers: declare on the box, and keep the other box servers: ${plan.mcpServers.join(", ") || "none"}`,
       ...denyListLines(),
     ].join("\n"),
   );

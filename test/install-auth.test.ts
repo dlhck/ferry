@@ -253,6 +253,7 @@ describe("auth command", () => {
         createAuthStart: (receivedLink) => {
           authLink = receivedLink;
           return {
+            ...noMcp,
             start: async (provider: string) => {
               providers.push(provider);
               return { kind: "already-done", provider: "gh" };
@@ -406,7 +407,7 @@ describe("auth command", () => {
           },
           createAuthStart: () => {
             authStarts += 1;
-            return { start: async () => ({ kind: "already-done", provider: "gh" }) };
+            return { ...noMcp, start: async () => ({ kind: "already-done", provider: "gh" }) };
           },
         }),
       ),
@@ -476,11 +477,21 @@ function authDependencies(overrides: {
     readConfig: overrides.readConfig ?? (() => config),
     createLink: overrides.createLink ?? fakeLink,
     createAuthStart: overrides.createAuthStart ?? (() => ({
+      ...noMcp,
       start: async () => overrides.result ?? ({ kind: "already-done", provider: "gh" }),
     })),
     writeLine: (line) => overrides.output?.push(line),
   };
 }
+
+const noMcp = {
+  startMcp: async (): Promise<AuthStartResult> => {
+    throw new Error("unexpected MCP login");
+  },
+  finishMcp: async (): Promise<AuthStartResult> => {
+    throw new Error("unexpected MCP login");
+  },
+};
 
 function fakeLink(): AuthLink {
   const success = { ok: true as const, address: "builder.tailnet.ts.net", stdout: "", stderr: "" };
@@ -489,3 +500,80 @@ function fakeLink(): AuthLink {
     forward: async () => success,
   };
 }
+
+describe("runAuthCommand with --mcp", () => {
+  const started = {
+    kind: "local-port-forward",
+    provider: "claude/linear",
+    url: "https://auth.example/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A3118%2Fcallback",
+    localPort: 3118,
+    remotePort: 3118,
+    timeoutMs: 300_000,
+  } as const;
+
+  test("prints the URL before the forward, then reports the login", async () => {
+    const output: string[] = [];
+    const calls: string[] = [];
+
+    await runAuthCommand(
+      { provider: "claude", mcp: "linear" },
+      authDependencies({
+        output,
+        createAuthStart: () => ({
+          start: noMcp.startMcp,
+          startMcp: async (tool: string, server: string) => {
+            calls.push(`start ${tool} ${server}`);
+            return started;
+          },
+          finishMcp: async (result) => {
+            calls.push(`finish ${output.length} lines printed`);
+            expect(result).toBe(started);
+            return { kind: "logged-in", provider: "claude/linear" };
+          },
+        }),
+      }),
+    );
+
+    expect(calls).toEqual(["start claude linear", "finish 3 lines printed"]);
+    expect(output).toEqual([
+      `URL: ${started.url}`,
+      "Open the URL in a browser on this machine.",
+      "Ferry forwards local port 3118 to the box for 300 s. Press Ctrl-C after the browser reports success.",
+      "claude/linear: logged in",
+    ]);
+  });
+
+  test("refuses a tool without an MCP login before it reads the config", async () => {
+    const output: string[] = [];
+
+    await expect(
+      runAuthCommand(
+        { provider: "gh", mcp: "linear" },
+        authDependencies({
+          output,
+          readConfig: () => {
+            throw new Error("config read");
+          },
+        }),
+      ),
+    ).rejects.toThrow("operator/invalid-provider");
+  });
+
+  test("prints a refused server name and forwards nothing", async () => {
+    const output: string[] = [];
+
+    await expect(
+      runAuthCommand(
+        { provider: "claude", mcp: "x;y" },
+        authDependencies({
+          output,
+          createAuthStart: () => ({
+            ...noMcp,
+            start: noMcp.startMcp,
+            startMcp: async () => ({ kind: "refused", code: "invalid-server", message: "bad name" }),
+          }),
+        }),
+      ),
+    ).rejects.toThrow("operator/invalid-server: bad name");
+  });
+});

@@ -174,6 +174,10 @@ function fakeStack(
           reads.push("auth.status");
           return auth;
         },
+        async mcpStatus() {
+          reads.push("auth.mcpStatus");
+          return [{ tool: "codex", loginRequired: ["linear"] }];
+        },
         async start() {
           mutations.push("auth.start");
         },
@@ -213,6 +217,9 @@ describe("ferry status command", () => {
     expect(stack.output[0]).toContain("Managed links: UNHEALTHY (1)");
     expect(stack.output[0]).toContain("codex: LOGIN REQUIRED");
     expect(stack.output[0]).toContain("pi: MANUAL LOGIN REQUIRED. SSH to the box");
+    expect(stack.output[0]).toContain(
+      "MCP logins:\n  codex/linear: LOGIN REQUIRED, run ferry auth codex --mcp linear",
+    );
     expect(stack.output[0]).toContain("Paseo listen hint: 100.64.0.8:6767");
     expect(stack.output[0]).toContain("dotenv: refuse environment file");
     expect(stack.mutations).toEqual([]);

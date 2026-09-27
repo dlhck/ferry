@@ -1,5 +1,5 @@
 import type { ApplyAction, ApplyPlan } from "./apply.ts";
-import type { AuthProviderStatus, AuthStatusReport } from "./auth-start.ts";
+import type { AuthProviderStatus, AuthStatusReport, McpLoginStatus } from "./auth-start.ts";
 import { parseGitIdentity, type GitIdentity } from "./git-identity.ts";
 import type { LinkError, LinkResult } from "./link.ts";
 import type { DenyRuleDescription } from "./manifest.ts";
@@ -38,6 +38,7 @@ export type StatusDependencies = {
   };
   readonly auth: {
     status(): Promise<AuthStatusReport>;
+    mcpStatus(): Promise<readonly McpLoginStatus[]>;
   };
   readonly manifest: {
     denyRules(): readonly DenyRuleDescription[];
@@ -77,6 +78,11 @@ export type StatusReport = {
   };
   readonly auth: {
     readonly providers: readonly AuthProviderStatus[];
+    readonly loginRequired: readonly string[];
+    readonly error: StatusDependencyError | null;
+  };
+  readonly mcpLogins: {
+    /** Box MCP servers that need a login, as `tool/server`. */
     readonly loginRequired: readonly string[];
     readonly error: StatusDependencyError | null;
   };
@@ -226,6 +232,20 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     .filter((provider) => provider.status === "login-required" || provider.status === "manual")
     .map((provider) => provider.provider);
 
+  let mcpError: StatusDependencyError | null = null;
+  const mcpLoginRequired: string[] = [];
+  if (online) {
+    try {
+      for (const status of await dependencies.auth.mcpStatus()) {
+        if ("error" in status) errors.push(status.error);
+        else mcpLoginRequired.push(...status.loginRequired.map((server) => `${status.tool}/${server}`));
+      }
+    } catch (cause) {
+      mcpError = dependencyError("box", cause);
+      errors.push(mcpError);
+    }
+  }
+
   return {
     schemaVersion: 1,
     link: { online, address, error: linkError },
@@ -245,6 +265,7 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     },
     managedPaths: { allHealthy, unhealthy, error: managedPathsError },
     auth: { providers, loginRequired, error: authError },
+    mcpLogins: { loginRequired: mcpLoginRequired, error: mcpError },
     paseo: {
       address,
       port: PASEO_DAEMON_PORT,

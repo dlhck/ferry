@@ -33,6 +33,12 @@ export type HarnessDescriptor = {
    * builtin descriptor sets this.
    */
   readonly settings?: { readonly file: string; readonly keys: readonly string[] };
+  /**
+   * The file and key where the harness declares its user-scope MCP servers.
+   * Ferry carries only the remote servers from it. Only a builtin descriptor
+   * sets this.
+   */
+  readonly mcp?: { readonly file: string; readonly format: "json" | "toml"; readonly key: string };
 };
 
 /** Codex, Pi, and Cursor Agent read `.agents/skills` instead of their own copies. */
@@ -89,10 +95,31 @@ export type ToolUpdate = {
   readonly binary?: string;
 };
 
+/**
+ * How ferry declares, lists, and logs in remote MCP servers with the CLI of a
+ * harness. The tool id is the harness id. In a command, `{name}`, `{url}`, and
+ * `{type}` are replaced with shell-quoted values.
+ */
+export type ToolMcp = {
+  /**
+   * Commands that register one server. `get` prints the server URL when the
+   * server is declared. Without them, ferry merges the server into the MCP
+   * file of the harness.
+   */
+  readonly register?: { readonly get: string; readonly remove: string; readonly add: string };
+  /** Lists the declared servers and their login state. */
+  readonly list: string;
+  /** Regular expression source for one `list` line of a server that needs a login. Group 1 is the name. */
+  readonly loginRequired: string;
+  /** Starts a login. It prints an authorize URL and waits on a loopback callback. */
+  readonly login: string;
+};
+
 /** One vendor CLI on the box. */
 export type ToolDescriptor = {
   readonly id: string;
   readonly install?: { readonly command: string };
   readonly update?: ToolUpdate;
   readonly auth?: ToolAuth;
+  readonly mcp?: ToolMcp;
 };

@@ -58,6 +58,16 @@ const DENY_RULES = {
     reason: "request headers in a carried settings key",
     verdict: "refuse",
   },
+  "mcp-credential": {
+    code: "mcp-credential",
+    reason: "remote MCP server declaration with headers, environment values, arguments, or a credential",
+    verdict: "refuse",
+  },
+  "mcp-name": {
+    code: "mcp-name",
+    reason: "MCP server name with characters other than letters, digits, dot, underscore, and hyphen",
+    verdict: "refuse",
+  },
   "hook-path": {
     code: "hook-path",
     reason: "hook entry that refers to a home path outside the managed set",
@@ -69,6 +79,11 @@ const DENY_RULES = {
   settings: {
     code: "settings",
     reason: "whole harness settings file; only listed keys are carried",
+    verdict: "skip",
+  },
+  "mcp-local": {
+    code: "mcp-local",
+    reason: "local or non-HTTPS MCP server; only remote HTTPS servers are carried",
     verdict: "skip",
   },
 } as const satisfies Record<string, DenyRule>;
@@ -136,6 +151,21 @@ const TOKEN_PATTERNS = [
  * characters, such as `aaaa`, still count as a token.
  */
 const PLACEHOLDER_BODY = /^(?:([xX0])\1*|[xX]+(?:[-_]+[xX]+)*)$/;
+/** A carried MCP server name reaches remote shell commands, so it may hold only these characters. */
+const MCP_SERVER_NAME = /^[A-Za-z0-9._-]+$/;
+/** Declaration keys that send headers or start a process. A remote server carries none of them. */
+const MCP_CREDENTIAL_KEYS = [
+  "headers",
+  "headersHelper",
+  "http_headers",
+  "env_http_headers",
+  "http_headers_helper",
+  "bearer_token_env_var",
+  "env",
+  "env_vars",
+  "args",
+];
+const SECRET_PARAMETER = /token|secret|credential|password|api.?key/i;
 /** Words in a hook command that name a file under the home: `~/x`, `$HOME/x`, `${HOME}/x`. */
 const HOME_REFERENCE = /^(?:~|\$HOME|\$\{HOME\})\/(.*)$/;
 /** Shell quotes, operators, and `=` separate the words of a hook command. */
@@ -154,6 +184,12 @@ export type SeedRoot = { readonly path: string; readonly files: readonly SeedFil
 /** The carried keys of one harness settings file, as JSON. `harness` is the harness id. */
 export type SeedSettings = { readonly harness: string; readonly bytes: Uint8Array };
 
+/** One remote MCP server. Ferry carries nothing else from a declaration. */
+export type McpServer = { readonly name: string; readonly type: "http" | "sse"; readonly url: string };
+
+/** The remote MCP servers one harness declares. `harness` is the harness id. */
+export type SeedMcp = { readonly harness: string; readonly servers: readonly McpServer[] };
+
 /** Something ferry found and did not import. Init prints these. */
 export type Leftover = Note & { readonly path: string };
 
@@ -165,6 +201,8 @@ export type Seed = {
   readonly roots: readonly SeedRoot[];
   /** The carried settings keys of each harness whose settings file exists. */
   readonly settings: readonly SeedSettings[];
+  /** The remote MCP servers of each harness that declares at least one. */
+  readonly mcp: readonly SeedMcp[];
   /** Content hash of the whole seed. Changes when any skill or byte changes. */
   readonly identity: string;
   readonly leftovers: readonly Leftover[];
@@ -244,6 +282,13 @@ export function readSeed(home: string, harnesses: readonly HarnessDescriptor[]):
     if (carried) settings.push({ harness: harness.id, bytes: carried });
   }
 
+  const mcp: SeedMcp[] = [];
+  for (const harness of harnesses) {
+    if (!harness.mcp) continue;
+    const servers = readMcp(home, harness.mcp, forbidden, leftovers);
+    if (servers.length > 0) mcp.push({ harness: harness.id, servers });
+  }
+
   const instructions = readInstructions(home, leftovers);
   if (instructions) forbidden.push(...tokenHits(join(home, INSTRUCTION_FILE), instructions.bytes));
 
@@ -256,7 +301,8 @@ export function readSeed(home: string, harnesses: readonly HarnessDescriptor[]):
     instructions,
     roots,
     settings,
-    identity: identify(skills, instructions, roots, settings, harnesses),
+    mcp,
+    identity: identify(skills, instructions, roots, settings, mcp, harnesses),
     leftovers,
   };
 }
@@ -475,6 +521,89 @@ function readSettings(
 }
 
 /**
+ * Read the remote MCP servers from the declared key of an MCP file. The file
+ * never leaves the machine, and a server keeps only its name, type, and URL.
+ * A local or non-HTTPS server is noted in `leftovers`. A remote server with
+ * headers, environment values, arguments, or a credential refuses the seed.
+ */
+function readMcp(
+  home: string,
+  mcp: NonNullable<HarnessDescriptor["mcp"]>,
+  forbidden: ForbiddenHit[],
+  leftovers: Leftover[],
+): McpServer[] {
+  const path = join(home, mcp.file);
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = mcp.format === "toml" ? Bun.TOML.parse(text) : JSON.parse(text);
+  } catch {
+    parsed = null;
+  }
+  if (!isRecord(parsed)) {
+    forbidden.push(note(path, NOTES["invalid-settings"]));
+    return [];
+  }
+
+  const servers: McpServer[] = [];
+  const declared = parsed[mcp.key];
+  const entries = isRecord(declared) ? Object.entries(declared) : [];
+  for (const [name, declaration] of entries.sort(([a], [b]) => compare(a, b))) {
+    const remote = isRecord(declaration) ? remoteServer(declaration) : null;
+    if (!remote) {
+      leftovers.push({
+        path,
+        code: DENY_RULES["mcp-local"].code,
+        reason: `MCP server ${name} is not a remote HTTPS server`,
+      });
+      continue;
+    }
+    if (!MCP_SERVER_NAME.test(name)) {
+      forbidden.push({
+        path,
+        code: DENY_RULES["mcp-name"].code,
+        reason: "an MCP server name has characters other than letters, digits, dot, underscore, and hyphen",
+      });
+      continue;
+    }
+    const url = new URL(remote.url);
+    const credential =
+      MCP_CREDENTIAL_KEYS.some((key) => hasKey(declaration, key)) ||
+      url.username !== "" ||
+      url.password !== "" ||
+      [...url.searchParams.keys()].some((key) => SECRET_PARAMETER.test(key)) ||
+      tokenHits(path, Buffer.from(JSON.stringify(declaration))).length > 0;
+    if (credential) {
+      forbidden.push({
+        path,
+        code: DENY_RULES["mcp-credential"].code,
+        reason: `MCP server ${name} has headers, environment values, arguments, or a credential`,
+      });
+      continue;
+    }
+    servers.push({ name, ...remote });
+  }
+  return servers;
+}
+
+/** The type and URL of a declaration with an HTTPS URL and an HTTP or SSE transport, else `null`. */
+function remoteServer(declaration: Record<string, unknown>): Omit<McpServer, "name"> | null {
+  const { type, url } = declaration;
+  if (type !== undefined && type !== "http" && type !== "sse" && type !== "streamable_http") {
+    return null;
+  }
+  if (typeof url !== "string" || !URL.canParse(url) || new URL(url).protocol !== "https:") {
+    return null;
+  }
+  return { type: type === "sse" ? "sse" : "http", url };
+}
+
+/**
  * Return `hooks` without the hook entries that refer to unmanaged home paths,
  * and note each entry left out. A matcher group with no hooks left and an event
  * with no groups left are removed too.
@@ -627,6 +756,7 @@ function identify(
   instructions: Instructions | null,
   roots: readonly SeedRoot[],
   settings: readonly SeedSettings[],
+  mcp: readonly SeedMcp[],
   harnesses: readonly HarnessDescriptor[],
 ): string {
   const hash = createHash("sha256");
@@ -638,6 +768,7 @@ function identify(
   for (const skill of skills) hash.update(`skill:${skill.name}:${contentKey(skill.files)}\n`);
   for (const root of roots) hash.update(`root:${root.path}:${contentKey(root.files)}\n`);
   for (const entry of settings) hash.update(`settings:${entry.harness}:${digest(entry.bytes)}\n`);
+  for (const entry of mcp) hash.update(`mcp:${entry.harness}:${JSON.stringify(entry.servers)}\n`);
   hash.update(`instructions:${instructions ? digest(instructions.bytes) : "none"}\n`);
   return hash.digest("hex");
 }
