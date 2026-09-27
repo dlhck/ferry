@@ -263,11 +263,33 @@ Rules:
 - A table cannot use the id of a builtin tool, and the config cannot name one tool two times.
 - Ferry replaces `{version}` in `install` and `update` with the version that the policy selects, in single quotes for the shell. `{version}` is the only placeholder. Ferry refuses each other `{...}` token, and a placeholder in `local` or `box`. A shell expansion such as `${HOME}` is not a placeholder.
 - Each id in `depends` must be a builtin tool or a tool that you define. Ferry refuses a dependency cycle.
-- A `path` directory must be inside the home.
+- A `path` directory must be inside the home. It can have only letters, digits, and `.`, `_`, `@`, `+`, `-`, and `/`.
 - Ferry refuses an unknown key, a value of the wrong type, and a policy that is not `"operator"`, `"latest"`, or an exact version. The error names the tool and the key.
 - A string can be in double quotes, or in single quotes. A string in single quotes keeps `"` and `\` as they are, which is easier for shell commands. A list is one line of strings in double quotes. A comment must be on its own line.
 
 A repeat `ferry init` keeps the `[tools]` table and the tool tables.
+
+### Box PATH
+
+The box `PATH` has `~/.local/bin` first, then `~/.pi/agent/bin` for Pi, then the `path` directories of the tools that you define, in config order. A directory is in the list one time only. Ferry uses the same list in three places:
+
+- Each box command that Ferry runs over SSH starts with `export PATH=...`, because a command over SSH does not read the shell profile.
+- `ferry sync` writes one block in `~/.profile` on the box, so a login shell and an SSH session find the same tools:
+
+  ```sh
+  # >>> ferry PATH >>>
+  # Managed by ferry. ferry sync rewrites this block. Do not edit it.
+  export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$HOME/.bun/bin:$PATH"
+  # <<< ferry PATH <<<
+  ```
+
+- When the Paseo integration is on, `Environment=PATH=` in `ferry-paseo.service` has the same directories, then the system directories.
+
+Ferry owns the block. Each `ferry sync` rewrites the block in place, or adds it at the end of the file, and keeps all other lines and the file mode. When the block is current, Ferry does not write the file. When `~/.profile` is missing, Ferry creates it. If `~/.bash_profile` or `~/.bash_login` is on the box, bash does not read `~/.profile` for a login shell, so source `~/.profile` from that file.
+
+When the Paseo integration is on and the directories changed, `ferry sync` writes the unit again and runs `systemctl --user daemon-reload` and `systemctl --user restart ferry-paseo.service`. The restart stops the agents that run in Paseo on the box, so Ferry restarts only when the `PATH` changed, and prints a line when it does. `ferry sync --dry-run` shows the directories.
+
+`ferry install` does not write the block. After you add or change a `path`, run `ferry sync`.
 
 ### Recipes
 
@@ -321,7 +343,7 @@ depends = ["node"]
 
 What works now: the `[tools]` policies, the tool tables, and `ferry tools`. What comes next:
 
-- `ferry install` and `ferry update` run the recipes of the tools that you define, apply the policy and the install mode, and write the box `PATH` from the `path` directories. Until then, they work as before: `ferry install` installs `gh` and the agent CLIs, and `ferry update` shows the tools that you define as skipped.
+- `ferry install` and `ferry update` run the recipes of the tools that you define, and apply the policy and the install mode. Until then, they work as before: `ferry install` installs `gh` and the agent CLIs, and `ferry update` shows the tools that you define as skipped.
 - A "Tools" section in `ferry status` with the box versions.
 
 ## Update the agent tools
