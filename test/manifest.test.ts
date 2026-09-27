@@ -270,6 +270,16 @@ describe("the deny set", () => {
         behavior: "refuse",
       },
       {
+        code: "mcp-credential",
+        description: "remote MCP server declaration with headers, environment values, arguments, or a credential",
+        behavior: "refuse",
+      },
+      {
+        code: "mcp-name",
+        description: "MCP server name with characters other than letters, digits, dot, underscore, and hyphen",
+        behavior: "refuse",
+      },
+      {
         code: "hook-path",
         description: "hook entry that refers to a home path outside the managed set",
         behavior: "skip",
@@ -280,6 +290,11 @@ describe("the deny set", () => {
       {
         code: "settings",
         description: "whole harness settings file; only listed keys are carried",
+        behavior: "skip",
+      },
+      {
+        code: "mcp-local",
+        description: "local or non-HTTPS MCP server; only remote HTTPS servers are carried",
         behavior: "skip",
       },
     ]);
@@ -951,5 +966,172 @@ describe("carried Claude hook commands", () => {
     write(home, ".claude/settings.json", hooksWith(`notify --token ghp_${"a".repeat(36)}`));
 
     expect(refusalOf(home).forbidden.map((hit) => hit.code)).toEqual(["github-token"]);
+  });
+});
+
+describe("carried MCP server declarations", () => {
+  function mcpOf(seed: Seed, harness: string): unknown {
+    return seed.mcp.find((entry) => entry.harness === harness)?.servers;
+  }
+
+  test("carries the remote servers of Claude, Codex, and Cursor Agent as name, type, and URL", () => {
+    const home = makeHome();
+    write(
+      home,
+      ".claude.json",
+      JSON.stringify({
+        oauthAccount: { emailAddress: "operator@example.com" },
+        projects: { "/work": { mcpServers: { project: { type: "http", url: "https://p.example/mcp" } } } },
+        mcpServers: {
+          linear: { type: "http", url: "https://mcp.linear.app/mcp" },
+          events: { type: "sse", url: "https://events.example/sse" },
+        },
+      }),
+    );
+    write(
+      home,
+      ".codex/config.toml",
+      [
+        'model = "o3"',
+        "[mcp_servers.linear]",
+        'url = "https://mcp.linear.app/mcp"',
+        "[mcp_servers.linear.tools.save_issue]",
+        'approval_mode = "approve"',
+      ].join("\n"),
+    );
+    write(home, ".cursor/mcp.json", JSON.stringify({ mcpServers: { workos: { url: "https://mcp.workos.com/mcp" } } }));
+
+    const seed = seedOf(home);
+
+    expect(mcpOf(seed, "claude")).toEqual([
+      { name: "events", type: "sse", url: "https://events.example/sse" },
+      { name: "linear", type: "http", url: "https://mcp.linear.app/mcp" },
+    ]);
+    expect(mcpOf(seed, "codex")).toEqual([{ name: "linear", type: "http", url: "https://mcp.linear.app/mcp" }]);
+    expect(mcpOf(seed, "cursor")).toEqual([{ name: "workos", type: "http", url: "https://mcp.workos.com/mcp" }]);
+    expect(JSON.stringify(seed.mcp)).not.toContain("operator@example.com");
+    expect(JSON.stringify(seed.mcp)).not.toContain("p.example");
+  });
+
+  test("a home without MCP files carries no MCP servers", () => {
+    expect(seedOf(makeHome()).mcp).toEqual([]);
+  });
+
+  test("skips a local server and a plain HTTP server with a note, and carries the rest", () => {
+    const home = makeHome();
+    write(
+      home,
+      ".claude.json",
+      JSON.stringify({
+        mcpServers: {
+          repl: { type: "stdio", command: "node", args: ["repl.js"], env: { API_KEY: "value" } },
+          dev: { type: "http", url: "http://localhost:3000/mcp" },
+          linear: { type: "http", url: "https://mcp.linear.app/mcp" },
+        },
+      }),
+    );
+
+    const seed = seedOf(home);
+
+    expect(mcpOf(seed, "claude")).toEqual([{ name: "linear", type: "http", url: "https://mcp.linear.app/mcp" }]);
+    const notes = seed.leftovers.filter((leftover) => leftover.code === "mcp-local");
+    expect(notes).toEqual([
+      { path: join(home, ".claude.json"), code: "mcp-local", reason: "MCP server dev is not a remote HTTPS server" },
+      { path: join(home, ".claude.json"), code: "mcp-local", reason: "MCP server repl is not a remote HTTPS server" },
+    ]);
+    expect(JSON.stringify(seed)).not.toContain("API_KEY");
+  });
+
+  const refused: readonly (readonly [string, Record<string, unknown>])[] = [
+    ["headers", { type: "http", url: "https://a.example/mcp", headers: { Authorization: "Bearer x" } }],
+    ["an env value", { type: "http", url: "https://a.example/mcp", env: { API_KEY: "x" } }],
+    ["arguments", { type: "http", url: "https://a.example/mcp", args: ["--key", "x"] }],
+    ["a token query parameter", { type: "http", url: "https://a.example/mcp?api_key=abc" }],
+    ["user info in the URL", { type: "http", url: "https://user:pass@a.example/mcp" }],
+    ["a token in the URL", { type: "http", url: `https://a.example/ghp_${"a".repeat(36)}/mcp` }],
+  ];
+  for (const [what, declaration] of refused) {
+    test(`refuses a remote Claude server with ${what}, and names only the server`, () => {
+      const home = makeHome();
+      write(home, ".claude.json", JSON.stringify({ mcpServers: { remote: declaration } }));
+
+      const hits = refusalOf(home).forbidden;
+
+      expect(hits).toEqual([
+        {
+          path: join(home, ".claude.json"),
+          code: "mcp-credential",
+          reason: "MCP server remote has headers, environment values, arguments, or a credential",
+        },
+      ]);
+      expect(JSON.stringify(hits)).not.toContain("a.example");
+    });
+  }
+
+  test("refuses a remote Codex server with HTTP headers or a bearer token variable", () => {
+    const home = makeHome();
+    write(
+      home,
+      ".codex/config.toml",
+      [
+        "[mcp_servers.one]",
+        'url = "https://a.example/mcp"',
+        'bearer_token_env_var = "ONE_TOKEN"',
+        "[mcp_servers.two]",
+        'url = "https://b.example/mcp"',
+        "[mcp_servers.two.http_headers]",
+        'X-Key = "value"',
+      ].join("\n"),
+    );
+
+    expect(refusalOf(home).forbidden.map((hit) => hit.reason)).toEqual([
+      "MCP server one has headers, environment values, arguments, or a credential",
+      "MCP server two has headers, environment values, arguments, or a credential",
+    ]);
+  });
+
+  test("refuses a server name with shell metacharacters without printing it", () => {
+    const home = makeHome();
+    write(
+      home,
+      ".cursor/mcp.json",
+      JSON.stringify({ mcpServers: { "x'; rm -rf ~; '": { url: "https://a.example/mcp" } } }),
+    );
+
+    const hits = refusalOf(home).forbidden;
+
+    expect(hits).toEqual([
+      {
+        path: join(home, ".cursor", "mcp.json"),
+        code: "mcp-name",
+        reason: "an MCP server name has characters other than letters, digits, dot, underscore, and hyphen",
+      },
+    ]);
+  });
+
+  test("carries a URL with shell metacharacters as data", () => {
+    const home = makeHome();
+    const url = "https://a.example/mcp?team=a&b=$(id)'`";
+    write(home, ".cursor/mcp.json", JSON.stringify({ mcpServers: { team: { url } } }));
+
+    expect(mcpOf(seedOf(home), "cursor")).toEqual([{ name: "team", type: "http", url }]);
+  });
+
+  test("refuses an MCP file that does not parse", () => {
+    const home = makeHome();
+    write(home, ".codex/config.toml", "[mcp_servers\nurl =");
+
+    expect(refusalOf(home).forbidden).toEqual([
+      { path: join(home, ".codex", "config.toml"), code: "invalid-settings", reason: expect.any(String) },
+    ]);
+  });
+
+  test("the identity follows the carried MCP servers", () => {
+    const home = makeHome();
+    write(home, ".cursor/mcp.json", JSON.stringify({ mcpServers: { a: { url: "https://a.example/mcp" } } }));
+    const before = seedOf(home).identity;
+
+    write(home, ".cursor/mcp.json", JSON.stringify({ mcpServers: { a: { url: "https://b.example/mcp" } } }));
+    expect(seedOf(home).identity).not.toBe(before);
   });
 });

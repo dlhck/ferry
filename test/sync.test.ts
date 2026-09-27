@@ -32,6 +32,7 @@ const seed: Seed = {
   instructions: null,
   roots: [],
   settings: [],
+  mcp: [],
   identity: "seed-identity",
   leftovers: [],
 };

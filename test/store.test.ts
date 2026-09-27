@@ -43,6 +43,7 @@ function seed(body = "Use small commits.\n"): Seed {
     instructions: { bytes: Buffer.from("Keep changes surgical.\n") },
     roots: [],
     settings: [],
+    mcp: [],
     identity: `seed-${body}`,
     leftovers: [],
   };

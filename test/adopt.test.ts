@@ -34,6 +34,7 @@ function fixture(source = "same\n", stored = "same\n") {
     instructions: null,
     roots: [],
     settings: [],
+    mcp: [],
     identity: "identity",
     leftovers: [],
   };

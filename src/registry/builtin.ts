@@ -31,6 +31,8 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
       file: ".claude/settings.json",
       keys: ["enabledPlugins", "extraKnownMarketplaces", "permissions", "hooks"],
     },
+    // The same file holds account and OAuth state. Only mcpServers is read.
+    mcp: { file: ".claude.json", format: "json", key: "mcpServers" },
   },
   {
     id: "codex",
@@ -38,6 +40,7 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
     skillRoot: ".codex/skills",
     ownSkills: false,
     instructionFile: ".codex/AGENTS.md",
+    mcp: { file: ".codex/config.toml", format: "toml", key: "mcp_servers" },
   },
   {
     id: "pi",
@@ -52,6 +55,7 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
     name: "Cursor Agent",
     skillRoot: ".cursor/skills",
     ownSkills: false,
+    mcp: { file: ".cursor/mcp.json", format: "json", key: "mcpServers" },
   },
 ];
 
@@ -93,6 +97,17 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
       login: "claude auth login",
       completion: { kind: "printed-url", allowedHosts: ["claude.ai", "anthropic.com"] },
     },
+    mcp: {
+      register: {
+        get: "claude mcp get {name}",
+        remove: "claude mcp remove --scope user {name}",
+        add: "claude mcp add --transport {type} --scope user {name} {url}",
+      },
+      list: "claude mcp list",
+      loginRequired: "^(.+): \\S+ \\(\\w+\\) - ! Needs authentication$",
+      // Without a terminal the login stops at once, so ferry runs it under script.
+      login: "claude mcp login {name} --no-browser",
+    },
   },
   {
     id: "codex",
@@ -117,6 +132,17 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
           timeoutMs: 120_000,
         },
       },
+    },
+    mcp: {
+      register: {
+        get: "codex mcp get {name}",
+        remove: "codex mcp remove {name}",
+        // Add writes the config, then starts a login that waits for a callback.
+        add: "timeout 20 codex mcp add {name} --url {url}",
+      },
+      list: "codex mcp list",
+      loginRequired: "^(\\S+)\\s+https://\\S+\\s.*\\bNot logged in\\s*$",
+      login: "codex mcp login {name} --no-browser",
     },
   },
   {
@@ -148,6 +174,12 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
       probe: "cursor-agent status",
       login: "cursor-agent login",
       completion: { kind: "printed-url", allowedHosts: ["cursor.com", "cursor.sh"] },
+    },
+    // Cursor Agent has no add command, so ferry merges servers into ~/.cursor/mcp.json.
+    mcp: {
+      list: "cursor-agent mcp list",
+      loginRequired: "^(\\S+): requires_authentication$",
+      login: "cursor-agent mcp login {name}",
     },
   },
 ];
