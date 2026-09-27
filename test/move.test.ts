@@ -513,7 +513,7 @@ describe("ferry move --allow-secrets", () => {
     const w = world();
     secretApp(w);
 
-    const result = await move(w, { path: "Developer/app", includeEnv: true, allowSecrets: true });
+    const result = await move(w, { path: "Developer/app", includeEnv: true, allowSecrets: true, yes: true });
 
     expect(result.error).toBeNull();
     const carried = join(w.box, "Developer/app/.env.local");
@@ -541,7 +541,7 @@ describe("ferry move --allow-secrets", () => {
 
     const result = await move(
       w,
-      { path: "Developer/app", includeEnv: true, allowSecrets: true },
+      { path: "Developer/app", includeEnv: true, allowSecrets: true, yes: true },
       { createLink: () => tampering },
     );
 
@@ -567,7 +567,7 @@ describe("ferry move --allow-secrets", () => {
     write(join(app, ".env.keys"), "-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n-----END OPENSSH PRIVATE KEY-----\n");
     write(join(app, ".env.bin"), new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]));
 
-    const result = await move(w, { path: "Developer/app", includeEnv: true, allowSecrets: true });
+    const result = await move(w, { path: "Developer/app", includeEnv: true, allowSecrets: true, yes: true });
 
     expect(result.error).toBeNull();
     const boxApp = join(w.box, "Developer/app");
@@ -582,7 +582,7 @@ describe("ferry move --allow-secrets", () => {
     expectNoSecretValue(result);
   });
 
-  test("--dry-run lists the secret files and changes nothing", async () => {
+  test("--dry-run lists the secret files and changes nothing, also without a terminal and --yes", async () => {
     const w = world();
     const app = secretApp(w);
     const before = { operator: listTree(w.operator), box: listTree(w.box) };
@@ -591,7 +591,7 @@ describe("ferry move --allow-secrets", () => {
     const result = await move(
       w,
       { path: "Developer/app", includeEnv: true, allowSecrets: true, dryRun: true },
-      { interactive: true, confirm: async () => ++asked > 0 },
+      { interactive: false, confirm: async () => ++asked > 0 },
     );
 
     expect(result.error).toBeNull();
@@ -631,23 +631,41 @@ describe("ferry move --allow-secrets", () => {
     expectNoSecretValue(result);
   });
 
-  test("--yes carries the secret files without a question", async () => {
+  test("on a terminal, carries the secret files after the operator agrees", async () => {
     const w = world();
     secretApp(w);
     let asked = 0;
 
     const result = await move(
       w,
-      { path: "Developer/app", includeEnv: true, allowSecrets: true, yes: true },
+      { path: "Developer/app", includeEnv: true, allowSecrets: true },
       { interactive: true, confirm: async () => ++asked > 0 },
     );
 
     expect(result.error).toBeNull();
-    expect(asked).toBe(0);
+    expect(asked).toBe(1);
     expect(existsSync(join(w.box, "Developer/app/.env.local"))).toBe(true);
   });
 
-  test("without a terminal, carries the secret files without a question", async () => {
+  for (const interactive of [true, false]) {
+    test(`--yes carries the secret files without a question ${interactive ? "on" : "without"} a terminal`, async () => {
+      const w = world();
+      secretApp(w);
+      let asked = 0;
+
+      const result = await move(
+        w,
+        { path: "Developer/app", includeEnv: true, allowSecrets: true, yes: true },
+        { interactive, confirm: async () => ++asked > 0 },
+      );
+
+      expect(result.error).toBeNull();
+      expect(asked).toBe(0);
+      expect(existsSync(join(w.box, "Developer/app/.env.local"))).toBe(true);
+    });
+  }
+
+  test("without a terminal and without --yes, refuses before any change", async () => {
     const w = world();
     secretApp(w);
     let asked = 0;
@@ -658,9 +676,11 @@ describe("ferry move --allow-secrets", () => {
       { interactive: false, confirm: async () => ++asked > 0 },
     );
 
-    expect(result.error).toBeNull();
+    expect(result.error?.message).toBe("Ferry found 1 file with secrets. Without a terminal, add --yes to carry them.");
     expect(asked).toBe(0);
-    expect(existsSync(join(w.box, "Developer/app/.env.local"))).toBe(true);
+    expect(existsSync(join(w.box, "Developer"))).toBe(false);
+    expect(w.commands.some(({ command }) => command.includes("git clone") || command.startsWith("tar -xf"))).toBe(false);
+    expectNoSecretValue(result);
   });
 
   test("--from-box writes the secret files with mode 600 on this machine", async () => {
@@ -669,7 +689,13 @@ describe("ferry move --allow-secrets", () => {
     write(join(boxApp, ".env.local"), ENV_LOCAL);
     chmodSync(join(boxApp, ".env.local"), 0o644);
 
-    const result = await move(w, { path: "Developer/app", fromBox: true, includeEnv: true, allowSecrets: true });
+    const result = await move(w, {
+      path: "Developer/app",
+      fromBox: true,
+      includeEnv: true,
+      allowSecrets: true,
+      yes: true,
+    });
 
     expect(result.error).toBeNull();
     expect(statSync(join(w.operator, "Developer/app/.env.local")).mode & 0o777).toBe(0o600);

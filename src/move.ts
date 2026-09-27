@@ -34,7 +34,7 @@ export type MoveInput = {
   readonly includeEnv: boolean;
   /** Also carry an environment file that fails the token or secret-field rules. Needs `includeEnv`. */
   readonly allowSecrets: boolean;
-  /** Carry the files with secrets without a question. */
+  /** Carry the files with secrets without a question. Without a terminal, Ferry refuses them without it. */
   readonly yes: boolean;
 };
 
@@ -198,7 +198,12 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
     if (input.dryRun) return;
 
     const secrets = plan.carry.filter((file) => file.secrets.length > 0);
-    if (secrets.length > 0 && !input.yes && dependencies.interactive) {
+    if (secrets.length > 0 && !input.yes) {
+      if (!dependencies.interactive) {
+        throw new MoveError(
+          `Ferry found ${plural(secrets.length, "file")} with secrets. Without a terminal, add --yes to carry them.`,
+        );
+      }
       progress.pause();
       const readers = input.fromBox ? "" : " Anyone with access to the box user can read them.";
       const question = `Carry ${plural(secrets.length, "file")} with secrets to ${destination.label}?${readers}`;

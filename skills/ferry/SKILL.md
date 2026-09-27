@@ -15,7 +15,7 @@ Ferry copies the agent setup of the operator machine to a remote Linux box. The 
 4. Do not start `ferry auth`. It needs a person with a browser. Tell the operator the exact command to run.
 5. Do not pass `--yes` to `ferry install`, `ferry update`, or `ferry uninstall`, and do not answer their confirmation prompts. The operator confirms.
 6. Never work around a refusal. Do not rename, move, split, or encode a file to get past a deny rule. Do not copy a secret, a login, or a token to the box by other means.
-7. Run `ferry move --dry-run` before `ferry move`. Add `--include-env` or `--remove` only when the operator asks for it.
+7. Run `ferry move --dry-run` before `ferry move`. Add `--include-env` or `--remove` only when the operator asks for it. Never pass `--allow-secrets` or `--yes` to `ferry move` unless the operator asks for it in this conversation.
 8. Install skills with `ferry skills add`, not with a plain `npx skills add`.
 
 ## Find out where you are
@@ -127,7 +127,12 @@ Do not run these commands yourself. When `auth.loginRequired` or `mcpLogins.logi
 2. Fix each `Problem:` line before the real move. Ferry refuses a move with unpushed commits, uncommitted changes to tracked files, or an existing destination path. Push or commit only if the operator agrees.
 3. A `Refuse:` file stays on the source machine. Do not copy it yourself. The operator decides what to do with it.
 4. Add `--include-env` only when the operator asks. It carries a `.env` file only if the file has no token and no secret key with a value.
-5. Add `--remove` only when the operator asks. Ferry refuses `--remove` if it refuses any local-only file. After verification, Ferry moves the source copy to `~/.Trash` on macOS or to `~/.ferry/trash` on Linux and on the box. It does not delete it.
+5. Never pass `--allow-secrets` or `--yes` unless the operator asks for it in this conversation. With `--include-env --allow-secrets`, Ferry also carries a `.env` or `.env.*` file that has a token or a secret key. It still refuses a `.env` file with a private key or an executable, and all other files keep every deny rule.
+   - First run `ferry move <path> --include-env --allow-secrets --dry-run`. Each such file shows on a `Carry with secrets: <path> (<kinds>)` line. The line names the kinds of secret, never the values.
+   - Tell the operator which files have secrets, and that the box will then hold the same secrets. Anyone with access to the box user can read them.
+   - On a terminal, Ferry asks before the transfer. Without a terminal, Ferry stops before any change unless `--yes` is set. Do not add `--yes` to get past this stop. Give the operator the command to run instead.
+   - The destination gets these files with mode 600.
+6. Add `--remove` only when the operator asks. Ferry refuses `--remove` if it refuses any local-only file. After verification, Ferry moves the source copy to `~/.Trash` on macOS or to `~/.ferry/trash` on Linux and on the box. It does not delete it.
 
 ## Install skills
 
