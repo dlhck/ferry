@@ -475,10 +475,8 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .command("watch")
     .description("Watch the portable set and sync accepted changes")
     .action(async () => {
-      // runWatch reads the `[host]` config through sync. Box tables need the fan-out of a later change.
-      if (config().boxes) {
-        throw new ConfigError("multi-box watch is not available yet. ferry watch works only with a [host] config.");
-      }
+      // The watch syncs all boxes and reads the config in each cycle. It does not accept --box,
+      // because one watch-state.json follows all boxes, and the watch service runs without flags.
       const controller = new AbortController();
       const stop = () => controller.abort();
       process.once("SIGINT", stop);

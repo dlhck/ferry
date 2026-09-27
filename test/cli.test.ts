@@ -842,14 +842,11 @@ describe("--box", () => {
     expect(selections).toEqual([[], ["b"], ["a", "b"]]);
   });
 
-  test("watch refuses box tables and refuses --box", async () => {
-    const program = (config = BOXES) => buildProgram({ readConfig: () => config, runWatch: async () => {} });
-    await expect(program().parseAsync(["watch"], { from: "user" })).rejects.toThrow(
-      "multi-box watch is not available yet.",
-    );
-    await expect(
-      program({ ...BOXES, defaultBox: undefined, boxes: BOXES.boxes?.slice(0, 1) }).parseAsync(["watch"], { from: "user" }),
-    ).rejects.toThrow("ferry watch works only with a [host] config.");
+  test("watch runs with box tables and refuses --box", async () => {
+    let runs = 0;
+    const program = () => buildProgram({ readConfig: () => BOXES, runWatch: async () => { runs += 1; } });
+    await program().parseAsync(["watch"], { from: "user" });
+    expect(runs).toBe(1);
     await expect(program().parseAsync(["watch", "--box", "a"], { from: "user" })).rejects.toThrow(
       "--box does not apply to ferry watch.",
     );

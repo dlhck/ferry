@@ -3,7 +3,9 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { inspectSyncSource, runSync, SyncError } from "./sync.ts";
+import { BoxesSyncError, inspectSyncSource, runSync, SyncError } from "./sync.ts";
+import { resolveBoxes } from "./boxes.ts";
+import { readConfig } from "./config.ts";
 import { AdoptionRefusal } from "./adopt.ts";
 import { ApplyError } from "./apply.ts";
 import { StoreRefusal } from "./store.ts";
@@ -32,13 +34,49 @@ export type WatchObservation =
   | { readonly ok: true; readonly identity: string }
   | { readonly ok: false; readonly signature: string; readonly message: string };
 
+/** One sync run of the watch. */
+export type WatchSyncRequest = {
+  readonly identity: string;
+  readonly home: string;
+  /** The boxes to sync, in config order. */
+  readonly boxes: readonly string[];
+  /**
+   * False when the snapshot already has this identity, for example for a box
+   * retry. Then Ferry does not write the store, and the boxes update to the
+   * published tip.
+   */
+  readonly publish: boolean;
+};
+
+/**
+ * The state that `readState` returns. `published` is the last published
+ * identity. `boxes` has the accepted identity of each box. It is null for a
+ * version 1 file: then each configured box has the `published` identity.
+ */
+export type WatchState = {
+  readonly published: string | null;
+  readonly boxes: Readonly<Record<string, string>> | null;
+};
+
+/** The state that the watch writes, as version 2. */
+export type WatchStateRecord = {
+  readonly published: string | null;
+  readonly boxes: Readonly<Record<string, string>>;
+};
+
 export type WatchDependencies = {
   readonly observe?: (home: string) => WatchObservation | Promise<WatchObservation>;
-  readonly sync?: (identity: string, home: string) => Promise<void>;
+  /**
+   * Sync the boxes of the request. A failure of some boxes throws a
+   * `BoxesSyncError`. With one box, an error of a box step has the origin `box`.
+   */
+  readonly sync?: (request: WatchSyncRequest) => Promise<void>;
+  /** The names of the configured boxes. The watch reads them in each cycle. */
+  readonly readBoxes?: (home: string) => readonly string[];
   readonly isRetryable?: (error: unknown) => boolean;
   readonly sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
-  readonly readState?: (home: string) => string | null;
-  readonly writeState?: (home: string, identity: string) => void;
+  readonly readState?: (home: string) => WatchState | null;
+  readonly writeState?: (home: string, state: WatchStateRecord) => void;
   readonly writeLine?: (line: string) => void;
   readonly update?: () => Promise<void>;
   /** The update command that the default daily update runs. */
@@ -49,6 +87,9 @@ export type WatchDependencies = {
   /** The reporter for the default sync and update. */
   readonly progress?: Progress;
 };
+
+/** A failed sync that waits for its next try. */
+type Retry = { readonly identity: string; readonly backoff: number; readonly at: number };
 
 export async function runWatch(
   input: WatchInput = {},
@@ -62,15 +103,21 @@ export async function runWatch(
   const sleep = dependencies.sleep ?? abortableSleep;
   const progress = dependencies.progress ?? noProgress;
   const sync = dependencies.sync ??
-    (async (_identity, sourceHome) => { await runSync({ home: sourceHome }, { progress }); });
+    (async (request: WatchSyncRequest) => {
+      await runSync(
+        { home: request.home, boxes: request.boxes },
+        request.publish ? { progress } : { progress, openStore: async () => publishedStore(request.home) },
+      );
+    });
+  const readBoxes = dependencies.readBoxes ?? configuredBoxNames;
   const retryable = dependencies.isRetryable ?? isRetryableWatchError;
   const writeLine = dependencies.writeLine ?? console.log;
   const readState = dependencies.readState ?? readWatchState;
   const writeState = dependencies.writeState ?? writeWatchState;
-  let accepted = readState(home);
   let refusal = "";
   // The daily update never includes the integrations. A Paseo restart stops the agents on the box.
   // It updates only the tools whose policy is `latest`. Other versions change only with `ferry update`.
+  // It updates all boxes. It skips an offline box and logs it, and that box waits for the next day.
   const update = dependencies.update ??
     (() => (dependencies.runUpdate ?? runUpdateCommand)(
       { yes: true, dryRun: false, includeIntegrations: false, latestOnly: true },
@@ -97,13 +144,50 @@ export async function runWatch(
       });
   };
 
+  const stored = readState(home);
   const initial = await observe(home);
-  if (initial.ok) {
-    if (accepted === null) accepted = initial.identity;
-  } else {
+  let published = stored ? stored.published : initial.ok ? initial.identity : null;
+  let accepted: Record<string, string> = { ...stored?.boxes };
+  // A version 1 file, or no file: the first config read gives this identity to each box.
+  let inherited = stored?.boxes ? null : published;
+  const retries = new Map<string, Retry>();
+  /** The retry of a sync that failed before the box steps, for example in the publish. */
+  let retry = null as Retry | null;
+  let settled: string | null = null;
+  let names: readonly string[] = [];
+  let configError = "";
+  const save = () => writeState(home, { published, boxes: { ...accepted } });
+  const prefix = (name: string) => (names.length > 1 ? `[${name}] ` : "");
+
+  /** Read the boxes of the config. A removed box leaves the state. A new box has no accepted identity, so it syncs. */
+  const loadBoxes = (): boolean => {
+    try {
+      names = readBoxes(home);
+    } catch (error) {
+      const message = messageOf(error);
+      if (message !== configError) writeLine(`Watch cannot read the config: ${message}`);
+      configError = message;
+      return false;
+    }
+    configError = "";
+    const next: Record<string, string> = {};
+    for (const name of names) {
+      const identity = accepted[name] ?? inherited;
+      if (identity !== null && identity !== undefined) next[name] = identity;
+    }
+    const changed = inherited !== null || Object.keys(accepted).some((name) => !names.includes(name));
+    for (const name of retries.keys()) if (!names.includes(name)) retries.delete(name);
+    inherited = null;
+    accepted = next;
+    if (changed) save();
+    return true;
+  };
+
+  if (!initial.ok) {
     refusal = initial.signature;
     writeLine(`Watch refused content: ${initial.message}`);
   }
+  loadBoxes();
   writeLine("Ferry watch is running.");
 
   while (!input.signal?.aborted) {
@@ -117,46 +201,98 @@ export async function runWatch(
       continue;
     }
     refusal = "";
-    if (changed.identity === accepted) continue;
+    if (!loadBoxes()) continue;
+    let identity = changed.identity;
+    if (names.every((name) => accepted[name] === identity)) continue;
+    if (identity !== published && identity !== settled) {
+      const desired = await settle(identity, home, pollMs, debounceMs, observe, sleep, input.signal);
+      if (!desired) continue;
+      identity = settled = desired;
+    }
 
-    let desired = await settle(changed.identity, home, pollMs, debounceMs, observe, sleep, input.signal);
-    if (!desired) continue;
-    let backoff = 1_000;
-    for (;;) {
-      try {
-        await sync(desired, home);
-        accepted = desired;
-        writeState(home, desired);
-        writeLine(`Synced Manifest ${desired.slice(0, 12)}.`);
-        break;
-      } catch (error) {
-        if (!retryable(error)) {
+    // Each box has its own backoff. The loop never sleeps for a backoff, so it observes and syncs the other boxes.
+    const time = now();
+    if (retry?.identity === identity && time < retry.at) continue;
+    const ready = names.filter((name) => {
+      const boxRetry = retries.get(name);
+      return accepted[name] !== identity && (boxRetry?.identity !== identity || boxRetry.at <= time);
+    });
+    if (ready.length === 0) continue;
+    const publish = identity !== published;
+
+    let failures: Map<string, unknown>;
+    try {
+      await sync({ identity, home, boxes: ready, publish });
+      failures = new Map();
+    } catch (error) {
+      const boxes = boxFailures(error, ready);
+      if (boxes === null) {
+        if (retryable(error)) {
+          const backoff = retry?.identity === identity ? Math.min(retry.backoff * 2, maxBackoffMs) : 1_000;
+          retry = { identity, backoff, at: now() + backoff };
+          writeLine(`Watch sync failed; retrying in ${backoff} ms: ${messageOf(error)}`);
+        } else {
+          retry = null;
           writeLine(`Watch sync refused: ${messageOf(error)}`);
           if (!isManifestReadFailure(error)) {
-            accepted = desired;
-            writeState(home, desired);
+            for (const name of ready) accepted[name] = identity;
+            save();
           }
-          break;
         }
-        writeLine(`Watch sync failed; retrying in ${backoff} ms: ${messageOf(error)}`);
-        await sleep(backoff, input.signal);
-        if (input.signal?.aborted) break;
-        const latest = await observe(home);
-        if (!latest.ok) {
-          writeLine(`Watch refused content: ${latest.message}`);
-          refusal = latest.signature;
-          break;
-        }
-        if (latest.identity !== desired) {
-          desired = latest.identity;
-          backoff = 1_000;
-        } else {
-          backoff = Math.min(backoff * 2, maxBackoffMs);
-        }
+        continue;
+      }
+      failures = boxes;
+    }
+
+    // The publish succeeded, and each box has its own result.
+    retry = null;
+    published = identity;
+    for (const name of ready) {
+      const error = failures.get(name);
+      if (error === undefined) {
+        accepted[name] = identity;
+        retries.delete(name);
+        writeLine(`${prefix(name)}Synced Manifest ${identity.slice(0, 12)}.`);
+      } else if (retryable(error)) {
+        const previous = retries.get(name);
+        const backoff = previous?.identity === identity ? Math.min(previous.backoff * 2, maxBackoffMs) : 1_000;
+        retries.set(name, { identity, backoff, at: now() + backoff });
+        writeLine(`${prefix(name)}Watch sync failed; retrying in ${backoff} ms: ${messageOf(error)}`);
+      } else {
+        accepted[name] = identity;
+        retries.delete(name);
+        writeLine(`${prefix(name)}Watch sync refused: ${messageOf(error)}`);
       }
     }
+    save();
   }
   await updating;
+}
+
+/**
+ * The error of each failed box, or null when the sync failed before the box
+ * steps. With one box, sync throws the error of the box, and a box step error
+ * has the origin `box`.
+ */
+function boxFailures(error: unknown, boxes: readonly string[]): Map<string, unknown> | null {
+  if (error instanceof BoxesSyncError) {
+    return new Map(error.results.flatMap((result) => (result.failure ? [[result.name, result.failure.error]] : [])));
+  }
+  if (boxes.length === 1 && error instanceof SyncError && error.origin === "box") return new Map([[boxes[0]!, error]]);
+  return null;
+}
+
+/**
+ * A store for a sync without a publish. The snapshot already has the current
+ * identity, so Ferry does not write the store. A null tip makes each box
+ * update to the upstream tip.
+ */
+function publishedStore(home: string) {
+  return { path: join(home, ".ferry", "store"), publish: async () => ({ published: false, tip: null }) };
+}
+
+function configuredBoxNames(home: string): readonly string[] {
+  return resolveBoxes(readConfig(home) ?? {}).map((box) => box.name);
 }
 
 async function settle(
@@ -235,23 +371,31 @@ function writeUpdateTime(home: string, time: number): void {
   renameSync(temporary, path);
 }
 
-function readWatchState(home: string): string | null {
+function readWatchState(home: string): WatchState | null {
   const path = statePath(home);
   if (!existsSync(path)) return null;
   try {
     const value: unknown = JSON.parse(readFileSync(path, "utf8"));
-    const state = value as { version?: unknown; identity?: unknown };
-    return state.version === 1 && typeof state.identity === "string" ? state.identity : null;
+    const state = value as { version?: unknown; identity?: unknown; published?: unknown; boxes?: unknown };
+    if (state.version === 1) return typeof state.identity === "string" ? { published: state.identity, boxes: null } : null;
+    if (state.version !== 2 || (state.published !== null && typeof state.published !== "string")) return null;
+    if (typeof state.boxes !== "object" || state.boxes === null || Array.isArray(state.boxes)) return null;
+    const boxes = Object.entries(state.boxes).filter((entry): entry is [string, string] => typeof entry[1] === "string");
+    return { published: state.published, boxes: Object.fromEntries(boxes) };
   } catch {
     return null;
   }
 }
 
-function writeWatchState(home: string, identity: string): void {
+function writeWatchState(home: string, state: WatchStateRecord): void {
   const path = statePath(home);
   const temporary = `${path}.tmp`;
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(temporary, `${JSON.stringify({ version: 1, identity })}\n`, { mode: 0o600 });
+  writeFileSync(
+    temporary,
+    `${JSON.stringify({ version: 2, published: state.published, boxes: state.boxes })}\n`,
+    { mode: 0o600 },
+  );
   renameSync(temporary, path);
 }
 

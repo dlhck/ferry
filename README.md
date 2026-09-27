@@ -324,7 +324,7 @@ Select a box with the `--box <name>` option:
 - `integrations` (the list) shows one block for each box, with the state of each integration on that box and the connect steps for that box. `--box` limits the list to the named boxes.
 - `tools` adds one `BOX <name>` column for each box, or for each box of `--box`. The column shows the version policy of that box. `ferry tools` reads this machine only, so it does not show the version on the box.
 - `sync` works on all boxes, or on the boxes of `--box`. It publishes the snapshot one time, then syncs up to 4 boxes at the same time. Each box uses its own `[box.<name>.integrations]`, so the Paseo steps run only on a box that has Paseo on. A box that is offline or fails does not stop the other boxes. The command then exits with code 1 and names each failed box and its failed step. If the publish fails, Ferry changes no box. If a sync is already active for a selected box, Ferry stops before the publish and names the box. After the boxes, Ferry adopts the published local skills one time. With more than one box, each box step and each box line starts with `[<name>]`. `sync --dry-run` prints one plan for each box and does not connect to a box.
-- `ferry watch` works only with a `[host]` config for now.
+- `watch` works on all boxes. It does not accept `--box`, because one state file follows all boxes and the watch service runs without options. The watch reads the config in each cycle, so `ferry box add` and `ferry box remove` take effect without a restart. A new box syncs in the next cycle. On a change, the watch publishes one time and syncs each box that does not have the change. A box that is offline or fails goes into its own backoff, capped at 60 seconds. The other boxes continue to sync, and the watch continues to observe. When the backoff of a box ends, the watch syncs that box only and does not publish again. The daily update runs one time for all boxes. It skips a box that is offline and logs it, and that box gets the update on the next day. With more than one box, each watch line about a box starts with `[<name>]`. See [Automatic sync](#automatic-sync).
 - With box tables, `ferry init` runs again for the box of `--box`, else `default_box`, else the only box. It keeps all box tables and `default_box`. It does not accept `--host`, `--ssh-user`, or `--ssh-destination`. Use `ferry box add` to add a box.
 - Other commands, such as `uninstall` and `skills add`, do not accept `--box`.
 
@@ -786,7 +786,15 @@ Ferry refuses `daemon-keypair.json` (the Paseo relay key pair) and `hub-credenti
 
 ## Automatic sync
 
-`ferry watch` runs in the foreground. It watches the Manifest identity for every configured global skill root, `~/AGENTS.md`, the Claude subagents and commands, and the carried Claude settings keys. It does not watch project-local skills. After an accepted change stays stable for one second, Ferry runs the normal sync without `--force`. Network, SSH, and Git failures retry with a backoff capped at 60 seconds. Manifest refusals name the local path and wait for another edit.
+`ferry watch` runs in the foreground. It watches the Manifest identity for every configured global skill root, `~/AGENTS.md`, the Claude subagents and commands, and the carried Claude settings keys. It does not watch project-local skills. After an accepted change stays stable for one second, Ferry runs the normal sync without `--force`. Network, SSH, and Git failures retry with a backoff capped at 60 seconds. Each box has its own backoff, and the watch does not stop to wait for it. Manifest refusals name the local path and wait for another edit.
+
+Ferry records the last published Manifest identity, and the identity that each box accepted, in `~/.ferry/watch-state.json`:
+
+```json
+{ "version": 2, "published": "<identity>", "boxes": { "a": "<identity>", "b": "<identity>" } }
+```
+
+A `[host]` config has one box, named `default`. The watch reads a version 1 file from an older Ferry as the identity of each configured box, and then writes version 2. This file is not part of the snapshot.
 
 `ferry watch` can also run `ferry update --yes` once each day, for the tools with the `"latest"` policy only. This is off by default. To turn it on, add this section to `~/.ferry/config.toml`:
 
