@@ -241,6 +241,7 @@ function configTool(id: string, definition: ToolDefinition): ToolDescriptor {
     kind: "tool",
     localVersion: definition.local,
     ...(definition.box ? { boxVersion: definition.box } : {}),
+    ...(definition.latest ? { latestVersion: definition.latest } : {}),
     recipe: { install: fill(definition.install), update: fill(definition.update ?? definition.install) },
     ...(definition.path ? { pathDirs: definition.path.map(plainPath) } : {}),
     ...(definition.depends ? { dependsOn: definition.depends } : {}),

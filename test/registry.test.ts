@@ -49,6 +49,7 @@ function refusalOf(home: string, registry: Registry): Refusal {
 const PNPM: ToolDefinition = {
   local: "pnpm --version",
   box: "pnpm --version",
+  latest: "npm view pnpm version",
   install: 'npm install -g --prefix "$HOME/.local" pnpm@{version}',
   path: [".local/bin"],
   depends: ["node"],
@@ -108,6 +109,7 @@ describe("operator entries", () => {
       kind: "tool",
       localVersion: "pnpm --version",
       boxVersion: "pnpm --version",
+      latestVersion: "npm view pnpm version",
       pathDirs: [".local/bin"],
       dependsOn: ["node"],
     });

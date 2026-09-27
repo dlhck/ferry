@@ -186,6 +186,7 @@ describe("operator config", () => {
       'version = "10.2.0"',
       'local = "pnpm --version"',
       "box = 'pnpm --version'",
+      'latest = "npm view pnpm version"',
       `install = 'npm install -g --prefix "$HOME/.local" pnpm@{version}'`,
       'update = "pnpm self-update {version}"',
       'path = [".local/bin"]',
@@ -202,6 +203,7 @@ describe("operator config", () => {
         version: "10.2.0",
         local: "pnpm --version",
         box: "pnpm --version",
+        latest: "npm view pnpm version",
         install: 'npm install -g --prefix "$HOME/.local" pnpm@{version}',
         update: "pnpm self-update {version}",
         path: [".local/bin"],
@@ -224,6 +226,9 @@ describe("operator config", () => {
     ["depends = [1]", "invalid value for depends in [tools.pnpm]"],
     ['depends = [""]', "invalid value for depends in [tools.pnpm]"],
     ['version = "lts"', "invalid policy for version in [tools.pnpm]"],
+    ["latest = 1", "invalid value for latest in [tools.pnpm]"],
+    ['latest = ""', "invalid value for latest in [tools.pnpm]"],
+    ['latest = ["npm view pnpm version"]', "invalid value for latest in [tools.pnpm]"],
   ] as const) {
     test(`refuses the tool table line ${line}`, () => {
       const home = homeWithConfig([...BASE, "", "[tools.pnpm]", 'local = "pnpm --version"', 'install = "x"', line]);
@@ -236,6 +241,7 @@ describe("operator config", () => {
     ['install = "npm i -g pnpm@{tag}"', "unknown placeholder {tag} in install of [tools.pnpm]"],
     ['update = "pnpm self-update {Version}"', "unknown placeholder {Version} in update of [tools.pnpm]"],
     ['local = "pnpm --version {version}"', "unknown placeholder {version} in local of [tools.pnpm]"],
+    ['latest = "npm view pnpm@{version} version"', "unknown placeholder {version} in latest of [tools.pnpm]"],
   ] as const) {
     test(`refuses the placeholder in ${line}`, () => {
       const home = homeWithConfig([...BASE, "", "[tools.pnpm]", 'local = "pnpm --version"', 'install = "x"', line]);
@@ -276,6 +282,7 @@ describe("operator config", () => {
         version: "operator",
         local: "pnpm --version",
         box: "pnpm --version",
+        latest: "npm view pnpm version",
         install: 'npm install -g --prefix "$HOME/.local" pnpm@{version}',
         path: [".local/bin"],
         depends: ["node"],
