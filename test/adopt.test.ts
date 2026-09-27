@@ -23,6 +23,7 @@ function fixture(source = "same\n", stored = "same\n") {
     ok: true,
     skills: [{ name: "example", files: [{ path: "SKILL.md", bytes: Buffer.from(source) }] }],
     instructions: null,
+    roots: [],
     identity: "identity",
     leftovers: [],
   };
@@ -48,5 +49,25 @@ describe("local skill adoption", () => {
       adoptPublishedSkills(home, store, [{ id: "custom", name: "Custom", skillRoot: ".custom/skills" }], seed),
     ).toThrow(AdoptionRefusal);
     expect(lstatSync(path).isDirectory()).toBe(true);
+  });
+});
+
+describe("local root adoption", () => {
+  test("replaces an identical published root with a managed symlink", () => {
+    const { home, store, seed } = fixture();
+    const path = join(home, ".claude", "agents");
+    mkdirSync(path, { recursive: true });
+    mkdirSync(join(store, "roots", ".claude", "agents"), { recursive: true });
+    writeFileSync(join(path, "reviewer.md"), "review\n");
+    writeFileSync(join(store, "roots", ".claude", "agents", "reviewer.md"), "review\n");
+    const withRoot: Seed = {
+      ...seed,
+      roots: [{ path: ".claude/agents", files: [{ path: "reviewer.md", bytes: Buffer.from("review\n") }] }],
+    };
+
+    adoptPublishedSkills(home, store, [{ id: "claude", name: "Claude", extraRoots: [".claude/agents"] }], withRoot);
+
+    expect(lstatSync(path).isSymbolicLink()).toBe(true);
+    expect(resolve(join(path, ".."), readlinkSync(path))).toBe(join(store, "roots", ".claude", "agents"));
   });
 });

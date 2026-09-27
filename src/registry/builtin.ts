@@ -22,6 +22,8 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
     name: "Claude",
     skillRoot: ".claude/skills",
     instructionFile: ".claude/CLAUDE.md",
+    // Subagents and custom commands are plain markdown files.
+    extraRoots: [".claude/agents", ".claude/commands"],
   },
   {
     id: "codex",

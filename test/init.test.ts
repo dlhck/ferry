@@ -79,6 +79,7 @@ describe("ferry init", () => {
     const home = makeHome();
     write(join(home, ".agents/skills/tdd/SKILL.md"), "test first\n");
     write(join(home, "AGENTS.md"), "Keep changes small.\n");
+    write(join(home, ".claude/commands/ship.md"), "ship\n");
     const before = realpathSync(join(home, ".agents/skills/tdd"));
     const { calls, deps } = dependencies(home);
 
@@ -121,6 +122,12 @@ describe("ferry init", () => {
       path: join(home, ".claude/CLAUDE.md"),
       target: join(home, ".ferry/store/AGENTS.md"),
     });
+    expect(result.plan.links).toContainEqual({
+      harness: "Claude",
+      path: join(home, ".claude/commands"),
+      target: join(home, ".ferry/store/roots/.claude/commands"),
+    });
+    expect(result.plan.links.some((link) => link.path.endsWith(".claude/agents"))).toBe(false);
   });
 
   test("seeds a fake store, probes the host, writes config outside it, and applies links", async () => {

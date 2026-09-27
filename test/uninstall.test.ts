@@ -56,6 +56,26 @@ describe("ferry uninstall", () => {
     expect(findBackups(home)).toEqual([]);
   });
 
+  test("links the Claude agents root at init and restores it at uninstall", async () => {
+    const home = makeHome();
+    write(join(home, ".claude/agents/reviewer.md"), "review agent\n");
+
+    await runInit(initInput(home), initDependencies(home));
+
+    expect(lstatSync(join(home, ".claude/agents")).isSymbolicLink()).toBe(true);
+    expect(realpathSync(join(home, ".claude/agents"))).toBe(
+      join(home, ".ferry/store/roots/.claude/agents"),
+    );
+    expect(readFileSync(join(home, ".claude/agents/reviewer.md"), "utf8")).toBe("review agent\n");
+
+    runUninstall({ home, harnesses: BUILTIN_HARNESSES });
+
+    expect(lstatSync(join(home, ".claude/agents")).isDirectory()).toBe(true);
+    expect(readFileSync(join(home, ".claude/agents/reviewer.md"), "utf8")).toBe("review agent\n");
+    expect(existsSync(join(home, ".ferry"))).toBe(false);
+    expect(findBackups(home)).toEqual([]);
+  });
+
   test("a second init keeps the first pre-init state", async () => {
     const home = makeHome();
     write(join(home, "AGENTS.md"), "before first init\n");
@@ -169,6 +189,10 @@ function writeStore(path: string, seed: Seed): void {
     for (const file of skill.files) {
       write(join(path, "skills", skill.name, file.path), file.bytes);
     }
+  }
+  for (const root of seed.roots) {
+    mkdirSync(join(path, "roots", root.path), { recursive: true });
+    for (const file of root.files) write(join(path, "roots", root.path, file.path), file.bytes);
   }
   write(join(path, "AGENTS.md"), seed.instructions?.bytes ?? new Uint8Array());
 }

@@ -64,6 +64,8 @@ export type CaptureInitStateInput = {
   readonly home: string;
   readonly harnesses: readonly HarnessDescriptor[];
   readonly skillNames: readonly string[];
+  /** The extra roots of the seed, relative to the home. */
+  readonly rootPaths: readonly string[];
 };
 
 export type UninstallInput = {
@@ -93,7 +95,7 @@ export function captureInitState(input: CaptureInitStateInput): PendingState | n
   const home = resolve(input.home);
   if (existsSync(statePath(home))) return null;
 
-  const managed = managedPaths(home, input.harnesses, input.skillNames);
+  const managed = managedPaths(home, input.harnesses, input.skillNames, input.rootPaths);
   const absentDirectories = new Set<string>();
   for (const entry of managed) {
     for (let directory = dirname(entry.path); directory !== home; directory = dirname(directory)) {
@@ -211,9 +213,11 @@ function managedPaths(
   home: string,
   harnesses: readonly HarnessDescriptor[],
   skillNames: readonly string[],
+  rootPaths: readonly string[],
 ): { readonly path: string; readonly target: string }[] {
   const checkout = join(home, STORE_RELATIVE_PATH);
   const paths = new Map<string, string>();
+  for (const root of rootPaths) paths.set(join(home, root), join(checkout, "roots", root));
   for (const harness of harnesses) {
     if (ownsSkills(harness) && harness.skillRoot) {
       for (const name of skillNames) {
@@ -254,6 +258,11 @@ function discoverManagedLinks(
     if (harness.instructionFile) {
       const path = join(home, harness.instructionFile);
       const target = join(checkout, "AGENTS.md");
+      if (isExpectedLink(path, target)) links.set(path, target);
+    }
+    for (const root of harness.extraRoots ?? []) {
+      const path = join(home, root);
+      const target = join(checkout, "roots", root);
       if (isExpectedLink(path, target)) links.set(path, target);
     }
   }

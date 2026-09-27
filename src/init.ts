@@ -202,6 +202,7 @@ export async function runInit(
     home,
     harnesses: input.harnesses,
     skillNames: seed.skills.map((skill) => skill.name),
+    rootPaths: seed.roots.map((root) => root.path),
   });
 
   const target = resolveLinkOptions(config.host);
@@ -285,6 +286,17 @@ function makeInitPlan(
         harness: harness.name,
         path: join(home, harness.instructionFile),
         target: join(localCheckout, "AGENTS.md"),
+      });
+    }
+  }
+  const seedRoots = new Set(seed.roots.map((root) => root.path));
+  for (const harness of harnesses) {
+    for (const root of harness.extraRoots ?? []) {
+      if (!seedRoots.has(root)) continue;
+      links.push({
+        harness: harness.name,
+        path: join(home, root),
+        target: join(localCheckout, "roots", root),
       });
     }
   }

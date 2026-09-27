@@ -236,3 +236,37 @@ describe("remote apply", () => {
     expect(existsSync(join(home, ".agents"))).toBe(false);
   });
 });
+
+describe("remote apply of Claude subagent and command roots", () => {
+  test("links a root the checkout holds and plans the same actions as a local apply", async () => {
+    const root = makeRoot("remote-roots");
+    const checkout = makeCheckout(root, ["unslop"]);
+    write(join(checkout, "roots", ".claude", "agents", "reviewer.md"), "review agent");
+    const home = join(root, "home");
+    mkdirSync(home);
+    const local = planApply({
+      checkout,
+      targetHome: home,
+      harnesses: BUILTIN_HARNESSES,
+      timestamp: "20260828T101112Z",
+    });
+
+    const remote = await apply({
+      checkout,
+      targetHome: home,
+      harnesses: BUILTIN_HARNESSES,
+      timestamp: "20260828T101112Z",
+      link: new ShellLink(root),
+    });
+
+    expect(remote).toEqual(local);
+    expect(remote.actions).toContainEqual({
+      kind: "create-symlink",
+      harness: "Claude",
+      path: join(home, ".claude", "agents"),
+      target: join(checkout, "roots", ".claude", "agents"),
+    });
+    expect(readFileSync(join(home, ".claude", "agents", "reviewer.md"), "utf8")).toBe("review agent");
+    expect(existsSync(join(home, ".claude", "commands"))).toBe(false);
+  });
+});

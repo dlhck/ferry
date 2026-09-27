@@ -235,3 +235,46 @@ describe("apply plan and commit", () => {
     expect(existsSync(join(home, ".codex"))).toBe(false);
   });
 });
+
+describe("Claude subagent and command roots", () => {
+  test("a root in the checkout links whole, and a root it lacks is not linked", () => {
+    const checkout = makeCheckout();
+    write(join(checkout, "roots", ".claude", "agents", "reviewer.md"), "review agent");
+    const home = makeRoot("home");
+
+    const plan = apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES });
+
+    expect(plan.actions).toContainEqual({
+      kind: "create-symlink",
+      harness: "Claude",
+      path: join(home, ".claude", "agents"),
+      target: join(checkout, "roots", ".claude", "agents"),
+    });
+    expect(readFileSync(join(home, ".claude", "agents", "reviewer.md"), "utf8")).toBe("review agent");
+    expect(existsSync(join(home, ".claude", "commands"))).toBe(false);
+  });
+
+  test("a live root refuses without force and moves to a backup with force", () => {
+    const checkout = makeCheckout();
+    write(join(checkout, "roots", ".claude", "commands", "ship.md"), "ship");
+    const home = makeRoot("home");
+    const live = join(home, ".claude", "commands");
+    write(join(live, "local.md"), "box copy");
+
+    expect(() => apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES })).toThrow(
+      ApplyError,
+    );
+
+    apply({
+      checkout,
+      targetHome: home,
+      harnesses: BUILTIN_HARNESSES,
+      force: true,
+      timestamp: "20260828T101112Z",
+    });
+
+    const backup = join(home, ".ferry", "backups", "20260828T101112Z", "claude", ".claude", "commands");
+    expect(readFileSync(join(backup, "local.md"), "utf8")).toBe("box copy");
+    expect(realpathSync(live)).toBe(join(checkout, "roots", ".claude", "commands"));
+  });
+});

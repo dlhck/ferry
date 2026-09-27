@@ -247,3 +247,14 @@ describe("registered paths cannot widen the deny set", () => {
     expect(seed.ok && seed.skills).toEqual([]);
   });
 });
+
+describe("registered paths cannot take a builtin extra root", () => {
+  test.each([
+    ["a skill root inside the Claude agents root", { skillRoot: ".claude/agents/skills" }],
+    ["an instruction file inside the Claude commands root", { instructionFile: ".claude/commands/AGENTS.md" }],
+  ])("%s is refused", (_label, paths) => {
+    const problems = problemsOf({ harness: [{ id: "fork", name: "Fork", ...paths }] });
+
+    expect(problems.map((problem) => problem.code)).toEqual(["path-collision"]);
+  });
+});

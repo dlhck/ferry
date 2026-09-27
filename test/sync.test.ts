@@ -30,6 +30,7 @@ const seed: Seed = {
   ok: true,
   skills: [],
   instructions: null,
+  roots: [],
   identity: "seed-identity",
   leftovers: [],
 };

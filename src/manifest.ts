@@ -2,9 +2,10 @@
  * Manifest decides what leaves the operator machine.
  *
  * Callers hand it a source home and the harness registry and get back a seed
- * (skill bodies plus the one instruction file) or a refusal that names every
- * clash and every forbidden hit. Callers pass harnesses, never a path set: the
- * union rule and the deny set live here, out of reach of any registry entry.
+ * (skill bodies, extra root files, and the one instruction file) or a refusal
+ * that names every clash and every forbidden hit. Callers pass harnesses, never
+ * a path set: the union rule and the deny set live here, out of reach of any
+ * registry entry.
  */
 
 import { createHash } from "node:crypto";
@@ -114,6 +115,9 @@ export type SeedSkill = { readonly name: string; readonly files: readonly SeedFi
 
 export type Instructions = { readonly bytes: Uint8Array };
 
+/** One extra root, such as `.claude/agents`. `path` is relative to the home. */
+export type SeedRoot = { readonly path: string; readonly files: readonly SeedFile[] };
+
 /** Something ferry found and did not import. Init prints these. */
 export type Leftover = Note & { readonly path: string };
 
@@ -121,6 +125,8 @@ export type Seed = {
   readonly ok: true;
   readonly skills: readonly SeedSkill[];
   readonly instructions: Instructions | null;
+  /** The extra roots of the harnesses that exist in the home, empty ones too. */
+  readonly roots: readonly SeedRoot[];
   /** Content hash of the whole seed. Changes when any skill or byte changes. */
   readonly identity: string;
   readonly leftovers: readonly Leftover[];
@@ -140,8 +146,9 @@ export type Refusal = {
 /**
  * Read the seed for `home`.
  *
- * Only the skill roots of `harnesses` and the home instruction file are read.
- * Project skill directories sit outside those roots, so they are never seen.
+ * Only the skill roots and extra roots of `harnesses` and the home instruction
+ * file are read. Project skill directories sit outside those roots, so they
+ * are never seen.
  */
 export function readSeed(home: string, harnesses: readonly HarnessDescriptor[]): Seed | Refusal {
   const clashes: Clash[] = [];
@@ -173,6 +180,25 @@ export function readSeed(home: string, harnesses: readonly HarnessDescriptor[]):
     skills.push({ name, files: [...variants.values()][0] ?? [] });
   }
 
+  const roots: SeedRoot[] = [];
+  for (const path of harnesses.flatMap((harness) => harness.extraRoots ?? [])) {
+    const root = join(home, path);
+    let stat;
+    try {
+      stat = statSync(root);
+    } catch {
+      continue;
+    }
+    if (!stat.isDirectory()) {
+      leftovers.push(note(root, NOTES["not-a-directory"]));
+      continue;
+    }
+    const scan = scanSkill(root);
+    forbidden.push(...scan.forbidden);
+    leftovers.push(...scan.leftovers);
+    roots.push({ path, files: scan.files });
+  }
+
   const instructions = readInstructions(home, leftovers);
   if (instructions) forbidden.push(...tokenHits(join(home, INSTRUCTION_FILE), instructions.bytes));
 
@@ -183,7 +209,8 @@ export function readSeed(home: string, harnesses: readonly HarnessDescriptor[]):
     ok: true,
     skills,
     instructions,
-    identity: identify(skills, instructions, harnesses),
+    roots,
+    identity: identify(skills, instructions, roots, harnesses),
     leftovers,
   };
 }
@@ -373,15 +400,17 @@ function contentKey(files: readonly SeedFile[]): string {
 function identify(
   skills: readonly SeedSkill[],
   instructions: Instructions | null,
+  roots: readonly SeedRoot[],
   harnesses: readonly HarnessDescriptor[],
 ): string {
   const hash = createHash("sha256");
   for (const harness of harnesses) {
     hash.update(
-      `harness:${harness.id}:${harness.skillRoot ?? "none"}:${harness.instructionFile ?? "none"}\n`,
+      `harness:${harness.id}:${harness.skillRoot ?? "none"}:${harness.instructionFile ?? "none"}:${(harness.extraRoots ?? []).join(",")}\n`,
     );
   }
   for (const skill of skills) hash.update(`skill:${skill.name}:${contentKey(skill.files)}\n`);
+  for (const root of roots) hash.update(`root:${root.path}:${contentKey(root.files)}\n`);
   hash.update(`instructions:${instructions ? digest(instructions.bytes) : "none"}\n`);
   return hash.digest("hex");
 }

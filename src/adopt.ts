@@ -1,4 +1,4 @@
-/** Convert newly published local skill directories into managed links. */
+/** Convert newly published local skill and extra root directories into managed links. */
 
 import {
   lstatSync,
@@ -32,40 +32,44 @@ export function adoptPublishedSkills(
   for (const harness of harnesses) {
     if (!harness.skillRoot) continue;
     for (const skill of seed.skills) {
-      const source = join(home, harness.skillRoot, skill.name);
-      const target = join(store, "skills", skill.name);
-      let stat;
-      try {
-        stat = lstatSync(source);
-      } catch (error) {
-        if (isMissing(error)) continue;
-        throw error;
-      }
-      if (stat.isSymbolicLink()) {
-        if (resolve(dirname(source), readlinkSync(source)) === target) continue;
-        throw new AdoptionRefusal(source);
-      }
-      if (!stat.isDirectory() || !sameTree(source, target)) throw new AdoptionRefusal(source);
-
-      const held = `${source}.ferry-adopting-${process.pid}`;
-      renameSync(source, held);
-      let linked = false;
-      try {
-        if (!sameTree(held, target)) throw new AdoptionRefusal(source);
-        mkdirSync(dirname(source), { recursive: true });
-        symlinkSync(target, source);
-        linked = true;
-        rmSync(held, { recursive: true });
-      } catch (error) {
-        try {
-          if (linked) unlinkSync(source);
-          renameSync(held, source);
-        } catch {
-          // The source was already removed or restored.
-        }
-        throw error;
-      }
+      adopt(join(home, harness.skillRoot, skill.name), join(store, "skills", skill.name));
     }
+  }
+  // An extra root that appeared after init links whole, as Apply links it on the box.
+  for (const root of seed.roots) adopt(join(home, root.path), join(store, "roots", root.path));
+}
+
+function adopt(source: string, target: string): void {
+  let stat;
+  try {
+    stat = lstatSync(source);
+  } catch (error) {
+    if (isMissing(error)) return;
+    throw error;
+  }
+  if (stat.isSymbolicLink()) {
+    if (resolve(dirname(source), readlinkSync(source)) === target) return;
+    throw new AdoptionRefusal(source);
+  }
+  if (!stat.isDirectory() || !sameTree(source, target)) throw new AdoptionRefusal(source);
+
+  const held = `${source}.ferry-adopting-${process.pid}`;
+  renameSync(source, held);
+  let linked = false;
+  try {
+    if (!sameTree(held, target)) throw new AdoptionRefusal(source);
+    mkdirSync(dirname(source), { recursive: true });
+    symlinkSync(target, source);
+    linked = true;
+    rmSync(held, { recursive: true });
+  } catch (error) {
+    try {
+      if (linked) unlinkSync(source);
+      renameSync(held, source);
+    } catch {
+      // The source was already removed or restored.
+    }
+    throw error;
   }
 }
 

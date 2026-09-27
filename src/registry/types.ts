@@ -22,6 +22,11 @@ export type HarnessDescriptor = {
   readonly ownSkills?: boolean;
   /** Instruction file the harness reads, such as `.claude/CLAUDE.md`. */
   readonly instructionFile?: string;
+  /**
+   * Directories ferry carries whole, such as `.claude/agents`. Each one links
+   * to one store directory. Only a builtin descriptor sets them.
+   */
+  readonly extraRoots?: readonly string[];
 };
 
 /** Codex, Pi, and Cursor Agent read `.agents/skills` instead of their own copies. */
