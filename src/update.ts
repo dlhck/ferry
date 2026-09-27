@@ -1,12 +1,20 @@
 /**
- * Update puts each managed tool on the box at the version that its policy
- * selects, with the same rules as install. It changes a tool only when the box
- * version differs. On the operator machine it runs the own update command of
- * an agent CLI that is already there. It never installs a tool there.
+ * Update puts each managed tool on each selected box at the version that the
+ * policy of that box selects, with the same rules as install. It changes a
+ * tool only when the box version differs. On the operator machine it runs the
+ * own update command of an agent CLI that is already there, once for all
+ * boxes. It never installs a tool there.
  */
 
 import * as prompts from "@clack/prompts";
-import { readConfig, resolveLinkOptions, type PartialOperatorConfig, type ToolsConfig } from "./config.ts";
+import { resolveBoxes, type ResolvedBox } from "./boxes.ts";
+import {
+  completeHostConfig,
+  readConfig,
+  resolveLinkOptions,
+  type PartialOperatorConfig,
+  type ToolsConfig,
+} from "./config.ts";
 import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
 import { BunHostAdapter, Link, type HostAdapter, type LinkOptions } from "./link.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
@@ -18,23 +26,16 @@ import { describeStep, effectivePolicy, planTools, ToolPlanError, type ToolStep 
 const UPDATE_COMMAND_TIMEOUT_MS = 30 * 60 * 1_000;
 const PROBE_TIMEOUT_MS = 10_000;
 
-export type UpdateTarget = "box" | "operator";
-
 /** A tool on the operator machine: its update command, or why ferry skips it. */
 export type OperatorUpdate =
   | { readonly tool: string; readonly command: string }
   | { readonly tool: string; readonly reason: "no own update command" | "not installed" };
 
-export type UpdatePlan = {
-  /** Each tool on the box, in `depends` order. */
-  readonly box: readonly ToolStep[];
-  /** Each tool on the operator machine, in registry order. */
-  readonly operator: readonly OperatorUpdate[];
-};
-
 export type UpdateCommandInput = {
   readonly yes: boolean;
   readonly dryRun: boolean;
+  /** The --box selection. Empty selects all boxes. */
+  readonly boxes?: readonly string[];
   /**
    * Also update the enabled integrations. A restart stops the agents on the
    * box, so only `ferry update` sets it. `ferry watch` never does.
@@ -67,18 +68,8 @@ export class UpdateError extends Error {
   }
 }
 
-/**
- * The box gets the tools whose box version differs from the resolved version.
- * The operator machine gets only the installed agent CLIs. Throws
- * ToolPlanError when the box plan cannot run.
- */
-export async function planUpdate(
-  tools: readonly ToolDescriptor[],
-  config: ToolsConfig | undefined,
-  local: HostAdapter,
-  box: Pick<Link, "run">,
-): Promise<UpdatePlan> {
-  const boxPlan = await planTools("update", tools, config, local, box);
+/** The operator machine gets only the installed agent CLIs, in registry order. */
+export async function planOperator(tools: readonly ToolDescriptor[], local: HostAdapter): Promise<OperatorUpdate[]> {
   const operator: OperatorUpdate[] = [];
   for (const tool of tools) {
     if (tool.update?.binary === undefined) {
@@ -89,48 +80,96 @@ export async function planUpdate(
       operator.push({ tool: tool.id, command: tool.update.command });
     }
   }
-  return { box: boxPlan, operator };
+  return operator;
 }
 
+/** One selected box: its link, its enabled integrations, and its plan or why Ferry could not reach it. */
+type BoxUpdate = {
+  readonly name: string;
+  /** `[<name>] ` in front of each box line when more than one box is selected, else empty. */
+  readonly prefix: string;
+  readonly link: Pick<Link, "run">;
+  readonly integrations: readonly Integration[];
+  readonly plan: readonly ToolStep[];
+  /** The link error when the box did not answer. Ferry then skips the box. */
+  readonly offline: string | null;
+};
+
+/**
+ * Update each selected box, one after the other, and the operator machine
+ * once. The box gets the tools whose box version differs from the version
+ * of its policy. A box that does not answer fails alone. The other boxes and
+ * the operator machine still update, and the command fails at the end.
+ */
 export async function runUpdateCommand(
   input: UpdateCommandInput,
   dependencies: Partial<UpdateCommandDependencies> = {},
 ): Promise<void> {
   const resolved = { ...defaultDependencies, ...dependencies };
-  const { target, config } = loadTarget(resolved.readConfig);
+  const { config, boxes: selected } = loadBoxes(resolved.readConfig, input.boxes ?? []);
   const registered = resolved.tools ?? registryTools(config);
-  const tools = input.latestOnly === true
-    ? registered.filter((tool) => effectivePolicy(tool, config?.tools) === "latest")
-    : registered;
-  const integrations = input.includeIntegrations === true
-    ? resolved.integrations.filter((integration) => config?.integrations?.[integration.id] === true)
-    : [];
-  const link = resolved.createLink(target);
-  let plan: UpdatePlan;
+  const selectTools = (policies: ToolsConfig | undefined) =>
+    input.latestOnly === true
+      ? registered.filter((tool) => effectivePolicy(tool, policies) === "latest")
+      : registered;
+  const several = selected.length > 1;
+
+  let boxes: BoxUpdate[];
+  let operator: OperatorUpdate[];
   try {
-    plan = await step(
+    ({ boxes, operator } = await step(
       resolved.progress,
       "Checking the tool versions",
-      () => planUpdate(tools, config?.tools, resolved.local, link),
-      undefined,
-      (plan) => `${plural(runnable(plan).length, "update")}, ${plan.box.length + plan.operator.length - runnable(plan).length} skipped`,
-    );
+      async () => {
+        const boxes: BoxUpdate[] = [];
+        for (const box of selected) {
+          const link = resolved.createLink(resolveLinkOptions(box.host));
+          const probe = await link.run("true");
+          const offline = probe.ok ? null : probe.error.message;
+          boxes.push({
+            name: box.name,
+            prefix: several ? `[${box.name}] ` : "",
+            link,
+            integrations: input.includeIntegrations === true
+              ? resolved.integrations.filter((integration) => box.integrations[integration.id] === true)
+              : [],
+            plan: offline === null ? await planTools("update", selectTools(box.tools), box.tools, resolved.local, link) : [],
+            offline,
+          });
+        }
+        return { boxes, operator: await planOperator(selectTools(config.tools), resolved.local) };
+      },
+      (plan) => plan.boxes.some((box) => box.offline !== null),
+      (plan) => {
+        const count = runnable(plan.boxes, plan.operator).length;
+        const planned = plan.boxes.reduce((total, box) => total + box.plan.length, plan.operator.length);
+        const offline = plan.boxes.filter((box) => box.offline !== null).length;
+        return `${plural(count, "update")}, ${planned - count} skipped${offline > 0 ? `, ${plural(offline, "box", "boxes")} offline` : ""}`;
+      },
+    ));
   } catch (error) {
     if (error instanceof ToolPlanError) throw new UpdateError(`Update stopped before it changed anything. ${error.message}`);
     throw error;
   }
-  const steps = runnable(plan);
-  resolved.progress.plan(input.dryRun ? 1 : 1 + steps.length + integrations.length);
+  const reached = boxes.filter((box) => box.offline === null);
+  const steps = runnable(boxes, operator);
+  const integrationCount = reached.reduce((total, box) => total + box.integrations.length, 0);
+  resolved.progress.plan(input.dryRun ? 1 : 1 + steps.length + integrationCount);
 
-  for (const entry of plan.box) resolved.writeLine(`Box ${entry.tool}: ${describeStep(entry)}`);
-  for (const entry of plan.operator) {
+  for (const box of boxes) {
+    if (box.offline !== null) resolved.writeLine(`${box.prefix}Box offline, Ferry skips it: ${box.offline}`);
+    for (const entry of box.plan) resolved.writeLine(`${box.prefix}Box ${entry.tool}: ${describeStep(entry)}`);
+  }
+  for (const entry of operator) {
     resolved.writeLine(
       "command" in entry ? `Operator ${entry.tool}: ${entry.command}` : `Operator ${entry.tool}: skipped, ${entry.reason}`,
     );
   }
-  for (const integration of integrations) {
-    resolved.writeLine(`Box ${integration.id}:`);
-    for (const line of await integration.plan("update", link)) resolved.writeLine(`  ${line}`);
+  for (const box of reached) {
+    for (const integration of box.integrations) {
+      resolved.writeLine(`${box.prefix}Box ${integration.id}:`);
+      for (const line of await integration.plan("update", box.link)) resolved.writeLine(`${box.prefix}  ${line}`);
+    }
   }
   if (input.dryRun) return;
   if (!input.yes) {
@@ -141,23 +180,24 @@ export async function runUpdateCommand(
     }
   }
 
-  const failed: string[] = [];
-  const failedOnBox = new Set<string>();
+  const failed: string[] = boxes.flatMap((box) => (box.offline === null ? [] : [`${box.prefix}box offline`]));
+  const failedOnBox = new Map(boxes.map((box) => [box.name, new Set<string>()]));
   for (const [index, step] of steps.entries()) {
-    const name = `${step.target} ${step.tool}`;
-    const failedDependency = step.dependsOn.find((dependency) => failedOnBox.has(dependency));
+    const name = `${step.box?.prefix ?? ""}${step.box === undefined ? "operator" : "box"} ${step.tool}`;
+    const failedTools = step.box === undefined ? undefined : failedOnBox.get(step.box.name);
+    const failedDependency = step.dependsOn.find((dependency) => failedTools?.has(dependency));
     if (failedDependency !== undefined) {
       resolved.progress.skip(`Updating ${name} (${index + 1}/${steps.length})`, `${failedDependency} failed`);
       failed.push(name);
-      failedOnBox.add(step.tool);
+      failedTools?.add(step.tool);
       resolved.writeLine(`Skipped ${name}: it depends on ${failedDependency}, which failed.`);
       continue;
     }
     resolved.progress.start(`Updating ${name} (${index + 1}/${steps.length})`);
     const { failure, stdout } =
-      step.target === "box"
-        ? await runOnBox(link, step.command)
-        : await runOnOperator(resolved.local, step.command);
+      step.box === undefined
+        ? await runOnOperator(resolved.local, step.command)
+        : await runOnBox(step.box.link, step.command);
     if (failure === null) {
       resolved.progress.done();
       // The update output can hold a warning, such as the gh fallback to the latest version.
@@ -166,38 +206,53 @@ export async function runUpdateCommand(
     } else {
       resolved.progress.fail(failure);
       failed.push(name);
-      if (step.target === "box") failedOnBox.add(step.tool);
+      failedTools?.add(step.tool);
       resolved.writeLine(`Failed to update ${name}: ${failure}`);
     }
   }
-  for (const integration of integrations) {
-    try {
-      for (const line of await integration.update(link, resolved.progress)) resolved.writeLine(line);
-    } catch (error) {
-      failed.push(`box ${integration.id}`);
-      resolved.writeLine(`Failed to update box ${integration.id}: ${messageOf(error)}`);
+  for (const box of reached) {
+    for (const integration of box.integrations) {
+      try {
+        for (const line of await integration.update(box.link, resolved.progress)) resolved.writeLine(`${box.prefix}${line}`);
+      } catch (error) {
+        failed.push(`${box.prefix}box ${integration.id}`);
+        resolved.writeLine(`Failed to update ${box.prefix}box ${integration.id}: ${messageOf(error)}`);
+      }
+    }
+  }
+  if (several) {
+    for (const box of boxes) {
+      const count = failed.filter((name) => name.startsWith(box.prefix)).length;
+      resolved.writeLine(
+        box.offline !== null
+          ? `Box ${box.name}: failed, the box is offline.`
+          : count > 0
+            ? `Box ${box.name}: failed, ${plural(count, "update")} failed.`
+            : `Box ${box.name}: done.`,
+      );
     }
   }
   if (failed.length > 0) {
     throw new UpdateError(
-      `${failed.length} of ${steps.length + integrations.length} updates failed: ${failed.join(", ")}`,
+      `${failed.length} of ${steps.length + integrationCount + boxes.length - reached.length} updates failed: ${failed.join(", ")}`,
     );
   }
 }
 
-/** The commands to run: the box changes in `depends` order, then the operator updates. */
-function runnable(plan: UpdatePlan): {
-  readonly target: UpdateTarget;
+/** The commands to run: the box changes of each box in `depends` order, then the operator updates. */
+function runnable(boxes: readonly BoxUpdate[], operator: readonly OperatorUpdate[]): {
+  /** The box of a box command. Undefined for an operator command. */
+  readonly box?: BoxUpdate;
   readonly tool: string;
   readonly command: string;
   readonly dependsOn: readonly string[];
 }[] {
   return [
-    ...plan.box.flatMap(({ tool, command, dependsOn }) =>
-      command === undefined ? [] : [{ target: "box" as const, tool, command, dependsOn }],
+    ...boxes.flatMap((box) =>
+      box.plan.flatMap(({ tool, command, dependsOn }) => (command === undefined ? [] : [{ box, tool, command, dependsOn }])),
     ),
-    ...plan.operator.flatMap((entry) =>
-      "command" in entry ? [{ target: "operator" as const, tool: entry.tool, command: entry.command, dependsOn: [] }] : [],
+    ...operator.flatMap((entry) =>
+      "command" in entry ? [{ tool: entry.tool, command: entry.command, dependsOn: [] }] : [],
     ),
   ];
 }
@@ -212,24 +267,25 @@ const defaultDependencies: UpdateCommandDependencies = {
   progress: noProgress,
 };
 
-function loadTarget(read: () => PartialOperatorConfig | null): {
-  target: LinkOptions;
-  config: PartialOperatorConfig | null;
-} {
+function loadBoxes(
+  read: () => PartialOperatorConfig | null,
+  selection: readonly string[],
+): { config: PartialOperatorConfig; boxes: ResolvedBox[] } {
   let config: PartialOperatorConfig | null;
   try {
     config = read();
   } catch {
     throw new UpdateError("Could not read Ferry config. Run ferry init.");
   }
-  const target = resolveLinkOptions(config?.host);
-  if (!target) throw new UpdateError("Ferry config has no complete host. Run ferry init.");
-  return { target, config };
+  if (!config || (!config.boxes && !completeHostConfig(config.host))) {
+    throw new UpdateError("Ferry config has no complete host. Run ferry init.");
+  }
+  return { config, boxes: resolveBoxes(config, selection) };
 }
 
 /** The builtin tools and the `[tools.<id>]` tables of the config, as `ferry update` in the CLI resolves them. */
-function registryTools(config: PartialOperatorConfig | null): readonly ToolDescriptor[] {
-  const registry = loadRegistry(config ?? {});
+function registryTools(config: PartialOperatorConfig): readonly ToolDescriptor[] {
+  const registry = loadRegistry(config);
   if (!registry.ok) {
     throw new UpdateError(
       `ferry refused the registry: ${registry.problems.map((problem) => problem.reason).join("; ")}`,

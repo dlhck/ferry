@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { UpdateCommandInput } from "../src/update.ts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -542,7 +543,7 @@ describe("ferry --help", () => {
   });
 
   test("wires update --yes --dry-run to the update command", async () => {
-    let received: { yes: boolean; dryRun: boolean; includeIntegrations?: boolean } | undefined;
+    let received: UpdateCommandInput | undefined;
     const program = buildProgram({
       readConfig: () => null,
       runUpdate: async (input) => {
@@ -552,7 +553,7 @@ describe("ferry --help", () => {
 
     await program.parseAsync(["update", "--yes", "--dry-run"], { from: "user" });
 
-    expect(received).toEqual({ yes: true, dryRun: true, includeIntegrations: true });
+    expect(received).toEqual({ yes: true, dryRun: true, includeIntegrations: true, boxes: [] });
   });
 
   test("wires every move flag to the move module", async () => {
@@ -759,7 +760,7 @@ describe("--box", () => {
   };
 
   test("a [host] config without --box reaches each command as before", async () => {
-    for (const args of [["install"], ["auth", "codex"], ["move", "project"], ["integrations", "enable", "paseo"], ["sync"], ["status"], ["update"]]) {
+    for (const args of [["install"], ["auth", "codex"], ["move", "project"], ["integrations", "enable", "paseo"], ["sync"], ["status"]]) {
       expect(await readBy(HOST, args)).toBeUndefined();
     }
   });
@@ -798,7 +799,7 @@ describe("--box", () => {
   });
 
   test("multi-target commands refuse more than one box", async () => {
-    for (const command of ["sync", "update"]) {
+    for (const command of ["sync"]) {
       await expect(readBy(BOXES, [command])).rejects.toThrow(
         `multi-box ${command} is not available yet. Select one box with --box <name>.`,
       );
@@ -809,7 +810,7 @@ describe("--box", () => {
   });
 
   test("multi-target commands read the config as the one selected box", async () => {
-    for (const command of ["sync", "update"]) {
+    for (const command of ["sync"]) {
       expect(await readBy(BOXES, [command, "--box", "b"])).toEqual(B_VIEW);
     }
   });
@@ -860,13 +861,16 @@ describe("--box", () => {
 
   test("integrations enable with box tables writes the key of the box", async () => {
     let setIntegration: ((id: "paseo", enabled: boolean) => void) | undefined;
+    let box: string | undefined;
     await buildProgram({
       readConfig: () => BOXES,
       runIntegration: async (_input, dependencies) => {
         setIntegration = dependencies?.setIntegration;
+        box = dependencies?.box;
       },
     }).parseAsync(["integrations", "enable", "paseo", "--box", "b"], { from: "user" });
     expect(setIntegration).toBeFunction();
+    expect(box).toBe("b");
 
     let hostSet: unknown = "not set";
     await buildProgram({
@@ -876,6 +880,54 @@ describe("--box", () => {
       },
     }).parseAsync(["integrations", "enable", "paseo"], { from: "user" });
     expect(hostSet).toBeUndefined();
+  });
+
+  test("update gets the whole config and the --box selection", async () => {
+    const received: { boxes?: readonly string[]; config?: PartialOperatorConfig | null }[] = [];
+    const program = () =>
+      buildProgram({
+        readConfig: () => BOXES,
+        runUpdate: async (input, dependencies) => {
+          received.push({ boxes: input.boxes, config: dependencies?.readConfig?.() });
+        },
+        createProgress: () => noProgress,
+      });
+    await program().parseAsync(["update", "--dry-run"], { from: "user" });
+    await program().parseAsync(["update", "--box", "a", "--box", "b"], { from: "user" });
+    expect(received).toEqual([
+      { boxes: [], config: BOXES },
+      { boxes: ["a", "b"], config: BOXES },
+    ]);
+  });
+
+  test("integrations lists each box, and --box narrows the list", async () => {
+    const lines = async (args: string[]) => {
+      const output: string[] = [];
+      await buildProgram({
+        readConfig: () => BOXES,
+        integrations: [createPaseo({ platform: "win32" })],
+        writeLine: (line) => output.push(line),
+      }).parseAsync(args, { from: "user" });
+      return output;
+    };
+    expect((await lines(["integrations"])).filter((line) => line.startsWith("Box "))).toEqual(["Box a", "Box b"]);
+    expect(await lines(["integrations"])).toContain("      Enter ssh://dev@box-a.example.");
+    expect(await lines(["integrations", "--box", "b"])).toEqual([
+      "Box b",
+      "  paseo  disabled  Paseo daemon on the box",
+      "    Local app: not found. The box version is not pinned.",
+    ]);
+  });
+
+  test("tools gets the --box selection", async () => {
+    let boxes: readonly string[] | undefined;
+    await buildProgram({
+      readConfig: () => BOXES,
+      runTools: async (dependencies) => {
+        boxes = dependencies.boxes;
+      },
+    }).parseAsync(["tools", "--box", "b"], { from: "user" });
+    expect(boxes).toEqual(["b"]);
   });
 
   test("init gets the one --box", async () => {

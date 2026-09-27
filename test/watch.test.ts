@@ -350,7 +350,8 @@ describe("watch daily update", () => {
             readConfig: () => ({ host: { transport: "ssh", destination: "user@box.example" }, tools: { codex: "0.156.1" } }),
             createLink: () => ({
               run: async (command) => {
-                if (!command.includes('cd "$HOME"')) boxCommands.push(command);
+                // Skip the version reads and the reach check of the box.
+                if (!command.includes('cd "$HOME"') && command !== "true") boxCommands.push(command);
                 return { ok: true, address: "box", stdout: command.includes("--version") ? "1.0.0" : "", stderr: "" };
               },
             }),

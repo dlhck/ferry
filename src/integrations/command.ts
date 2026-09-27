@@ -21,8 +21,10 @@ export type IntegrationCommandInput =
 export type IntegrationCommandDependencies = {
   readonly integrations: readonly Integration[];
   readonly readConfig: () => PartialOperatorConfig | null;
-  /** Sets the `[integrations]` key in the operator config. */
+  /** Sets the key in `[integrations]`, or in `[box.<box>.integrations]` when `box` is set. */
   readonly setIntegration: (id: IntegrationId, enabled: boolean) => void;
+  /** The box whose table `setIntegration` writes. Undefined for `[integrations]`. */
+  readonly box?: string;
   readonly createLink: (options: LinkOptions) => IntegrationLink;
   readonly confirm: (message: string) => Promise<boolean | symbol | undefined>;
   readonly writeLine: (line: string) => void;
@@ -75,7 +77,8 @@ export async function runIntegrationCommand(
   for (const line of lines) resolved.writeLine(line);
   // The flag changes only after the box steps succeed.
   resolved.setIntegration(integration.id, enable);
-  resolved.writeLine(`Set [integrations] ${integration.id} = ${enable} in ${configPath()}.`);
+  const table = resolved.box === undefined ? "integrations" : `box.${resolved.box}.integrations`;
+  resolved.writeLine(`Set [${table}] ${integration.id} = ${enable} in ${configPath()}.`);
   if (!enable) return;
   resolved.writeLine(`Connect ${integration.name} to the box:`);
   const destination = host.transport === "ssh" ? host.destination : `${host.sshUser}@${host.tailscale}`;
