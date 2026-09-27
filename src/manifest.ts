@@ -131,6 +131,8 @@ const CREDENTIAL_NAMES = new Set([
   "auth.json",
   ".auth.json",
   ".netrc",
+  // The Paseo Hub login.
+  "hub-credentials.json",
 ]);
 const TOKEN_NAMES = new Set([
   "token.json",
@@ -138,6 +140,8 @@ const TOKEN_NAMES = new Set([
   "daemon.key",
   "tailscaled.state",
   ".tailscaled.state",
+  // The Paseo relay key pair.
+  "daemon-keypair.json",
 ]);
 const PRIVATE_KEY_NAMES = new Set(["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"]);
 const PRIVATE_KEY_EXTS = [".pem", ".key", ".p12", ".pfx"];
@@ -166,8 +170,12 @@ const PLACEHOLDER_BODY = /^(?:([xX0])\1*|[xX]+(?:[-_]+[xX]+)*)$/;
 /**
  * Config keys that hold a password or secret. Ferry compares each key in lower
  * case with `-` and `_` removed, so `clientSecret` and `client-secret` match too.
+ * A key matches when it is one of `SECRET_KEYS`, or when it contains one of
+ * `SECRET_WORDS`, such as `secretKeyB64` or `OPENAI_API_KEY`. Only a string
+ * value counts, so a number such as `maxTokens: 4096` in a parsed file passes.
  */
-const SECRET_KEYS = new Set(["password", "passwd", "secret", "clientsecret", "privatekey", "apikey"]);
+const SECRET_KEYS = new Set(["passwd"]);
+const SECRET_WORDS = ["secret", "privatekey", "apikey", "password", "token"];
 const CONFIG_EXTS = { ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml" } as const;
 /**
  * A `key: value` or `key = value` line, for a config file that does not parse.
@@ -570,7 +578,8 @@ function secretKeys(value: unknown): string[] {
 }
 
 function isSecretKey(key: string): boolean {
-  return SECRET_KEYS.has(key.toLowerCase().replace(/[-_]/g, ""));
+  const normal = key.toLowerCase().replace(/[-_]/g, "");
+  return SECRET_KEYS.has(normal) || SECRET_WORDS.some((word) => normal.includes(word));
 }
 
 /** A non-empty string that is not a placeholder by the token placeholder rule. */

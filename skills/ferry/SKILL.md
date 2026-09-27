@@ -139,6 +139,32 @@ For example, this installs this skill:
 ferry skills add dlhck/ferry --skill ferry
 ```
 
+## Integrations
+
+An integration runs one extra service on the box. Paseo is the only integration. It is off by default. When it is off, Ferry prints nothing about it.
+
+- `ferry integrations` lists each integration, shows if it is enabled, and shows the local app version that the box gets. It changes nothing.
+- `ferry integrations enable paseo`, `ferry integrations disable paseo`, and the Paseo step of `ferry update` need the operator. Run them with `--dry-run` only, and tell the operator the command. An update restarts the Paseo daemon and stops the agents that run on the box.
+- When Paseo is enabled, each sync carries the Paseo agent profiles to the box as its last step. Sync prints `Warning: Paseo agent profile <name> was not carried: provider <provider> is not available on the box.` for each profile that it skips. A profile with an `env` block or a secret stops the sync, as a deny rule does.
+
+On the box, do not edit these files. Ferry writes them, and it overwrites your change:
+
+- `~/.config/systemd/user/ferry-paseo.service`
+- `daemon.agentProfiles` in `~/.paseo/config.json`
+
+To change a profile, tell the operator to change it in Paseo on the operator machine and to run `ferry sync`.
+
+When Paseo is enabled, `ferry status` has an `Integrations` section, and `ferry status --json` has `integrations.paseo`:
+
+| Line or field | Meaning |
+| --- | --- |
+| `Service:`, `state.service` | `ferry-paseo.service` must be `active, enabled`. |
+| `Daemon:`, `state.localDaemon` | The daemon must be `running`. |
+| `Version:`, `state.daemonVersion`, `state.localVersion` | The box version and the local app version. `not pinned` means there is no local Paseo app. |
+| `Listen:`, `state.listen`, `state.relay` | The daemon must listen on `127.0.0.1:6767` with the relay off. |
+| `Providers:`, `state.providers` | The agent providers on the box. Sync skips a profile whose provider is `unavailable`. |
+| `WARNING` lines, `warnings` | A problem that the operator must fix, such as a version difference or a daemon that is not running. Tell the operator. |
+
 ## Other commands
 
 - `ferry --version` prints the Ferry version.

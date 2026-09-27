@@ -415,6 +415,7 @@ describe("ferry --help", () => {
         settingsChanges: [],
         mcpServers: [],
         storeUpdates: [],
+        paseoProfiles: null,
       },
     };
     const program = buildProgram({
