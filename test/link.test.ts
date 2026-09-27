@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Link } from "../src/link.ts";
+import { BunHostAdapter, Link } from "../src/link.ts";
 import type { HostAdapter, HostCommand, HostCommandResult } from "../src/link.ts";
 
 const onlineStatus = JSON.stringify({
@@ -140,6 +140,31 @@ describe("Link", () => {
 
     expect(host.commands[1]?.argv).toContain("-A");
     expect(host.commands[1]?.argv.at(-1)).toBe(`${BOX_PATH}git fetch`);
+  });
+
+  test("input bytes go to the standard input of the SSH command", async () => {
+    const host = new FakeHost([result()]);
+    const link = new Link({ destination: "ubuntu@orb" }, host);
+    const input = new Uint8Array([0, 1, 2, 255]);
+
+    await link.run("tar -xf -", { input });
+
+    expect(host.commands[0]?.input).toEqual(input);
+    expect(host.commands[0]?.argv.at(-1)).toBe(`${BOX_PATH}tar -xf -`);
+  });
+
+  test("the host adapter writes input bytes to stdin and closes stdin without input", async () => {
+    const adapter = new BunHostAdapter();
+
+    const withInput = await adapter.run({
+      argv: ["sh", "-c", "wc -c"],
+      timeoutMs: 5_000,
+      input: new Uint8Array(1_000),
+    });
+    const without = await adapter.run({ argv: ["sh", "-c", "wc -c"], timeoutMs: 5_000 });
+
+    expect(withInput.stdout.trim()).toBe("1000");
+    expect(without.stdout.trim()).toBe("0");
   });
 
   test("the box shell finds vendor CLIs in the user install directories", async () => {

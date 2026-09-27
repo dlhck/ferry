@@ -3,6 +3,8 @@
 export type HostCommand = {
   readonly argv: readonly string[];
   readonly timeoutMs: number;
+  /** Bytes for the standard input of the command. Without input, stdin is closed. */
+  readonly input?: Uint8Array;
 };
 
 export type HostCommandResult = {
@@ -71,6 +73,8 @@ export type RunOptions = {
   readonly timeoutMs?: number;
   /** Agent forwarding is only for a remote git command that uses SSH. */
   readonly agentForwarding?: "git";
+  /** Bytes for the standard input of the command on the box, such as a tar archive. */
+  readonly input?: Uint8Array;
 };
 
 export type ForwardOptions = {
@@ -115,6 +119,7 @@ export class Link {
       execution = await this.adapter.run({
         argv,
         timeoutMs: options.timeoutMs ?? this.options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+        ...(options.input ? { input: options.input } : {}),
       });
     } catch (error) {
       return failure("ssh-start-failed", "operator", messageOf(error, "could not start OpenSSH"));
@@ -282,7 +287,11 @@ function isDirect(options: LinkOptions): options is DirectLinkOptions {
 /** Production adapter. It runs only on the operator machine. */
 export class BunHostAdapter implements HostAdapter {
   async run(command: HostCommand): Promise<HostCommandResult> {
-    const process = Bun.spawn([...command.argv], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const process = Bun.spawn([...command.argv], {
+      stdin: command.input ?? "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
     const stdout = new Response(process.stdout).text();
     const stderr = new Response(process.stderr).text();
     let timer: ReturnType<typeof setTimeout> | undefined;
