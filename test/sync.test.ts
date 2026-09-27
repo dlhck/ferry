@@ -232,6 +232,47 @@ describe("runSync", () => {
     }
   });
 
+  test("dry-run names a skipped hook and carries the others", async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "ferry-sync-hooks-")));
+    try {
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(
+        join(home, ".claude", "settings.json"),
+        JSON.stringify({
+          hooks: {
+            Stop: [
+              {
+                hooks: [
+                  { type: "command", command: "~/.claude/hooks/notify.sh" },
+                  { type: "command", command: "jq ." },
+                ],
+              },
+            ],
+          },
+        }),
+      );
+      const lines: string[] = [];
+      const printed: SyncPlan[] = [];
+
+      const result = await runSync(
+        { home, dryRun: true },
+        {
+          readConfig: () => config,
+          publisher: () => "operator-machine",
+          writePlan: (plan) => printed.push(plan),
+          writeLine: (line) => lines.push(line),
+        },
+      );
+
+      expect(result.dryRun).toBe(true);
+      expect(lines).toEqual([
+        `Skipped hook: hook hooks.Stop[0].hooks[0].command refers to ~/.claude/hooks/notify.sh, outside the managed set: ${join(home, ".claude", "settings.json")}`,
+      ]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("dry-run lists every carried key present when the store has no settings yet", async () => {
     const local = {
       ...seed,

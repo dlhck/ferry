@@ -251,8 +251,8 @@ describe("the deny set", () => {
       },
       {
         code: "hook-path",
-        description: "hook command that refers to a home path outside the managed set",
-        behavior: "refuse",
+        description: "hook entry that refers to a home path outside the managed set",
+        behavior: "skip",
       },
       { code: "history", description: "session history", behavior: "skip" },
       { code: "database", description: "sqlite or other database file", behavior: "skip" },
@@ -813,40 +813,88 @@ describe("carried Claude hook commands", () => {
     ["~/.claude/skills/../../.ssh/run.sh", "~/.claude/skills/../../.ssh/run.sh"],
     ["~/.codex/skills/lint/run.sh", "~/.codex/skills/lint/run.sh"],
     ["FILE=~/notes.md notify", "~/notes.md"],
-  ])("refuses a hook that refers to an unmanaged home path: %s", (command, reference) => {
+  ])("skips a hook that refers to an unmanaged home path and keeps the others: %s", (command, reference) => {
     const home = makeHome();
     write(home, ".claude/settings.json", hooksWith("jq .", command));
 
-    expect(refusalOf(home).forbidden).toEqual([
+    const seed = seedOf(home);
+
+    expect(carried(seed)).toEqual({ hooks: JSON.parse(hooksWith("jq .")).hooks });
+    expect(seed.leftovers).toEqual([
       {
         path: join(home, ".claude", "settings.json"),
         code: "hook-path",
-        reason: `hook command hooks.PreToolUse[0].hooks[1].command refers to ${reference}, outside the managed set`,
+        reason: `hook hooks.PreToolUse[0].hooks[1].command refers to ${reference}, outside the managed set`,
       },
     ]);
   });
 
-  test("refuses a hook that refers to the operator home by its absolute path, even a managed one", () => {
+  test("skips a hook that refers to the operator home by its absolute path, even a managed one", () => {
     const home = makeHome();
     const script = join(home, ".claude", "skills", "lint", "run.sh");
-    write(home, ".claude/settings.json", hooksWith(`bash ${script}`));
+    write(home, ".claude/settings.json", hooksWith("jq .", `bash ${script}`));
+
+    const seed = seedOf(home);
+
+    expect(carried(seed)).toEqual({ hooks: JSON.parse(hooksWith("jq .")).hooks });
+    expect(seed.leftovers.map((leftover) => leftover.reason)).toEqual([
+      `hook hooks.PreToolUse[0].hooks[1].command refers to ${script}, outside the managed set`,
+    ]);
+  });
+
+  test("drops a matcher group with no hooks left and an event with no groups left", () => {
+    const home = makeHome();
+    write(
+      home,
+      ".claude/settings.json",
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            { matcher: "Bash", hooks: [{ type: "command", command: "~/a.sh" }] },
+            { matcher: "Edit", hooks: [{ type: "command", command: "jq ." }] },
+          ],
+          Stop: [{ hooks: [{ type: "command", command: "~/b.sh" }] }],
+        },
+      }),
+    );
+
+    const seed = seedOf(home);
+
+    expect(carried(seed)).toEqual({
+      hooks: { PreToolUse: [{ matcher: "Edit", hooks: [{ type: "command", command: "jq ." }] }] },
+    });
+    expect(seed.leftovers.map((leftover) => leftover.reason)).toEqual([
+      "hook hooks.PreToolUse[0].hooks[0].command refers to ~/a.sh, outside the managed set",
+      "hook hooks.Stop[0].hooks[0].command refers to ~/b.sh, outside the managed set",
+    ]);
+  });
+
+  test("the identity follows the carried hooks, not the skipped ones", () => {
+    const home = makeHome();
+    write(home, ".claude/settings.json", hooksWith("jq ."));
+    const before = seedOf(home).identity;
+
+    write(home, ".claude/settings.json", hooksWith("jq .", "~/a.sh"));
+    expect(seedOf(home).identity).toBe(before);
+  });
+
+  test("refuses a hook path outside the matcher group shape, because it cannot skip one entry", () => {
+    const home = makeHome();
+    write(home, ".claude/settings.json", JSON.stringify({ hooks: { Stop: { command: "~/a.sh" } } }));
 
     expect(refusalOf(home).forbidden).toEqual([
       {
         path: join(home, ".claude", "settings.json"),
         code: "hook-path",
-        reason: `hook command hooks.PreToolUse[0].hooks[0].command refers to ${script}, outside the managed set`,
+        reason: "hook command hooks.Stop.command refers to ~/a.sh, outside the managed set",
       },
     ]);
   });
 
-  test("names every hook path that refuses the seed", () => {
+  test("a token in a carried hook still refuses the seed", () => {
     const home = makeHome();
-    write(home, ".claude/settings.json", hooksWith("~/a.sh", "~/b.sh"));
+    write(home, ".claude/settings.json", hooksWith(`notify --token ghp_${"a".repeat(36)}`));
 
-    expect(refusalOf(home).forbidden.map((hit) => hit.reason)).toEqual([
-      "hook command hooks.PreToolUse[0].hooks[0].command refers to ~/a.sh, outside the managed set",
-      "hook command hooks.PreToolUse[0].hooks[1].command refers to ~/b.sh, outside the managed set",
-    ]);
+    expect(refusalOf(home).forbidden.map((hit) => hit.code)).toEqual(["github-token"]);
   });
 });

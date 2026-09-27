@@ -60,8 +60,8 @@ const DENY_RULES = {
   },
   "hook-path": {
     code: "hook-path",
-    reason: "hook command that refers to a home path outside the managed set",
-    verdict: "refuse",
+    reason: "hook entry that refers to a home path outside the managed set",
+    verdict: "skip",
   },
   history: { code: "history", reason: "session history", verdict: "skip" },
   database: { code: "database", reason: "sqlite or other database file", verdict: "skip" },
@@ -226,7 +226,7 @@ export function readSeed(home: string, harnesses: readonly HarnessDescriptor[]):
   const settings: SeedSettings[] = [];
   for (const harness of harnesses) {
     if (!harness.settings) continue;
-    const carried = readSettings(home, harness.settings, harnesses, forbidden);
+    const carried = readSettings(home, harness.settings, harnesses, forbidden, leftovers);
     if (carried) settings.push({ harness: harness.id, bytes: carried });
   }
 
@@ -405,13 +405,15 @@ function denyRuleFor(entryName: string, isDirectory: boolean): DenyRule | null {
 
 /**
  * Read only the listed keys from a JSON settings file. The file itself never
- * leaves the machine. `null` means the file is missing or refused.
+ * leaves the machine. `null` means the file is missing or refused. A hook entry
+ * that refers to an unmanaged home path is left out and noted in `leftovers`.
  */
 function readSettings(
   home: string,
   settings: { readonly file: string; readonly keys: readonly string[] },
   harnesses: readonly HarnessDescriptor[],
   forbidden: ForbiddenHit[],
+  leftovers: Leftover[],
 ): Uint8Array | null {
   const path = join(home, settings.file);
   let text: string;
@@ -435,6 +437,9 @@ function readSettings(
   for (const key of settings.keys) {
     if (Object.hasOwn(parsed, key)) carried[key] = (parsed as Record<string, unknown>)[key];
   }
+  if (Object.hasOwn(carried, "hooks")) {
+    carried.hooks = withoutUnmanagedHooks(path, carried.hooks, home, harnesses, leftovers);
+  }
   const bytes = Buffer.from(`${JSON.stringify(carried, null, 2)}\n`);
   // A marketplace or hook can send request headers, and a header can hold a credential.
   if (hasKey(carried, "headers")) {
@@ -450,12 +455,53 @@ function readSettings(
 }
 
 /**
- * Name each hook command word that refers to a file the box will not have.
- *
- * A `~/`, `$HOME/`, or `${HOME}/` word must lead into a managed skill root,
- * extra root, or instruction file. An absolute path under the operator home is
- * always refused, because the box home has a different path. Programs on PATH,
- * `$CLAUDE_PROJECT_DIR` paths, and absolute paths outside the home pass.
+ * Return `hooks` without the hook entries that refer to unmanaged home paths,
+ * and note each entry left out. A matcher group with no hooks left and an event
+ * with no groups left are removed too.
+ */
+function withoutUnmanagedHooks(
+  path: string,
+  hooks: unknown,
+  home: string,
+  harnesses: readonly HarnessDescriptor[],
+  leftovers: Leftover[],
+): unknown {
+  if (!isRecord(hooks)) return hooks;
+  const kept: Record<string, unknown> = {};
+  for (const [event, groups] of Object.entries(hooks)) {
+    if (!Array.isArray(groups)) {
+      kept[event] = groups;
+      continue;
+    }
+    const keptGroups: unknown[] = [];
+    groups.forEach((group, groupIndex) => {
+      if (!isRecord(group) || !Array.isArray(group.hooks)) {
+        keptGroups.push(group);
+        return;
+      }
+      const entries = group.hooks.filter((entry, entryIndex) => {
+        if (!isRecord(entry) || typeof entry.command !== "string") return true;
+        const words = unmanagedWords(entry.command, home, harnesses);
+        if (words.length === 0) return true;
+        const at = `hooks.${event}[${groupIndex}].hooks[${entryIndex}].command`;
+        leftovers.push({
+          path,
+          code: DENY_RULES["hook-path"].code,
+          reason: `hook ${at} refers to ${words.join(", ")}, outside the managed set`,
+        });
+        return false;
+      });
+      if (entries.length > 0) keptGroups.push({ ...group, hooks: entries });
+    });
+    if (keptGroups.length > 0) kept[event] = keptGroups;
+  }
+  return kept;
+}
+
+/**
+ * Refuse each hook command word that refers to a file the box will not have.
+ * `withoutUnmanagedHooks` already left out such entries in the usual shape, so
+ * a hit here is a command in a place that shape does not cover.
  */
 function hookPathHits(
   path: string,
@@ -465,13 +511,7 @@ function hookPathHits(
 ): ForbiddenHit[] {
   const hits: ForbiddenHit[] = [];
   for (const { at, command } of hookCommands(hooks, "hooks")) {
-    for (const word of command.split(COMMAND_SEPARATORS)) {
-      const relativePath = word.match(HOME_REFERENCE)?.[1];
-      const unmanaged =
-        relativePath === undefined
-          ? word === home || word.startsWith(`${home}/`)
-          : !managedPath(relativePath, harnesses);
-      if (!unmanaged) continue;
+    for (const word of unmanagedWords(command, home, harnesses)) {
       hits.push({
         path,
         code: DENY_RULES["hook-path"].code,
@@ -480,6 +520,31 @@ function hookPathHits(
     }
   }
   return hits;
+}
+
+/**
+ * The words of a hook command that refer to a file the box will not have.
+ *
+ * A `~/`, `$HOME/`, or `${HOME}/` word must lead into a managed skill root,
+ * extra root, or instruction file. An absolute path under the operator home
+ * never passes, because the box home has a different path. Programs on PATH,
+ * `$CLAUDE_PROJECT_DIR` paths, and absolute paths outside the home pass.
+ */
+function unmanagedWords(
+  command: string,
+  home: string,
+  harnesses: readonly HarnessDescriptor[],
+): string[] {
+  return command.split(COMMAND_SEPARATORS).filter((word) => {
+    const relativePath = word.match(HOME_REFERENCE)?.[1];
+    return relativePath === undefined
+      ? word === home || word.startsWith(`${home}/`)
+      : !managedPath(relativePath, harnesses);
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** Every string `command` property under `value`, with its JSON location. */
