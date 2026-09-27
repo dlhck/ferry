@@ -171,6 +171,29 @@ describe("remote apply", () => {
     expect(readFileSync(unmanaged, "utf8")).toBe("local");
   });
 
+  test("leftover links to the Codex system skills are removed and a real directory stays", async () => {
+    const root = makeRoot("remote-system");
+    const checkout = makeCheckout(root, ["unslop", ".system"]);
+    const home = join(root, "home");
+    const leftovers = [...ownedSkillRoots, ".pi/agent/skills", ".cursor/skills"].map((skillRoot) =>
+      join(home, skillRoot, ".system"),
+    );
+    for (const leftover of leftovers) {
+      mkdirSync(dirname(leftover), { recursive: true });
+      symlinkSync(join(checkout, "skills", ".system"), leftover);
+    }
+    const official = join(home, ".codex", "skills", ".system", "SKILL.md");
+    write(official, "codex system skill");
+
+    const plan = await apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES, link: new ShellLink(root) });
+
+    expect(plan.actions.filter((action) => action.path.endsWith(".system")).map((action) => action.kind)).toEqual(
+      leftovers.map(() => "delete-managed-name"),
+    );
+    for (const leftover of leftovers) expect(existsSync(leftover)).toBe(false);
+    expect(readFileSync(official, "utf8")).toBe("codex system skill");
+  });
+
   test("a partial mutation failure names the correct harness", async () => {
     const root = makeRoot("remote-failure");
     const checkout = makeCheckout(root, ["unslop"]);

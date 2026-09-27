@@ -12,7 +12,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
-import type { Seed } from "./manifest.ts";
+import { CODEX_SYSTEM_SKILLS, type Seed } from "./manifest.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
 
 export class AdoptionRefusal extends Error {
@@ -34,6 +34,10 @@ export function adoptPublishedSkills(
     for (const skill of seed.skills) {
       adopt(join(home, harness.skillRoot, skill.name), join(store, "skills", skill.name));
     }
+    removeStoreLink(
+      join(home, harness.skillRoot, CODEX_SYSTEM_SKILLS),
+      join(store, "skills", CODEX_SYSTEM_SKILLS),
+    );
   }
   // An extra root that appeared after init links whole, as Apply links it on the box.
   for (const root of seed.roots) adopt(join(home, root.path), join(store, "roots", root.path));
@@ -70,6 +74,20 @@ function adopt(source: string, target: string): void {
       // The source was already removed or restored.
     }
     throw error;
+  }
+}
+
+/** Remove `source` only when it is a symlink to `target`. */
+function removeStoreLink(source: string, target: string): void {
+  let stat;
+  try {
+    stat = lstatSync(source);
+  } catch (error) {
+    if (isMissing(error)) return;
+    throw error;
+  }
+  if (stat.isSymbolicLink() && resolve(dirname(source), readlinkSync(source)) === target) {
+    unlinkSync(source);
   }
 }
 

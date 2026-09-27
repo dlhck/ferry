@@ -128,6 +128,26 @@ describe("ferry uninstall", () => {
     expect(existsSync(join(home, ".ferry"))).toBe(false);
   });
 
+  test("removes old links to the Codex system skills and keeps the real Codex directory", () => {
+    const home = makeHome();
+    const storeSystem = join(home, ".ferry/store/skills/.system");
+    write(join(storeSystem, "SKILL.md"), "old\n");
+    const links = [".agents/skills/.system", ".claude/skills/.system"].map((path) => join(home, path));
+    for (const link of links) {
+      mkdirSync(dirname(link), { recursive: true });
+      symlinkSync(storeSystem, link);
+    }
+    const official = join(home, ".codex/skills/.system/SKILL.md");
+    write(official, "new\n");
+    write(join(home, ".ferry/config.toml"), "version = 1\n");
+
+    runUninstall({ home, harnesses: BUILTIN_HARNESSES });
+
+    for (const link of links) expect(lstatSync(link, { throwIfNoEntry: false })).toBeUndefined();
+    expect(readFileSync(official, "utf8")).toBe("new\n");
+    expect(existsSync(join(home, ".ferry"))).toBe(false);
+  });
+
   test("restores central backups when the uninstall state is missing", () => {
     const home = makeHome();
     const storeSkill = join(home, ".ferry/store/skills/tdd");

@@ -176,6 +176,26 @@ describe("union of the managed harnesses", () => {
       reason: "Ferry backup directory",
     });
   });
+
+  test("the Codex system skills directory is ignored in every skill root", () => {
+    const home = makeHome();
+    writeSkill(home, ".codex/skills", ".system", { ".codex-system-skills.marker": "codex", "a/SKILL.md": "new" });
+    writeSkill(home, ".ferry/store/skills", ".system", { "a/SKILL.md": "old" });
+    for (const root of [".agents/skills", ".claude/skills", ".pi/agent/skills", ".cursor/skills"]) {
+      mkdirSync(join(home, root), { recursive: true });
+      symlinkSync(join(home, ".ferry", "store", "skills", ".system"), join(home, root, ".system"));
+    }
+    // A link whose store directory a publish removed.
+    mkdirSync(join(home, ".claude", "skills"), { recursive: true });
+    rmSync(join(home, ".claude", "skills", ".system"));
+    symlinkSync(join(home, ".ferry", "store", "skills", "gone", ".system"), join(home, ".claude", "skills", ".system"));
+    writeSkill(home, ".agents/skills", "tdd", { "SKILL.md": "kept" });
+
+    const seed = seedOf(home);
+
+    expect(names(seed)).toEqual(["tdd"]);
+    expect(seed.leftovers.filter((leftover) => leftover.path.includes(".system"))).toEqual([]);
+  });
 });
 
 describe("the instruction file", () => {
