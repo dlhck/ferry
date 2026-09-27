@@ -68,6 +68,16 @@ const DENY_RULES = {
     reason: "MCP server name with characters other than letters, digits, dot, underscore, and hyphen",
     verdict: "refuse",
   },
+  "secret-field": {
+    code: "secret-field",
+    reason: "password or secret key with a value in a JSON, YAML, or TOML file",
+    verdict: "refuse",
+  },
+  executable: {
+    code: "executable",
+    reason: "executable binary (ELF, Mach-O, or PE)",
+    verdict: "refuse",
+  },
   "hook-path": {
     code: "hook-path",
     reason: "hook entry that refers to a home path outside the managed set",
@@ -151,6 +161,20 @@ const TOKEN_PATTERNS = [
  * characters, such as `aaaa`, still count as a token.
  */
 const PLACEHOLDER_BODY = /^(?:([xX0])\1*|[xX]+(?:[-_]+[xX]+)*)$/;
+/**
+ * Config keys that hold a password or secret. Ferry compares each key in lower
+ * case with `-` and `_` removed, so `clientSecret` and `client-secret` match too.
+ */
+const SECRET_KEYS = new Set(["password", "passwd", "secret", "clientsecret", "privatekey", "apikey"]);
+const CONFIG_EXTS = { ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml" } as const;
+/**
+ * A `key: value` or `key = value` line, for a config file that does not parse.
+ * Group 1 is the key, group 2 the value. The match does not see a key in a
+ * flow mapping such as `{ password: value }`, or a value on the next line.
+ */
+const CONFIG_LINE = /^\s*(?:-\s+)?["']?([\w-]+)["']?\s*[:=]\s*(.*)$/;
+/** Mach-O magic numbers, thin and universal, as the first four bytes of the file. */
+const MACHO_MAGICS = new Set(["feedface", "feedfacf", "cefaedfe", "cffaedfe", "cafebabe", "cafebabf"]);
 /** A carried MCP server name reaches remote shell commands, so it may hold only these characters. */
 const MCP_SERVER_NAME = /^[A-Za-z0-9._-]+$/;
 /** Declaration keys that send headers or start a process. A remote server carries none of them. */
@@ -290,7 +314,7 @@ export function readSeed(home: string, harnesses: readonly HarnessDescriptor[]):
   }
 
   const instructions = readInstructions(home, leftovers);
-  if (instructions) forbidden.push(...tokenHits(join(home, INSTRUCTION_FILE), instructions.bytes));
+  if (instructions) forbidden.push(...contentHits(join(home, INSTRUCTION_FILE), instructions.bytes));
 
   if (clashes.length > 0 || forbidden.length > 0) {
     return { ok: false, clashes, forbidden };
@@ -410,13 +434,87 @@ function walk(root: string, dir: string, rootReal: string, seen: Set<string>, sc
       scan.forbidden.push(note(path, DENY_RULES["private-key"]));
       continue;
     }
-    const tokens = tokenHits(path, bytes);
-    if (tokens.length > 0) {
-      scan.forbidden.push(...tokens);
+    const hits = contentHits(path, bytes);
+    if (hits.length > 0) {
+      scan.forbidden.push(...hits);
       continue;
     }
     scan.files.push({ path: relative(root, path), bytes });
   }
+}
+
+/** The forbidden hits of one file in a managed root, found from its bytes. */
+function contentHits(path: string, bytes: Uint8Array): ForbiddenHit[] {
+  if (isExecutable(bytes)) return [note(path, DENY_RULES.executable)];
+  return [...tokenHits(path, bytes), ...secretFieldHits(path, bytes)];
+}
+
+/**
+ * True when `bytes` start with an ELF, Mach-O, or PE header. A script with a
+ * shebang is text and passes. `cafebabe` also starts a Java class file. A
+ * universal Mach-O has its architecture count after the magic, and a class
+ * file has its version there, which is 45 or more. Ferry refuses only the
+ * universal Mach-O. A PE file needs the `PE\0\0` signature at the offset in
+ * its MS-DOS header, so a text file that starts with `MZ` passes.
+ */
+function isExecutable(bytes: Uint8Array): boolean {
+  const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (buffer.length < 8) return false;
+  const magic = buffer.subarray(0, 4).toString("hex");
+  if (magic === "7f454c46") return true;
+  if (MACHO_MAGICS.has(magic)) return !magic.startsWith("cafeba") || buffer.readUInt32BE(4) < 45;
+  if (buffer.subarray(0, 2).toString("latin1") !== "MZ" || buffer.length < 0x40) return false;
+  const offset = buffer.readUInt32LE(0x3c);
+  return buffer.subarray(offset, offset + 4).toString("latin1") === "PE\0\0";
+}
+
+/**
+ * Name each secret key with a value in a JSON, YAML, or TOML file. The hit
+ * names the key, never the value. An empty value and a placeholder value pass.
+ * A file that does not parse is matched line by line with `CONFIG_LINE`.
+ */
+function secretFieldHits(path: string, bytes: Uint8Array): ForbiddenHit[] {
+  const ext = Object.keys(CONFIG_EXTS).find((candidate) => path.toLowerCase().endsWith(candidate));
+  if (!ext) return [];
+  const text = Buffer.from(bytes).toString("utf8");
+  const format = CONFIG_EXTS[ext as keyof typeof CONFIG_EXTS];
+  let keys: string[];
+  try {
+    const parsed: unknown =
+      format === "json" ? JSON.parse(text) : format === "yaml" ? Bun.YAML.parse(text) : Bun.TOML.parse(text);
+    keys = secretKeys(parsed);
+  } catch {
+    keys = text.split("\n").flatMap((line) => {
+      const match = line.match(CONFIG_LINE);
+      if (!match || !isSecretKey(match[1]!)) return [];
+      const value = match[2]!.trim().replace(/,$/, "").replace(/^(["'])(.*)\1$/, "$2");
+      return isSecretValue(value) ? [match[1]!] : [];
+    });
+  }
+  return [...new Set(keys)].map((key) => ({
+    path,
+    code: DENY_RULES["secret-field"].code,
+    reason: `key ${key} holds a password or secret`,
+  }));
+}
+
+/** Every secret key under `value`, at any depth, whose value is a secret string. */
+function secretKeys(value: unknown): string[] {
+  if (typeof value !== "object" || value === null) return [];
+  return Object.entries(value).flatMap(([key, child]) =>
+    !Array.isArray(value) && isSecretKey(key) && typeof child === "string" && isSecretValue(child)
+      ? [key]
+      : secretKeys(child),
+  );
+}
+
+function isSecretKey(key: string): boolean {
+  return SECRET_KEYS.has(key.toLowerCase().replace(/[-_]/g, ""));
+}
+
+/** A non-empty string that is not a placeholder by the token placeholder rule. */
+function isSecretValue(value: string): boolean {
+  return value !== "" && !PLACEHOLDER_BODY.test(value);
 }
 
 /** Name each token kind found in `bytes`. The hit never holds the token itself. */

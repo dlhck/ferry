@@ -280,6 +280,16 @@ describe("the deny set", () => {
         behavior: "refuse",
       },
       {
+        code: "secret-field",
+        description: "password or secret key with a value in a JSON, YAML, or TOML file",
+        behavior: "refuse",
+      },
+      {
+        code: "executable",
+        description: "executable binary (ELF, Mach-O, or PE)",
+        behavior: "refuse",
+      },
+      {
         code: "hook-path",
         description: "hook entry that refers to a home path outside the managed set",
         behavior: "skip",
@@ -496,6 +506,132 @@ describe("the deny set", () => {
     expect(names(seedOf(home))).toEqual(["unslop"]);
   });
 
+});
+
+describe("password and secret fields in config files", () => {
+  // Build the value at run time so this file holds no string a secret scanner flags.
+  const value = "hunter" + "2-" + "q7Z";
+
+  const formats = {
+    json: (key: string, v: string) => JSON.stringify({ database: { host: "db", [key]: v } }),
+    yaml: (key: string, v: string) => `database:\n  host: db\n  ${key}: "${v}"\n`,
+    toml: (key: string, v: string) => `[database]\nhost = "db"\n${key} = "${v}"\n`,
+  };
+  const keys = ["password", "passwd", "secret", "client_secret", "private_key", "api_key"];
+  const cases = Object.keys(formats).flatMap((ext) => keys.map((key) => [ext, key] as const));
+
+  test.each(cases)("a .%s file with a %s value refuses and names the path and key", (ext, key) => {
+    const home = makeHome();
+    const file = `config.${ext}`;
+    writeSkill(home, ".claude/skills", "sherlock", {
+      "SKILL.md": "body",
+      [file]: formats[ext as keyof typeof formats](key, value),
+    });
+
+    const refusal = refusalOf(home);
+
+    expect(refusal.forbidden).toEqual([
+      {
+        path: join(home, ".claude", "skills", "sherlock", file),
+        code: "secret-field",
+        reason: expect.stringContaining(key),
+      },
+    ]);
+    expect(JSON.stringify(refusal)).not.toContain(value);
+  });
+
+  test.each(["Password", "PASSWD", "clientSecret", "api-key", "privateKey"])(
+    "the key %s matches without regard to case or separators",
+    (key) => {
+      const home = makeHome();
+      write(home, ".claude/agents/config.yaml", formats.yaml(key, value));
+
+      expect(refusalOf(home).forbidden.map((hit) => hit.code)).toEqual(["secret-field"]);
+    },
+  );
+
+  const allowed = ["", "x", "XXXX", "0000", "xxxx-xxxx", "xx_xx"];
+  const allowedCases = Object.keys(formats).flatMap((ext) => allowed.map((v) => [ext, v] as const));
+
+  test.each(allowedCases)("a .%s file with the empty or placeholder value %p does not refuse", (ext, v) => {
+    const home = makeHome();
+    writeSkill(home, ".claude/skills", "sherlock", {
+      "SKILL.md": "body",
+      [`config.${ext}`]: formats[ext as keyof typeof formats]("password", v),
+    });
+
+    expect(names(seedOf(home))).toEqual(["sherlock"]);
+  });
+
+  test("a file that does not parse is matched line by line", () => {
+    const home = makeHome();
+    writeSkill(home, ".claude/skills", "sherlock", {
+      "SKILL.md": "body",
+      "config.json": `{\n  "password": "${value}",\n  broken\n`,
+    });
+
+    const refusal = refusalOf(home);
+
+    expect(refusal.forbidden.map((hit) => hit.code)).toEqual(["secret-field"]);
+    expect(JSON.stringify(refusal)).not.toContain(value);
+  });
+
+  test("a password key in a Markdown file does not refuse", () => {
+    const home = makeHome();
+    writeSkill(home, ".claude/skills", "sherlock", { "SKILL.md": `password: ${value}\n` });
+
+    expect(names(seedOf(home))).toEqual(["sherlock"]);
+  });
+});
+
+describe("executable binaries", () => {
+  const binary = (...head: number[]) => Buffer.from([...head, 0, 0, 0, 0, 0, 0, 0, 0]);
+  /** An MS-DOS stub whose offset at 0x3c leads to the PE signature. */
+  function pe(): Buffer {
+    const bytes = Buffer.alloc(0x48);
+    bytes.write("MZ", 0, "latin1");
+    bytes.writeUInt32LE(0x40, 0x3c);
+    bytes.write("PE\0\0", 0x40, "latin1");
+    return bytes;
+  }
+
+  test.each([
+    ["ELF", binary(0x7f, 0x45, 0x4c, 0x46, 2, 1, 1)],
+    ["Mach-O 32-bit big-endian", binary(0xfe, 0xed, 0xfa, 0xce)],
+    ["Mach-O 64-bit big-endian", binary(0xfe, 0xed, 0xfa, 0xcf)],
+    ["Mach-O 32-bit little-endian", binary(0xce, 0xfa, 0xed, 0xfe)],
+    ["Mach-O 64-bit little-endian", binary(0xcf, 0xfa, 0xed, 0xfe)],
+    ["Mach-O universal", binary(0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2)],
+    ["PE", pe()],
+  ])("a %s file refuses the whole seed", (_kind, bytes) => {
+    const home = makeHome();
+    const dir = writeSkill(home, ".claude/skills", "sherlock", { "SKILL.md": "body" });
+    writeFileSync(join(dir, "sherlock"), bytes);
+
+    expect(refusalOf(home).forbidden).toEqual([
+      { path: join(dir, "sherlock"), code: "executable", reason: expect.any(String) },
+    ]);
+  });
+
+  test("an executable in an extra root refuses", () => {
+    const home = makeHome();
+    write(home, ".claude/commands/ship.md", "ship");
+    writeFileSync(join(home, ".claude", "commands", "tool"), binary(0x7f, 0x45, 0x4c, 0x46));
+
+    expect(refusalOf(home).forbidden.map((hit) => hit.code)).toEqual(["executable"]);
+  });
+
+  test.each([
+    ["a shell script", Buffer.from("#!/bin/sh\necho hi\n")],
+    ["a Java class file", binary(0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 0x34)],
+    ["a text file that starts with MZ", Buffer.from("MZ is the header of a DOS program.\n")],
+  ])("%s does not refuse", (_kind, bytes) => {
+    const home = makeHome();
+    const dir = writeSkill(home, ".claude/skills", "sherlock", { "SKILL.md": "body" });
+    writeFileSync(join(dir, "run"), bytes);
+
+    expect(names(seedOf(home))).toEqual(["sherlock"]);
+  });
 });
 
 describe("seed identity", () => {
