@@ -62,6 +62,10 @@ private snapshot.
 Ferry never copies logins. Vendor sessions stay on the machine that created
 them. Ferry starts a login on the box and you finish it in a browser here.`;
 
+// The release build sets FERRY_VERSION with `bun build --define`. A run from source does not.
+declare const FERRY_VERSION: string | undefined;
+const VERSION = typeof FERRY_VERSION === "string" ? FERRY_VERSION : "0.0.0-dev";
+
 type CliDependencies = {
   readonly runInit?: (input: InitInput, dependencies?: InitDependencies) => Promise<InitResult>;
   readonly runInstall?: (
@@ -113,6 +117,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
   program
     .name("ferry")
     .description(DESCRIPTION)
+    .version(VERSION)
     .showHelpAfterError()
     .action(() => {
       program.outputHelp();
