@@ -491,7 +491,7 @@ describe("ferry --help", () => {
   });
 
   test("wires status --json to the status command", async () => {
-    let received: { json: boolean } | undefined;
+    let received: { json: boolean; selection?: readonly string[] } | undefined;
     const program = buildProgram({
       readConfig: () => null,
       runStatus: async (input) => {
@@ -501,7 +501,7 @@ describe("ferry --help", () => {
 
     await program.parseAsync(["status", "--json"], { from: "user" });
 
-    expect(received).toEqual({ json: true });
+    expect(received).toEqual({ json: true, selection: [] });
   });
 
   test("status help lists the json flag", () => {
@@ -798,7 +798,7 @@ describe("--box", () => {
   });
 
   test("multi-target commands refuse more than one box", async () => {
-    for (const command of ["sync", "status", "update"]) {
+    for (const command of ["sync", "update"]) {
       await expect(readBy(BOXES, [command])).rejects.toThrow(
         `multi-box ${command} is not available yet. Select one box with --box <name>.`,
       );
@@ -809,9 +809,30 @@ describe("--box", () => {
   });
 
   test("multi-target commands read the config as the one selected box", async () => {
-    for (const command of ["sync", "status", "update"]) {
+    for (const command of ["sync", "update"]) {
       expect(await readBy(BOXES, [command, "--box", "b"])).toEqual(B_VIEW);
     }
+  });
+
+  test("status gets the --box names as its selection, and no box means all boxes", async () => {
+    const selections: unknown[] = [];
+    const program = () =>
+      buildProgram({
+        readConfig: () => BOXES,
+        runStatus: async (input, dependencies) => {
+          selections.push(input.selection);
+          expect(dependencies?.readConfig).toBeUndefined();
+          return undefined as never;
+        },
+        createProgress: () => noProgress,
+        writeLine: () => {},
+      });
+
+    await program().parseAsync(["status"], { from: "user" });
+    await program().parseAsync(["status", "--box", "b"], { from: "user" });
+    await program().parseAsync(["--box", "a", "status", "--box", "b", "--json"], { from: "user" });
+
+    expect(selections).toEqual([[], ["b"], ["a", "b"]]);
   });
 
   test("watch refuses box tables and refuses --box", async () => {

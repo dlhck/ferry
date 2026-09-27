@@ -399,8 +399,8 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       await withProgress(
         (progress, writeLine) =>
           (dependencies.runStatus ?? runStatusCommand)(
-            { json: options.json === true },
-            { createLink, writeLine, progress, ...boxConfig(selectBox("status", false)) },
+            { json: options.json === true, selection: boxNames() },
+            { createLink, writeLine, progress },
           ),
         options.json === true ? noProgress : progress(),
       );
