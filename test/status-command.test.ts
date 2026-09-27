@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ApplyPlan, RemoteApplyInput } from "../src/apply.ts";
 import type { AuthStatusReport } from "../src/auth-start.ts";
+import { buildProgram } from "../src/cli.ts";
 import type { LinkResult } from "../src/link.ts";
 import type { Registry } from "../src/registry/load.ts";
 import type { ToolDescriptor } from "../src/registry/types.ts";
@@ -226,6 +227,37 @@ describe("ferry status command", () => {
     expect(stack.reads.filter((call) => call === "registry.load")).toHaveLength(1);
     expect(stack.reads.some((call) => /\bgit pull\b/.test(call))).toBe(false);
   });
+
+  for (const [label, integrations] of [
+    ["no [integrations] section", {}],
+    ["paseo = false", { integrations: { paseo: false } }],
+  ] as const) {
+    test(`status and status --json print nothing about Paseo with ${label}`, async () => {
+      const lines: string[] = [];
+      const terminal = fakeTerminal();
+      for (const args of [["status"], ["status", "--json"]]) {
+        const stack = fakeStack();
+        const readConfig = stack.dependencies.readConfig!;
+        await buildProgram({
+          runStatus: (input, dependencies) =>
+            runStatusCommand(input, {
+              ...stack.dependencies,
+              readConfig: () => ({ ...readConfig(), ...integrations }),
+              ...dependencies,
+            }),
+          writeLine: (line) => lines.push(line),
+          createProgress: () => terminal.progress,
+        }).parseAsync(args, { from: "user" });
+      }
+
+      const output = lines.join("\n");
+      expect(output).toContain("Host: ONLINE");
+      expect(output).toContain('"schemaVersion":1');
+      expect(terminal.table().join("\n")).toContain("Connecting to the box");
+      expect(output).not.toMatch(/paseo/i);
+      expect(terminal.writes.join("")).not.toMatch(/paseo/i);
+    });
+  }
 
   test("prints the exact report as JSON without human text", async () => {
     const stack = fakeStack();

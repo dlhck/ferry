@@ -14,7 +14,11 @@ export type OperatorConfig = {
   readonly host: OperatorHostConfig;
   readonly harness?: readonly unknown[];
   readonly update?: UpdateConfig;
+  readonly integrations?: IntegrationsConfig;
 };
+
+/** Each key turns on one integration. A missing key means that the integration is off. */
+export type IntegrationsConfig = { readonly paseo?: boolean };
 
 /** `watch` turns on the daily tool update in `ferry watch`. */
 export type UpdateConfig = { readonly watch?: boolean };
@@ -42,6 +46,7 @@ export type PartialOperatorConfig = {
   };
   readonly harness?: readonly unknown[];
   readonly update?: UpdateConfig;
+  readonly integrations?: IntegrationsConfig;
 };
 
 /** TOML key to parsed property for each `[[harness]]` entry. */
@@ -57,6 +62,7 @@ const SECTION_KEYS: Record<string, readonly string[]> = {
   "[host]": ["transport", "tailscale", "ssh_user", "destination"],
   "[[harness]]": Object.keys(HARNESS_KEYS),
   "[update]": ["watch"],
+  "[integrations]": ["paseo"],
 };
 
 export class ConfigError extends Error {
@@ -86,6 +92,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     };
     harness: Record<string, string>[];
     update?: { watch?: boolean };
+    integrations?: { paseo?: boolean };
   } = { host: {}, harness: [] };
   let section = "";
   let harness: Record<string, string> | null = null;
@@ -98,8 +105,8 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       harness = null;
       continue;
     }
-    if (line === "[update]") {
-      section = "[update]";
+    if (line === "[update]" || line === "[integrations]") {
+      section = line;
       harness = null;
       continue;
     }
@@ -121,11 +128,12 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       config.version = 1;
       continue;
     }
-    if (section === "[update]") {
+    if (section === "[update]" || section === "[integrations]") {
       if (encoded !== "true" && encoded !== "false") {
-        throw new ConfigError(`invalid boolean for ${key} in [update] of ${path}`);
+        throw new ConfigError(`invalid boolean for ${key} in ${section} of ${path}`);
       }
-      config.update = { watch: encoded === "true" };
+      if (section === "[update]") config.update = { watch: encoded === "true" };
+      else config.integrations = { paseo: encoded === "true" };
       continue;
     }
 
@@ -179,6 +187,9 @@ export function writeConfig(config: OperatorConfig, home = homedir()): void {
       ]),
       ...(config.update?.watch !== undefined
         ? ["[update]", `watch = ${config.update.watch}`, ""]
+        : []),
+      ...(config.integrations?.paseo !== undefined
+        ? ["[integrations]", `paseo = ${config.integrations.paseo}`, ""]
         : []),
     ].join("\n"),
     { mode: 0o600 },

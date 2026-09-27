@@ -9,11 +9,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { buildProgram } from "../src/cli.ts";
 import { readConfig } from "../src/config.ts";
 import { InitRefusal, runInit, type InitDependencies } from "../src/init.ts";
 import type { Seed } from "../src/manifest.ts";
 import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
-import { recordProgress } from "./fake-progress.ts";
+import { fakeTerminal, recordProgress } from "./fake-progress.ts";
 
 const homes: string[] = [];
 const skillRoots = [".agents/skills", ".claude/skills"] as const;
@@ -553,6 +554,66 @@ describe("ferry init", () => {
 
     expect(readConfig(home)?.update).toEqual({ watch: true });
   });
+
+  test("a second run keeps the integration switches", async () => {
+    const home = makeHome();
+    write(join(home, ".ferry/config.toml"), [
+      "version = 1",
+      'publisher = "first-operator"',
+      'snapshot_url = "snapshot.git"',
+      "",
+      "[host]",
+      'tailscale = "box"',
+      'ssh_user = "david"',
+      "",
+      "[integrations]",
+      "paseo = true",
+      "",
+    ].join("\n"));
+    const { deps } = dependencies(home);
+
+    await runInit({ home, harnesses: BUILTIN_HARNESSES }, deps);
+
+    expect(readConfig(home)?.integrations).toEqual({ paseo: true });
+  });
+
+  for (const [label, section] of [
+    ["no [integrations] section", []],
+    ["paseo = false", ["[integrations]", "paseo = false", ""]],
+  ] as const) {
+    test(`init --dry-run prints nothing about Paseo with ${label}`, async () => {
+      const home = makeHome();
+      write(join(home, ".agents/skills/tdd/SKILL.md"), "test first\n");
+      write(join(home, ".ferry/config.toml"), [
+        "version = 1",
+        'publisher = "operator.test"',
+        'snapshot_url = "snapshot.git"',
+        "",
+        "[host]",
+        'tailscale = "box"',
+        'ssh_user = "david"',
+        "",
+        ...section,
+      ].join("\n"));
+      const { calls, deps } = dependencies(home);
+      const lines: string[] = [];
+      const terminal = fakeTerminal();
+
+      await buildProgram({
+        readConfig: () => readConfig(home),
+        runInit: (input, cliDependencies) => runInit({ ...input, home }, { ...deps, ...cliDependencies }),
+        writeLine: (line) => lines.push(line),
+        createProgress: () => terminal.progress,
+      }).parseAsync(["init", "--dry-run"], { from: "user" });
+
+      const output = lines.join("\n");
+      expect(calls).toEqual({ opened: 0, published: 0, linked: 0 });
+      expect(output).toContain("Init plan (no changes will be made):");
+      expect(terminal.table().join("\n")).toContain("Reading the portable set");
+      expect(output).not.toMatch(/paseo/i);
+      expect(terminal.writes.join("")).not.toMatch(/paseo/i);
+    });
+  }
 
   test("records and probes an explicit SSH destination", async () => {
     const home = makeHome();

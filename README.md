@@ -343,6 +343,23 @@ ferry auth claude --mcp linear
 
 Ferry starts the login of the tool on the box. Claude and Codex need a terminal, so Ferry runs the login under `script`, detached from the SSH session. Ferry prints the authorize URL. Open it in a browser on your machine. The browser then goes to a `localhost` callback port. Ferry forwards that port to the box for up to 300 seconds, so the tool on the box gets the callback and keeps the token. Ferry checks the MCP server list on the box every 5 seconds and closes the forward when the server no longer needs a login. Press Ctrl-C to stop early. Ferry then checks the login once more and reports it. The login on the box stops after 330 seconds. The callback port must be free on your machine. For example, Claude uses port 3118. Pi has no MCP support of its own, so Ferry does not declare Pi MCP servers.
 
+## Integrations
+
+An integration runs one extra service on the box. Paseo is the only integration. All integrations are off by default. When no integration is on, Ferry commands print nothing about integrations.
+
+`ferry integrations` lists each integration, shows if it is on, and shows the version of the local app and the file that Ferry read it from. The box gets the same Paseo version as the local app. Ferry reads the version from `/Applications/Paseo.app/Contents/Resources/bin/paseo --version` or from the `Info.plist` of the app on macOS, and from `/opt/Paseo/resources/bin/paseo --version` on Linux. If there is no local app, the box version is not pinned.
+
+The config key is in `~/.ferry/config.toml`:
+
+```toml
+[integrations]
+paseo = true
+```
+
+A repeat `ferry init` keeps this section. Ferry refuses an unknown integration name.
+
+This release does not set up Paseo on the box. It has no `ferry integrations enable` or `disable` command, and `ferry update`, `ferry status`, and `ferry move` do not use the key. When the key is `true`, `ferry integrations` prints the steps to connect Paseo Desktop to the box: open Settings → Add host → Remote SSH and enter `ssh://<box destination>`. Ferry cannot add the host for you, because Paseo Desktop has no command for it.
+
 ## Automatic sync
 
 `ferry watch` runs in the foreground. It watches the Manifest identity for every configured global skill root, `~/AGENTS.md`, the Claude subagents and commands, and the carried Claude settings keys. It does not watch project-local skills. After an accepted change stays stable for one second, Ferry runs the normal sync without `--force`. Network, SSH, and Git failures retry with a backoff capped at 60 seconds. Manifest refusals name the local path and wait for another edit.

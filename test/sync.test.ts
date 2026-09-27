@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplyError } from "../src/apply.ts";
+import { buildProgram } from "../src/cli.ts";
 import type { OperatorConfig } from "../src/config.ts";
 import { denyRules, type Seed } from "../src/manifest.ts";
 import { loadRegistry, type RegistryConfig } from "../src/registry/load.ts";
@@ -219,6 +220,41 @@ describe("runSync", () => {
       expect(lines).toContain(`  ${rule.code}: ${rule.behavior} ${rule.description}`);
     }
   });
+
+  for (const [label, integrations] of [
+    ["no [integrations] section", {}],
+    ["paseo = false", { integrations: { paseo: false } }],
+  ] as const) {
+    test(`sync --dry-run prints nothing about Paseo with ${label}`, async () => {
+      const lines: string[] = [];
+      const terminal = fakeTerminal();
+      const log = console.log;
+      console.log = (line: string) => lines.push(line);
+      try {
+        await buildProgram({
+          runSync: (input, dependencies) =>
+            runSync(
+              { ...input, home: "/operator" },
+              {
+                readConfig: () => ({ ...config, ...integrations }),
+                publisher: () => "operator-machine",
+                readSeed: () => seed,
+                ...dependencies,
+              },
+            ),
+          createProgress: () => terminal.progress,
+        }).parseAsync(["sync", "--dry-run"], { from: "user" });
+      } finally {
+        console.log = log;
+      }
+
+      const output = lines.join("\n");
+      expect(output).toContain("Deny list:");
+      expect(terminal.table().join("\n")).toContain("Reading the portable set");
+      expect(output).not.toMatch(/paseo/i);
+      expect(terminal.writes.join("")).not.toMatch(/paseo/i);
+    });
+  }
 
   test("dry-run lists the carried settings keys that differ from the store, offline", async () => {
     const home = realpathSync(mkdtempSync(join(tmpdir(), "ferry-sync-home-")));

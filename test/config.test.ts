@@ -108,6 +108,44 @@ describe("operator config", () => {
     expect(readConfig(home)?.update).toEqual({ watch: true });
   });
 
+  test("reads the integration switches", () => {
+    expect(readConfig(homeWithConfig([...BASE, "", "[integrations]", "paseo = true"]))?.integrations).toEqual({ paseo: true });
+    expect(readConfig(homeWithConfig([...BASE, "", "[integrations]", "paseo = false"]))?.integrations).toEqual({ paseo: false });
+    expect(readConfig(homeWithConfig(BASE))?.integrations).toBeUndefined();
+  });
+
+  test("refuses an unknown integration name", () => {
+    const home = homeWithConfig([...BASE, "", "[integrations]", "zed = true"]);
+
+    expect(() => readConfig(home)).toThrow("unknown key zed in [integrations]");
+  });
+
+  test("refuses an integration value that is not a boolean", () => {
+    const home = homeWithConfig([...BASE, "", "[integrations]", 'paseo = "yes"']);
+
+    expect(() => readConfig(home)).toThrow("invalid boolean for paseo in [integrations]");
+  });
+
+  test("writing the config keeps the integration switches and the other sections", () => {
+    const home = homeWithConfig(BASE);
+
+    writeConfig({
+      version: 1,
+      publisher: "operator",
+      snapshotUrl: "snapshot.git",
+      host: { tailscale: "box", sshUser: "ferry" },
+      harness: [{ id: "opencode", name: "OpenCode" }],
+      update: { watch: true },
+      integrations: { paseo: true },
+    }, home);
+
+    expect(readConfig(home)).toMatchObject({
+      harness: [{ id: "opencode", name: "OpenCode" }],
+      update: { watch: true },
+      integrations: { paseo: true },
+    });
+  });
+
   test("refuses an unknown key and names it", () => {
     const home = homeWithConfig([...BASE, "", "[[harness]]", 'id = "opencode"', 'skil_root = ".config/opencode/skills"']);
 

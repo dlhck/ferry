@@ -176,6 +176,7 @@ export async function runInit(
       : { tailscale: required(values.host), sshUser: required(values.sshUser) },
     harness: existing?.harness,
     update: existing?.update,
+    integrations: existing?.integrations,
   };
   const snapshotTarget = snapshotSshTarget(config.snapshotUrl);
   progress.plan(input.dryRun ? 1 : snapshotTarget ? 8 : 4);
