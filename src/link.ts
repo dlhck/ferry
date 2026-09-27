@@ -5,6 +5,8 @@ export type HostCommand = {
   readonly timeoutMs: number;
   /** Bytes for the standard input of the command. Without input, stdin is closed. */
   readonly input?: Uint8Array;
+  /** The command is stopped when this signal aborts. */
+  readonly signal?: AbortSignal;
 };
 
 export type HostCommandResult = {
@@ -52,6 +54,11 @@ export type LinkSuccess = {
 
 export type LinkResult = LinkSuccess | LinkFailure;
 
+/** A port forward that its signal stopped. This is not an error. */
+export type ForwardStopped = LinkSuccess & { readonly stopped: true };
+
+export type ForwardResult = LinkResult | ForwardStopped;
+
 type LinkTimeouts = {
   readonly probeTimeoutMs?: number;
   readonly connectTimeoutMs?: number;
@@ -83,6 +90,8 @@ export type ForwardOptions = {
   readonly remoteHost?: string;
   /** The forward is stopped and returns `forward-timeout` after this interval. */
   readonly timeoutMs: number;
+  /** The forward is stopped and returns `ForwardStopped` when this signal aborts. */
+  readonly signal?: AbortSignal;
 };
 
 const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
@@ -137,7 +146,7 @@ export class Link {
     return success(resolved.address, execution);
   }
 
-  async forward(options: ForwardOptions): Promise<LinkResult> {
+  async forward(options: ForwardOptions): Promise<ForwardResult> {
     const invalid = this.validateConfig() ?? validateForward(options);
     if (invalid) return invalid;
 
@@ -158,11 +167,16 @@ export class Link {
 
     let execution: HostCommandResult;
     try {
-      execution = await this.adapter.run({ argv, timeoutMs: options.timeoutMs });
+      execution = await this.adapter.run({
+        argv,
+        timeoutMs: options.timeoutMs,
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
     } catch (error) {
       return failure("ssh-start-failed", "operator", messageOf(error, "could not start OpenSSH"));
     }
 
+    if (options.signal?.aborted) return { ...success(resolved.address, execution), stopped: true };
     if (execution.timedOut) {
       return failure(
         "forward-timeout",
@@ -299,7 +313,11 @@ export class BunHostAdapter implements HostAdapter {
       timer = setTimeout(() => resolve("timeout"), command.timeoutMs);
     });
     const exited = process.exited.then((exitCode) => ({ exitCode }));
+    const stop = () => process.kill();
+    command.signal?.addEventListener("abort", stop, { once: true });
+    if (command.signal?.aborted) stop();
     const settled = await Promise.race([exited, timeout]);
+    command.signal?.removeEventListener("abort", stop);
 
     if (settled === "timeout") {
       process.kill();

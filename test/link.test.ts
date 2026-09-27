@@ -248,6 +248,45 @@ describe("Link", () => {
     });
   });
 
+  test("an aborted signal stops the port forward and reports forward-stopped, not an error", async () => {
+    const stop = new AbortController();
+    const host = new FakeHost([result({ exitCode: 255 })]);
+    const link = new Link({ destination: "user@box.example" }, host);
+    stop.abort();
+
+    const outcome = await link.forward({
+      localPort: 1455,
+      remotePort: 1455,
+      timeoutMs: 2_000,
+      signal: stop.signal,
+    });
+
+    expect(host.commands[0]?.signal).toBe(stop.signal);
+    expect(outcome).toEqual({
+      ok: true,
+      stopped: true,
+      address: "user@box.example",
+      stdout: "",
+      stderr: "",
+    });
+  });
+
+  test("the host adapter stops the command when its signal aborts", async () => {
+    const stop = new AbortController();
+    const started = Date.now();
+    setTimeout(() => stop.abort(), 50);
+
+    const outcome = await new BunHostAdapter().run({
+      argv: ["sleep", "30"],
+      timeoutMs: 20_000,
+      signal: stop.signal,
+    });
+
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(outcome.timedOut).toBe(false);
+    expect(outcome.exitCode).not.toBe(0);
+  });
+
   test("a direct port forward uses the SSH destination without Tailscale", async () => {
     const host = new FakeHost([result()]);
     const link = new Link({ destination: "user@box.example" }, host);
