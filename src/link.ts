@@ -85,6 +85,14 @@ const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 
+/**
+ * A non-interactive SSH command does not read the shell profile, so PATH does not
+ * contain the user install directories of the vendor CLIs. The Claude, Codex and
+ * Cursor installers use ~/.local/bin. The managed Pi installer uses ~/.pi/agent/bin
+ * when no user bin directory is on PATH. Child processes get the same PATH.
+ */
+const BOX_PATH = 'export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH"; ';
+
 export class Link {
   constructor(
     private readonly options: LinkOptions,
@@ -100,7 +108,7 @@ export class Link {
 
     const argv = this.sshBase(resolved.destination);
     if (options.agentForwarding === "git") argv.splice(1, 0, "-A");
-    argv.push(command);
+    argv.push(BOX_PATH + command);
 
     let execution: HostCommandResult;
     try {

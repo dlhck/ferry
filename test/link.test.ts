@@ -26,6 +26,8 @@ class FakeHost implements HostAdapter {
   }
 }
 
+const BOX_PATH = 'export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH"; ';
+
 function result(overrides: Partial<HostCommandResult> = {}): HostCommandResult {
   return { exitCode: 0, stdout: "", stderr: "", timedOut: false, ...overrides };
 }
@@ -81,7 +83,7 @@ describe("Link", () => {
       "-o",
       "ConnectTimeout=10",
       "ferry@build-box.example.ts.net",
-      "uname -a",
+      `${BOX_PATH}uname -a`,
     ]);
   });
 
@@ -106,7 +108,7 @@ describe("Link", () => {
           "-o",
           "ConnectTimeout=10",
           "ubuntu@orb",
-          `printf '%s\\n' "$HOME"`,
+          `${BOX_PATH}printf '%s\\n' "$HOME"`,
         ],
         timeoutMs: 30_000,
       },
@@ -137,6 +139,22 @@ describe("Link", () => {
     await link.run("git fetch", { agentForwarding: "git" });
 
     expect(host.commands[1]?.argv).toContain("-A");
+    expect(host.commands[1]?.argv.at(-1)).toBe(`${BOX_PATH}git fetch`);
+  });
+
+  test("the box shell finds vendor CLIs in the user install directories", async () => {
+    const host = new FakeHost([result()]);
+    const link = new Link({ destination: "ubuntu@orb" }, host);
+
+    await link.run(`printf '%s|%s' "$PATH" "a b"`);
+
+    const remote = host.commands[0]?.argv.at(-1) ?? "";
+    const shell = Bun.spawnSync(["sh", "-c", remote], {
+      env: { HOME: "/home/ubuntu", PATH: "/usr/bin:/bin" },
+    });
+    expect(shell.stdout.toString()).toBe(
+      "/home/ubuntu/.local/bin:/home/ubuntu/.pi/agent/bin:/usr/bin:/bin|a b",
+    );
   });
 
   test("a remote command failure names the box", async () => {
