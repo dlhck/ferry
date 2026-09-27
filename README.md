@@ -1,6 +1,6 @@
 # ferry
 
-Ferry keeps a remote Linux agent box in the same shape as the machine you work on. Your machine is the source of truth. A private git repository holds the skills and the one global instruction file. Both machines clone that repository and point their harness directories at the clone with symlinks. Ferry uses Tailscale by default and also accepts an explicit OpenSSH destination for local machines and existing SSH configurations.
+Ferry keeps a remote Linux agent box in the same shape as the machine you work on. Your machine is the source of truth. A private git repository holds the skills, the one global instruction file, the Claude subagents and commands, and the Claude plugin declarations. Both machines clone that repository and point their harness directories at the clone with symlinks. Ferry uses Tailscale by default and also accepts an explicit OpenSSH destination for local machines and existing SSH configurations.
 
 Ferry never copies logins. OAuth sessions stay on the machine that created them. Ferry starts a vendor login on the box and you finish it in a browser here.
 
@@ -47,9 +47,24 @@ Ferry adds `-g` and `--copy` if you do not pass them. The example runs `npx skil
 
 The install does not publish the skill. Run `ferry sync` or keep `ferry watch` running to publish it to the snapshot and apply it on the box.
 
+## What Ferry carries
+
+Ferry carries these items from the operator machine to the box:
+
+- The skills in every global harness skill root, such as `~/.agents/skills` and `~/.claude/skills`.
+- `~/AGENTS.md`, linked as the instruction file of each harness.
+- The Claude subagents in `~/.claude/agents` and the Claude commands in `~/.claude/commands`. Ferry links each directory whole into the store. On the box, a live directory at one of these paths stops the sync. `ferry sync --force` moves it to `~/.ferry/backups` and then links it.
+- The Claude plugin declarations: the `enabledPlugins` and `extraKnownMarketplaces` keys of `~/.claude/settings.json`. The snapshot holds these two keys in `settings/claude.json`. It holds no other settings key and no plugin cache.
+
+The deny rules apply to every carried directory. A file such as `.env` or `credentials.json`, or a file that holds a token, stops the sync. Ferry also stops the sync if a carried settings key holds a token or request headers.
+
+On the box, `ferry sync` runs `claude plugin marketplace add` for each carried marketplace and `claude plugin install` for each enabled plugin. Claude does not install a plugin from settings alone. Then Ferry writes the two carried keys into the box `~/.claude/settings.json`. The box keeps all other keys, such as `env` and `permissions`. If the box has no settings file, Ferry creates one. A marketplace or plugin that the box cannot install gives a warning and does not stop the sync. A marketplace with a `directory` or `file` source is on the operator machine only, so the box cannot add it.
+
+Claude writes a marketplace to `extraKnownMarketplaces` when you add it with `claude plugin marketplace add`. Older Claude versions recorded marketplaces only in `~/.claude/plugins`. If a plugin in `enabledPlugins` comes from a marketplace that `extraKnownMarketplaces` does not list, such as `claude-plugins-official`, run `claude plugin marketplace add` for it once on the operator machine. For example: `claude plugin marketplace add anthropics/claude-plugins-official`.
+
 ## Automatic sync
 
-`ferry watch` runs in the foreground. It watches the Manifest identity for every configured global skill root and `~/AGENTS.md`. It does not watch project-local skills. After an accepted change stays stable for one second, Ferry runs the normal sync without `--force`. Network, SSH, and Git failures retry with a backoff capped at 60 seconds. Manifest refusals name the local path and wait for another edit.
+`ferry watch` runs in the foreground. It watches the Manifest identity for every configured global skill root, `~/AGENTS.md`, the Claude subagents and commands, and the carried Claude settings keys. It does not watch project-local skills. After an accepted change stays stable for one second, Ferry runs the normal sync without `--force`. Network, SSH, and Git failures retry with a backoff capped at 60 seconds. Manifest refusals name the local path and wait for another edit.
 
 Install and start the user service from the operator machine:
 
@@ -128,7 +143,7 @@ skill_root = ".config/opencode/skills"
 instruction_file = ".config/opencode/AGENTS.md"
 ```
 
-Every command uses these entries, and `ferry init` keeps them when it rewrites the file. Ferry refuses an unknown key or section in the config and names it.
+Every command uses these entries, and `ferry init` keeps them when it rewrites the file. A custom harness cannot add extra directories or settings keys to the snapshot. Ferry refuses an unknown key or section in the config and names it.
 
 ## Development
 
