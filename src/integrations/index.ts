@@ -31,6 +31,5 @@ export async function integrationLines(
       for (const step of integration.connectSteps(destination)) lines.push(`    ${step}`);
     }
   }
-  lines.push("", "Ferry does not set up integrations on the box in this release.");
   return lines;
 }
