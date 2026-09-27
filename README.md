@@ -1,5 +1,42 @@
 # ferry
 
+[![CI](https://github.com/dlhck/ferry/actions/workflows/ci.yml/badge.svg)](https://github.com/dlhck/ferry/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/dlhck/ferry)](https://github.com/dlhck/ferry/releases)
+
+```mermaid
+flowchart LR
+    subgraph laptop["💻 Your machine · source of truth"]
+        direction TB
+        set["🧰 skills<br/>AGENTS.md<br/>Claude agents + commands<br/>settings allowlist<br/>remote MCP servers"]
+        vault["🔐 logins and tokens<br/>never leave"]
+    end
+
+    snap[("📦 private snapshot repo")]
+
+    subgraph fleet["☁️ Linux agent boxes"]
+        direction TB
+        b1["🖥️ build-box<br/>claude · codex<br/>pi · cursor"]
+        b2["🖥️ gpu-box<br/>claude · codex<br/>pi · cursor"]
+        b3["🖥️ lab-box<br/>claude · codex<br/>pi · cursor"]
+    end
+
+    set == "ferry sync<br/>commit + push" ==> snap
+    snap ==> b1
+    snap == "pull + symlink<br/>over SSH or Tailscale" ==> b2
+    snap ==> b3
+    laptop -. "ferry auth<br/>login starts on the box,<br/>you finish it in a browser" .-> fleet
+
+    classDef source fill:#1f6feb,stroke:#1f6feb,color:#fff
+    classDef secret fill:#da3633,stroke:#da3633,color:#fff
+    classDef repo fill:#8957e5,stroke:#8957e5,color:#fff
+    classDef box fill:#238636,stroke:#238636,color:#fff
+    class set source
+    class vault secret
+    class snap repo
+    class b1,b2,b3 box
+```
+
 Ferry keeps a remote Linux agent box in the same shape as the machine you work on. Your machine is the source of truth. A private git repository holds the skills, the one global instruction file, the Claude subagents and commands, and the Claude plugin declarations. Both machines clone that repository and point their harness directories at the clone with symlinks. Ferry uses Tailscale by default and also accepts an explicit OpenSSH destination for local machines and existing SSH configurations.
 
 Ferry never copies logins. OAuth sessions stay on the machine that created them. Ferry starts a vendor login on the box and you finish it in a browser here.
