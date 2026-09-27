@@ -8,6 +8,7 @@ import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 import type { Refusal } from "../src/manifest.ts";
 import { loadRegistry } from "../src/registry/load.ts";
 import type { Registry, RegistryConfig, RegistryProblem } from "../src/registry/load.ts";
+import { toolDefaults } from "../src/registry/types.ts";
 
 const homes: string[] = [];
 
@@ -56,7 +57,78 @@ describe("operator entries", () => {
       "pi",
       "cursor",
     ]);
-    expect(registry.tools.map((tool) => tool.id)).toEqual(["gh", "claude", "codex", "pi", "cursor"]);
+    expect(registry.tools.map((tool) => tool.id)).toEqual([
+      "gh",
+      "claude",
+      "codex",
+      "pi",
+      "cursor",
+      "node",
+      "npm",
+      "pnpm",
+      "bun",
+      "docker",
+      "vercel",
+      "infisical",
+      "playwright",
+    ]);
+  });
+
+  test("the kind of each builtin tool sets its install mode and default policy", () => {
+    const defaults = Object.fromEntries(
+      registryOf({}).tools.map((tool) => [tool.id, `${tool.kind} ${toolDefaults(tool).mode} ${toolDefaults(tool).policy}`]),
+    );
+
+    expect(defaults).toEqual({
+      gh: "tool mirror operator",
+      claude: "agent always latest",
+      codex: "agent always latest",
+      pi: "agent always latest",
+      cursor: "agent always latest",
+      node: "tool mirror operator",
+      npm: "tool mirror operator",
+      pnpm: "tool mirror operator",
+      bun: "tool mirror operator",
+      docker: "tool mirror operator",
+      vercel: "tool mirror operator",
+      infisical: "tool mirror operator",
+      playwright: "tool mirror operator",
+    });
+  });
+
+  test("a [[tool]] entry without a kind keeps the agent defaults", () => {
+    const tool = registryOf({ tool: [{ id: "aider", install: { command: "pipx install aider-chat" } }] }).tools.at(-1);
+
+    expect(tool && toolDefaults(tool)).toEqual({ mode: "always", policy: "latest" });
+  });
+
+  test("every builtin tool names a version command, and each dependency is a builtin tool", () => {
+    const tools = registryOf({}).tools;
+    const ids = new Set(tools.map((tool) => tool.id));
+
+    for (const tool of tools) {
+      expect(tool.name).toBeString();
+      expect(tool.localVersion).toBeString();
+      expect(tool.boxVersion).toBeString();
+      for (const dependency of tool.dependsOn ?? []) expect(ids.has(dependency)).toBe(true);
+      for (const dir of tool.pathDirs ?? []) expect(dir.startsWith("/") || dir.includes("..")).toBe(false);
+    }
+    expect(Object.fromEntries(tools.filter((tool) => tool.dependsOn).map((tool) => [tool.id, tool.dependsOn]))).toEqual({
+      npm: ["node"],
+      pnpm: ["node"],
+      vercel: ["node"],
+      playwright: ["node"],
+    });
+    expect(Object.fromEntries(tools.filter((tool) => tool.pathDirs).map((tool) => [tool.id, tool.pathDirs]))).toEqual({
+      claude: [".local/bin"],
+      codex: [".local/bin"],
+      pi: [".pi/agent/bin"],
+      cursor: [".local/bin"],
+      node: [".nvm/current/bin"],
+      pnpm: [".local/bin"],
+      bun: [".bun/bin"],
+      vercel: [".local/bin"],
+    });
   });
 
   test("a registered harness contributes its skills to the seed", () => {

@@ -555,6 +555,29 @@ describe("ferry init", () => {
     expect(readConfig(home)?.update).toEqual({ watch: true });
   });
 
+  test("a second run keeps the [tools] table", async () => {
+    const home = makeHome();
+    write(join(home, ".ferry/config.toml"), [
+      "version = 1",
+      'publisher = "first-operator"',
+      'snapshot_url = "snapshot.git"',
+      "",
+      "[host]",
+      'tailscale = "box"',
+      'ssh_user = "david"',
+      "",
+      "[tools]",
+      'node = "operator"',
+      'bun = "1.4.2"',
+      "",
+    ].join("\n"));
+    const { deps } = dependencies(home);
+
+    await runInit({ home, harnesses: BUILTIN_HARNESSES }, deps);
+
+    expect(readConfig(home)?.tools).toEqual({ node: "operator", bun: "1.4.2" });
+  });
+
   test("a second run keeps the integration switches", async () => {
     const home = makeHome();
     write(join(home, ".ferry/config.toml"), [
