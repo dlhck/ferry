@@ -7,6 +7,7 @@ import type { DenyRuleDescription } from "./manifest.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
 import type { TipReport } from "./store.ts";
 import { changedPaths } from "./sync.ts";
+import type { ToolStatus } from "./tools/check.ts";
 
 export type StatusDependencyError = {
   readonly code: "inspection-failed";
@@ -37,6 +38,10 @@ export type BoxStatusDependencies = {
   readonly auth: {
     status(): Promise<AuthStatusReport>;
     mcpStatus(): Promise<readonly McpLoginStatus[]>;
+  };
+  /** The registry tools with the policies of this box. `online` is false when the box is offline. */
+  readonly tools?: {
+    check(online: boolean): Promise<readonly ToolStatus[]>;
   };
   /** The integrations that are enabled for this box only. */
   readonly integrations?: readonly {
@@ -114,6 +119,8 @@ export type BoxStatus = {
     readonly loginRequired: readonly string[];
     readonly error: StatusDependencyError | null;
   };
+  /** One entry for each registry tool. Empty when the box check failed; the error is in `errors`. */
+  readonly tools?: readonly ToolStatus[];
   /** Present only when at least one integration is enabled for this box. */
   readonly integrations?: Readonly<Partial<Record<IntegrationId, IntegrationStatus>>>;
   /** The errors of this box. */
@@ -147,7 +154,11 @@ const BOX_LIMIT = 4;
 export async function composeStatus(dependencies: StatusDependencies): Promise<StatusReport> {
   const progress = dependencies.progress ?? noProgress;
   progress.plan(
-    1 + dependencies.boxes.reduce((total, box) => total + BOX_STEPS + (box.integrations?.length ?? 0), 0),
+    1 +
+      dependencies.boxes.reduce(
+        (total, box) => total + BOX_STEPS + (box.tools ? 1 : 0) + (box.integrations?.length ?? 0),
+        0,
+      ),
   );
   const errors: StatusError[] = [];
   let denyList: readonly DenyRuleDescription[] = [];
@@ -204,7 +215,7 @@ type SharedStatus = {
   readonly operatorIdentity: GitIdentity | null;
 };
 
-/** The steps of one box without its integrations. */
+/** The steps of one box without its tools and integrations. */
 const BOX_STEPS = 8;
 
 async function composeBoxStatus(
@@ -360,6 +371,26 @@ async function composeBoxStatus(
     progress.skip("Checking MCP logins on the box", OFFLINE);
   }
 
+  let tools: readonly ToolStatus[] | undefined;
+  if (dependencies.tools) {
+    const name = "Checking tools on the box";
+    if (online) {
+      try {
+        const check = dependencies.tools;
+        tools = await step(progress, name, () => check.check(true), undefined, (rows) => {
+          const warnings = rows.filter((row) => TOOL_WARNINGS.includes(row.state)).length;
+          return warnings > 0 ? plural(warnings, "warning") : undefined;
+        });
+      } catch (cause) {
+        errors.push(dependencyError("box", cause));
+        tools = [];
+      }
+    } else {
+      progress.skip(name, OFFLINE);
+      tools = await dependencies.tools.check(false);
+    }
+  }
+
   const integrations: Partial<Record<IntegrationId, IntegrationStatus>> = {};
   for (const integration of enabledIntegrations) {
     const name = `Checking ${integration.name} on the box`;
@@ -414,6 +445,7 @@ async function composeBoxStatus(
     managedPaths: { allHealthy, unhealthy, error: managedPathsError },
     auth: { providers, loginRequired, error: authError },
     mcpLogins: { loginRequired: mcpLoginRequired, error: mcpError },
+    ...(tools ? { tools } : {}),
     ...(enabledIntegrations.length > 0 ? { integrations } : {}),
     errors,
   };
@@ -481,6 +513,8 @@ function orderedProgress(
 }
 
 const OFFLINE = "host offline";
+/** The tool states that print a warning. */
+const TOOL_WARNINGS: readonly ToolStatus["state"][] = ["drift", "missing", "hidden"];
 
 /** Run one inspection as a progress step. A failed Link result is a failed step, with its error code as detail. */
 function inspect<T>(progress: Progress, name: string, work: () => T | Promise<T>): Promise<T> {

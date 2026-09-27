@@ -10,7 +10,7 @@ import {
 import { resolveBoxes, type ResolvedBox } from "./boxes.ts";
 import { readConfig, resolveLinkOptions, type OperatorHostConfig, type PartialOperatorConfig } from "./config.ts";
 import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
-import { Link, type LinkOptions } from "./link.ts";
+import { BunHostAdapter, Link, type HostAdapter, type HostCommandResult, type LinkOptions } from "./link.ts";
 import {
   BOX_GIT_IDENTITY_COMMAND,
   readOperatorGitIdentity,
@@ -26,6 +26,7 @@ import {
 } from "./registry/load.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
 import { composeStatus, type BoxStatus, type BoxStatusDependencies, type StatusReport } from "./status.ts";
+import { checkTools, type ToolStatus } from "./tools/check.ts";
 import { effectivePolicy } from "./tools/resolve.ts";
 import { RealGitRunner, Store, type TipReport } from "./store.ts";
 import { boxChangesCommand } from "./sync.ts";
@@ -63,6 +64,8 @@ export type StatusCommandDependencies = {
     tools: readonly ToolDescriptor[],
   ) => StatusAuth;
   readonly denyRules: () => readonly DenyRuleDescription[];
+  /** Runs the operator version commands of the tools. */
+  readonly local: HostAdapter;
   /** All built-in integrations. Status checks the ones that the config enables. */
   readonly integrations: readonly Integration[];
   readonly writeLine: (line: string) => void;
@@ -80,12 +83,14 @@ export async function runStatusCommand(
   const registry = effectiveRegistry(config, resolved.loadRegistry);
   const home = resolved.home();
   const store = resolved.createStore(home);
+  // The boxes share each operator version read.
+  const local = onceEach(resolved.local);
 
   const report = await composeStatus({
     operator: { gitIdentity: () => resolved.readOperatorGitIdentity(home) },
     store,
     manifest: { denyRules: resolved.denyRules },
-    boxes: boxes.map((box) => boxDependencies(box, config, registry, resolved)),
+    boxes: boxes.map((box) => boxDependencies(box, config, registry, local, resolved)),
     progress: resolved.progress,
   });
 
@@ -97,6 +102,7 @@ function boxDependencies(
   box: ResolvedBox,
   config: StatusConfig,
   registry: Registry,
+  local: HostAdapter,
   resolved: StatusCommandDependencies,
 ): BoxStatusDependencies {
   const link = resolved.createLink(resolveLinkOptions(box.host));
@@ -139,6 +145,7 @@ function boxDependencies(
       },
     },
     auth: resolved.createAuthStart(link, registry.tools),
+    tools: { check: (online) => checkTools(registry.tools, box.tools, local, online ? link : null) },
     integrations: resolved.integrations
       .filter((integration) => box.integrations[integration.id] === true)
       .map((integration) => ({
@@ -187,6 +194,7 @@ function boxLines(box: BoxStatus, operator: GitIdentity | null): string[] {
     "",
     managedPaths(box),
     ...box.managedPaths.unhealthy.map((action) => `  - ${managedPath(action)}`),
+    ...toolLines(box.tools),
     "",
     "Authentication:",
     ...(box.auth.providers.length === 0
@@ -228,6 +236,7 @@ const defaultDependencies: StatusCommandDependencies = {
   inspectApply: (input) => apply(input),
   createAuthStart: (link, tools) => new AuthStart(link, tools),
   denyRules,
+  local: new BunHostAdapter(),
   integrations: INTEGRATIONS,
   writeLine: console.log,
   progress: noProgress,
@@ -339,6 +348,66 @@ function integrations(box: BoxStatus): string[] {
       ...entry.warnings.map((warning) => `    WARNING: ${warning}`),
     ]),
   ];
+}
+
+/** One row for each tool, then one warning for each tool to fix. */
+function toolLines(tools: readonly ToolStatus[] | undefined): string[] {
+  if (tools === undefined) return [];
+  if (tools.length === 0) return ["", "Tools:", "  unavailable"];
+  const rows = tools.map((tool) => [
+    tool.id,
+    tool.policy,
+    `operator ${tool.operator ?? "-"}`,
+    `target ${tool.target ?? (tool.policy === "latest" && tool.state !== "skipped" ? "latest" : "-")}`,
+    `box ${tool.box ?? "-"}`,
+    toolState(tool),
+  ]);
+  const widths = rows[0]!.map((_, column) => Math.max(...rows.map((row) => row[column]!.length)));
+  return [
+    "",
+    "Tools:",
+    ...rows.map((row) => `  ${row.map((cell, column) => (column === row.length - 1 ? cell : cell.padEnd(widths[column]!))).join("  ")}`),
+    ...tools.flatMap((tool) => {
+      switch (tool.state) {
+        case "drift":
+          return [`  WARNING: ${tool.id} is ${tool.box} on the box, and the target is ${tool.target}. Run ferry update.`];
+        case "missing":
+          return [`  WARNING: ${tool.id} is not on the box. Run ferry install.`];
+        case "hidden":
+          return [`  WARNING: ${tool.id}: ${tool.reason}. Run ferry sync to write the PATH block of ~/.profile.`];
+        default:
+          return [];
+      }
+    }),
+  ];
+}
+
+function toolState(tool: ToolStatus): string {
+  switch (tool.state) {
+    case "ok":
+      return "ok";
+    case "skipped":
+    case "unknown":
+      return `${tool.state} (${tool.reason})`;
+    default:
+      return tool.state.toUpperCase();
+  }
+}
+
+/** Run each distinct command one time, and give each caller the same result. */
+function onceEach(adapter: HostAdapter): HostAdapter {
+  const results = new Map<string, Promise<HostCommandResult>>();
+  return {
+    run(command) {
+      const key = JSON.stringify(command.argv);
+      let result = results.get(key);
+      if (result === undefined) {
+        result = adapter.run(command);
+        results.set(key, result);
+      }
+      return result;
+    },
+  };
 }
 
 function person(identity: GitIdentity): string {
