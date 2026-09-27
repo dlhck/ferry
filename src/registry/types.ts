@@ -27,6 +27,12 @@ export type HarnessDescriptor = {
    * to one store directory. Only a builtin descriptor sets them.
    */
   readonly extraRoots?: readonly string[];
+  /**
+   * The settings file of the harness and the keys ferry carries from it. No
+   * other key leaves the machine, and the box keeps its other keys. Only a
+   * builtin descriptor sets this.
+   */
+  readonly settings?: { readonly file: string; readonly keys: readonly string[] };
 };
 
 /** Codex, Pi, and Cursor Agent read `.agents/skills` instead of their own copies. */

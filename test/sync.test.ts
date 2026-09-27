@@ -31,6 +31,7 @@ const seed: Seed = {
   skills: [],
   instructions: null,
   roots: [],
+  settings: [],
   identity: "seed-identity",
   leftovers: [],
 };

@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import type { Seed } from "../src/manifest.ts";
+import { readSeed, type Seed } from "../src/manifest.ts";
 import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 import {
   StoreRefusal,
@@ -42,6 +42,7 @@ function seed(body = "Use small commits.\n"): Seed {
     ],
     instructions: { bytes: Buffer.from("Keep changes surgical.\n") },
     roots: [],
+    settings: [],
     identity: `seed-${body}`,
     leftovers: [],
   };
@@ -63,6 +64,7 @@ const expectedMetadata = {
       skillRoot: ".claude/skills",
       instructionFile: ".claude/CLAUDE.md",
       extraRoots: [".claude/agents", ".claude/commands"],
+      settings: { file: ".claude/settings.json", keys: ["enabledPlugins", "extraKnownMarketplaces"] },
     },
     {
       id: "codex",
@@ -387,3 +389,49 @@ function sameFiles(a: Map<string, Uint8Array>, b: Map<string, Uint8Array>): bool
   }
   return true;
 }
+
+describe("store layout of carried settings keys", () => {
+  test("env, apiKeyHelper, permissions, and hooks never enter a commit", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-store-home-"));
+    homes.push(home);
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(
+      join(home, ".claude", "settings.json"),
+      JSON.stringify({
+        env: { API_TOKEN: "env-secret-value" },
+        apiKeyHelper: "/usr/local/bin/print-key",
+        permissions: { allow: ["Bash(git status)"] },
+        hooks: { Stop: [{ hooks: [{ type: "command", command: "notify" }] }] },
+        enabledPlugins: { "review@team": true },
+        extraKnownMarketplaces: {
+          team: { source: { source: "github", repo: "example/claude-plugins" } },
+        },
+      }),
+    );
+    const value = readSeed(home, BUILTIN_HARNESSES);
+    if (!value.ok) throw new Error("expected a seed");
+    const git = new FakeGit();
+    const store = await openStore("snapshot.git", value, { git, home, harnesses: BUILTIN_HARNESSES });
+
+    await store.publish(value);
+
+    expect(JSON.parse(Buffer.from(git.remoteFiles.get("settings/claude.json") ?? []).toString())).toEqual({
+      enabledPlugins: { "review@team": true },
+      extraKnownMarketplaces: {
+        team: { source: { source: "github", repo: "example/claude-plugins" } },
+      },
+    });
+    expect([...git.remoteFiles.keys()].some((path) => path.endsWith("settings.json"))).toBe(false);
+    for (const [path, bytes] of git.remoteFiles) {
+      if (path === "ferry.json") continue;
+      const text = Buffer.from(bytes).toString();
+      for (const key of ["env", "apiKeyHelper", "permissions", "hooks", "env-secret-value"]) {
+        expect(text).not.toContain(`"${key}"`);
+      }
+      expect(text).not.toContain("env-secret-value");
+    }
+    expect(git.invocations.find((invocation) => invocation.args[0] === "add")?.args).toContain(
+      "settings",
+    );
+  });
+});

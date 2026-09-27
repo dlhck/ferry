@@ -24,6 +24,7 @@ function fixture(source = "same\n", stored = "same\n") {
     skills: [{ name: "example", files: [{ path: "SKILL.md", bytes: Buffer.from(source) }] }],
     instructions: null,
     roots: [],
+    settings: [],
     identity: "identity",
     leftovers: [],
   };
