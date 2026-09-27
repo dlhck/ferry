@@ -11,6 +11,7 @@ import type {
 } from "../src/init.ts";
 import { createPaseo } from "../src/integrations/paseo.ts";
 import { denyRules } from "../src/manifest.ts";
+import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 import type { SyncInput, SyncResult } from "../src/sync.ts";
 import type { UninstallInput, UninstallResult } from "../src/uninstall.ts";
 import { lineProgress, noProgress, type Progress } from "../src/progress.ts";
@@ -206,6 +207,20 @@ describe("ferry --help", () => {
       "    Open Settings → Add host → Remote SSH.",
       "    Enter ssh://ploi@box.",
     ]);
+  });
+
+  test("wires ferry tools to the registry tools of the config", async () => {
+    const received: string[][] = [];
+    const program = buildProgram({
+      readConfig: () => ({ tools: { bun: "1.4.2" } }),
+      runTools: async (dependencies) => {
+        received.push(dependencies.tools.map((tool) => tool.id));
+      },
+    });
+
+    await program.parseAsync(["tools"], { from: "user" });
+
+    expect(received).toEqual([BUILTIN_TOOLS.map((tool) => tool.id)]);
   });
 
   test("wires integrations enable and disable with their flags", async () => {

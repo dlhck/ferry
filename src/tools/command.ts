@@ -1,0 +1,91 @@
+/**
+ * `ferry tools` lists the registry tools, the policy of each one, and the
+ * version on the operator machine. It reads this machine only. The box state
+ * is a part of `ferry status`.
+ */
+
+import { readConfig, type PartialOperatorConfig } from "../config.ts";
+import { BunHostAdapter, type HostAdapter } from "../link.ts";
+import { toolDefaults, type ToolDescriptor } from "../registry/types.ts";
+import { readLocalVersion } from "./version.ts";
+
+/**
+ * Tools that projects need, from the inventory in issue #106, that Ferry has
+ * no recipe for. They stay off the box. `ferry tools` reports them only.
+ */
+export const PROJECT_TOOLS: readonly Pick<ToolDescriptor, "id" | "localVersion">[] = [
+  { id: "yarn", localVersion: "yarn --version" },
+  { id: "uv", localVersion: "uv --version" },
+  { id: "go", localVersion: "go version" },
+  { id: "rust", localVersion: "rustc --version" },
+  { id: "java", localVersion: "java -version" },
+  { id: "pgsync", localVersion: "pgsync --version" },
+];
+
+export type ToolsCommandDependencies = {
+  readonly readConfig: () => PartialOperatorConfig | null;
+  /** The registry tools. The CLI resolves the registry once. */
+  readonly tools: readonly ToolDescriptor[];
+  readonly projectTools: readonly Pick<ToolDescriptor, "id" | "localVersion">[];
+  /** Runs the version commands on the operator machine. Tests inject a fake. */
+  readonly local: HostAdapter;
+  readonly writeLine: (line: string) => void;
+};
+
+export async function runToolsCommand(
+  dependencies: Pick<ToolsCommandDependencies, "tools"> & Partial<ToolsCommandDependencies>,
+): Promise<void> {
+  const resolved = { ...defaultDependencies, ...dependencies };
+  const policies = resolved.readConfig()?.tools ?? {};
+  const [versions, projectVersions] = await Promise.all([
+    Promise.all(resolved.tools.map((tool) => readLocalVersion(tool, resolved.local))),
+    Promise.all(resolved.projectTools.map((tool) => readLocalVersion(tool, resolved.local))),
+  ]);
+
+  const rows = resolved.tools.map((tool, index) => {
+    const defaults = toolDefaults(tool);
+    const configured = policies[tool.id];
+    const version = versions[index] ?? null;
+    return [
+      tool.id,
+      tool.kind ?? "agent",
+      defaults.mode,
+      configured ?? `${defaults.policy} (default)`,
+      version === null ? "no" : "yes",
+      version ?? "-",
+      tool.name ?? tool.id,
+    ];
+  });
+  resolved.writeLine("Tools");
+  for (const line of table([["TOOL", "KIND", "INSTALL", "POLICY", "OPERATOR", "VERSION", "NAME"], ...rows])) {
+    resolved.writeLine(`  ${line}`);
+  }
+
+  if (resolved.projectTools.length > 0) {
+    resolved.writeLine("");
+    resolved.writeLine("Needed by projects, no Ferry recipe");
+    const projectRows = resolved.projectTools.map((tool, index) => {
+      const version = projectVersions[index] ?? null;
+      return [tool.id, version === null ? "not on the operator machine" : `on the operator machine, ${version}`];
+    });
+    for (const line of table(projectRows)) resolved.writeLine(`  ${line}`);
+  }
+
+  resolved.writeLine("");
+  resolved.writeLine("ferry tools reads this machine only. It does not connect to the box.");
+}
+
+const defaultDependencies: Omit<ToolsCommandDependencies, "tools"> = {
+  readConfig,
+  projectTools: PROJECT_TOOLS,
+  local: new BunHostAdapter(),
+  writeLine: console.log,
+};
+
+/** Pad each column to its widest cell. The last column is not padded. */
+function table(rows: readonly (readonly string[])[]): string[] {
+  const widths = rows[0]?.map((_, column) => Math.max(...rows.map((row) => row[column]?.length ?? 0))) ?? [];
+  return rows.map((row) =>
+    row.map((cell, column) => (column === row.length - 1 ? cell : cell.padEnd(widths[column] ?? 0))).join("  "),
+  );
+}

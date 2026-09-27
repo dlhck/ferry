@@ -41,6 +41,7 @@ import {
   type StatusCommandDependencies,
   type StatusCommandInput,
 } from "./status-command.ts";
+import { runToolsCommand, type ToolsCommandDependencies } from "./tools/command.ts";
 import { runWatch, type WatchDependencies, type WatchInput } from "./watch.ts";
 import {
   installWatchService,
@@ -102,6 +103,9 @@ type CliDependencies = {
   readonly runIntegration?: (
     input: IntegrationCommandInput,
     dependencies?: Partial<IntegrationCommandDependencies>,
+  ) => Promise<void>;
+  readonly runTools?: (
+    dependencies: Pick<ToolsCommandDependencies, "tools"> & Partial<ToolsCommandDependencies>,
   ) => Promise<void>;
   readonly runProcess?: RunProcess;
   readonly readConfig?: () => PartialOperatorConfig | null;
@@ -346,6 +350,13 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
           { progress, writeLine, ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}) },
         ),
       );
+    });
+
+  program
+    .command("tools")
+    .description("List the tools, the version policy of each one, and the versions on this machine")
+    .action(async () => {
+      await (dependencies.runTools ?? runToolsCommand)({ tools: registry().tools, readConfig: config, writeLine });
     });
 
   const watch = program
