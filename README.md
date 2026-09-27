@@ -358,7 +358,35 @@ paseo = true
 
 A repeat `ferry init` keeps this section. Ferry refuses an unknown integration name.
 
-This release does not set up Paseo on the box. It has no `ferry integrations enable` or `disable` command, and `ferry update`, `ferry status`, and `ferry move` do not use the key. When the key is `true`, `ferry integrations` prints the steps to connect Paseo Desktop to the box: open Settings → Add host → Remote SSH and enter `ssh://<box destination>`. Ferry cannot add the host for you, because Paseo Desktop has no command for it.
+This release does not set up Paseo on the box. It has no `ferry integrations enable` or `disable` command, and `ferry update` does not use the key. When the key is `true`, `ferry integrations` prints the steps to connect Paseo Desktop to the box: open Settings → Add host → Remote SSH and enter `ssh://<box destination>`. Ferry cannot add the host for you, because Paseo Desktop has no command for it.
+
+### Status and move
+
+When `paseo = true`, `ferry status` adds an `Integrations` section and a step called "Checking Paseo on the box". The step runs one read-only command on the box. It reads `systemctl --user is-active` and `is-enabled` for `ferry-paseo.service`, `is-active` for the old `paseo.service`, and `paseo daemon status --json`:
+
+```
+Integrations:
+  Paseo:
+    Service: ferry-paseo.service active, enabled
+    Daemon: running, reachable
+    Version: box 0.9.2, local app 0.9.2
+    Listen: 127.0.0.1:6767, relay off
+    Providers: claude available, codex available
+```
+
+If there is no local Paseo app, the version line says `not pinned (no local Paseo app)`. Ferry prints a `WARNING` line for each of these problems:
+
+- The box version is not the same as the local app version.
+- The daemon is not running.
+- The daemon listens on an address that is not loopback.
+- The relay is on.
+- The old hand-written `paseo.service` is active, so two daemons can run.
+- Paseo is not installed on the box.
+- Ferry cannot read the output of `paseo daemon status --json`.
+
+`ferry status --json` adds `integrations.paseo` with `name`, `lines`, `warnings`, and `state`. `state` has the unit states, `localDaemon`, `connectedDaemon`, `daemonVersion`, `localVersion`, `pinned`, `listen`, `relay`, `providers`, and `error`. Ferry never shows the `serverId`, the hostname, or the values in `~/.paseo/config.json`. When the host is offline, Ferry skips the check.
+
+When `paseo = true`, `ferry move` to the box adds a step called "Registering the project in Paseo" after the move. The step runs `paseo project create <path>` on the box. A repeat run is safe, because Paseo returns the existing project for a known directory. If the step fails, Ferry prints a warning and the move stays complete. `ferry move --from-box` does not register the project on this machine. With `--remove`, Ferry does not remove the source project from Paseo. It prints a line that tells you how to remove it: run `paseo project ls` to find its ID, then `paseo project delete <id>`. This does not delete files.
 
 ## Automatic sync
 
