@@ -110,7 +110,6 @@ describe("init on an operator-shaped machine", () => {
 
     expect(resolve(home)).not.toBe(resolve(homedir()));
     expect(snapshotOperatorHome()).toEqual(operator);
-    expect(result.address).toBe(SSH_DESTINATION);
     expect(result.published).toBe(true);
     expect(result.leftovers.map((leftover) => leftover.path)).toEqual([
       join(home, ".agents/skills/not-a-skill.txt"),

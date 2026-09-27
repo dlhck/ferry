@@ -165,8 +165,6 @@ export function formatStatus(report: StatusReport): string {
     "MCP logins:",
     ...mcpLogins(report),
     "",
-    `Paseo listen hint: ${report.paseo.listen ?? "unavailable while host is offline"}`,
-    "",
     "Deny list:",
     ...report.denyList.map(
       (rule) => `  ${rule.code}: ${rule.behavior} ${rule.description}`,

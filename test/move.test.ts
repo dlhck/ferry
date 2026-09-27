@@ -44,7 +44,7 @@ function write(path: string, body: string | Uint8Array): void {
   writeFileSync(path, body);
 }
 
-/** A temp world: an operator home, a box home, a bare origin, and a fake paseo on the box. */
+/** A temp world: an operator home, a box home, and a bare origin. */
 function world() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "ferry-move-test-")));
   roots.push(root);
@@ -63,9 +63,6 @@ function world() {
   git(seed, "add", ".");
   git(seed, "commit", "-q", "-m", "init");
   git(seed, "push", "-q", "origin", "HEAD:main");
-  const paseoLog = join(root, "paseo.log");
-  write(join(bin, "paseo"), `#!/bin/sh\necho "$@" >> '${paseoLog}'\n`);
-  chmodSync(join(bin, "paseo"), 0o755);
 
   const commands: { command: string; options: RunOptions }[] = [];
   /** Runs each box command in `sh` with the box home, as OpenSSH would on the box. */
@@ -85,7 +82,7 @@ function world() {
       return result;
     },
   };
-  return { root, operator, box, origin, link, commands, paseoLog };
+  return { root, operator, box, origin, link, commands };
 }
 
 type World = ReturnType<typeof world>;
@@ -193,7 +190,8 @@ describe("ferry move to the box", () => {
     expect(result.lines).toContain("Refuse: .env.local (environment file)");
     expect(result.lines).toContain("Skip: node_modules (build output, cache, IDE state, or macOS metadata)");
     expect(result.lines).toContain("Skip: .idea (build output, cache, IDE state, or macOS metadata)");
-    expect(readFileSync(w.paseoLog, "utf8").trim()).toBe(`project create ${boxApp}`);
+    expect(result.lines.at(-2)).toMatch(/^(Carry|Refuse|Skip|Note): /);
+    expect(result.lines.at(-1)).toMatch(/^Moved ~\/Developer\/app to the box: carried 4, refused 1,/);
     expect(existsSync(app)).toBe(true);
     expect(result.events).toEqual([
       "start:Preflight",
@@ -203,8 +201,6 @@ describe("ferry move to the box", () => {
       "start:Carrying 4 files",
       "done",
       "start:Verifying",
-      "done",
-      "start:Registering in Paseo",
       "done",
     ]);
   });
@@ -403,7 +399,6 @@ describe("ferry move to the box", () => {
     expect(result.lines).toContain("Carry: AGENTS.md");
     expect(result.lines).toContain("Carry: .env.local");
     expect({ operator: listTree(w.operator), box: listTree(w.box) }).toEqual(before);
-    expect(existsSync(w.paseoLog)).toBe(false);
   });
 
   test("refuses a path outside the home and an existing destination", async () => {

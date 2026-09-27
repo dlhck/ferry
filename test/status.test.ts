@@ -171,7 +171,6 @@ describe("Status composer", () => {
         error: null,
       },
       mcpLogins: { loginRequired: ["claude/linear"], error: null },
-      paseo: { address: "100.64.0.8", port: 6767, listen: "100.64.0.8:6767" },
       denyList: denyRules,
       errors: [],
     });
@@ -281,7 +280,6 @@ describe("Status composer", () => {
     expect(report.boxSudo).toEqual({ passwordless: null, watchUpdateBlocked: false, error: null });
     expect(report.managedPaths.allHealthy).toBeNull();
     expect(report.auth.providers).toEqual([]);
-    expect(report.paseo).toEqual({ address: null, port: 6767, listen: null });
     expect(report.errors).toContainEqual(offline.error);
     expect(calls.mutations).toEqual([]);
   });

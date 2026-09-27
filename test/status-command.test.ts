@@ -191,7 +191,6 @@ function fakeStack(
     writeLine: (line: string) => output.push(line),
     writeConfig: () => mutations.push("config.write"),
     acquireSyncLock: () => mutations.push("sync.lock"),
-    applyPaseoConfig: () => mutations.push("paseo.write"),
   };
 
   return {
@@ -219,9 +218,8 @@ describe("ferry status command", () => {
     expect(stack.output[0]).toContain("codex: LOGIN REQUIRED");
     expect(stack.output[0]).toContain("pi: MANUAL LOGIN REQUIRED. SSH to the box");
     expect(stack.output[0]).toContain(
-      "MCP logins:\n  codex/linear: LOGIN REQUIRED, run ferry auth codex --mcp linear",
+      "MCP logins:\n  codex/linear: LOGIN REQUIRED, run ferry auth codex --mcp linear\n\nDeny list:",
     );
-    expect(stack.output[0]).toContain("Paseo listen hint: 100.64.0.8:6767");
     expect(stack.output[0]).toContain("dotenv: refuse environment file");
     expect(stack.mutations).toEqual([]);
     expect(stack.reads.filter((call) => call === "config.read")).toHaveLength(1);
@@ -384,7 +382,6 @@ describe("ferry status command", () => {
       watchUpdateBlocked: false,
       error: null,
     });
-    expect(stack.output[0]).toContain("Paseo listen hint: unavailable while host is offline");
     expect(stack.output[0]).toContain("network/host-offline");
     expect(stack.reads).not.toContain("apply.inspect");
     expect(stack.reads).not.toContain("auth.status");
