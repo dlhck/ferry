@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -162,6 +163,7 @@ describe("runSync", () => {
           prohibitedCalls += 1;
           throw new Error("Store must not be opened");
         },
+        acquireStoreLock: async () => () => {},
         acquireLock: () => {
           prohibitedCalls += 1;
           throw new Error("lock must not be acquired");
@@ -413,6 +415,10 @@ describe("runSync", () => {
           return link;
         },
         writePlan: () => events.push("plan"),
+        acquireStoreLock: async () => {
+          events.push("store-lock");
+          return () => events.push("store-unlock");
+        },
         acquireLock: () => {
           events.push("lock");
           return () => events.push("unlock");
@@ -437,6 +443,7 @@ describe("runSync", () => {
             unmanaged: [],
           };
         },
+        adopt: () => events.push("adopt"),
       },
     );
 
@@ -444,13 +451,16 @@ describe("runSync", () => {
       "create-link",
       "resolve-home",
       "plan",
-      "lock",
+      "store-lock",
       "open-store",
       "publish:chore: ship skills",
+      "store-unlock",
+      "lock",
       "update-box",
       "apply",
       "write-path",
       "unlock",
+      "adopt",
     ]);
     expect(linkCalls).toEqual([
       { command: `printf '%s\\n' "$HOME"`, options: undefined },
@@ -510,6 +520,7 @@ describe("runSync", () => {
         }),
         createLink: () => link,
         writePlan: () => {},
+        acquireStoreLock: async () => () => {},
         acquireLock: () => () => events.push("unlock"),
         openStore: async () => ({
           path: "/operator/.ferry/store",
@@ -523,7 +534,7 @@ describe("runSync", () => {
       },
     );
 
-    expect(events).toEqual(["apply", "install-plugins", "read-settings", "write-settings", "adopt", "unlock"]);
+    expect(events).toEqual(["apply", "install-plugins", "read-settings", "write-settings", "unlock", "adopt"]);
     const write = commands.find((call) => call.command.includes("mv "));
     expect(write?.command).toContain("/srv/ferry/.claude/settings.json");
     expect(write?.command).toContain('"review@team": true');
@@ -556,6 +567,7 @@ describe("runSync", () => {
         createLink: () => link,
         writePlan: () => {},
         writeLine: (line) => lines.push(line),
+        acquireStoreLock: async () => () => {},
         acquireLock: () => () => events.push("unlock"),
         openStore: async () => ({
           path: "/operator/.ferry/store",
@@ -569,7 +581,7 @@ describe("runSync", () => {
       },
     );
 
-    expect(events).toEqual(["apply", "declare-mcp", "adopt", "unlock"]);
+    expect(events).toEqual(["apply", "declare-mcp", "unlock", "adopt"]);
     expect(lines).toContain("Box MCP: could not declare claude MCP server linear");
   });
 
@@ -635,6 +647,7 @@ describe("runSync", () => {
             },
           };
         },
+        acquireStoreLock: async () => () => {},
         acquireLock: () => () => {},
         openStore: async () => ({
           path: "/operator/.ferry/store",
@@ -702,6 +715,7 @@ describe("runSync", () => {
           },
         }),
         writePlan: () => {},
+        acquireStoreLock: async () => () => {},
         acquireLock: () => () => {},
         openStore: async (_remote, _seed, options) => {
           storeHarnesses = options.harnesses;
@@ -730,137 +744,6 @@ describe("runSync", () => {
     expect(storeHarnesses).toBe(manifestHarnesses);
     expect(applyHarnesses).toBe(manifestHarnesses);
     expect(published).toBe(true);
-  });
-
-  test("refuses a concurrent sync for the same host and removes the lock after success", async () => {
-    const home = mkdtempSync(join(tmpdir(), "ferry-sync-lock-"));
-    let markPublishStarted: () => void = () => {};
-    let continuePublish: () => void = () => {};
-    const publishStarted = new Promise<void>((resolve) => {
-      markPublishStarted = resolve;
-    });
-    const publishMayFinish = new Promise<void>((resolve) => {
-      continuePublish = resolve;
-    });
-    const dependencies: SyncDependencies = {
-      readConfig: () => config,
-      publisher: () => "operator-machine",
-      readSeed: () => seed,
-      createLink: () => {
-        let calls = 0;
-        return {
-          run: async () => {
-            calls += 1;
-            return {
-              ok: true,
-              address: "box.example.ts.net",
-              stdout: calls === 1 ? "/srv/ferry\n" : "",
-              stderr: "",
-            };
-          },
-        };
-      },
-      openStore: async () => ({
-        path: join(home, ".ferry", "store"),
-        publish: async () => {
-          markPublishStarted();
-          await publishMayFinish;
-          return { published: false, tip: "abc123" };
-        },
-      }),
-      apply: async (input) => ({
-        checkout: input.checkout,
-        targetHome: input.targetHome,
-        actions: [],
-        unmanaged: [],
-      }),
-      writePlan: () => {},
-    };
-
-    try {
-      const first = runSync({ home }, dependencies);
-      await publishStarted;
-
-      await expect(runSync({ home }, dependencies)).rejects.toEqual(
-        expect.objectContaining({
-          code: "concurrent-sync",
-          origin: "operator",
-          message: expect.stringContaining("box"),
-        }),
-      );
-
-      continuePublish();
-      await first;
-      expect(readdirSync(join(home, ".ferry"))).toEqual([]);
-    } finally {
-      continuePublish();
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  test("recovers a lock left by a dead process", async () => {
-    const home = mkdtempSync(join(tmpdir(), "ferry-sync-stale-lock-"));
-    const lockDirectory = join(home, ".ferry");
-    let markPublishStarted: () => void = () => {};
-    let continuePublish: () => void = () => {};
-    let publishCalls = 0;
-    const publishStarted = new Promise<void>((resolve) => {
-      markPublishStarted = resolve;
-    });
-    const publishMayFinish = new Promise<void>((resolve) => {
-      continuePublish = resolve;
-    });
-    const dependencies: SyncDependencies = {
-      readConfig: () => config,
-      publisher: () => "operator-machine",
-      readSeed: () => seed,
-      createLink: () => {
-        let calls = 0;
-        return {
-          run: async () => ({
-            ok: true,
-            address: "box.example.ts.net",
-            stdout: ++calls === 1 ? "/srv/ferry\n" : "",
-            stderr: "",
-          }),
-        };
-      },
-      openStore: async () => ({
-        path: join(home, ".ferry", "store"),
-        publish: async () => {
-          publishCalls += 1;
-          if (publishCalls === 1) {
-            markPublishStarted();
-            await publishMayFinish;
-          }
-          return { published: false, tip: "abc123" };
-        },
-      }),
-      apply: async (input) => ({
-        checkout: input.checkout,
-        targetHome: input.targetHome,
-        actions: [],
-        unmanaged: [],
-      }),
-      adopt: () => {},
-      writePlan: () => {},
-    };
-
-    try {
-      const first = runSync({ home }, dependencies);
-      await publishStarted;
-      const [lockFile] = readdirSync(lockDirectory);
-      expect(lockFile).toMatch(/^sync-[a-f0-9]{16}\.lock$/);
-      writeFileSync(join(lockDirectory, lockFile!), JSON.stringify({ pid: 999_999_999 }));
-      continuePublish();
-      await first;
-
-      await runSync({ home }, dependencies);
-      expect(readdirSync(lockDirectory)).toEqual([]);
-    } finally {
-      continuePublish();
-      rmSync(home, { recursive: true, force: true });
-    }
   });
 
   test("names a failed box update, stops before Apply, and releases the lock", async () => {
@@ -893,6 +776,7 @@ describe("runSync", () => {
             },
           }),
           writePlan: () => {},
+          acquireStoreLock: async () => () => {},
           acquireLock: () => () => {
             released = true;
           },
@@ -946,6 +830,7 @@ describe("runSync", () => {
             },
           }),
           writePlan: () => {},
+          acquireStoreLock: async () => () => {},
           acquireLock: () => () => {
             released = true;
           },
@@ -970,8 +855,8 @@ describe("runSync", () => {
     expect(released).toBe(true);
   });
 
-  test("names the git remote when Store publication fails", async () => {
-    let released = false;
+  test("names the git remote when Store publication fails, before it locks the box", async () => {
+    let locked = false;
 
     await expect(
       runSync(
@@ -989,8 +874,10 @@ describe("runSync", () => {
             }),
           }),
           writePlan: () => {},
-          acquireLock: () => () => {
-            released = true;
+          acquireStoreLock: async () => () => {},
+          acquireLock: () => {
+            locked = true;
+            return () => {};
           },
           openStore: async () => {
             throw new Error("push rejected");
@@ -1004,7 +891,7 @@ describe("runSync", () => {
         message: expect.stringMatching(/git@example\.test.*push rejected/),
       }),
     );
-    expect(released).toBe(true);
+    expect(locked).toBe(false);
   });
 
   test("resets a dirty box checkout to the pushed commit and names each discarded file", async () => {
@@ -1043,6 +930,7 @@ describe("runSync", () => {
           createLink: () => ({ run: (command) => shellLink(root, boxHome, command) }),
           writePlan: () => {},
           writeLine: (line) => lines.push(line),
+          acquireStoreLock: async () => () => {},
           acquireLock: () => () => {},
           openStore: async () => ({
             path: operator,
@@ -1134,6 +1022,7 @@ describe("runSync progress", () => {
       }),
       writePlan: () => events.push("plan"),
       writeLine: (line) => events.push(`line:${line}`),
+      acquireStoreLock: async () => () => {},
       acquireLock: () => () => {},
       openStore: async () => ({
         path: "/operator/.ferry/store",
@@ -1162,8 +1051,8 @@ describe("runSync progress", () => {
       "Installing Claude plugins         ✔ done     1 warning                 0.1s",
       "Merging settings on the box       ✔ done                               0.1s",
       "Declaring MCP servers             ✔ done     2 servers                 0.1s",
-      "Adopting published local skills   ✔ done                               0.1s",
       "Writing the box PATH              ✔ done     updated ~/.profile        0.1s",
+      "Adopting published local skills   ✔ done                               0.1s",
     ]);
   });
 
@@ -1219,9 +1108,9 @@ describe("runSync progress", () => {
       "count:1/2",
       "count:2/2",
       "done",
-      "start:Adopting published local skills",
-      "done",
       "start:Writing the box PATH",
+      "done",
+      "start:Adopting published local skills",
       "done",
     ]);
   });
@@ -1284,7 +1173,7 @@ describe("a store update from one harness root", () => {
     const refuse = () => {
       throw new Error("must not run");
     };
-    return { createLink: refuse, openStore: refuse, acquireLock: refuse, apply: refuse, adopt: refuse };
+    return { createLink: refuse, openStore: refuse, acquireStoreLock: refuse, acquireLock: refuse, apply: refuse, adopt: refuse };
   }
 
   test("updates the store copy, publishes it, and links the real directory to the store", async () => {
@@ -1305,6 +1194,7 @@ describe("a store update from one harness root", () => {
               stderr: "",
             }),
           }),
+          acquireStoreLock: async () => () => {},
           acquireLock: () => () => {},
           apply: async (input) => ({
             checkout: input.checkout,
@@ -1482,6 +1372,7 @@ describe("sync with the Paseo integration", () => {
       },
       writePlan: (plan) => plans.push(plan),
       writeLine: (line) => lines.push(line),
+      acquireStoreLock: async () => () => {},
       acquireLock: () => () => {},
       openStore: async () => ({
         path: "/operator/.ferry/store",
@@ -1505,7 +1396,8 @@ describe("sync with the Paseo integration", () => {
     await sync.result;
 
     expect(sync.events).toContain("plan:12");
-    expect(sync.events.slice(-6)).toEqual([
+    expect(sync.events.slice(-2)).toEqual(["start:Adopting published local skills", "done:"]);
+    expect(sync.events.slice(-8, -2)).toEqual([
       "start:Writing the box PATH",
       "done:updated ~/.profile",
       "start:Carrying Paseo agent profiles",
@@ -1527,7 +1419,7 @@ describe("sync with the Paseo integration", () => {
     const sync = run(paseoHome(null));
     await sync.result;
 
-    expect(sync.events.slice(-4, -2)).toEqual(["start:Carrying Paseo agent profiles", "done:no profiles"]);
+    expect(sync.events.slice(-6, -4)).toEqual(["start:Carrying Paseo agent profiles", "done:no profiles"]);
     expect(sync.commands.some((command) => command.includes("paseo daemon") || command.includes(".paseo/"))).toBe(false);
   });
 
@@ -1535,7 +1427,7 @@ describe("sync with the Paseo integration", () => {
     const sync = run(paseoHome([reviewer]), { status: "" });
     await sync.result;
 
-    expect(sync.events.slice(-4, -2)).toEqual(["start:Carrying Paseo agent profiles", "fail"]);
+    expect(sync.events.slice(-6, -4)).toEqual(["start:Carrying Paseo agent profiles", "fail"]);
     expect(sync.lines.at(-1)).toStartWith("Warning: Ferry could not carry the Paseo agent profiles:");
   });
 
@@ -1545,7 +1437,7 @@ describe("sync with the Paseo integration", () => {
   };
   const restart = "systemctl --user daemon-reload && systemctl --user restart ferry-paseo.service";
 
-  test("rewrites the unit PATH and restarts the daemon as the last step when a config tool adds a directory", async () => {
+  test("rewrites the unit PATH and restarts the daemon as the last box step when a config tool adds a directory", async () => {
     const sync = run(paseoHome(null), { config: bunConfig });
     await sync.result;
 
@@ -1554,7 +1446,7 @@ describe("sync with the Paseo integration", () => {
     const write = sync.commands.find((command) => command.includes("ferry-paseo.service") && command.includes(" mv "));
     expect(write).toContain(":%h/.bun/bin:/usr/local/sbin");
     expect(sync.commands.at(-1)).toBe(restart);
-    expect(sync.events.slice(-2)).toEqual(["start:Updating the Paseo unit PATH", "done:restarted"]);
+    expect(sync.events.slice(-4, -2)).toEqual(["start:Updating the Paseo unit PATH", "done:restarted"]);
     expect(sync.lines).toContain(
       "The box PATH changed, so Ferry updated ferry-paseo.service and restarted the Paseo daemon. The restart stopped the agents that ran on the box.",
     );
@@ -1567,7 +1459,7 @@ describe("sync with the Paseo integration", () => {
 
     expect(sync.commands.some((command) => command.includes("ferry-paseo.service") && command.includes(" mv "))).toBe(false);
     expect(sync.commands).not.toContain(restart);
-    expect(sync.events.slice(-2)).toEqual(["start:Updating the Paseo unit PATH", "done:no changes"]);
+    expect(sync.events.slice(-4, -2)).toEqual(["start:Updating the Paseo unit PATH", "done:no changes"]);
     expect(sync.lines.some((line) => line.includes("restart"))).toBe(false);
   });
 
@@ -1575,7 +1467,7 @@ describe("sync with the Paseo integration", () => {
     const sync = run(paseoHome(null), { config: bunConfig, unit: null });
     await sync.result;
 
-    expect(sync.events.slice(-2)).toEqual(["start:Updating the Paseo unit PATH", "fail"]);
+    expect(sync.events.slice(-4, -2)).toEqual(["start:Updating the Paseo unit PATH", "fail"]);
     expect(sync.commands).not.toContain(restart);
     expect(sync.lines.at(-1)).toBe(
       "Warning: Ferry could not update the PATH of ferry-paseo.service: ~/.config/systemd/user/ferry-paseo.service is not on the box. Run ferry integrations enable paseo. The sync is complete.",
@@ -1652,5 +1544,230 @@ describe("sync with the Paseo integration", () => {
       "Paseo agent profiles: Reviewer -> box ~/.paseo/config.json daemon.agentProfiles, then paseo daemon reload. Ferry skips each profile whose provider is not available on the box.",
     );
     expect(await printed(config)).not.toContain("Paseo");
+  });
+});
+
+describe("sync locks", () => {
+  /** The box lock file name of the earlier single-lock version, so a running old watch and a new CLI share it. */
+  function boxLockFile(target: string): string {
+    return `sync-${createHash("sha256").update(target).digest("hex").slice(0, 16)}.lock`;
+  }
+
+  function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+    let resolve = () => {};
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  function lockedSync(
+    home: string,
+    destination: string,
+    events: string[],
+    hooks: { readonly publish?: () => Promise<void>; readonly apply?: () => Promise<void> } = {},
+  ): SyncDependencies {
+    return {
+      readConfig: () => ({ ...config, host: { transport: "ssh", destination } }),
+      publisher: () => "operator-machine",
+      readSeed: () => seed,
+      createLink: () => ({
+        run: async (command) => {
+          const home = command.startsWith("printf");
+          events.push(`${destination}:${home ? "resolve-home" : "box-command"}`);
+          return { ok: true, address: destination, stdout: home ? "/srv/ferry\n" : "", stderr: "" };
+        },
+      }),
+      openStore: async () => ({
+        path: join(home, ".ferry", "store"),
+        publish: async () => {
+          events.push(`${destination}:publish`);
+          await hooks.publish?.();
+          events.push(`${destination}:published`);
+          return { published: true, tip: "abc123" };
+        },
+      }),
+      apply: async (input) => {
+        events.push(`${destination}:apply`);
+        await hooks.apply?.();
+        events.push(`${destination}:applied`);
+        return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] };
+      },
+      adopt: () => {
+        events.push(`${destination}:adopt`);
+      },
+      writePlan: () => {},
+    };
+  }
+
+  test("serializes two publishes on the store lock", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-sync-store-lock-"));
+    const events: string[] = [];
+    const publishing = deferred();
+    const release = deferred();
+    try {
+      const first = runSync(
+        { home },
+        lockedSync(home, "a@box-a", events, {
+          publish: async () => {
+            publishing.resolve();
+            await release.promise;
+          },
+        }),
+      );
+      await publishing.promise;
+      expect(readdirSync(join(home, ".ferry"))).toEqual(["store.lock"]);
+
+      const second = runSync({ home }, lockedSync(home, "b@box-b", events));
+      await new Promise((done) => setTimeout(done, 300));
+      expect(events.filter((event) => event.endsWith(":publish"))).toEqual(["a@box-a:publish"]);
+
+      release.resolve();
+      await Promise.all([first, second]);
+      expect(events.filter((event) => /:publish(ed)?$/.test(event))).toEqual([
+        "a@box-a:publish",
+        "a@box-a:published",
+        "b@box-b:publish",
+        "b@box-b:published",
+      ]);
+      expect(readdirSync(join(home, ".ferry"))).toEqual([]);
+    } finally {
+      release.resolve();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("runs the box steps of two targets in parallel", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-sync-box-locks-"));
+    const events: string[] = [];
+    const firstApplying = deferred();
+    const secondApplied = deferred();
+    try {
+      const first = runSync(
+        { home },
+        lockedSync(home, "a@box-a", events, {
+          apply: async () => {
+            firstApplying.resolve();
+            await secondApplied.promise;
+          },
+        }),
+      );
+      await firstApplying.promise;
+      expect(readdirSync(join(home, ".ferry"))).toEqual([boxLockFile("ssh:a@box-a")]);
+
+      const second = runSync(
+        { home },
+        lockedSync(home, "b@box-b", events, { apply: async () => secondApplied.resolve() }),
+      );
+      await Promise.all([first, second]);
+
+      expect(events.indexOf("b@box-b:applied")).toBeLessThan(events.indexOf("a@box-a:applied"));
+      expect(readdirSync(join(home, ".ferry"))).toEqual([]);
+    } finally {
+      secondApplied.resolve();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses a second sync for the same target before it publishes, with the old lock file name", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-sync-same-box-"));
+    const events: string[] = [];
+    const secondEvents: string[] = [];
+    const applying = deferred();
+    const release = deferred();
+    try {
+      const first = runSync(
+        { home },
+        lockedSync(home, "a@box-a", events, {
+          apply: async () => {
+            applying.resolve();
+            await release.promise;
+          },
+        }),
+      );
+      await applying.promise;
+      expect(readdirSync(join(home, ".ferry"))).toEqual([boxLockFile("ssh:a@box-a")]);
+
+      await expect(runSync({ home }, lockedSync(home, "a@box-a", secondEvents))).rejects.toEqual(
+        expect.objectContaining({
+          code: "concurrent-sync",
+          origin: "operator",
+          message: expect.stringContaining("a@box-a"),
+        }),
+      );
+      expect(secondEvents).toEqual(["a@box-a:resolve-home"]);
+
+      release.resolve();
+      await first;
+      expect(readdirSync(join(home, ".ferry"))).toEqual([]);
+    } finally {
+      release.resolve();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses a sync after the publish when another sync takes the box lock after the check", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-sync-box-race-"));
+    const events: string[] = [];
+    try {
+      await expect(
+        runSync(
+          { home },
+          {
+            ...lockedSync(home, "a@box-a", events),
+            acquireLock: (_home, host) => {
+              throw new SyncError("concurrent-sync", "operator", `another sync is active for ${host}`);
+            },
+          },
+        ),
+      ).rejects.toEqual(expect.objectContaining({ code: "concurrent-sync" }));
+      expect(events).toEqual(["a@box-a:resolve-home", "a@box-a:publish", "a@box-a:published"]);
+      expect(readdirSync(join(home, ".ferry"))).toEqual([]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("changes no box when the publish fails, and releases the store lock", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-sync-publish-failure-"));
+    const events: string[] = [];
+    try {
+      await expect(
+        runSync(
+          { home },
+          {
+            ...lockedSync(home, "a@box-a", events),
+            openStore: async () => {
+              throw new Error("push rejected");
+            },
+            acquireLock: () => {
+              events.push("box-lock");
+              return () => {};
+            },
+          },
+        ),
+      ).rejects.toEqual(expect.objectContaining({ code: "publish-failure" }));
+      expect(events).toEqual(["a@box-a:resolve-home"]);
+      expect(readdirSync(join(home, ".ferry"))).toEqual([]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("recovers a store lock and a box lock left by a dead process", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-sync-stale-locks-"));
+    const events: string[] = [];
+    try {
+      mkdirSync(join(home, ".ferry"));
+      writeFileSync(join(home, ".ferry", "store.lock"), JSON.stringify({ pid: 999_999_999 }));
+      writeFileSync(join(home, ".ferry", boxLockFile("ssh:a@box-a")), JSON.stringify({ pid: 999_999_999 }));
+
+      await runSync({ home }, lockedSync(home, "a@box-a", events));
+
+      expect(events).toContain("a@box-a:applied");
+      expect(readdirSync(join(home, ".ferry"))).toEqual([]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

@@ -244,6 +244,37 @@ With more than one box, each progress step starts with the box name, for example
 
 `host` is the SSH destination, or `<ssh_user>@<tailscale host>` for a Tailscale box. The top-level `errors` has only the operator and git remote errors. Each box has its own `errors`. A box entry has `integrations` only when an integration is on for that box.
 
+## Several boxes
+
+Ferry can keep more than one box in the config. Each box has a `[box.<name>]` table. A config with only a `[host]` table is one box with the name `default`. It works as before, and no command needs `--box`.
+
+Add a box:
+
+```sh
+ferry box add b --ssh-destination user@box-b.example
+ferry box add c --host box-c --ssh-user ferry
+```
+
+`ferry box add` makes the same checks on the new box as `ferry init`: the SSH connection, and for an SSH snapshot URL, the operator SSH agent, the Git host key on the box, and read access to the snapshot. Then it writes the `[box.<name>]` table. If a check fails, Ferry does not change the config.
+
+The first `ferry box add` on a `[host]` config changes the config. Ferry moves `[host]` to `[box.default]`, adds the new box, and sets `default_box = "default"`. Thus the commands that change one box still use the old host. Ferry shows this change and asks before it writes. Add `--yes` to skip the question.
+
+Other box commands:
+
+- `ferry box list` prints the name, transport, and destination of each box. The `Default` column marks the box that a command uses without `--box`.
+- `ferry box remove <name>` removes the table from the config. Ferry does not connect to the box and does not change it. Ferry does not remove the last box. If the box was the `default_box`, Ferry removes `default_box` and prints a warning.
+- `ferry box default <name>` sets `default_box`.
+
+Select a box with the `--box <name>` option:
+
+- `install`, `auth`, `move`, and `integrations enable|disable` change one box. They use the box of `--box`, else `default_box`, else the only box. If there is more than one box and no `default_box`, they stop and ask for `--box`. They accept one `--box` only.
+- With box tables, `integrations enable|disable` writes the key to `[box.<name>.integrations]` of that box.
+- `status` works on all boxes, or on the boxes of `--box`. Give `--box` more than one time to select more boxes. See [Status](#status).
+- `sync` and `update` work on one box for now. With more than one box, give `--box <name>`. Support for more than one box at a time comes in a later version.
+- `ferry watch` works only with a `[host]` config for now.
+- With box tables, `ferry init` runs again for the box of `--box`, else `default_box`, else the only box. It keeps all box tables and `default_box`. It does not accept `--host`, `--ssh-user`, or `--ssh-destination`. Use `ferry box add` to add a box.
+- Other commands, such as `uninstall`, `tools`, and `skills add`, do not accept `--box`.
+
 ## Add skills
 
 After `ferry init`, use `ferry skills add` to install skills. The command runs `npx skills add` and passes your arguments through unchanged:

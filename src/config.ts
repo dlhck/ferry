@@ -487,9 +487,40 @@ function toolLines(tools: ToolsConfig): string[] {
   ];
 }
 
-/** Set one `[integrations]` key and keep the rest of the config. The config must be complete. */
-export function setIntegration(id: keyof IntegrationsConfig, enabled: boolean, home = homedir()): void {
+/** The config with these box tables and this `default_box`. The rest of the config stays. The config must be complete. */
+export function withBoxes(
+  config: PartialOperatorConfig | null,
+  boxes: readonly BoxConfig[],
+  defaultBox: string | undefined,
+): BoxesOperatorConfig {
+  if (config?.version !== 1 || config.publisher === undefined || config.snapshotUrl === undefined) {
+    throw new ConfigError("Ferry config is not complete. Run ferry init.");
+  }
+  const { host: _host, boxes: _boxes, defaultBox: _defaultBox, ...rest } = config;
+  return {
+    ...rest,
+    version: 1,
+    publisher: config.publisher,
+    snapshotUrl: config.snapshotUrl,
+    ...(defaultBox !== undefined ? { defaultBox } : {}),
+    boxes,
+  };
+}
+
+/**
+ * Set one integration key and keep the rest of the config. The config must be
+ * complete. With `box`, the key goes into `[box.<box>.integrations]` of a
+ * config with box tables. Else it goes into `[integrations]`.
+ */
+export function setIntegration(id: keyof IntegrationsConfig, enabled: boolean, home = homedir(), box?: string): void {
   const config = readConfig(home);
+  if (box !== undefined && config?.boxes) {
+    const boxes = config.boxes.map((entry) =>
+      entry.name === box ? { ...entry, integrations: { ...entry.integrations, [id]: enabled } } : entry,
+    );
+    writeConfig(withBoxes(config, boxes, config.defaultBox), home);
+    return;
+  }
   const host = completeHostConfig(config?.host);
   const target = config?.boxes ? { boxes: config.boxes } : host ? { host } : null;
   if (config?.version !== 1 || config.publisher === undefined || config.snapshotUrl === undefined || target === null) {

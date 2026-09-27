@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { Command } from "commander";
+import { homedir } from "node:os";
 import * as prompts from "@clack/prompts";
 import {
   runInit,
@@ -28,7 +29,16 @@ import {
   type SyncResult,
 } from "./sync.ts";
 import { noProgress, plainProgress, terminalProgress, type Progress } from "./progress.ts";
-import { readConfig, type PartialOperatorConfig } from "./config.ts";
+import {
+  ConfigError,
+  isBoxName,
+  readConfig,
+  setIntegration,
+  writeConfig,
+  type PartialOperatorConfig,
+} from "./config.ts";
+import { resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
+import { runBoxAdd, runBoxDefault, runBoxList, runBoxRemove, type BoxCommandDependencies } from "./box.ts";
 import { INTEGRATIONS, integrationLines, type Integration } from "./integrations/index.ts";
 import {
   runIntegrationCommand,
@@ -115,6 +125,8 @@ type CliDependencies = {
   readonly prompt?: InitPrompt;
   readonly approveHostKeys?: (request: SnapshotHostKeyApproval) => Promise<boolean>;
   readonly confirmUninstall?: () => Promise<boolean>;
+  /** The question of `ferry box add` before it changes a `[host]` config. */
+  readonly confirm?: (message: string) => Promise<boolean | symbol | undefined>;
   readonly writeLine?: (line: string) => void;
   /** The reporter for one command run. The default is one live line and a table on a terminal, else plain lines. */
   readonly createProgress?: () => Progress;
@@ -154,10 +166,77 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .name("ferry")
     .description(DESCRIPTION)
     .version(VERSION)
+    .option(
+      "--box <name>",
+      "select a box of the config; repeat it to select more boxes",
+      (name: string, names: string[] = []) => [...names, name],
+    )
     .showHelpAfterError()
     .action(() => {
       program.outputHelp();
     });
+  const boxNames = (): string[] => program.opts<{ box?: string[] }>().box ?? [];
+  /** The commands that accept --box. Each other command refuses it. */
+  const boxCommands = new Set<Command>();
+  program.hook("preAction", (_program, action) => {
+    const names = boxNames();
+    const invalid = names.find((name) => !isBoxName(name));
+    if (invalid !== undefined) {
+      throw new ConfigError(
+        `invalid box name ${invalid}. Use 1 to 32 characters from a-z, 0-9, and -, with no - at the start. The name all is reserved.`,
+      );
+    }
+    if (names.length > 0 && !boxCommands.has(action)) {
+      throw new ConfigError(`--box does not apply to ferry ${commandPath(action)}.`);
+    }
+  });
+  /**
+   * The box of a command. A single-target command (`single`) gets the box of
+   * `resolveTargetBox`. A multi-target command gets the boxes of
+   * `resolveBoxes`, and refuses more than one until it can fan out.
+   * Undefined for a `[host]` config without --box, so the command reads the
+   * config as before.
+   */
+  const selectBox = (command: string, single: boolean): { config: PartialOperatorConfig; box: ResolvedBox } | undefined => {
+    const names = boxNames();
+    let current: PartialOperatorConfig;
+    try {
+      current = config();
+    } catch (error) {
+      // The command reports a config that it cannot read, as before.
+      if (names.length === 0) return undefined;
+      throw error;
+    }
+    if (!current.boxes && names.length === 0) return undefined;
+    if (single) {
+      if (names.length > 1) throw new ConfigError(`ferry ${command} changes one box. Give --box once.`);
+      return { config: current, box: resolveTargetBox(current, names[0]) };
+    }
+    const [box, ...others] = resolveBoxes(current, names);
+    if (!box || others.length > 0) {
+      throw new ConfigError(`multi-box ${command} is not available yet. Select one box with --box <name>.`);
+    }
+    return { config: current, box };
+  };
+  /** A `readConfig` that shows the command one box as a `[host]` config, or nothing. */
+  const boxConfig = (selected: { config: PartialOperatorConfig; box: ResolvedBox } | undefined) => {
+    if (!selected) return {};
+    const { boxes: _boxes, defaultBox: _defaultBox, ...rest } = selected.config;
+    const view: PartialOperatorConfig = {
+      ...rest,
+      host: selected.box.host,
+      integrations: selected.box.integrations,
+      tools: selected.box.tools,
+    };
+    return { readConfig: () => view };
+  };
+  /** With box tables, `integrations enable|disable` sets the key in `[box.<name>.integrations]`. */
+  const integrationBox = (selected: { config: PartialOperatorConfig; box: ResolvedBox } | undefined) => ({
+    ...boxConfig(selected),
+    ...(selected?.config.boxes
+      ? { setIntegration: (id: "paseo", enabled: boolean) => setIntegration(id, enabled, homedir(), selected.box.name) }
+      : {}),
+  });
 
   program
     .command("init")
@@ -175,6 +254,8 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       dryRun?: boolean;
     }) => {
       const execute = dependencies.runInit ?? runInit;
+      const [box, ...others] = boxNames();
+      if (others.length > 0) throw new ConfigError("ferry init changes one box. Give --box once.");
       const result = await withProgress((progress) =>
         execute(
           {
@@ -184,6 +265,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
             snapshotUrl: options.snapshotUrl,
             dryRun: options.dryRun === true,
             harnesses: registry().harnesses,
+            ...(box !== undefined ? { box } : {}),
           },
           {
             prompt: dependencies.prompt ?? promptForInit,
@@ -204,7 +286,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       await withProgress((progress, writeLine) =>
         (dependencies.runInstall ?? runInstallCommand)(
           { yes: options.yes === true },
-          { tools: registry().tools, createLink, progress, writeLine },
+          { tools: registry().tools, createLink, progress, writeLine, ...boxConfig(selectBox("install", true)) },
         ),
       );
     });
@@ -218,7 +300,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       await withProgress((progress, writeLine) =>
         (dependencies.runUpdate ?? runUpdateCommand)(
           { yes: options.yes === true, dryRun: options.dryRun === true, includeIntegrations: true },
-          { tools: registry().tools, createLink, progress, writeLine },
+          { tools: registry().tools, createLink, progress, writeLine, ...boxConfig(selectBox("update", false)) },
         ),
       );
     });
@@ -247,7 +329,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .action(async (provider: string | undefined, options: { mcp?: string }) => {
       await (dependencies.runAuth ?? runAuthCommand)(
         options.mcp === undefined ? { provider } : { provider, mcp: options.mcp },
-        { tools: registry().tools, createLink, progress: progress() },
+        { tools: registry().tools, createLink, progress: progress(), ...boxConfig(selectBox("auth", true)) },
       );
     });
 
@@ -265,7 +347,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
             force: options.force === true,
             message: options.message,
           },
-          { progress, writeLine },
+          { progress, writeLine, ...boxConfig(selectBox("sync", false)) },
         ),
       );
     });
@@ -303,7 +385,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
               allowSecrets: options.allowSecrets === true,
               yes: options.yes === true,
             },
-            { createLink, writeLine, progress },
+            { createLink, writeLine, progress, ...boxConfig(selectBox("move", true)) },
           ),
         );
       },
@@ -316,7 +398,10 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .action(async (options: { json?: boolean }) => {
       await withProgress(
         (progress, writeLine) =>
-          (dependencies.runStatus ?? runStatusCommand)({ json: options.json === true }, { createLink, writeLine, progress }),
+          (dependencies.runStatus ?? runStatusCommand)(
+            { json: options.json === true },
+            { createLink, writeLine, progress, ...boxConfig(selectBox("status", false)) },
+          ),
         options.json === true ? noProgress : progress(),
       );
     });
@@ -338,7 +423,13 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       await withProgress((progress, writeLine) =>
         (dependencies.runIntegration ?? runIntegrationCommand)(
           { action: "enable", name, dryRun: options.dryRun === true, yes: options.yes === true },
-          { createLink, progress, writeLine, ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}) },
+          {
+            createLink,
+            progress,
+            writeLine,
+            ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}),
+            ...integrationBox(selectBox("integrations enable", true)),
+          },
         ),
       );
     });
@@ -352,7 +443,13 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       await withProgress((progress, writeLine) =>
         (dependencies.runIntegration ?? runIntegrationCommand)(
           { action: "disable", name, purge: options.purge === true, yes: options.yes === true },
-          { createLink, progress, writeLine, ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}) },
+          {
+            createLink,
+            progress,
+            writeLine,
+            ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}),
+            ...integrationBox(selectBox("integrations disable", true)),
+          },
         ),
       );
     });
@@ -368,6 +465,10 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .command("watch")
     .description("Watch the portable set and sync accepted changes")
     .action(async () => {
+      // runWatch reads the `[host]` config through sync. Box tables need the fan-out of a later change.
+      if (config().boxes) {
+        throw new ConfigError("multi-box watch is not available yet. ferry watch works only with a [host] config.");
+      }
       const controller = new AbortController();
       const stop = () => controller.abort();
       process.once("SIGINT", stop);
@@ -397,6 +498,59 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       const result = await (dependencies.installWatchService ?? installWatchService)();
       (dependencies.writeLine ?? console.log)(`Installed ${result.manager} service at ${result.path}`);
     });
+
+  const box = program.command("box").description("List, add, and remove the boxes of the config");
+  const boxDependencies = (reporter: Progress, writeLine: (line: string) => void): BoxCommandDependencies => ({
+    readConfig: config,
+    writeConfig: (value) => writeConfig(value),
+    createLink,
+    approveHostKeys: dependencies.approveHostKeys ?? approveHostKeys,
+    confirm: dependencies.confirm ?? ((message) => prompts.confirm({ message, initialValue: false })),
+    writeLine,
+    progress: reporter,
+  });
+  box
+    .command("list")
+    .description("List the boxes, their transport and destination, and the default box")
+    .action(() => runBoxList({ readConfig: config, writeLine }));
+  box
+    .command("add")
+    .description("Check a new box like ferry init, then add it to the config")
+    .argument("<name>", "box name: 1 to 32 characters from a-z, 0-9, and -")
+    .option("--host <host>", "Tailscale host name or IP address")
+    .option("--ssh-user <user>", "SSH user on the host")
+    .option("--ssh-destination <destination>", "explicit OpenSSH destination")
+    .option("--yes", "change a [host] config to box tables without a confirmation prompt")
+    .action(async (name: string, options: { host?: string; sshUser?: string; sshDestination?: string; yes?: boolean }) => {
+      await withProgress((reporter, writeLine) =>
+        runBoxAdd(
+          {
+            name,
+            host: options.host,
+            sshUser: options.sshUser,
+            sshDestination: options.sshDestination,
+            yes: options.yes === true,
+          },
+          boxDependencies(reporter, writeLine),
+        ),
+      );
+    });
+  box
+    .command("remove")
+    .description("Remove a box from the config. Ferry does not connect to the box")
+    .argument("<name>", "box name")
+    .action((name: string) => runBoxRemove({ name }, { readConfig: config, writeConfig: (value) => writeConfig(value), writeLine }));
+  box
+    .command("default")
+    .description("Set default_box, the box of install, auth, move, and integrations without --box")
+    .argument("<name>", "box name")
+    .action((name: string) => runBoxDefault({ name }, { readConfig: config, writeConfig: (value) => writeConfig(value), writeLine }));
+
+  for (const name of ["init", "install", "update", "auth", "sync", "move", "status"]) {
+    const command = program.commands.find((known) => known.name() === name);
+    if (command) boxCommands.add(command);
+  }
+  for (const command of integrations.commands) boxCommands.add(command);
 
   program
     .command("skills")
@@ -565,6 +719,12 @@ function reportInit(result: InitResult, writeLine: (line: string) => void): void
     return;
   }
   writeLine(result.published ? "Snapshot seed published." : "Snapshot already matches the seed.");
+}
+
+function commandPath(command: Command): string {
+  const names: string[] = [];
+  for (let current: Command | null = command; current?.parent; current = current.parent) names.unshift(current.name());
+  return names.join(" ");
 }
 
 function renderError(message: string): void {
