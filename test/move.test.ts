@@ -426,6 +426,54 @@ describe("ferry move to the box", () => {
     expect(listTree(join(w.box, "notes"))).toEqual(["a.md", "sub", "sub/b.md"]);
     expect(result.lines).toContain("Clone: none, the folder has no git repository; Ferry copies the folder");
   });
+
+  const GENERATED = [
+    ".velite/posts.json",
+    "tsconfig.tsbuildinfo",
+    "packages/ui/tsconfig.app.tsbuildinfo",
+    ".vercel/output/config.json",
+    "apps/web/.vercel/output/config.json",
+    ".output/server/index.mjs",
+    ".vite/deps/_metadata.json",
+    ".docusaurus/registry.js",
+    ".expo/devices.json",
+    ".pnpm-store/v3/index",
+  ];
+  const SKIPPED = [
+    ".velite",
+    "tsconfig.tsbuildinfo",
+    "packages/ui/tsconfig.app.tsbuildinfo",
+    ".vercel/output",
+    "apps/web/.vercel/output",
+    ".output",
+    ".vite",
+    ".docusaurus",
+    ".expo",
+    ".pnpm-store",
+  ];
+
+  for (const [label, setUp] of [
+    ["a git repository", (w: World) => project(w, w.operator)],
+    ["a folder without git", (w: World) => join(w.operator, "Developer/app")],
+  ] as const) {
+    test(`skips generated build output in ${label} and carries files next to it`, async () => {
+      const w = world();
+      const app = setUp(w);
+      for (const path of GENERATED) write(join(app, path), "generated\n");
+      write(join(app, ".vercel/project.json"), '{"projectId":"prj_example"}\n');
+      write(join(app, "apps/web/.vercel/project.json"), '{"projectId":"prj_example"}\n');
+
+      const result = await move(w, { path: "Developer/app" });
+
+      expect(result.error).toBeNull();
+      const boxApp = join(w.box, "Developer/app");
+      for (const path of GENERATED) expect(existsSync(join(boxApp, path))).toBe(false);
+      expect(existsSync(join(boxApp, ".vercel/project.json"))).toBe(true);
+      expect(existsSync(join(boxApp, "apps/web/.vercel/project.json"))).toBe(true);
+      const skipped = result.lines.filter((line) => line.startsWith("Skip: ")).map((line) => line.split(" ")[1]);
+      expect(skipped.sort()).toEqual([...SKIPPED].sort());
+    });
+  }
 });
 
 describe("ferry move --from-box", () => {

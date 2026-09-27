@@ -56,16 +56,24 @@ export class MoveError extends Error {}
 /**
  * Directory and file names that Ferry does not carry: build output, caches,
  * IDE state, and macOS metadata. A tracked file in one of them still arrives
- * with the clone.
+ * with the clone. An entry with a `/` is a path that matches at any depth.
  */
 export const SKIPPED_NAMES = [
   "node_modules",
   ".next",
   ".nuxt",
+  ".output",
   ".svelte-kit",
   ".turbo",
+  ".vite",
+  ".velite",
+  ".docusaurus",
+  ".expo",
+  ".vercel/output",
   ".cache",
   ".parcel-cache",
+  ".pnpm-store",
+  "*.tsbuildinfo",
   "dist",
   "build",
   "coverage",
@@ -299,11 +307,10 @@ async function preflight(
     `Ferry could not list the files of ~/${rel} on ${source.label}`,
   );
   const [candidates = "", skippedList = ""] = listed.split(`\0${SECTION}\0`);
-  const skipped: Hit[] = entries(skippedList).map((path) => ({
-    path: path.replace(/\/$/, ""),
-    code: "skip",
-    reason: "build output, cache, IDE state, or macOS metadata",
-  }));
+  const skipped: Hit[] = entries(skippedList)
+    .map((path) => path.replace(/\/$/, ""))
+    .filter(isSkipped)
+    .map((path) => ({ path, code: "skip", reason: "build output, cache, IDE state, or macOS metadata" }));
 
   const refused: Hit[] = [];
   const wanted: string[] = [];
@@ -520,8 +527,8 @@ async function mergedPull(source: Side, path: string, url: string, ref: string):
   }
 }
 
-const X_SKIPPED = SKIPPED_NAMES.map((name) => `-x ${quoteShell(name)}`).join(" ");
-const FIND_SKIPPED = `\\( ${SKIPPED_NAMES.map((name) => `-name ${quoteShell(name)}`).join(" -o ")} \\)`;
+const X_SKIPPED = SKIPPED_NAMES.map((name) => `-x ${quoteShell(name.includes("/") ? `**/${name}` : name)}`).join(" ");
+const FIND_SKIPPED = `\\( ${SKIPPED_NAMES.map((name) => (name.includes("/") ? `-path ${quoteShell(`*/${name}`)}` : `-name ${quoteShell(name)}`)).join(" -o ")} \\)`;
 /**
  * The untracked and ignored files, then the skipped entries. Without
  * `--exclude-standard`, only the skip list excludes a file. An entry that ends
@@ -529,6 +536,17 @@ const FIND_SKIPPED = `\\( ${SKIPPED_NAMES.map((name) => `-name ${quoteShell(name
  */
 const GIT_LIST = `git ls-files -z --others ${X_SKIPPED} && printf '\\0${SECTION}\\0' && git ls-files -z --others --ignored --directory ${X_SKIPPED}`;
 const FIND_LIST = `find . ${FIND_SKIPPED} -prune -o ! -type d -print0 && printf '\\0${SECTION}\\0' && find . -mindepth 1 ${FIND_SKIPPED} -prune -print0`;
+
+/**
+ * True when `path` matches an entry of `SKIPPED_NAMES`. For a skipped file name
+ * such as `*.tsbuildinfo`, `git ls-files --directory` also lists its parent
+ * directories.
+ */
+function isSkipped(path: string): boolean {
+  return SKIPPED_NAMES.some((name) =>
+    name.includes("/") ? path === name || path.endsWith(`/${name}`) : new Bun.Glob(name).match(posix.basename(path)),
+  );
+}
 
 /** Copy `paths` from the box into a local temporary directory for the deny checks. */
 async function fetchFiles(source: Side, path: string, paths: readonly string[]): Promise<string> {
