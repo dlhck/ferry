@@ -1,19 +1,53 @@
 name: Release
 
+# The owner publishes a GitHub release from a tag vX.Y.Z. This workflow builds the
+# binaries, attaches them to the release, and publishes the npm packages.
+# See RELEASING.md.
+
 on:
-  push:
-    tags:
-      - "*"
+  release:
+    types: [published]
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
 jobs:
+  version:
+    name: Read version from tag
+    # A release event never comes from a pull request. This condition also stops forks.
+    if: github.repository == 'dlhck/ferry'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      dist-tag: ${{ steps.version.outputs.dist-tag }}
+
+    steps:
+      - name: Check tag
+        id: version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "$TAG" =~ $semver ]]; then
+            echo "::error::Tag $TAG is not vX.Y.Z or vX.Y.Z-<pre-release>."
+            exit 1
+          fi
+          version="${TAG#v}"
+          if [[ "$version" == *-* ]]; then dist_tag=next; else dist_tag=latest; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "dist-tag=$dist_tag" >> "$GITHUB_OUTPUT"
+          echo "Version $version, npm dist-tag $dist_tag"
+
   build:
     name: Build ${{ matrix.asset }}
+    needs: version
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - target: bun-darwin-arm64
@@ -27,12 +61,12 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: latest
+          bun-version: 1.4.0
 
       - name: Install dependencies
         run: bun ci
@@ -43,14 +77,14 @@ jobs:
           --outfile dist/${{ matrix.asset }}
 
       - name: Upload executable
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
           if-no-files-found: error
 
-  release:
-    name: Create GitHub Release
+  attach:
+    name: Attach binaries to release
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -58,14 +92,63 @@ jobs:
 
     steps:
       - name: Download executables
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: ferry-*
           path: dist
           merge-multiple: true
 
-      - name: Create release
+      - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" dist/* --clobber
+
+  publish:
+    name: Publish to npm
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Download executables
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: ferry-*
+          path: dist
+          merge-multiple: true
+
+      - name: Stage packages
+        run: node npm/stage.mjs "${{ needs.version.outputs.version }}" dist out
+
+      - name: Publish packages
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          DIST_TAG: ${{ needs.version.outputs.dist-tag }}
+          # Only for the first release. Trusted publishing (OIDC) replaces it. See RELEASING.md.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm --version
+          # Platform packages first, so the main package never points at a missing version.
+          for dir in ./out/ferry-darwin-arm64 ./out/ferry-darwin-x64 ./out/ferry-linux-arm64 ./out/ferry-linux-x64 ./out/ferry; do
+            name=$(node -p "require('$dir/package.json').name")
+            # A second run of a failed release skips the packages that are already on npm.
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "$name@$VERSION is already on npm."
+              continue
+            fi
+            npm publish "$dir" --provenance --access public --tag "$DIST_TAG"
+          done
