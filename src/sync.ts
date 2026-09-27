@@ -123,6 +123,10 @@ export async function runSync(
 ): Promise<SyncResult> {
   const home = input.home ?? homedir();
   const { config, registry, seed } = inspectSyncSource(home, dependencies);
+  for (const leftover of seed.leftovers) {
+    if (leftover.code !== "hook-path") continue;
+    (dependencies.writeLine ?? console.log)(`Skipped hook: ${leftover.reason}: ${leftover.path}`);
+  }
 
   if (input.dryRun) {
     const plan = makePlan(input, config, home, null, registry, seed);
