@@ -68,6 +68,7 @@ import {
 } from "./uninstall.ts";
 import { runSkillsAdd, SkillsAddError, type RunProcess } from "./skills-add.ts";
 import { runMove, type MoveDependencies, type MoveInput } from "./move.ts";
+import { runTunnel, type TunnelDependencies, type TunnelInput } from "./tunnel.ts";
 import {
   runUpdateCommand,
   type UpdateCommandDependencies,
@@ -102,6 +103,7 @@ type CliDependencies = {
   ) => Promise<void>;
   readonly runSync?: (input: SyncInput, dependencies?: SyncDependencies) => Promise<SyncResult>;
   readonly runMove?: (input: MoveInput, dependencies?: Partial<MoveDependencies>) => Promise<void>;
+  readonly runTunnel?: (input: TunnelInput, dependencies?: Partial<TunnelDependencies>) => Promise<void>;
   readonly runStatus?: (
     input: StatusCommandInput,
     dependencies?: Partial<StatusCommandDependencies>,
@@ -387,6 +389,19 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     );
 
   program
+    .command("tunnel")
+    .description("Open box ports on this machine until Ctrl-C, or list the ports that listen on the box")
+    .argument("[ports...]", "box port, or box:local to pick another local port, such as 3000 or 3000:4000")
+    .option("--list", "list the TCP ports that listen on the box, with process names")
+    .action(async (ports: string[], options: { list?: boolean }) => {
+      const { name, host } = selectBox("tunnel")?.box ?? resolveTargetBox(config());
+      await (dependencies.runTunnel ?? runTunnel)(
+        { ports, list: options.list === true, box: { name, host } },
+        { createLink, writeLine },
+      );
+    });
+
+  program
     .command("status")
     .description("Inspect link, snapshot, managed paths, and box logins without writing")
     .option("--json", "print the status report as JSON")
@@ -541,7 +556,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .argument("<name>", "box name")
     .action((name: string) => runBoxDefault({ name }, { readConfig: config, writeConfig: (value) => writeConfig(value), writeLine }));
 
-  for (const name of ["init", "install", "update", "auth", "sync", "move", "status", "integrations", "tools"]) {
+  for (const name of ["init", "install", "update", "auth", "sync", "move", "tunnel", "status", "integrations", "tools"]) {
     const command = program.commands.find((known) => known.name() === name);
     if (command) boxCommands.add(command);
   }
