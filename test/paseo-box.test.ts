@@ -2,9 +2,16 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { carryAgentProfiles, createPaseo, readAgentProfiles, UNIT_FILE } from "../src/integrations/paseo.ts";
+import {
+  carryAgentProfiles,
+  createPaseo,
+  readAgentProfiles,
+  refreshUnitPath,
+  unitFile,
+} from "../src/integrations/paseo.ts";
 import type { HostAdapter, LinkResult } from "../src/link.ts";
 import { noProgress } from "../src/progress.ts";
+import { BUILTIN_BOX_PATH_DIRS } from "../src/tools/path.ts";
 
 /**
  * A fake box. Each Link command runs in `sh` with a temporary HOME and fake
@@ -143,7 +150,7 @@ describe("Paseo enable", () => {
       `paseo project create ${box.home}/Developer/app`,
       `paseo project create ${box.home}/code/org/repo`,
     ]);
-    expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(UNIT_FILE);
+    expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(unitFile(BUILTIN_BOX_PATH_DIRS));
     expect(lines).toEqual([
       "Registered 2 of 2 box projects in Paseo.",
       "Paseo 0.9.2 runs on the box at 127.0.0.1:6767. The relay is off.",
@@ -151,6 +158,7 @@ describe("Paseo enable", () => {
   });
 
   test("the unit runs the daemon in the foreground with the Link PATH, loopback listen and no relay", () => {
+    const UNIT_FILE = unitFile(BUILTIN_BOX_PATH_DIRS);
     expect(UNIT_FILE).toContain("Type=simple\n");
     expect(UNIT_FILE).toContain("ExecStart=%h/.local/bin/paseo daemon run\n");
     expect(UNIT_FILE).toContain(
@@ -324,6 +332,45 @@ describe("Paseo update", () => {
       "systemctl restart ferry-paseo.service",
     ]);
     expect(lines).toEqual(["Paseo 0.9.2 runs on the box."]);
+  });
+});
+
+describe("Paseo unit PATH", () => {
+  const dirs = [".local/bin", ".pi/agent/bin", ".bun/bin"];
+
+  test("enable writes the PATH directories of the Link into the unit", async () => {
+    const box = fakeBox();
+
+    await paseoWith("0.9.2").enable(Object.assign(box, { pathDirs: dirs }), noProgress);
+
+    expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(unitFile(dirs));
+  });
+
+  test("rewrites the unit, reloads systemd and restarts the daemon when the PATH changed", async () => {
+    const box = fakeBox();
+    touch(join(box.home, UNIT_PATH), unitFile(BUILTIN_BOX_PATH_DIRS));
+
+    expect(await refreshUnitPath(box, dirs)).toBe(true);
+
+    expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(unitFile(dirs));
+    expect(box.log()).toEqual(["systemctl daemon-reload", "systemctl restart ferry-paseo.service"]);
+  });
+
+  test("does not write the unit or restart the daemon when the PATH is current", async () => {
+    const box = fakeBox();
+    touch(join(box.home, UNIT_PATH), unitFile(dirs));
+
+    expect(await refreshUnitPath(box, dirs)).toBe(false);
+
+    expect(box.log()).toEqual([]);
+    expect(box.commands).toHaveLength(1);
+  });
+
+  test("refuses when the unit is not on the box", async () => {
+    const box = fakeBox();
+
+    await expect(refreshUnitPath(box, dirs)).rejects.toThrow("Run ferry integrations enable paseo");
+    expect(box.log()).toEqual([]);
   });
 });
 

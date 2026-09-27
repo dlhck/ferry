@@ -35,6 +35,7 @@ import {
   type IntegrationCommandDependencies,
   type IntegrationCommandInput,
 } from "./integrations/command.ts";
+import { Link, type LinkOptions } from "./link.ts";
 import { loadRegistry, type Registry } from "./registry/load.ts";
 import {
   runStatusCommand,
@@ -42,6 +43,7 @@ import {
   type StatusCommandInput,
 } from "./status-command.ts";
 import { runToolsCommand, type ToolsCommandDependencies } from "./tools/command.ts";
+import { boxPathDirs } from "./tools/path.ts";
 import { runWatch, type WatchDependencies, type WatchInput } from "./watch.ts";
 import {
   installWatchService,
@@ -129,6 +131,8 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
   // Commands that need the registry resolve it when they run, so help never reads the config.
   const config = () => (dependencies.readConfig ?? readConfig)() ?? {};
   const registry = () => resolveRegistry(config());
+  /** Each box command puts the PATH directories of the registry tools in front of PATH. `ferry sync` adds them itself. */
+  const createLink = (options: LinkOptions) => new Link({ ...options, pathDirs: boxPathDirs(registry().tools) });
   const progress = () => (dependencies.createProgress ?? terminalProgress)();
   const writeLine = (line: string) => (dependencies.writeLine ?? console.log)(line);
   /**
@@ -184,6 +188,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
           {
             prompt: dependencies.prompt ?? promptForInit,
             approveHostKeys: dependencies.approveHostKeys ?? approveHostKeys,
+            createLink,
             progress,
           },
         ),
@@ -199,7 +204,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       await withProgress((progress, writeLine) =>
         (dependencies.runInstall ?? runInstallCommand)(
           { yes: options.yes === true },
-          { tools: registry().tools, progress, writeLine },
+          { tools: registry().tools, createLink, progress, writeLine },
         ),
       );
     });
@@ -213,7 +218,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       await withProgress((progress, writeLine) =>
         (dependencies.runUpdate ?? runUpdateCommand)(
           { yes: options.yes === true, dryRun: options.dryRun === true, includeIntegrations: true },
-          { tools: registry().tools, progress, writeLine },
+          { tools: registry().tools, createLink, progress, writeLine },
         ),
       );
     });
@@ -242,7 +247,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .action(async (provider: string | undefined, options: { mcp?: string }) => {
       await (dependencies.runAuth ?? runAuthCommand)(
         options.mcp === undefined ? { provider } : { provider, mcp: options.mcp },
-        { tools: registry().tools, progress: progress() },
+        { tools: registry().tools, createLink, progress: progress() },
       );
     });
 
@@ -298,7 +303,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
               allowSecrets: options.allowSecrets === true,
               yes: options.yes === true,
             },
-            { writeLine, progress },
+            { createLink, writeLine, progress },
           ),
         );
       },
@@ -311,7 +316,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .action(async (options: { json?: boolean }) => {
       await withProgress(
         (progress, writeLine) =>
-          (dependencies.runStatus ?? runStatusCommand)({ json: options.json === true }, { writeLine, progress }),
+          (dependencies.runStatus ?? runStatusCommand)({ json: options.json === true }, { createLink, writeLine, progress }),
         options.json === true ? noProgress : progress(),
       );
     });
@@ -333,7 +338,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       await withProgress((progress, writeLine) =>
         (dependencies.runIntegration ?? runIntegrationCommand)(
           { action: "enable", name, dryRun: options.dryRun === true, yes: options.yes === true },
-          { progress, writeLine, ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}) },
+          { createLink, progress, writeLine, ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}) },
         ),
       );
     });
@@ -347,7 +352,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       await withProgress((progress, writeLine) =>
         (dependencies.runIntegration ?? runIntegrationCommand)(
           { action: "disable", name, purge: options.purge === true, yes: options.yes === true },
-          { progress, writeLine, ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}) },
+          { createLink, progress, writeLine, ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}) },
         ),
       );
     });

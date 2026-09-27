@@ -3,10 +3,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { quoteShell, readCommand, writeCommand } from "../box-settings.ts";
-import { BOX_PATH_DIRS, BunHostAdapter, type HostAdapter } from "../link.ts";
+import { BunHostAdapter, type HostAdapter, type Link } from "../link.ts";
 import { carriedContentHits } from "../manifest.ts";
 import { step, type Progress } from "../progress.ts";
 import { nodeBootstrap } from "../registry/builtin.ts";
+import { BUILTIN_BOX_PATH_DIRS } from "../tools/path.ts";
 import type {
   Integration,
   IntegrationAction,
@@ -48,27 +49,38 @@ const SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bi
 const INSTALL_TIMEOUT_MS = 10 * 60 * 1_000;
 
 /** The daemon gets the same PATH as a Ferry box command, so agents find the same tools. */
-export const UNIT_FILE = [
-  "# Managed by ferry. ferry integrations disable paseo removes this file.",
-  "[Unit]",
-  "Description=Paseo daemon (ferry)",
-  "After=network-online.target",
-  "",
-  "[Service]",
-  "Type=simple",
-  "ExecStart=%h/.local/bin/paseo daemon run",
-  `Environment=PATH=${[...BOX_PATH_DIRS.map((dir) => `%h/${dir}`), SYSTEM_PATH].join(":")}`,
-  `Environment=PASEO_LISTEN=${LISTEN}`,
-  "Environment=PASEO_RELAY_ENABLED=false",
-  "Restart=on-failure",
-  "RestartSec=5",
-  "KillSignal=SIGTERM",
-  "TimeoutStopSec=15",
-  "",
-  "[Install]",
-  "WantedBy=default.target",
-  "",
-].join("\n");
+export function unitFile(pathDirs: readonly string[]): string {
+  return [
+    "# Managed by ferry. ferry integrations disable paseo removes this file.",
+    "[Unit]",
+    "Description=Paseo daemon (ferry)",
+    "After=network-online.target",
+    "",
+    "[Service]",
+    "Type=simple",
+    "ExecStart=%h/.local/bin/paseo daemon run",
+    unitPathLine(pathDirs),
+    `Environment=PASEO_LISTEN=${LISTEN}`,
+    "Environment=PASEO_RELAY_ENABLED=false",
+    "Restart=on-failure",
+    "RestartSec=5",
+    "KillSignal=SIGTERM",
+    "TimeoutStopSec=15",
+    "",
+    "[Install]",
+    "WantedBy=default.target",
+    "",
+  ].join("\n");
+}
+
+function unitPathLine(pathDirs: readonly string[]): string {
+  return `Environment=PATH=${[...pathDirs.map((dir) => `%h/${dir}`), SYSTEM_PATH].join(":")}`;
+}
+
+/** A Link knows the box PATH directories. A link without them gets the directories of the built-in tools. */
+function linkPathDirs(link: IntegrationLink): readonly string[] {
+  return (link as Partial<Pick<Link, "pathDirs">>).pathDirs ?? BUILTIN_BOX_PATH_DIRS;
+}
 
 const NODE_COMMAND = nodeBootstrap(NODE_MAJOR, 0);
 const NODE_VERSION_COMMAND = "node --version";
@@ -83,7 +95,6 @@ const TAKEOVER_COMMAND = [
   "  echo inactive",
   "fi",
 ].join("\n");
-const WRITE_UNIT_COMMAND = writeCommand(UNIT_PATH, UNIT_FILE);
 const START_COMMAND = [
   "systemctl --user daemon-reload",
   `systemctl --user enable --now ${UNIT}`,
@@ -219,8 +230,8 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
         ...indent(`${NODE_VERSION_COMMAND}   # stop if the major version is lower than ${NODE_MAJOR}`),
         ...indent(installCommand(local.version)),
         ...indent(TAKEOVER_COMMAND),
-        `  # write ~/${UNIT_PATH}:`,
-        ...UNIT_FILE.trimEnd().split("\n").map((line) => `  #   ${line}`),
+        `  # write ~/${UNIT_PATH}. PATH also has the directories of the tools in the config:`,
+        ...unitFile(BUILTIN_BOX_PATH_DIRS).trimEnd().split("\n").map((line) => `  #   ${line}`),
         ...indent(START_COMMAND),
         ...indent(`${STATUS_COMMAND}   # repeat until localDaemon is running, for ${Math.round(startTimeoutMs / 1_000)} s`),
         ...indent(PROJECTS_COMMAND),
@@ -256,7 +267,9 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
         lines.push(`Disabled the old ${OLD_UNIT}. The file ~/.config/systemd/user/${OLD_UNIT} stays.`);
       }
 
-      await step(progress, `Writing ${UNIT}`, () => boxRun(link, WRITE_UNIT_COMMAND, `Ferry could not write ~/${UNIT_PATH}`));
+      await step(progress, `Writing ${UNIT}`, () =>
+        boxRun(link, writeCommand(UNIT_PATH, unitFile(linkPathDirs(link))), `Ferry could not write ~/${UNIT_PATH}`),
+      );
       await step(progress, `Starting ${UNIT}`, () => boxRun(link, START_COMMAND, `Ferry could not start ${UNIT}`));
       const running = await step(progress, "Waiting for the Paseo daemon", () => waitForDaemon(link), undefined, (v) => v);
 
@@ -351,6 +364,22 @@ async function runVersion(host: HostAdapter, argv: readonly string[]): Promise<s
   } catch {
     return null;
   }
+}
+
+/**
+ * Write the unit again when its PATH is not `pathDirs`, then reload systemd
+ * and restart the daemon. The restart stops the agents that run on the box, so
+ * it happens only when the PATH changed. Returns true after a restart.
+ */
+export async function refreshUnitPath(link: IntegrationLink, pathDirs: readonly string[]): Promise<boolean> {
+  const current = await boxRun(link, readCommand(UNIT_PATH), `Ferry could not read ~/${UNIT_PATH} on the box`);
+  if (!current.startsWith("F")) {
+    throw new PaseoError(`~/${UNIT_PATH} is not on the box. Run ferry integrations enable paseo`);
+  }
+  if (current.slice(1).split("\n").includes(unitPathLine(pathDirs))) return false;
+  await boxRun(link, writeCommand(UNIT_PATH, unitFile(pathDirs)), `Ferry could not write ~/${UNIT_PATH}`);
+  await boxRun(link, `systemctl --user daemon-reload && ${RESTART_COMMAND}`, `Ferry could not restart ${UNIT}`);
+  return true;
 }
 
 /**

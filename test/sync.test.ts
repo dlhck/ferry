@@ -17,6 +17,7 @@ import { ApplyError } from "../src/apply.ts";
 import { buildProgram } from "../src/cli.ts";
 import type { OperatorConfig } from "../src/config.ts";
 import { denyRules, type Seed } from "../src/manifest.ts";
+import { unitFile } from "../src/integrations/paseo.ts";
 import { loadRegistry, type RegistryConfig } from "../src/registry/load.ts";
 import type { LinkResult } from "../src/link.ts";
 import type { HarnessDescriptor } from "../src/registry/types.ts";
@@ -28,6 +29,7 @@ import {
   type SyncPlan,
 } from "../src/sync.ts";
 import { noProgress, type Progress } from "../src/progress.ts";
+import { BUILTIN_BOX_PATH_DIRS, profileBlockCommand } from "../src/tools/path.ts";
 import { fakeTerminal } from "./fake-progress.ts";
 
 const config: OperatorConfig = {
@@ -390,7 +392,7 @@ describe("runSync", () => {
             stderr: "",
           };
         }
-        events.push("update-box");
+        events.push(command.includes(".profile") ? "write-path" : "update-box");
         return {
           ok: true as const,
           address: "box.example.ts.net",
@@ -447,6 +449,7 @@ describe("runSync", () => {
       "publish:chore: ship skills",
       "update-box",
       "apply",
+      "write-path",
       "unlock",
     ]);
     expect(linkCalls).toEqual([
@@ -456,6 +459,7 @@ describe("runSync", () => {
           "if [ -d '/srv/ferry/.ferry/store/.git' ]; then git -C '/srv/ferry/.ferry/store' status --porcelain=v1 -z --untracked-files=all && git -C '/srv/ferry/.ferry/store' fetch --quiet && git -C '/srv/ferry/.ferry/store' reset --quiet --hard 'abc123' && git -C '/srv/ferry/.ferry/store' clean --quiet --force -d; else mkdir -p '/srv/ferry/.ferry' && git clone 'git@example.test:operator/ferry-store.git' '/srv/ferry/.ferry/store'; fi",
         options: { agentForwarding: "git" },
       },
+      { command: profileBlockCommand(BUILTIN_BOX_PATH_DIRS), options: undefined },
     ]);
     expect(applyInput).toMatchObject({
       checkout: "/srv/ferry/.ferry/store",
@@ -646,7 +650,7 @@ describe("runSync", () => {
       },
     );
 
-    expect(linkOptions).toEqual({ destination: "user@box.example" });
+    expect(linkOptions).toEqual({ destination: "user@box.example", pathDirs: BUILTIN_BOX_PATH_DIRS });
     expect(result.plan).toMatchObject({
       box: "user@box.example",
       remoteHome: "/home/user",
@@ -1159,6 +1163,7 @@ describe("runSync progress", () => {
       "Merging settings on the box       ✔ done                               0.1s",
       "Declaring MCP servers             ✔ done     2 servers                 0.1s",
       "Adopting published local skills   ✔ done                               0.1s",
+      "Writing the box PATH              ✔ done     updated ~/.profile        0.1s",
     ]);
   });
 
@@ -1215,6 +1220,8 @@ describe("runSync progress", () => {
       "count:2/2",
       "done",
       "start:Adopting published local skills",
+      "done",
+      "start:Writing the box PATH",
       "done",
     ]);
   });
@@ -1438,7 +1445,13 @@ describe("sync with the Paseo integration", () => {
 
   function run(
     home: string,
-    options: { readonly config?: OperatorConfig; readonly dryRun?: boolean; readonly status?: string } = {},
+    options: {
+      readonly config?: OperatorConfig & RegistryConfig;
+      readonly dryRun?: boolean;
+      readonly status?: string;
+      /** The box unit file. `null` means that the file is missing. */
+      readonly unit?: string | null;
+    } = {},
   ) {
     const events: string[] = [];
     const commands: string[] = [];
@@ -1459,6 +1472,9 @@ describe("sync with the Paseo integration", () => {
             let stdout = "";
             if (command.startsWith("printf")) stdout = "/srv/ferry\n";
             else if (command.includes("paseo daemon status")) stdout = status;
+            else if (command.startsWith("if [ -e '.config/systemd/user/ferry-paseo.service' ]")) {
+              stdout = options.unit === null ? "M" : `F${options.unit ?? unitFile(BUILTIN_BOX_PATH_DIRS)}`;
+            }
             else if (command.includes(".paseo/config.json") && !command.includes(" mv ")) stdout = "M";
             return { ok: true as const, address: "box", stdout, stderr: "" };
           },
@@ -1484,12 +1500,19 @@ describe("sync with the Paseo integration", () => {
     return { events, commands, lines, plans, result: runSync({ home, dryRun: options.dryRun }, dependencies) };
   }
 
-  test("carries the profiles as the last step, skips a missing provider, and reloads the daemon", async () => {
+  test("carries the profiles after the box PATH, skips a missing provider, and reloads the daemon", async () => {
     const sync = run(paseoHome([reviewer, pilot]));
     await sync.result;
 
-    expect(sync.events).toContain("plan:10");
-    expect(sync.events.slice(-2)).toEqual(["start:Carrying Paseo agent profiles", "done:1 profile, 1 skipped"]);
+    expect(sync.events).toContain("plan:12");
+    expect(sync.events.slice(-6)).toEqual([
+      "start:Writing the box PATH",
+      "done:updated ~/.profile",
+      "start:Carrying Paseo agent profiles",
+      "done:1 profile, 1 skipped",
+      "start:Updating the Paseo unit PATH",
+      "done:no changes",
+    ]);
     expect(sync.lines).toContain(
       "Warning: Paseo agent profile Pilot was not carried: provider copilot is not available on the box.",
     );
@@ -1497,23 +1520,94 @@ describe("sync with the Paseo integration", () => {
     expect(write).toContain('"name": "Reviewer"');
     expect(write).not.toContain("Pilot");
     expect(write).not.toContain("providers");
-    expect(sync.commands.at(-1)).toBe("paseo daemon reload");
+    expect(sync.commands.at(-2)).toBe("paseo daemon reload");
   });
 
   test("reports no profiles and runs no Paseo command when the operator has none", async () => {
     const sync = run(paseoHome(null));
     await sync.result;
 
-    expect(sync.events.slice(-2)).toEqual(["start:Carrying Paseo agent profiles", "done:no profiles"]);
-    expect(sync.commands.some((command) => command.includes("paseo"))).toBe(false);
+    expect(sync.events.slice(-4, -2)).toEqual(["start:Carrying Paseo agent profiles", "done:no profiles"]);
+    expect(sync.commands.some((command) => command.includes("paseo daemon") || command.includes(".paseo/"))).toBe(false);
   });
 
   test("warns and completes the sync when the box cannot take the profiles", async () => {
     const sync = run(paseoHome([reviewer]), { status: "" });
     await sync.result;
 
-    expect(sync.events.slice(-2)).toEqual(["start:Carrying Paseo agent profiles", "fail"]);
+    expect(sync.events.slice(-4, -2)).toEqual(["start:Carrying Paseo agent profiles", "fail"]);
     expect(sync.lines.at(-1)).toStartWith("Warning: Ferry could not carry the Paseo agent profiles:");
+  });
+
+  const bunConfig = {
+    ...paseoConfig,
+    tools: { bun: { local: "bun --version", install: "curl -fsSL https://bun.sh/install | bash", path: [".bun/bin"] } },
+  };
+  const restart = "systemctl --user daemon-reload && systemctl --user restart ferry-paseo.service";
+
+  test("rewrites the unit PATH and restarts the daemon as the last step when a config tool adds a directory", async () => {
+    const sync = run(paseoHome(null), { config: bunConfig });
+    await sync.result;
+
+    const dirs = [...BUILTIN_BOX_PATH_DIRS, ".bun/bin"];
+    expect(sync.commands).toContain(profileBlockCommand(dirs));
+    const write = sync.commands.find((command) => command.includes("ferry-paseo.service") && command.includes(" mv "));
+    expect(write).toContain(":%h/.bun/bin:/usr/local/sbin");
+    expect(sync.commands.at(-1)).toBe(restart);
+    expect(sync.events.slice(-2)).toEqual(["start:Updating the Paseo unit PATH", "done:restarted"]);
+    expect(sync.lines).toContain(
+      "The box PATH changed, so Ferry updated ferry-paseo.service and restarted the Paseo daemon. The restart stopped the agents that ran on the box.",
+    );
+  });
+
+  test("does not write the unit or restart the daemon when the unit PATH is current", async () => {
+    const dirs = [...BUILTIN_BOX_PATH_DIRS, ".bun/bin"];
+    const sync = run(paseoHome(null), { config: bunConfig, unit: unitFile(dirs) });
+    await sync.result;
+
+    expect(sync.commands.some((command) => command.includes("ferry-paseo.service") && command.includes(" mv "))).toBe(false);
+    expect(sync.commands).not.toContain(restart);
+    expect(sync.events.slice(-2)).toEqual(["start:Updating the Paseo unit PATH", "done:no changes"]);
+    expect(sync.lines.some((line) => line.includes("restart"))).toBe(false);
+  });
+
+  test("warns and completes the sync when the unit is not on the box", async () => {
+    const sync = run(paseoHome(null), { config: bunConfig, unit: null });
+    await sync.result;
+
+    expect(sync.events.slice(-2)).toEqual(["start:Updating the Paseo unit PATH", "fail"]);
+    expect(sync.commands).not.toContain(restart);
+    expect(sync.lines.at(-1)).toBe(
+      "Warning: Ferry could not update the PATH of ferry-paseo.service: ~/.config/systemd/user/ferry-paseo.service is not on the box. Run ferry integrations enable paseo. The sync is complete.",
+    );
+  });
+
+  test("the dry run names the box PATH directories, and the Paseo restart only when the integration is enabled", async () => {
+    const printed = async (config: OperatorConfig & RegistryConfig) => {
+      const output: string[] = [];
+      const result = await runSync(
+        { home: paseoHome(null), dryRun: true },
+        { readConfig: () => config, publisher: () => "operator-machine", readSeed: () => seed, writeLine: (line) => output.push(line) },
+      );
+      return { plan: result.plan, output: output.join("\n") };
+    };
+
+    const on = await printed(bunConfig);
+    expect(on.plan.pathDirs).toEqual([".local/bin", ".pi/agent/bin", ".bun/bin"]);
+    expect(on.output).toContain(
+      "Box PATH: ~/.local/bin, ~/.pi/agent/bin, ~/.bun/bin -> the ferry block of ~/.profile and the PATH of ferry-paseo.service. A PATH change restarts the Paseo daemon and stops its agents",
+    );
+    const off = await printed({ ...bunConfig, integrations: { paseo: false } });
+    expect(off.output).toContain("Box PATH: ~/.local/bin, ~/.pi/agent/bin, ~/.bun/bin -> the ferry block of ~/.profile\n");
+  });
+
+  test("refuses an unsafe box PATH directory before it connects to the box", async () => {
+    const sync = run(paseoHome(null), { config: { ...bunConfig, tools: { bad: { local: "x", install: "x", path: ['.bin"x'] } } } });
+
+    await expect(sync.result).rejects.toEqual(
+      expect.objectContaining({ code: "registry-refusal", message: expect.stringContaining("not safe in PATH") }),
+    );
+    expect(sync.commands).toEqual([]);
   });
 
   test("refuses a profile with an env block before it connects to the box", async () => {
