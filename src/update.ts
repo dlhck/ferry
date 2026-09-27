@@ -7,6 +7,7 @@
 import * as prompts from "@clack/prompts";
 import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
 import { BunHostAdapter, Link, type HostAdapter, type LinkOptions } from "./link.ts";
+import { noProgress, step, type Progress } from "./progress.ts";
 import { BUILTIN_TOOLS } from "./registry/builtin.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
 
@@ -43,6 +44,7 @@ export type UpdateCommandDependencies = {
   readonly local: HostAdapter;
   readonly confirm: () => Promise<boolean | symbol | undefined>;
   readonly writeLine: (line: string) => void;
+  readonly progress: Progress;
 };
 
 export class UpdateError extends Error {
@@ -83,7 +85,9 @@ export async function runUpdateCommand(
 ): Promise<void> {
   const resolved = { ...defaultDependencies, ...dependencies };
   const target = loadTarget(resolved.readConfig);
-  const plan = await planUpdate(resolved.tools, resolved.local);
+  const plan = await step(resolved.progress, "Checking the installed tools", () =>
+    planUpdate(resolved.tools, resolved.local),
+  );
 
   // One line for each tool on each side, in registry order.
   for (const side of ["box", "operator"] as const) {
@@ -102,14 +106,17 @@ export async function runUpdateCommand(
 
   const link = resolved.createLink(target);
   const failed: UpdateStep[] = [];
-  for (const step of plan.steps) {
+  for (const [index, step] of plan.steps.entries()) {
+    resolved.progress.start(`Updating ${step.target} ${step.tool} (${index + 1}/${plan.steps.length})`);
     const failure =
       step.target === "box"
         ? await runOnBox(link, step.command)
         : await runOnOperator(resolved.local, step.command);
     if (failure === null) {
+      resolved.progress.done();
       resolved.writeLine(`Updated ${step.target} ${step.tool}.`);
     } else {
+      resolved.progress.fail();
       failed.push(step);
       resolved.writeLine(`Failed to update ${step.target} ${step.tool}: ${failure}`);
     }
@@ -130,6 +137,7 @@ const defaultDependencies: UpdateCommandDependencies = {
   local: new BunHostAdapter(),
   confirm: () => prompts.confirm({ message: "Run these updates?" }),
   writeLine: console.log,
+  progress: noProgress,
 };
 
 function label(target: UpdateTarget): string {

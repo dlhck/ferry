@@ -13,6 +13,7 @@ import { readConfig } from "../src/config.ts";
 import { InitRefusal, runInit, type InitDependencies } from "../src/init.ts";
 import type { Seed } from "../src/manifest.ts";
 import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
+import { recordProgress } from "./fake-progress.ts";
 
 const homes: string[] = [];
 const skillRoots = [".agents/skills", ".claude/skills"] as const;
@@ -425,6 +426,62 @@ describe("ferry init", () => {
 
     expect(calls).toEqual({ opened: 0, published: 0, linked: 3 });
     expect(existsSync(join(home, ".ferry"))).toBe(false);
+  });
+
+  test("shows each init step and ends the host key step before the approval prompt", async () => {
+    const home = makeHome();
+    const { deps } = dependencies(home);
+    const progress = recordProgress();
+    let linkCall = 0;
+
+    await runInit(
+      {
+        home,
+        harnesses: BUILTIN_HARNESSES,
+        sshDestination: "ubuntu@orb",
+        snapshotUrl: "git@github.com:operator/ferry-store.git",
+      },
+      {
+        ...deps,
+        progress,
+        approveHostKeys: async () => {
+          progress.events.push("prompt");
+          return true;
+        },
+        createLink: () => ({
+          async run() {
+            linkCall++;
+            const stdout =
+              linkCall === 2
+                ? "missing\n"
+                : linkCall === 3
+                  ? "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"
+                  : "";
+            return { ok: true, address: "ubuntu@orb", stdout, stderr: "" };
+          },
+        }),
+      },
+    );
+
+    expect(progress.events).toEqual([
+      "start:Reading the portable set",
+      "done",
+      "start:Checking the operator SSH agent",
+      "done",
+      "start:Connecting to the box",
+      "done",
+      "start:Reading the SSH host keys of github.com on the box",
+      "done",
+      "prompt",
+      "start:Trusting the SSH host keys of github.com on the box",
+      "done",
+      "start:Checking access to the snapshot",
+      "done",
+      "start:Publishing the snapshot",
+      "done",
+      "start:Linking managed paths",
+      "done",
+    ]);
   });
 
   test("a second run keeps existing values and fills a missing value", async () => {
