@@ -553,6 +553,28 @@ describe("ferry init", () => {
     expect(readConfig(home)?.update).toEqual({ watch: true });
   });
 
+  test("a second run keeps the integration switches", async () => {
+    const home = makeHome();
+    write(join(home, ".ferry/config.toml"), [
+      "version = 1",
+      'publisher = "first-operator"',
+      'snapshot_url = "snapshot.git"',
+      "",
+      "[host]",
+      'tailscale = "box"',
+      'ssh_user = "david"',
+      "",
+      "[integrations]",
+      "paseo = true",
+      "",
+    ].join("\n"));
+    const { deps } = dependencies(home);
+
+    await runInit({ home, harnesses: BUILTIN_HARNESSES }, deps);
+
+    expect(readConfig(home)?.integrations).toEqual({ paseo: true });
+  });
+
   test("records and probes an explicit SSH destination", async () => {
     const home = makeHome();
     let target: unknown;

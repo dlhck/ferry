@@ -175,6 +175,7 @@ export async function runInit(
       : { tailscale: required(values.host), sshUser: required(values.sshUser) },
     harness: existing?.harness,
     update: existing?.update,
+    integrations: existing?.integrations,
   };
 
   const seed = await step(
