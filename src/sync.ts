@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname, homedir } from "node:os";
 import { dirname, join, posix } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { apply as applyStore, type ApplyPlan, type RemoteApplyInput } from "./apply.ts";
 import {
   completeHostConfig,
@@ -52,7 +53,10 @@ export type SyncDependencies = {
     seed: Seed,
     options: SyncStoreOptions,
   ) => Promise<SyncStore>;
+  /** Lock the box steps for one target. It fails at once when another sync holds the lock. */
   readonly acquireLock?: (home: string, host: string) => () => void;
+  /** Lock the local store around the publish. It waits while another sync publishes. */
+  readonly acquireStoreLock?: (home: string) => Promise<() => void>;
   readonly apply?: (input: RemoteApplyInput) => Promise<ApplyPlan>;
   readonly adopt?: typeof adoptPublishedSkills;
   readonly writePlan?: (plan: SyncPlan) => void;
@@ -181,15 +185,17 @@ export async function runSync(
   const plan = makePlan(input, config, home, remoteHome, registry, seed, profiles, pathDirs);
   writePlan(plan);
 
-  const release = takeLock(dependencies, home, targetKey(config));
+  const host = targetKey(config);
+  refuseActiveSync(home, host);
+  let store: SyncStore;
+  let publication: PublishResult;
   try {
-    let store: SyncStore;
-    let publication: PublishResult;
-    try {
-      ({ store, publication } = await step(
-        progress,
-        "Publishing the snapshot",
-        async () => {
+    ({ store, publication } = await step(
+      progress,
+      "Publishing the snapshot",
+      async () => {
+        const releaseStore = await takeStoreLock(dependencies, home);
+        try {
           const store = dependencies.openStore
             ? await dependencies.openStore(config.snapshotUrl, seed, {
                 home,
@@ -200,23 +206,32 @@ export async function runSync(
                 harnesses: registry.harnesses,
               });
           return { store, publication: await store.publish(seed, input.message) };
-        },
-        undefined,
-        ({ publication }) =>
-          publication.published ? `published ${publication.tip?.slice(0, 7) ?? ""}`.trim() : "no changes",
-      ));
-    } catch (cause) {
-      throw new SyncError(
-        "publish-failure",
-        "git remote",
-        `failed to publish ${config.snapshotUrl}: ${messageOf(cause)}`,
-        { cause },
-      );
-    }
-    for (const update of seed.storeUpdates) {
-      writeLine(`Updated store skill ${update.name} from ${update.path}`);
-    }
+        } finally {
+          releaseStore();
+        }
+      },
+      undefined,
+      ({ publication }) =>
+        publication.published ? `published ${publication.tip?.slice(0, 7) ?? ""}`.trim() : "no changes",
+    ));
+  } catch (cause) {
+    if (cause instanceof SyncError) throw cause;
+    throw new SyncError(
+      "publish-failure",
+      "git remote",
+      `failed to publish ${config.snapshotUrl}: ${messageOf(cause)}`,
+      { cause },
+    );
+  }
+  for (const update of seed.storeUpdates) {
+    writeLine(`Updated store skill ${update.name} from ${update.path}`);
+  }
 
+  // Another sync for this target can take the box lock after refuseActiveSync. Then this sync fails here, after the publish.
+  const release = takeLock(dependencies, home, host);
+  let applyPlan: ApplyPlan;
+  let discarded: string[];
+  try {
     const update = await step(
       progress,
       "Updating the box checkout",
@@ -240,12 +255,11 @@ export async function runSync(
         return discarded > 0 ? `discarded ${plural(discarded, "box change")}` : undefined;
       },
     );
-    const discarded = changedPaths(update.stdout);
+    discarded = changedPaths(update.stdout);
     for (const path of discarded) {
       writeLine(`Discarded box change: ${posix.join(required(plan.remoteCheckout), path)}`);
     }
 
-    let applyPlan: ApplyPlan;
     try {
       applyPlan = await step(
         progress,
@@ -327,19 +341,6 @@ export async function runSync(
       );
     }
 
-    try {
-      await step(progress, "Adopting published local skills", () =>
-        (dependencies.adopt ?? adoptPublishedSkills)(home, store.path, registry.harnesses, seed),
-      );
-    } catch (cause) {
-      throw new SyncError(
-        "apply-failure",
-        "operator",
-        `could not adopt a published local skill: ${messageOf(cause)}`,
-        { cause },
-      );
-    }
-
     await step(
       progress,
       "Writing the box PATH",
@@ -399,11 +400,25 @@ export async function runSync(
         writeLine(`Warning: Ferry could not update the PATH of ferry-paseo.service: ${messageOf(cause)}. The sync is complete.`);
       }
     }
-
-    return { dryRun: false, published: publication.published, plan, applyPlan, discarded };
   } finally {
     release();
   }
+
+  // Adopt changes only the operator machine, so it runs after the box steps and outside the box lock.
+  try {
+    await step(progress, "Adopting published local skills", () =>
+      (dependencies.adopt ?? adoptPublishedSkills)(home, store.path, registry.harnesses, seed),
+    );
+  } catch (cause) {
+    throw new SyncError(
+      "apply-failure",
+      "operator",
+      `could not adopt a published local skill: ${messageOf(cause)}`,
+      { cause },
+    );
+  }
+
+  return { dryRun: false, published: publication.published, plan, applyPlan, discarded };
 }
 
 export function inspectSyncSource(
@@ -642,9 +657,45 @@ function takeLock(
   }
 }
 
-function acquireSyncLock(home: string, host: string): () => void {
+async function takeStoreLock(dependencies: SyncDependencies, home: string): Promise<() => void> {
+  try {
+    return await (dependencies.acquireStoreLock ?? acquireStoreLock)(home);
+  } catch (cause) {
+    throw new SyncError("lock-failure", "operator", "could not lock the local store", { cause });
+  }
+}
+
+/** Fail before the publish when a live sync holds the box lock of this target. */
+function refuseActiveSync(home: string, host: string): void {
+  if (!staleLock(boxLockPath(home, host))) {
+    throw new SyncError("concurrent-sync", "operator", `another sync is active for ${host}`);
+  }
+}
+
+/** The key stays the target string, so a running watch of an earlier version and a new CLI share the lock. */
+function boxLockPath(home: string, host: string): string {
   const digest = createHash("sha256").update(host).digest("hex").slice(0, 16);
-  const path = join(home, ".ferry", `sync-${digest}.lock`);
+  return join(home, ".ferry", `sync-${digest}.lock`);
+}
+
+function acquireSyncLock(home: string, host: string): () => void {
+  const release = tryLock(boxLockPath(home, host));
+  if (!release) throw new SyncError("concurrent-sync", "operator", `another sync is active for ${host}`);
+  return release;
+}
+
+/** Wait while another sync publishes. Only the publish holds this lock, so the wait is short. */
+async function acquireStoreLock(home: string): Promise<() => void> {
+  const path = join(home, ".ferry", "store.lock");
+  for (;;) {
+    const release = tryLock(path);
+    if (release) return release;
+    await sleep(100);
+  }
+}
+
+/** Take the lock at `path`, and remove a stale lock first. Return `null` when a live process holds it. */
+function tryLock(path: string): (() => void) | null {
   const token = randomUUID();
   const temporary = `${path}.${process.pid}.${token}`;
   mkdirSync(dirname(path), { recursive: true });
@@ -656,9 +707,7 @@ function acquireSyncLock(home: string, host: string): () => void {
         break;
       } catch (cause) {
         if (!isCode(cause, "EEXIST")) throw cause;
-        if (!staleLock(path)) {
-          throw new SyncError("concurrent-sync", "operator", `another sync is active for ${host}`);
-        }
+        if (!staleLock(path)) return null;
         try {
           unlinkSync(path);
         } catch (unlinkError) {
