@@ -14,6 +14,7 @@ import {
 import type { ToolDescriptor } from "./registry/types.ts";
 import { composeStatus, type StatusReport } from "./status.ts";
 import { RealGitRunner, Store, type TipReport } from "./store.ts";
+import { boxChangesCommand } from "./sync.ts";
 
 const STORE_RELATIVE_PATH = ".ferry/store";
 
@@ -71,6 +72,10 @@ export async function runStatusCommand(
         const checkout = posix.join(required(boxHome), STORE_RELATIVE_PATH);
         return link.run(`git -C ${quoteShell(checkout)} rev-parse --verify HEAD 2>/dev/null || true`);
       },
+      async readBoxChanges() {
+        const checkout = posix.join(required(boxHome), STORE_RELATIVE_PATH);
+        return link.run(`${boxChangesCommand(checkout)} 2>/dev/null || true`);
+      },
     },
     store,
     apply: {
@@ -105,6 +110,9 @@ export function formatStatus(report: StatusReport): string {
     `  Local = remote: ${yesNo(report.store.localMatchesRemote)}`,
     `  Remote = box: ${yesNo(report.store.remoteMatchesBox)}`,
     `  All agree: ${yesNo(report.store.allMatch)}`,
+    "",
+    boxCheckout(report),
+    ...report.boxCheckout.changes.map((path) => `  - ${path}`),
     "",
     managedPaths(report),
     ...report.managedPaths.unhealthy.map((action) => `  - ${managedPath(action)}`),
@@ -200,6 +208,13 @@ function tip(value: string | null): string {
 
 function yesNo(value: boolean): string {
   return value ? "yes" : "no";
+}
+
+function boxCheckout(report: StatusReport): string {
+  if (report.boxCheckout.dirty === null) return "Box checkout: unavailable";
+  return report.boxCheckout.dirty
+    ? `Box checkout: DIRTY (${report.boxCheckout.changes.length}), the next sync discards these changes`
+    : "Box checkout: CLEAN";
 }
 
 function managedPaths(report: StatusReport): string {

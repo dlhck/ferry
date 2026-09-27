@@ -68,6 +68,10 @@ function dependencies(
         calls.reads.push("link.readBoxTip");
         return online("100.64.0.8", "box-tip\n");
       },
+      async readBoxChanges() {
+        calls.reads.push("link.readBoxChanges");
+        return online("100.64.0.8", " M skills/tdd/SKILL.md\0?? skills/scratch/SKILL.md\0");
+      },
     },
     store: {
       async inspectTips(boxTip) {
@@ -114,6 +118,11 @@ describe("Status composer", () => {
       schemaVersion: 1,
       link: { online: true, address: "100.64.0.8", error: null },
       store: { ...tips(), error: null },
+      boxCheckout: {
+        dirty: true,
+        changes: ["skills/scratch/SKILL.md", "skills/tdd/SKILL.md"],
+        error: null,
+      },
       managedPaths: {
         allHealthy: false,
         unhealthy: [
@@ -156,6 +165,7 @@ describe("Status composer", () => {
       "manifest.denyRules",
       "link.probe",
       "link.readBoxTip",
+      "link.readBoxChanges",
       "store.inspectTips",
       "apply.plan",
       "auth.status",
@@ -180,6 +190,10 @@ describe("Status composer", () => {
           return offline;
         },
         async readBoxTip() {
+          calls.mutations.push("offline box read");
+          return online();
+        },
+        async readBoxChanges() {
           calls.mutations.push("offline box read");
           return online();
         },
@@ -208,6 +222,7 @@ describe("Status composer", () => {
 
     expect(report.link).toEqual({ online: false, address: null, error: offline.error });
     expect(report.store.box).toBeNull();
+    expect(report.boxCheckout).toEqual({ dirty: null, changes: [], error: null });
     expect(report.managedPaths.allHealthy).toBeNull();
     expect(report.auth.providers).toEqual([]);
     expect(report.paseo).toEqual({ address: null, port: 6767, listen: null });
@@ -224,6 +239,9 @@ describe("Status composer", () => {
         },
         async readBoxTip() {
           throw new Error("box tip failed");
+        },
+        async readBoxChanges() {
+          throw new Error("box changes failed");
         },
       },
       store: {
@@ -247,6 +265,7 @@ describe("Status composer", () => {
 
     expect(report.errors).toEqual([
       { code: "inspection-failed", origin: "box", message: "box: box tip failed" },
+      { code: "inspection-failed", origin: "box", message: "box: box changes failed" },
       {
         code: "inspection-failed",
         origin: "git-remote",
