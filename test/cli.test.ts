@@ -460,6 +460,7 @@ describe("ferry --help", () => {
         paseoProfiles: null,
         pathDirs: [".local/bin"],
       },
+      boxes: [],
     };
     const program = buildProgram({
       readConfig: () => null,
@@ -478,6 +479,7 @@ describe("ferry --help", () => {
       dryRun: true,
       force: true,
       message: "chore: ship skills",
+      boxes: [],
     });
   });
 
@@ -790,7 +792,7 @@ describe("--box", () => {
 
   test("an unknown or invalid box name is refused", async () => {
     await expect(readBy(BOXES, ["install", "--box", "c"])).rejects.toThrow("unknown box c. Known boxes: a, b.");
-    await expect(readBy(HOST, ["sync", "--box", "a"])).rejects.toThrow("unknown box a. Known boxes: default.");
+    await expect(readBy(HOST, ["install", "--box", "a"])).rejects.toThrow("unknown box a. Known boxes: default.");
     await expect(readBy(BOXES, ["install", "--box", "Box"])).rejects.toThrow("invalid box name Box");
   });
 
@@ -798,21 +800,25 @@ describe("--box", () => {
     expect((await readBy(HOST, ["install", "--box", "default"]))?.host).toEqual(HOST.host);
   });
 
-  test("multi-target commands refuse more than one box", async () => {
-    for (const command of ["sync"]) {
-      await expect(readBy(BOXES, [command])).rejects.toThrow(
-        `multi-box ${command} is not available yet. Select one box with --box <name>.`,
-      );
-      await expect(readBy(BOXES, [command, "--box", "a", "--box", "b"])).rejects.toThrow(
-        `multi-box ${command} is not available yet.`,
-      );
-    }
-  });
+  test("sync gets the --box names, and no box means all boxes", async () => {
+    const selections: unknown[] = [];
+    const program = () =>
+      buildProgram({
+        readConfig: () => BOXES,
+        runSync: async (input, dependencies) => {
+          selections.push(input.boxes);
+          expect(dependencies?.readConfig).toBeUndefined();
+          return undefined as never;
+        },
+        createProgress: () => noProgress,
+        writeLine: () => {},
+      });
 
-  test("multi-target commands read the config as the one selected box", async () => {
-    for (const command of ["sync"]) {
-      expect(await readBy(BOXES, [command, "--box", "b"])).toEqual(B_VIEW);
-    }
+    await program().parseAsync(["sync"], { from: "user" });
+    await program().parseAsync(["sync", "--box", "b", "--dry-run"], { from: "user" });
+    await program().parseAsync(["--box", "a", "sync", "--box", "b"], { from: "user" });
+
+    expect(selections).toEqual([[], ["b"], ["a", "b"]]);
   });
 
   test("status gets the --box names as its selection, and no box means all boxes", async () => {

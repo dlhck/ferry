@@ -37,7 +37,7 @@ import {
   writeConfig,
   type PartialOperatorConfig,
 } from "./config.ts";
-import { resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
+import { resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import { runBoxAdd, runBoxDefault, runBoxList, runBoxRemove, type BoxCommandDependencies } from "./box.ts";
 import { INTEGRATIONS, integrationLines, type Integration } from "./integrations/index.ts";
 import {
@@ -191,13 +191,11 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     }
   });
   /**
-   * The box of a command. A single-target command (`single`) gets the box of
-   * `resolveTargetBox`. A multi-target command gets the boxes of
-   * `resolveBoxes`, and refuses more than one until it can fan out.
-   * Undefined for a `[host]` config without --box, so the command reads the
-   * config as before.
+   * The box of a single-target command, from `resolveTargetBox`. Undefined
+   * for a `[host]` config without --box, so the command reads the config as
+   * before.
    */
-  const selectBox = (command: string, single: boolean): { config: PartialOperatorConfig; box: ResolvedBox } | undefined => {
+  const selectBox = (command: string): { config: PartialOperatorConfig; box: ResolvedBox } | undefined => {
     const names = boxNames();
     let current: PartialOperatorConfig;
     try {
@@ -208,15 +206,8 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       throw error;
     }
     if (!current.boxes && names.length === 0) return undefined;
-    if (single) {
-      if (names.length > 1) throw new ConfigError(`ferry ${command} changes one box. Give --box once.`);
-      return { config: current, box: resolveTargetBox(current, names[0]) };
-    }
-    const [box, ...others] = resolveBoxes(current, names);
-    if (!box || others.length > 0) {
-      throw new ConfigError(`multi-box ${command} is not available yet. Select one box with --box <name>.`);
-    }
-    return { config: current, box };
+    if (names.length > 1) throw new ConfigError(`ferry ${command} changes one box. Give --box once.`);
+    return { config: current, box: resolveTargetBox(current, names[0]) };
   };
   /** A `readConfig` that shows the command one box as a `[host]` config, or nothing. */
   const boxConfig = (selected: { config: PartialOperatorConfig; box: ResolvedBox } | undefined) => {
@@ -289,7 +280,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       await withProgress((progress, writeLine) =>
         (dependencies.runInstall ?? runInstallCommand)(
           { yes: options.yes === true },
-          { tools: registry().tools, createLink, progress, writeLine, ...boxConfig(selectBox("install", true)) },
+          { tools: registry().tools, createLink, progress, writeLine, ...boxConfig(selectBox("install")) },
         ),
       );
     });
@@ -332,13 +323,13 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .action(async (provider: string | undefined, options: { mcp?: string }) => {
       await (dependencies.runAuth ?? runAuthCommand)(
         options.mcp === undefined ? { provider } : { provider, mcp: options.mcp },
-        { tools: registry().tools, createLink, progress: progress(), ...boxConfig(selectBox("auth", true)) },
+        { tools: registry().tools, createLink, progress: progress(), ...boxConfig(selectBox("auth")) },
       );
     });
 
   program
     .command("sync")
-    .description("Publish the snapshot and apply it to the configured box")
+    .description("Publish the snapshot and apply it to the selected boxes, or to all boxes")
     .option("--dry-run", "print the plan without writing")
     .option("--force", "back up live managed paths before Apply links them")
     .option("-m, --message <message>", "snapshot commit message")
@@ -349,8 +340,9 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
             dryRun: options.dryRun === true,
             force: options.force === true,
             message: options.message,
+            boxes: boxNames(),
           },
-          { progress, writeLine, ...boxConfig(selectBox("sync", false)) },
+          { progress, writeLine },
         ),
       );
     });
@@ -388,7 +380,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
               allowSecrets: options.allowSecrets === true,
               yes: options.yes === true,
             },
-            { createLink, writeLine, progress, ...boxConfig(selectBox("move", true)) },
+            { createLink, writeLine, progress, ...boxConfig(selectBox("move")) },
           ),
         );
       },
@@ -431,7 +423,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
             progress,
             writeLine,
             ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}),
-            ...integrationBox(selectBox("integrations enable", true)),
+            ...integrationBox(selectBox("integrations enable")),
           },
         ),
       );
@@ -451,7 +443,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
             progress,
             writeLine,
             ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}),
-            ...integrationBox(selectBox("integrations disable", true)),
+            ...integrationBox(selectBox("integrations disable")),
           },
         ),
       );
