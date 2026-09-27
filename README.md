@@ -211,6 +211,32 @@ ferry skills add dlhck/ferry --skill ferry
 
 Then run `ferry sync`. The sync carries the skill to the box like any other skill.
 
+## Tools
+
+Ferry has one list of tools. It has two kinds:
+
+- `agent`: the vendor CLIs of the harnesses, `claude`, `codex`, `pi`, and `cursor`. Ferry installs them on every box, at the latest version.
+- `tool`: `gh`, `node` (through nvm), `npm`, `pnpm`, `bun`, `docker`, `vercel`, `infisical`, and the Playwright browsers. Ferry puts a tool on the box only when this machine has it, at the version of this machine.
+
+The `[tools]` table in `~/.ferry/config.toml` sets the version policy of a tool. Each value is a string:
+
+```toml
+[tools]
+node = "operator"   # the version on this machine
+bun = "1.4.2"       # an exact version
+claude = "latest"   # the latest vendor release
+```
+
+A tool that is not in the table uses the default of its kind: `latest` for an agent, `operator` for a tool. Ferry refuses a tool id that it does not know, and a value that is not `"operator"`, `"latest"`, or an exact version such as `1.4.2`. A repeat `ferry init` keeps the table.
+
+`ferry tools` lists each tool with its kind, install mode, policy, and the version on this machine. It loads nvm first, so the `node` row shows the nvm default Node. It also lists the tools that projects need and that Ferry has no recipe for, such as `yarn` and `uv`. `ferry tools` does not connect to the box.
+
+What works now: the `[tools]` table and `ferry tools`. What comes next:
+
+- The install and update recipes for the tools, and the box `PATH` from the tool directories.
+- `ferry install` and `ferry update` apply the policy and the install mode. Until then, they work as before: `ferry install` installs `gh` and the agent CLIs, and `ferry update` shows the other tools as skipped.
+- A "Tools" section in `ferry status` with the box versions.
+
 ## Update the agent tools
 
 `ferry update` runs the update command of each agent tool on the box and on this machine:
