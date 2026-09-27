@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { carriedContentHits, carriedNameHit, denyRules, readSeed } from "../src/manifest.ts";
@@ -1355,5 +1355,17 @@ describe("carried project files", () => {
       "secret-field",
     ]);
     expect(carriedContentHits(".env.local", bytes("PORT=3000\nPASSWORD=\n"))).toEqual([]);
+  });
+});
+
+describe("the repository skill", () => {
+  test("Manifest carries skills/ferry without a refusal", () => {
+    const home = makeHome();
+    cpSync(join(import.meta.dir, "..", "skills", "ferry"), join(home, ".agents/skills/ferry"), { recursive: true });
+
+    const seed = seedOf(home);
+
+    expect(names(seed)).toEqual(["ferry"]);
+    expect(seed.leftovers).toEqual([]);
   });
 });

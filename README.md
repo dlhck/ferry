@@ -164,6 +164,16 @@ Some installers replace the store link of a skill in one harness root with a rea
 
 In all other cases, sync stops with a clash. `ferry sync` prints `Updated store skill <name> from <path>` for each update. `ferry sync --dry-run` lists the updates in the `Store updates from a harness root:` line and changes nothing.
 
+### Agent skill
+
+This repository has an agent skill in [`skills/ferry`](skills/ferry/SKILL.md). It tells agents on this machine and on the box how to work with Ferry. Its first rule is for agents on the box. They must not edit a Ferry-managed file there, because the next sync discards the change. Install the skill on this machine:
+
+```sh
+ferry skills add dlhck/ferry --skill ferry
+```
+
+Then run `ferry sync`. The sync carries the skill to the box like any other skill.
+
 ## Update the agent tools
 
 `ferry update` runs the update command of each agent tool on the box and on this machine:
