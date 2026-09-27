@@ -114,14 +114,22 @@ const CACHE_DIRS = new Set([".git", "node_modules", ".cache", "__pycache__"]);
 const SETTINGS_NAMES = new Set(["settings.json", "settings.local.json", "mcp.json", ".mcp.json"]);
 const PRIVATE_KEY_HEADER = /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/;
 // A bare prefix in prose is not a token. Each pattern needs a token-length tail.
+// Group 1 is the body after the prefix.
 const TOKEN_PATTERNS = [
-  [/\bgh[opsu]_[A-Za-z0-9]{30,}/, DENY_RULES["github-token"]],
-  [/\bgithub_pat_[A-Za-z0-9_]{40,}/, DENY_RULES["github-token"]],
-  [/\bsk-ant-[A-Za-z0-9_-]{20,}/, DENY_RULES["anthropic-key"]],
-  [/\bsk-proj-[A-Za-z0-9_-]{20,}/, DENY_RULES["openai-key"]],
-  [/\bxox[bp]-[A-Za-z0-9-]{20,}/, DENY_RULES["slack-token"]],
-  [/\bAKIA[0-9A-Z]{16}\b/, DENY_RULES["aws-access-key"]],
+  [/\bgh[opsu]_([A-Za-z0-9]{30,})/g, DENY_RULES["github-token"]],
+  [/\bgithub_pat_([A-Za-z0-9_]{40,})/g, DENY_RULES["github-token"]],
+  [/\bsk-ant-([A-Za-z0-9_-]{20,})/g, DENY_RULES["anthropic-key"]],
+  [/\bsk-proj-([A-Za-z0-9_-]{20,})/g, DENY_RULES["openai-key"]],
+  [/\bxox[bp]-([A-Za-z0-9-]{20,})/g, DENY_RULES["slack-token"]],
+  [/\bAKIA([0-9A-Z]{16})\b/g, DENY_RULES["aws-access-key"]],
 ] as const satisfies readonly (readonly [RegExp, DenyRule])[];
+/**
+ * A documentation placeholder, not a token: a body that is one character
+ * (`x`, `X`, or `0`) repeated, or a body of only `x`/`X` with the `-`/`_`
+ * separators of the vendor format, such as `xxxx-xxxx`. Other repeated
+ * characters, such as `aaaa`, still count as a token.
+ */
+const PLACEHOLDER_BODY = /^(?:([xX0])\1*|[xX]+(?:[-_]+[xX]+)*)$/;
 /** Words in a hook command that name a file under the home: `~/x`, `$HOME/x`, `${HOME}/x`. */
 const HOME_REFERENCE = /^(?:~|\$HOME|\$\{HOME\})\/(.*)$/;
 /** Shell quotes, operators, and `=` separate the words of a hook command. */
@@ -363,7 +371,12 @@ function tokenHits(path: string, bytes: Uint8Array): ForbiddenHit[] {
   const text = Buffer.from(bytes).toString("latin1");
   const hits = new Map<string, ForbiddenHit>();
   for (const [pattern, rule] of TOKEN_PATTERNS) {
-    if (!hits.has(rule.code) && pattern.test(text)) hits.set(rule.code, note(path, rule));
+    if (hits.has(rule.code)) continue;
+    for (const match of text.matchAll(pattern)) {
+      if (PLACEHOLDER_BODY.test(match[1]!)) continue;
+      hits.set(rule.code, note(path, rule));
+      break;
+    }
   }
   return [...hits.values()];
 }
