@@ -2,8 +2,9 @@ import type { ApplyAction, ApplyPlan } from "./apply.ts";
 import type { AuthProviderStatus, AuthStatusReport, McpLoginStatus } from "./auth-start.ts";
 import { parseGitIdentity, type GitIdentity } from "./git-identity.ts";
 import type { LinkError, LinkResult } from "./link.ts";
+import type { IntegrationHealth, IntegrationId } from "./integrations/types.ts";
 import type { DenyRuleDescription } from "./manifest.ts";
-import { noProgress, step, type Progress } from "./progress.ts";
+import { noProgress, plural, step, type Progress } from "./progress.ts";
 import type { TipReport } from "./store.ts";
 import { changedPaths } from "./sync.ts";
 
@@ -42,7 +43,21 @@ export type StatusDependencies = {
   readonly manifest: {
     denyRules(): readonly DenyRuleDescription[];
   };
+  /** The enabled integrations only. */
+  readonly integrations?: readonly {
+    readonly id: IntegrationId;
+    readonly name: string;
+    health(): Promise<IntegrationHealth>;
+  }[];
   readonly progress?: Progress;
+};
+
+/** The health of one enabled integration. `state` is the machine-readable part. */
+export type IntegrationStatus = {
+  readonly name: string;
+  readonly lines: readonly string[];
+  readonly warnings: readonly string[];
+  readonly state: Readonly<Record<string, unknown>>;
 };
 
 export type StatusReport = {
@@ -87,13 +102,16 @@ export type StatusReport = {
     readonly error: StatusDependencyError | null;
   };
   readonly denyList: readonly DenyRuleDescription[];
+  /** Present only when at least one integration is enabled. */
+  readonly integrations?: Readonly<Partial<Record<IntegrationId, IntegrationStatus>>>;
   readonly errors: readonly StatusError[];
 };
 
 /** Compose one read-only report from module-owned inspection methods. */
 export async function composeStatus(dependencies: StatusDependencies): Promise<StatusReport> {
   const progress = dependencies.progress ?? noProgress;
-  progress.plan(9);
+  const enabledIntegrations = dependencies.integrations ?? [];
+  progress.plan(9 + enabledIntegrations.length);
   const errors: StatusError[] = [];
   let denyList: readonly DenyRuleDescription[] = [];
   try {
@@ -263,6 +281,41 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     progress.skip("Checking MCP logins on the box", OFFLINE);
   }
 
+  const integrations: Partial<Record<IntegrationId, IntegrationStatus>> = {};
+  for (const integration of enabledIntegrations) {
+    const name = `Checking ${integration.name} on the box`;
+    if (!online) {
+      progress.skip(name, OFFLINE);
+      integrations[integration.id] = {
+        name: integration.name,
+        lines: ["unavailable while host is offline"],
+        warnings: [],
+        state: { error: OFFLINE },
+      };
+      continue;
+    }
+    try {
+      const health = await step(progress, name, () => integration.health(), undefined, (health) =>
+        health.warnings.length > 0 ? plural(health.warnings.length, "warning") : undefined,
+      );
+      integrations[integration.id] = {
+        name: integration.name,
+        lines: health.lines,
+        warnings: health.warnings,
+        state: health.json,
+      };
+    } catch (cause) {
+      const error = dependencyError("box", cause);
+      errors.push(error);
+      integrations[integration.id] = {
+        name: integration.name,
+        lines: ["unavailable"],
+        warnings: [],
+        state: { error: error.message },
+      };
+    }
+  }
+
   return {
     schemaVersion: 1,
     link: { online, address, error: linkError },
@@ -284,6 +337,7 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     auth: { providers, loginRequired, error: authError },
     mcpLogins: { loginRequired: mcpLoginRequired, error: mcpError },
     denyList,
+    ...(enabledIntegrations.length > 0 ? { integrations } : {}),
     errors,
   };
 }

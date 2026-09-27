@@ -8,6 +8,7 @@ import {
   type McpLoginStatus,
 } from "./auth-start.ts";
 import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
+import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
 import { Link, type LinkOptions } from "./link.ts";
 import {
   BOX_GIT_IDENTITY_COMMAND,
@@ -58,6 +59,8 @@ export type StatusCommandDependencies = {
     tools: readonly ToolDescriptor[],
   ) => StatusAuth;
   readonly denyRules: () => readonly DenyRuleDescription[];
+  /** All built-in integrations. Status checks the ones that the config enables. */
+  readonly integrations: readonly Integration[];
   readonly writeLine: (line: string) => void;
   readonly progress: Progress;
 };
@@ -116,6 +119,13 @@ export async function runStatusCommand(
     },
     auth,
     manifest: { denyRules: resolved.denyRules },
+    integrations: resolved.integrations
+      .filter((integration) => config.integrations?.[integration.id] === true)
+      .map((integration) => ({
+        id: integration.id,
+        name: integration.name,
+        health: () => integration.health(link),
+      })),
     progress: resolved.progress,
   });
 
@@ -165,6 +175,7 @@ export function formatStatus(report: StatusReport): string {
     "MCP logins:",
     ...mcpLogins(report),
     "",
+    ...integrations(report),
     "Deny list:",
     ...report.denyList.map(
       (rule) => `  ${rule.code}: ${rule.behavior} ${rule.description}`,
@@ -193,6 +204,7 @@ const defaultDependencies: StatusCommandDependencies = {
   inspectApply: (input) => apply(input),
   createAuthStart: (link, tools) => new AuthStart(link, tools),
   denyRules,
+  integrations: INTEGRATIONS,
   writeLine: console.log,
   progress: noProgress,
 };
@@ -284,6 +296,20 @@ function mcpLogins(report: StatusReport): string[] {
     const [tool, server] = entry.split("/");
     return `  ${entry}: LOGIN REQUIRED, run ferry auth ${tool} --mcp ${server}`;
   });
+}
+
+function integrations(report: StatusReport): string[] {
+  const entries = Object.values(report.integrations ?? {});
+  if (entries.length === 0) return [];
+  return [
+    "Integrations:",
+    ...entries.flatMap((entry) => [
+      `  ${entry.name}:`,
+      ...entry.lines.map((line) => `    ${line}`),
+      ...entry.warnings.map((warning) => `    WARNING: ${warning}`),
+    ]),
+    "",
+  ];
 }
 
 function person(identity: GitIdentity): string {
