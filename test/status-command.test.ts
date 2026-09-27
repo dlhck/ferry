@@ -19,6 +19,7 @@ const registry: Registry = {
     { id: "codex", name: "Codex", skillRoot: ".codex/skills" },
   ],
   tools: [
+    { id: "gh", kind: "tool" },
     {
       id: "codex",
       auth: {
@@ -73,6 +74,7 @@ function fakeStack(
   boxIdentity = "user.name Operator\nuser.email operator@example.com\n",
   boxSudo = "yes\n",
   updateWatch?: boolean,
+  ghPolicy?: string,
 ): FakeStack {
   const output: string[] = [];
   const reads: string[] = [];
@@ -138,6 +140,7 @@ function fakeStack(
         host: { tailscale: "box", sshUser: "ferry" },
         harness: [{ id: "custom" }],
         ...(updateWatch === undefined ? {} : { update: { watch: updateWatch } }),
+        ...(ghPolicy === undefined ? {} : { tools: { gh: ghPolicy } }),
       };
     },
     loadRegistry: (config: Parameters<StatusCommandDependencies["loadRegistry"]>[0]) => {
@@ -354,11 +357,11 @@ describe("ferry status command", () => {
     expect(password.mutations).toEqual([]);
   });
 
-  test("warns that the watch cannot update gh when the watch update is on and sudo asks for a password", async () => {
-    const watchOn = fakeStack(true, "", undefined, "no\n", true);
-    const watchOff = fakeStack(true, "", undefined, "no\n", false);
-    const passwordless = fakeStack(true, "", undefined, "yes\n", true);
-    const json = fakeStack(true, "", undefined, "no\n", true);
+  test("warns that the watch cannot update gh when the watch update is on, the gh policy is latest, and sudo asks for a password", async () => {
+    const watchOn = fakeStack(true, "", undefined, "no\n", true, "latest");
+    const watchOff = fakeStack(true, "", undefined, "no\n", false, "latest");
+    const passwordless = fakeStack(true, "", undefined, "yes\n", true, "latest");
+    const json = fakeStack(true, "", undefined, "no\n", true, "latest");
 
     await runStatusCommand({ json: false }, watchOn.dependencies);
     await runStatusCommand({ json: false }, watchOff.dependencies);
@@ -366,7 +369,7 @@ describe("ferry status command", () => {
     await runStatusCommand({ json: true }, json.dependencies);
 
     const warning =
-      "Box sudo: PASSWORD REQUIRED\n  WARNING: [update] watch = true, but the watch cannot update gh because sudo on the box asks for a password. See the sudoers rule in the README.";
+      'Box sudo: PASSWORD REQUIRED\n  WARNING: [update] watch = true and the gh policy is "latest", but the watch cannot update gh because sudo on the box asks for a password. See the sudoers rule in the README.';
     expect(watchOn.output[0]).toContain(warning);
     expect(watchOff.output[0]).toContain("Box sudo: PASSWORD REQUIRED");
     expect(watchOff.output[0]).not.toContain("WARNING");
@@ -377,6 +380,20 @@ describe("ferry status command", () => {
       error: null,
     });
   });
+
+  for (const ghPolicy of [undefined, "operator", "2.92.0"]) {
+    test(`does not warn when the watch update is on and the gh policy is ${ghPolicy ?? "the default"}, because the watch does not update gh`, async () => {
+      const text = fakeStack(true, "", undefined, "no\n", true, ghPolicy);
+      const json = fakeStack(true, "", undefined, "no\n", true, ghPolicy);
+
+      await runStatusCommand({ json: false }, text.dependencies);
+      await runStatusCommand({ json: true }, json.dependencies);
+
+      expect(text.output[0]).toContain("Box sudo: PASSWORD REQUIRED");
+      expect(text.output[0]).not.toContain("WARNING");
+      expect(JSON.parse(json.output[0]!).boxSudo.watchUpdateBlocked).toBe(false);
+    });
+  }
 
   test("constructs Link from a direct SSH destination", async () => {
     const stack = fakeStack();

@@ -81,7 +81,7 @@ function dependencies(
         return online("100.64.0.8", "yes\n");
       },
     },
-    updateWatch: false,
+    watchUpdatesGh: false,
     operator: {
       async gitIdentity() {
         calls.reads.push("operator.gitIdentity");
@@ -240,7 +240,7 @@ describe("Status composer", () => {
           return online();
         },
       },
-      updateWatch: true,
+      watchUpdatesGh: true,
       store: {
         async inspectTips(boxTip) {
           calls.reads.push("store.inspectTips");
@@ -408,9 +408,9 @@ describe("Status composer", () => {
 
   test("blocks the watch update only when the watch update is on and sudo asks for a password", async () => {
     const calls: Calls = { reads: [], mutations: [] };
-    const password = dependencies(calls, { updateWatch: true });
+    const password = dependencies(calls, { watchUpdatesGh: true });
     password.link.readBoxSudo = async () => online("100.64.0.8", "no\n");
-    const passwordless = dependencies(calls, { updateWatch: true });
+    const passwordless = dependencies(calls, { watchUpdatesGh: true });
 
     expect((await composeStatus(password)).boxSudo.watchUpdateBlocked).toBe(true);
     expect((await composeStatus(passwordless)).boxSudo.watchUpdateBlocked).toBe(false);

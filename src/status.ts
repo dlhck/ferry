@@ -25,8 +25,8 @@ export type StatusDependencies = {
     /** Print `yes` when sudo on the box runs without a password, else `no`. */
     readBoxSudo(): Promise<LinkResult>;
   };
-  /** The `[update]` config key `watch`. */
-  readonly updateWatch: boolean;
+  /** True when `[update] watch = true` and the policy of gh is `latest`, so the daily watch update runs the gh update. */
+  readonly watchUpdatesGh: boolean;
   readonly operator: {
     gitIdentity(): Promise<GitIdentity>;
   };
@@ -82,7 +82,7 @@ export type StatusReport = {
   };
   readonly boxSudo: {
     readonly passwordless: boolean | null;
-    /** True when the watch runs updates and sudo asks for a password, so the gh update fails. */
+    /** True when the watch updates gh and sudo asks for a password, so the gh update fails. */
     readonly watchUpdateBlocked: boolean;
     readonly error: LinkError | StatusDependencyError | null;
   };
@@ -330,7 +330,7 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     },
     boxSudo: {
       passwordless,
-      watchUpdateBlocked: dependencies.updateWatch && passwordless === false,
+      watchUpdateBlocked: dependencies.watchUpdatesGh && passwordless === false,
       error: boxSudoError,
     },
     managedPaths: { allHealthy, unhealthy, error: managedPathsError },
