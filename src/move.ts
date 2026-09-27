@@ -5,8 +5,8 @@
  * The destination clones the project from its git remote at the same path
  * relative to the home directory. Ferry then carries the local-only files that
  * pass the Manifest deny rules, verifies each one with a SHA-256 checksum on
- * the destination, and registers the project in Paseo. With `remove`, the
- * source copy goes to a trash directory. Ferry never deletes it.
+ * the destination. With `remove`, the source copy goes to a trash directory.
+ * Ferry never deletes it.
  *
  * Every source and destination step is a `sh` command string. The operator
  * machine runs it with `sh -c`. The box runs it through Link.
@@ -108,7 +108,6 @@ const NETWORK_TIMEOUT_MS = 120_000;
 const GH_TIMEOUT_MS = 15_000;
 const TRANSFER_TIMEOUT_MS = 15 * 60_000;
 const SECTION = "ferry-section";
-const NO_PASEO = "ferry-no-paseo";
 
 export async function runMove(input: MoveInput, overrides: Partial<MoveDependencies> = {}): Promise<void> {
   const dependencies: MoveDependencies = { ...defaultDependencies(), ...overrides };
@@ -173,22 +172,6 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       });
     }
 
-    const paseo = await step(
-      progress,
-      "Registering in Paseo",
-      () =>
-        destination.run(
-          `if command -v paseo >/dev/null 2>&1; then paseo project create ${destinationPath}; else echo ${NO_PASEO}; fi`,
-          { timeoutMs: PROBE_TIMEOUT_MS },
-        ),
-      (result) => !result.ok,
-    );
-    const paseoLine = !paseo.ok
-      ? `Paseo: registration failed: ${paseo.message}`
-      : paseo.stdout.includes(NO_PASEO)
-        ? `Paseo: ${destination.label} has no paseo CLI; the project is not registered`
-        : `Paseo: registered ~/${rel} on ${destination.label}`;
-
     let trashLine: string | null = null;
     if (input.remove) {
       const name = `${posix.basename(rel)}-${timestamp(dependencies.now())}`;
@@ -205,7 +188,6 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       trashLine = `Trash: moved the source copy to ${source.trash.replace(source.home, "~")}/${name}`;
     }
 
-    writeLine(paseoLine);
     if (trashLine) writeLine(trashLine);
     writeLine(
       `Moved ~/${rel} to ${destination.label}: carried ${plan.carry.length}, refused ${plan.refused.length}, skipped ${plan.skipped.length}.`,

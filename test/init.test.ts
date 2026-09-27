@@ -150,8 +150,6 @@ describe("ferry init", () => {
     );
 
     expect(calls).toEqual({ opened: 1, published: 1, linked: 3 });
-    expect(result.address).toBe("100.64.0.9");
-    expect(result.paseoPort).toBe(6767);
     expect(result.leftovers).toHaveLength(1);
     expect(readConfig(home)).toEqual({
       version: 1,
@@ -376,7 +374,7 @@ describe("ferry init", () => {
 
     expect(repositoryChecked).toBe(true);
     expect(calls).toEqual({ opened: 1, published: 1, linked: 5 });
-    expect(result).toMatchObject({ dryRun: false, address: "user@box.example", published: true });
+    expect(result).toMatchObject({ dryRun: false, published: true });
   });
 
   test("an SSH snapshot refuses when the forwarded identity cannot read the repository", async () => {

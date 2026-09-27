@@ -25,8 +25,6 @@ import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
 import { openStore as openSnapshotStore, type PublishResult } from "./store.ts";
 import { captureInitState, writeInitState } from "./uninstall.ts";
 
-export const PASEO_DAEMON_PORT = 6767;
-
 export type InitInput = {
   readonly dryRun?: boolean;
   readonly home?: string;
@@ -110,8 +108,6 @@ export type InitDryRunResult = {
 
 export type InitExecutedResult = {
   readonly dryRun: false;
-  readonly address: string;
-  readonly paseoPort: 6767;
   readonly leftovers: readonly Leftover[];
   readonly published: boolean;
 };
@@ -281,8 +277,6 @@ export async function runInit(
 
   return {
     dryRun: false,
-    address: probe.address,
-    paseoPort: PASEO_DAEMON_PORT,
     leftovers: seed.leftovers,
     published: publication.published,
   };

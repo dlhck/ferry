@@ -467,7 +467,6 @@ function reportInit(result: InitResult, writeLine: (line: string) => void): void
     for (const line of denyListLines()) writeLine(line);
     return;
   }
-  writeLine(`Paseo: ${result.address}:${result.paseoPort}`);
   writeLine(result.published ? "Snapshot seed published." : "Snapshot already matches the seed.");
 }
 

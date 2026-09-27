@@ -51,8 +51,6 @@ describe("ferry --help", () => {
     let received: InitInput | undefined;
     const result: InitResult = {
       dryRun: false,
-      address: "100.64.0.9",
-      paseoPort: 6767,
       leftovers: [],
       published: true,
     };
@@ -85,7 +83,7 @@ describe("ferry --help", () => {
       sshUser: "david",
       snapshotUrl: "snapshot.git",
     });
-    expect(output).toContain("Paseo: 100.64.0.9:6767");
+    expect(output).toEqual(["Snapshot seed published."]);
   });
 
   test("wires an explicit SSH destination to init", async () => {
@@ -96,8 +94,6 @@ describe("ferry --help", () => {
         received = input;
         return {
           dryRun: false,
-          address: "user@box.example",
-          paseoPort: 6767,
           leftovers: [],
           published: false,
         };
@@ -133,8 +129,6 @@ describe("ferry --help", () => {
         initDependencies = dependencies;
         return {
           dryRun: false,
-          address: "user@box.example",
-          paseoPort: 6767,
           leftovers: [],
           published: false,
         };
@@ -641,7 +635,7 @@ describe("progress selection", () => {
       },
       runInit: async (_input, dependencies) => {
         received.init = dependencies?.progress;
-        return { dryRun: false, address: "box", paseoPort: 6767, leftovers: [], published: false };
+        return { dryRun: false, leftovers: [], published: false };
       },
       runInstall: async (_input, dependencies) => {
         received.install = dependencies?.progress;

@@ -7,8 +7,6 @@ import { noProgress, step, type Progress } from "./progress.ts";
 import type { TipReport } from "./store.ts";
 import { changedPaths } from "./sync.ts";
 
-const PASEO_DAEMON_PORT = 6767;
-
 export type StatusDependencyError = {
   readonly code: "inspection-failed";
   readonly origin: "operator" | "git-remote" | "box";
@@ -87,11 +85,6 @@ export type StatusReport = {
     /** Box MCP servers that need a login, as `tool/server`. */
     readonly loginRequired: readonly string[];
     readonly error: StatusDependencyError | null;
-  };
-  readonly paseo: {
-    readonly address: string | null;
-    readonly port: 6767;
-    readonly listen: string | null;
   };
   readonly denyList: readonly DenyRuleDescription[];
   readonly errors: readonly StatusError[];
@@ -275,11 +268,6 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     managedPaths: { allHealthy, unhealthy, error: managedPathsError },
     auth: { providers, loginRequired, error: authError },
     mcpLogins: { loginRequired: mcpLoginRequired, error: mcpError },
-    paseo: {
-      address,
-      port: PASEO_DAEMON_PORT,
-      listen: address ? `${address}:${PASEO_DAEMON_PORT}` : null,
-    },
     denyList,
     errors,
   };
