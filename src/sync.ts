@@ -24,6 +24,7 @@ import { openStore as openSnapshotStore, skillChanged, type PublishResult } from
 import { adoptPublishedSkills } from "./adopt.ts";
 import { installBoxPlugins, mergeBoxSettings } from "./box-settings.ts";
 import { registerBoxMcp } from "./box-mcp.ts";
+import { carryAgentProfiles, profileName, readAgentProfiles, type AgentProfile } from "./integrations/paseo.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
 
 export type SyncInput = {
@@ -83,6 +84,8 @@ export type SyncPlan = {
   readonly mcpServers: readonly string[];
   /** Skills whose store copy the publish replaces with a real directory in one harness root. */
   readonly storeUpdates: readonly StoreUpdate[];
+  /** The names of the local Paseo agent profiles, or `null` when the Paseo integration is off. */
+  readonly paseoProfiles: readonly string[] | null;
 };
 
 export type SettingsChange = { readonly harness: string; readonly keys: readonly string[] };
@@ -133,17 +136,18 @@ export async function runSync(
   const writeLine = dependencies.writeLine ?? console.log;
   const writePlan = dependencies.writePlan ?? ((plan: SyncPlan) => printPlan(plan, writeLine));
   progress.plan(input.dryRun ? 1 : 9);
-  const { config, registry, seed } = await step(
+  const { config, registry, seed, profiles } = await step(
     progress,
     "Reading the portable set",
     async () => {
       const source = inspectSyncSource(home, dependencies);
       await refuseChangedStoreCopies(home, source.config, source.seed);
-      return source;
+      return { ...source, profiles: source.config.integrations?.paseo === true ? paseoProfiles(home) : null };
     },
     undefined,
     (source) => plural(source.seed.skills.length, "skill"),
   );
+  if (!input.dryRun && profiles !== null) progress.plan(10);
   for (const leftover of seed.leftovers) {
     const label = leftover.code === "hook-path" ? "hook" : leftover.code === "mcp-local" ? "MCP server" : null;
     if (!label) continue;
@@ -151,7 +155,7 @@ export async function runSync(
   }
 
   if (input.dryRun) {
-    const plan = makePlan(input, config, home, null, registry, seed);
+    const plan = makePlan(input, config, home, null, registry, seed, profiles);
     writePlan(plan);
     return { dryRun: true, published: false, plan };
   }
@@ -161,7 +165,7 @@ export async function runSync(
   const remoteHome = await step(progress, `Connecting to ${targetLabel(config)}`, () =>
     resolveRemoteHome(link, config),
   );
-  const plan = makePlan(input, config, home, remoteHome, registry, seed);
+  const plan = makePlan(input, config, home, remoteHome, registry, seed, profiles);
   writePlan(plan);
 
   const release = takeLock(dependencies, home, targetKey(config));
@@ -323,6 +327,31 @@ export async function runSync(
       );
     }
 
+    // The carry runs last and only warns on failure, so the Paseo daemon never blocks the core sync.
+    if (profiles !== null) {
+      try {
+        const carry = await step(
+          progress,
+          "Carrying Paseo agent profiles",
+          () => carryAgentProfiles(link, profiles),
+          undefined,
+          (carry) =>
+            profiles.length === 0
+              ? "no profiles"
+              : [
+                  plural(carry.carried.length, "profile"),
+                  carry.warnings.length > 0 && `${carry.warnings.length} skipped`,
+                  carry.carried.length > 0 && !carry.changed && "no changes",
+                ]
+                  .filter(Boolean)
+                  .join(", "),
+        );
+        for (const warning of carry.warnings) writeLine(`Warning: ${warning}`);
+      } catch (cause) {
+        writeLine(`Warning: Ferry could not carry the Paseo agent profiles: ${messageOf(cause)}. The sync is complete.`);
+      }
+    }
+
     return { dryRun: false, published: publication.published, plan, applyPlan, discarded };
   } finally {
     release();
@@ -386,6 +415,15 @@ async function refuseChangedStoreCopies(home: string, config: OperatorConfig, se
   }
 }
 
+/** Read the local Paseo agent profiles. A refused profile refuses the sync before it publishes. */
+function paseoProfiles(home: string): readonly AgentProfile[] {
+  try {
+    return readAgentProfiles(home);
+  } catch (cause) {
+    throw new SyncError("manifest-refusal", "operator", messageOf(cause), { cause });
+  }
+}
+
 function makePlan(
   input: SyncInput,
   config: OperatorConfig,
@@ -393,6 +431,7 @@ function makePlan(
   remoteHome: string | null,
   registry: Registry,
   seed: Seed,
+  profiles: readonly AgentProfile[] | null,
 ): SyncPlan {
   const localCheckout = join(home, ".ferry", "store");
   return {
@@ -407,6 +446,7 @@ function makePlan(
     settingsChanges: settingsChanges(localCheckout, registry.harnesses, seed),
     mcpServers: seed.mcp.flatMap((entry) => entry.servers.map((server) => `${entry.harness}/${server.name}`)),
     storeUpdates: seed.storeUpdates,
+    paseoProfiles: profiles === null ? null : profiles.map(profileName),
   };
 }
 
@@ -459,6 +499,13 @@ function printPlan(plan: SyncPlan, writeLine: (line: string) => void): void {
       `Store updates from a harness root: ${
         plan.storeUpdates.map((update) => `${update.name} (${update.path})`).join(", ") || "none"
       }`,
+      ...(plan.paseoProfiles === null
+        ? []
+        : [
+            plan.paseoProfiles.length === 0
+              ? "Paseo agent profiles: no profiles"
+              : `Paseo agent profiles: ${plan.paseoProfiles.join(", ")} -> box ~/.paseo/config.json daemon.agentProfiles, then paseo daemon reload. Ferry skips each profile whose provider is not available on the box.`,
+          ]),
       ...denyListLines(),
     ].join("\n"),
   );
@@ -663,6 +710,7 @@ function completeConfig(config: PartialOperatorConfig | null): OperatorConfig {
     publisher: config.publisher,
     snapshotUrl: config.snapshotUrl,
     host,
+    ...(config.integrations ? { integrations: config.integrations } : {}),
   };
 }
 

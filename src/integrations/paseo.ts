@@ -1,9 +1,10 @@
 /** The Paseo integration. The Paseo daemon runs on the box, and Paseo Desktop connects to it over SSH. */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { quoteShell, writeCommand } from "../box-settings.ts";
+import { quoteShell, readCommand, writeCommand } from "../box-settings.ts";
 import { BOX_PATH_DIRS, BunHostAdapter, type HostAdapter } from "../link.ts";
+import { carriedContentHits } from "../manifest.ts";
 import { step, type Progress } from "../progress.ts";
 import { nodeBootstrap } from "../registry/builtin.ts";
 import type {
@@ -103,6 +104,9 @@ const PROJECTS_COMMAND = [
   "done",
 ].join("\n");
 const RESTART_COMMAND = `systemctl --user restart ${UNIT}`;
+/** The Paseo config, relative to the home directory, on the operator machine and on the box. */
+export const CONFIG_FILE = ".paseo/config.json";
+const RELOAD_COMMAND = "paseo daemon reload";
 const DISABLE_COMMAND = [
   "set -e",
   `if [ -f ${quoteShell(UNIT_PATH)} ]; then systemctl --user disable --now ${UNIT}; fi`,
@@ -347,6 +351,147 @@ async function runVersion(host: HostAdapter, argv: readonly string[]): Promise<s
   } catch {
     return null;
   }
+}
+
+/**
+ * A Paseo agent profile. Ferry carries `daemon.agentProfiles` from the Paseo
+ * config and nothing else from that file.
+ */
+export type AgentProfile = Readonly<Record<string, unknown>>;
+
+/**
+ * Read `daemon.agentProfiles` from the local Paseo config. A missing file or
+ * key gives no profiles. Throw a PaseoError that names each profile that holds
+ * an `env` block, a credential key, a token, or a secret field. The error never
+ * holds a value.
+ */
+export function readAgentProfiles(home: string): readonly AgentProfile[] {
+  const path = join(home, CONFIG_FILE);
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return [];
+  }
+  let config: unknown;
+  try {
+    config = JSON.parse(text);
+  } catch {
+    throw new PaseoError(`${path} is not valid JSON, so Ferry cannot read daemon.agentProfiles`);
+  }
+  const profiles = isObject(config) && isObject(config.daemon) ? config.daemon.agentProfiles : undefined;
+  if (profiles === undefined) return [];
+  if (!Array.isArray(profiles)) throw new PaseoError(`daemon.agentProfiles in ${path} is not a list`);
+
+  const refused: string[] = [];
+  for (const [index, profile] of profiles.entries()) {
+    const name = profileName(profile, index);
+    if (!isObject(profile)) {
+      refused.push(`${name} is not a JSON object`);
+      continue;
+    }
+    if (hasCredentialKey(profile)) refused.push(`${name} has an env block or a credential key`);
+    for (const hit of carriedContentHits(path, Buffer.from(JSON.stringify(profile)))) {
+      refused.push(`${name}: ${hit.reason}`);
+    }
+  }
+  if (refused.length > 0) {
+    throw new PaseoError(`Ferry refused to carry the Paseo agent profiles in ${path}: ${refused.join("; ")}`);
+  }
+  return profiles as AgentProfile[];
+}
+
+export type ProfileCarry = {
+  /** The names of the profiles that the box config holds after the carry. */
+  readonly carried: readonly string[];
+  /** One line for each profile that Ferry did not carry. */
+  readonly warnings: readonly string[];
+  /** True when Ferry wrote the box config and reloaded the daemon. */
+  readonly changed: boolean;
+};
+
+/**
+ * Put `profiles` into `daemon.agentProfiles` of the box Paseo config, and keep
+ * all other box keys. Skip each profile whose provider is not available on the
+ * box (issue #99, decision 3). Profiles need no restart, so `paseo daemon
+ * reload` applies them. With no profiles, it runs no box command.
+ */
+export async function carryAgentProfiles(
+  link: IntegrationLink,
+  profiles: readonly AgentProfile[],
+): Promise<ProfileCarry> {
+  if (profiles.length === 0) return { carried: [], warnings: [], changed: false };
+
+  const status = await link.run(STATUS_COMMAND, { timeoutMs: BOX_TIMEOUT_MS });
+  const daemon = status.ok ? parseDaemonStatus(status.stdout) : null;
+  if (daemon === null || daemon.localDaemon !== "running") {
+    throw new PaseoError(
+      `Ferry cannot read the providers from paseo daemon status --json, because ${UNIT} or the daemon does not run on the box`,
+    );
+  }
+  const available = new Set(daemon.providers.filter((entry) => entry.available).map((entry) => entry.provider));
+  const kept: AgentProfile[] = [];
+  const carried: string[] = [];
+  const warnings: string[] = [];
+  for (const [index, profile] of profiles.entries()) {
+    const name = profileName(profile, index);
+    if (typeof profile.provider === "string" && available.has(profile.provider)) {
+      kept.push(profile);
+      carried.push(name);
+    } else {
+      warnings.push(
+        `Paseo agent profile ${name} was not carried: provider ${String(profile.provider)} is not available on the box.`,
+      );
+    }
+  }
+
+  const current = await boxRun(link, readCommand(CONFIG_FILE), `Ferry could not read ~/${CONFIG_FILE} on the box`);
+  const text = current.startsWith("F") ? current.slice(1) : null;
+  const merged = mergeAgentProfiles(text, kept);
+  if (merged === text) return { carried, warnings, changed: false };
+  await boxRun(link, writeCommand(CONFIG_FILE, merged), `Ferry could not write ~/${CONFIG_FILE} on the box`);
+  await boxRun(link, RELOAD_COMMAND, "paseo daemon reload failed on the box");
+  return { carried, warnings, changed: true };
+}
+
+/** Set `daemon.agentProfiles` in the box config text. Keep all other keys. */
+function mergeAgentProfiles(box: string | null, profiles: readonly AgentProfile[]): string {
+  let config: unknown = {};
+  if (box !== null && box.trim() !== "") {
+    try {
+      config = JSON.parse(box);
+    } catch {
+      config = null;
+    }
+  }
+  if (!isObject(config) || (config.daemon !== undefined && !isObject(config.daemon))) {
+    throw new PaseoError(`~/${CONFIG_FILE} on the box is not a JSON object with a daemon object`);
+  }
+  const merged = { ...config, daemon: { ...(config.daemon as object | undefined), agentProfiles: profiles } };
+  return `${JSON.stringify(merged, null, 2)}\n`;
+}
+
+/** The profile name for people: its `name`, else its `id`, else its position. */
+export function profileName(profile: unknown, index: number): string {
+  if (isObject(profile)) {
+    if (typeof profile.name === "string" && profile.name !== "") return profile.name;
+    if (typeof profile.id === "string" && profile.id !== "") return profile.id;
+  }
+  return `#${index + 1}`;
+}
+
+/** True when a key at any depth is `env` or names a credential. */
+function hasCredentialKey(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  return Object.entries(value).some(
+    ([key, child]) =>
+      (!Array.isArray(value) && (key.toLowerCase() === "env" || key.toLowerCase().includes("credential"))) ||
+      hasCredentialKey(child),
+  );
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** The line that `ferry move --remove` prints. Ferry never deletes a Paseo project (issue #99, decision 4). */

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   existsSync,
   mkdirSync,
@@ -1412,3 +1412,151 @@ async function sh(cwd: string, command: string): Promise<string> {
   if (!result.ok) throw new Error(`${command}: ${result.error.message}`);
   return result.stdout;
 }
+
+describe("sync with the Paseo integration", () => {
+  const paseoConfig: OperatorConfig = { ...config, integrations: { paseo: true } };
+  const reviewer = { id: "p1", name: "Reviewer", provider: "claude", model: "opus" };
+  const pilot = { id: "p2", name: "Pilot", provider: "copilot", model: "any" };
+
+  const homes: string[] = [];
+  afterEach(() => {
+    for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+  });
+
+  function paseoHome(profiles: readonly unknown[] | null): string {
+    const home = mkdtempSync(join(tmpdir(), "ferry-sync-paseo-"));
+    homes.push(home);
+    if (profiles !== null) {
+      mkdirSync(join(home, ".paseo"));
+      writeFileSync(
+        join(home, ".paseo/config.json"),
+        JSON.stringify({ daemon: { listen: "127.0.0.1:6767", agentProfiles: profiles }, providers: { openai: {} } }),
+      );
+    }
+    return home;
+  }
+
+  function run(
+    home: string,
+    options: { readonly config?: OperatorConfig; readonly dryRun?: boolean; readonly status?: string } = {},
+  ) {
+    const events: string[] = [];
+    const commands: string[] = [];
+    const lines: string[] = [];
+    const plans: SyncPlan[] = [];
+    const status =
+      options.status ??
+      JSON.stringify({ localDaemon: "running", providers: [{ provider: "claude", available: true }] });
+    const dependencies: SyncDependencies = {
+      readConfig: () => options.config ?? paseoConfig,
+      publisher: () => "operator-machine",
+      readSeed: () => seed,
+      createLink: () => {
+        if (options.dryRun) throw new Error("Link must not be created");
+        return {
+          run: async (command: string) => {
+            commands.push(command);
+            let stdout = "";
+            if (command.startsWith("printf")) stdout = "/srv/ferry\n";
+            else if (command.includes("paseo daemon status")) stdout = status;
+            else if (command.includes(".paseo/config.json") && !command.includes(" mv ")) stdout = "M";
+            return { ok: true as const, address: "box", stdout, stderr: "" };
+          },
+        };
+      },
+      writePlan: (plan) => plans.push(plan),
+      writeLine: (line) => lines.push(line),
+      acquireLock: () => () => {},
+      openStore: async () => ({
+        path: "/operator/.ferry/store",
+        publish: async () => ({ published: false, tip: null }),
+      }),
+      apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
+      adopt: () => {},
+      progress: {
+        ...noProgress,
+        plan: (total) => events.push(`plan:${total}`),
+        start: (step) => events.push(`start:${step}`),
+        done: (detail) => events.push(`done:${detail ?? ""}`),
+        fail: () => events.push("fail"),
+      },
+    };
+    return { events, commands, lines, plans, result: runSync({ home, dryRun: options.dryRun }, dependencies) };
+  }
+
+  test("carries the profiles as the last step, skips a missing provider, and reloads the daemon", async () => {
+    const sync = run(paseoHome([reviewer, pilot]));
+    await sync.result;
+
+    expect(sync.events).toContain("plan:10");
+    expect(sync.events.slice(-2)).toEqual(["start:Carrying Paseo agent profiles", "done:1 profile, 1 skipped"]);
+    expect(sync.lines).toContain(
+      "Warning: Paseo agent profile Pilot was not carried: provider copilot is not available on the box.",
+    );
+    const write = sync.commands.find((command) => command.includes(".paseo/config.json") && command.includes(" mv "));
+    expect(write).toContain('"name": "Reviewer"');
+    expect(write).not.toContain("Pilot");
+    expect(write).not.toContain("providers");
+    expect(sync.commands.at(-1)).toBe("paseo daemon reload");
+  });
+
+  test("reports no profiles and runs no Paseo command when the operator has none", async () => {
+    const sync = run(paseoHome(null));
+    await sync.result;
+
+    expect(sync.events.slice(-2)).toEqual(["start:Carrying Paseo agent profiles", "done:no profiles"]);
+    expect(sync.commands.some((command) => command.includes("paseo"))).toBe(false);
+  });
+
+  test("warns and completes the sync when the box cannot take the profiles", async () => {
+    const sync = run(paseoHome([reviewer]), { status: "" });
+    await sync.result;
+
+    expect(sync.events.slice(-2)).toEqual(["start:Carrying Paseo agent profiles", "fail"]);
+    expect(sync.lines.at(-1)).toStartWith("Warning: Ferry could not carry the Paseo agent profiles:");
+  });
+
+  test("refuses a profile with an env block before it connects to the box", async () => {
+    const sync = run(paseoHome([{ ...reviewer, env: { MODE: "fast" } }]));
+
+    await expect(sync.result).rejects.toEqual(
+      expect.objectContaining({ code: "manifest-refusal", message: expect.stringContaining("Reviewer") }),
+    );
+    expect(sync.commands).toEqual([]);
+  });
+
+  test("the dry run names the profiles it would carry and stays offline", async () => {
+    const output: string[] = [];
+    const log = console.log;
+    console.log = (line: string) => output.push(line);
+    try {
+      const sync = run(paseoHome([reviewer, pilot]), { dryRun: true });
+      await sync.result;
+      expect(sync.plans[0]?.paseoProfiles).toEqual(["Reviewer", "Pilot"]);
+      expect(sync.commands).toEqual([]);
+    } finally {
+      console.log = log;
+    }
+  });
+
+  test("the printed plan has a Paseo line only when the integration is enabled", async () => {
+    const printed = async (config: OperatorConfig) => {
+      const output: string[] = [];
+      await runSync(
+        { home: paseoHome([reviewer]), dryRun: true },
+        {
+          readConfig: () => config,
+          publisher: () => "operator-machine",
+          readSeed: () => seed,
+          writeLine: (line) => output.push(line),
+        },
+      );
+      return output.join("\n");
+    };
+
+    expect(await printed(paseoConfig)).toContain(
+      "Paseo agent profiles: Reviewer -> box ~/.paseo/config.json daemon.agentProfiles, then paseo daemon reload. Ferry skips each profile whose provider is not available on the box.",
+    );
+    expect(await printed(config)).not.toContain("Paseo");
+  });
+});

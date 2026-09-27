@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { createPaseo, UNIT_FILE } from "../src/integrations/paseo.ts";
+import { carryAgentProfiles, createPaseo, readAgentProfiles, UNIT_FILE } from "../src/integrations/paseo.ts";
 import type { HostAdapter, LinkResult } from "../src/link.ts";
 import { noProgress } from "../src/progress.ts";
 
@@ -54,7 +54,8 @@ exit 0`,
 esac`,
   npm: 'echo "npm $*" >> "$LOG"',
   paseo: `case "$1 $2" in
-  "daemon status") echo '{"localDaemon":"running","daemonVersion":"0.9.2","listen":"127.0.0.1:6767"}' ;;
+  "daemon status") if [ -e "$STATE/status" ]; then cat "$STATE/status"; else echo '{"localDaemon":"running","daemonVersion":"0.9.2","listen":"127.0.0.1:6767"}'; fi ;;
+  "daemon reload") echo "paseo daemon reload" >> "$LOG" ;;
   "project create") echo "paseo project create $3" >> "$LOG"; [ "$3" != "$(cat "$STATE/fail-project" 2>/dev/null)" ] ;;
 esac`,
 };
@@ -343,5 +344,137 @@ describe("Paseo plan", () => {
 
     expect(await paseo.plan("disable")).not.toContain(uninstall);
     expect(await paseo.plan("purge")).toContain(uninstall);
+  });
+});
+
+describe("Paseo agent profiles", () => {
+  // Build the value at run time so this file holds no string a secret scanner flags.
+  const secret = "hunter" + "2-" + "q7Z";
+  const claude = { id: "p1", name: "Reviewer", provider: "claude", model: "opus" };
+  const codex = { id: "p2", name: "Builder", provider: "codex", model: "gpt" };
+  const copilot = { id: "p3", name: "Pilot", provider: "copilot", model: "any" };
+
+  function operatorHome(config: unknown): string {
+    const home = mkdtempSync(join(tmpdir(), "ferry-paseo-home-"));
+    roots.push(home);
+    if (config !== undefined) touch(join(home, ".paseo/config.json"), JSON.stringify(config));
+    return home;
+  }
+
+  function runningBox(providers: readonly { provider: string; available: boolean }[]): FakeBox {
+    const box = fakeBox();
+    touch(join(box.state, "active-ferry-paseo.service"));
+    writeFileSync(join(box.state, "status"), JSON.stringify({ localDaemon: "running", providers }));
+    return box;
+  }
+
+  test("reads only daemon.agentProfiles from the local config", () => {
+    const home = operatorHome({
+      daemon: { listen: "127.0.0.1:6767", auth: { password: secret }, agentProfiles: [claude, codex] },
+      providers: { openai: { apiKey: secret } },
+      agents: { providers: { claude: { env: { KEY: secret } } } },
+    });
+
+    expect(readAgentProfiles(home)).toEqual([claude, codex]);
+  });
+
+  test("returns no profiles when the local config or the key is missing", () => {
+    expect(readAgentProfiles(operatorHome(undefined))).toEqual([]);
+    expect(readAgentProfiles(operatorHome({ daemon: { listen: "127.0.0.1:6767" } }))).toEqual([]);
+  });
+
+  test("refuses the carry and names each profile with an env block or a secret, never the value", () => {
+    const home = operatorHome({
+      daemon: {
+        agentProfiles: [
+          claude,
+          { ...codex, env: { MODE: "fast" } },
+          { ...copilot, notes: "use it", apiKey: secret },
+        ],
+      },
+    });
+
+    let error: unknown;
+    try {
+      readAgentProfiles(home);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain("Builder");
+    expect(message).toContain("env");
+    expect(message).toContain("Pilot");
+    expect(message).toContain("key apiKey holds a password or secret");
+    expect(message).not.toContain("Reviewer");
+    expect(message).not.toContain(secret);
+  });
+
+  test("refuses a profile with a token in a value", () => {
+    const token = "gh" + "p_" + "A".repeat(36);
+    const home = operatorHome({ daemon: { agentProfiles: [{ ...claude, notes: `use ${token}` }] } });
+
+    expect(() => readAgentProfiles(home)).toThrow("Reviewer");
+  });
+
+  test("merges the profiles into the box config, keeps other keys, skips a missing provider, and reloads", async () => {
+    const box = runningBox([
+      { provider: "claude", available: true },
+      { provider: "codex", available: true },
+      { provider: "copilot", available: false },
+    ]);
+    touch(join(box.home, ".paseo/config.json"), JSON.stringify({ version: 1, daemon: { listen: "127.0.0.1:6767", agentProfiles: [{ id: "old" }] }, app: { baseUrl: "x" } }));
+
+    const result = await carryAgentProfiles(box, [claude, codex, copilot]);
+
+    expect(result).toEqual({
+      carried: ["Reviewer", "Builder"],
+      warnings: ["Paseo agent profile Pilot was not carried: provider copilot is not available on the box."],
+      changed: true,
+    });
+    expect(JSON.parse(readFileSync(join(box.home, ".paseo/config.json"), "utf8"))).toEqual({
+      version: 1,
+      daemon: { listen: "127.0.0.1:6767", agentProfiles: [claude, codex] },
+      app: { baseUrl: "x" },
+    });
+    expect(box.log()).toEqual(["paseo daemon reload"]);
+  });
+
+  test("skips a profile whose provider the box does not list", async () => {
+    const box = runningBox([{ provider: "claude", available: true }]);
+
+    const result = await carryAgentProfiles(box, [claude, { ...codex, provider: "custom" }]);
+
+    expect(result.warnings).toEqual([
+      "Paseo agent profile Builder was not carried: provider custom is not available on the box.",
+    ]);
+    expect(JSON.parse(readFileSync(join(box.home, ".paseo/config.json"), "utf8"))).toEqual({
+      daemon: { agentProfiles: [claude] },
+    });
+  });
+
+  test("writes nothing and does not reload when the box already has the profiles", async () => {
+    const box = runningBox([{ provider: "claude", available: true }]);
+    touch(join(box.home, ".paseo/config.json"), `${JSON.stringify({ daemon: { agentProfiles: [claude] } }, null, 2)}\n`);
+
+    const result = await carryAgentProfiles(box, [claude]);
+
+    expect(result.changed).toBe(false);
+    expect(box.log()).toEqual([]);
+    expect(box.commands.some((command) => command.includes(" mv "))).toBe(false);
+  });
+
+  test("with no profiles, it does nothing on the box", async () => {
+    const box = runningBox([]);
+
+    expect(await carryAgentProfiles(box, [])).toEqual({ carried: [], warnings: [], changed: false });
+    expect(box.commands).toEqual([]);
+  });
+
+  test("fails and writes nothing when the daemon does not run", async () => {
+    const box = fakeBox();
+
+    await expect(carryAgentProfiles(box, [claude])).rejects.toThrow("providers");
+    expect(existsSync(join(box.home, ".paseo/config.json"))).toBe(false);
   });
 });
