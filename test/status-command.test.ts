@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { ApplyPlan, RemoteApplyInput } from "../src/apply.ts";
 import type { AuthStatusReport } from "../src/auth-start.ts";
 import { buildProgram } from "../src/cli.ts";
+import { createPaseo } from "../src/integrations/paseo.ts";
+import type { Integration, IntegrationHealth } from "../src/integrations/types.ts";
 import type { LinkResult } from "../src/link.ts";
 import type { Registry } from "../src/registry/load.ts";
 import type { ToolDescriptor } from "../src/registry/types.ts";
@@ -507,5 +509,101 @@ describe("ferry status progress", () => {
     await runStatusCommand({ json: true }, { ...tracked.dependencies, progress: recordProgress() });
 
     expect(tracked.output).toEqual(plain.output);
+  });
+
+  describe("with [integrations] paseo = true", () => {
+    const health: IntegrationHealth = {
+      lines: ["Service: ferry-paseo.service active, enabled", "Daemon: running, reachable"],
+      warnings: ["The Paseo relay is on. Ferry keeps it off on the box."],
+      json: { localDaemon: "running", relay: true },
+    };
+
+    function enabled(online = true) {
+      const stack = fakeStack(online);
+      const readConfig = stack.dependencies.readConfig!;
+      const calls: unknown[] = [];
+      const paseo: Integration = {
+        ...createPaseo({ platform: "win32" }),
+        async health(link) {
+          calls.push(link);
+          return health;
+        },
+      };
+      const dependencies: Partial<StatusCommandDependencies> = {
+        ...stack.dependencies,
+        readConfig: () => ({ ...readConfig(), integrations: { paseo: true } }),
+        integrations: [paseo],
+      };
+      return { stack, calls, dependencies };
+    }
+
+    test("prints an Integrations section with the health lines and warnings", async () => {
+      const { stack, calls, dependencies } = enabled();
+
+      await runStatusCommand({ json: false }, dependencies);
+
+      expect(calls).toHaveLength(1);
+      expect(stack.output.join("\n")).toContain(
+        [
+          "MCP logins:",
+          "  codex/linear: LOGIN REQUIRED, run ferry auth codex --mcp linear",
+          "",
+          "Integrations:",
+          "  Paseo:",
+          "    Service: ferry-paseo.service active, enabled",
+          "    Daemon: running, reachable",
+          "    WARNING: The Paseo relay is on. Ferry keeps it off on the box.",
+          "",
+          "Deny list:",
+        ].join("\n"),
+      );
+    });
+
+    test("adds integrations.paseo to the JSON report", async () => {
+      const { stack, dependencies } = enabled();
+
+      const report = await runStatusCommand({ json: true }, dependencies);
+
+      expect(JSON.parse(stack.output[0]!).integrations).toEqual({
+        paseo: { name: "Paseo", lines: health.lines, warnings: health.warnings, state: health.json },
+      });
+      expect(report.integrations?.paseo?.state).toEqual(health.json);
+    });
+
+    test("checks the integration as a progress step", async () => {
+      const { dependencies } = enabled();
+      const terminal = fakeTerminal();
+
+      await runStatusCommand({ json: false }, { ...dependencies, progress: terminal.progress });
+      terminal.progress.finish();
+
+      expect(terminal.table().at(-1)).toMatch(/^Checking Paseo on the box\s+✔ done\s+1 warning\s+0\.1s$/);
+    });
+
+    test("skips the check when the host is offline", async () => {
+      const { stack, calls, dependencies } = enabled(false);
+      const progress = recordProgress();
+
+      const report = await runStatusCommand({ json: false }, { ...dependencies, progress });
+
+      expect(calls).toEqual([]);
+      expect(progress.events).toContain("skip:Checking Paseo on the box");
+      expect(report.integrations?.paseo).toEqual({
+        name: "Paseo",
+        lines: ["unavailable while host is offline"],
+        warnings: [],
+        state: { error: "host offline" },
+      });
+      expect(stack.output.join("\n")).toContain("Integrations:\n  Paseo:\n    unavailable while host is offline");
+    });
+  });
+
+  test("adds no integrations key when no integration is enabled", async () => {
+    const stack = fakeStack();
+
+    const report = await runStatusCommand({ json: true }, stack.dependencies);
+
+    expect("integrations" in report).toBe(false);
+    expect(stack.output[0]).not.toContain("integrations");
   });
 });
