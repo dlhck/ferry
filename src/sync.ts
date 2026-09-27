@@ -45,6 +45,7 @@ export type SyncDependencies = {
   readonly apply?: (input: RemoteApplyInput) => Promise<ApplyPlan>;
   readonly adopt?: typeof adoptPublishedSkills;
   readonly writePlan?: (plan: SyncPlan) => void;
+  readonly writeLine?: (line: string) => void;
 };
 
 type SyncConfig = PartialOperatorConfig & RegistryConfig;
@@ -79,6 +80,8 @@ export type SyncResult = {
   readonly published: boolean;
   readonly plan: SyncPlan;
   readonly applyPlan?: ApplyPlan;
+  /** Box checkout paths that the update discarded, relative to the checkout. */
+  readonly discarded?: readonly string[];
 };
 
 export type SyncErrorCode =
@@ -153,7 +156,7 @@ export async function runSync(
     }
 
     const update = await link.run(
-      remoteUpdateCommand(required(plan.remoteCheckout), config.snapshotUrl),
+      remoteUpdateCommand(required(plan.remoteCheckout), config.snapshotUrl, publication.tip),
       { agentForwarding: "git" },
     );
     if (!update.ok) {
@@ -161,6 +164,12 @@ export async function runSync(
         "remote-update-failure",
         "box",
         `failed to update ${plan.box} from ${config.snapshotUrl}: ${update.error.origin}/${update.error.code}: ${update.error.message}`,
+      );
+    }
+    const discarded = changedPaths(update.stdout);
+    for (const path of discarded) {
+      (dependencies.writeLine ?? console.log)(
+        `Discarded box change: ${posix.join(required(plan.remoteCheckout), path)}`,
       );
     }
 
@@ -194,7 +203,7 @@ export async function runSync(
       );
     }
 
-    return { dryRun: false, published: publication.published, plan, applyPlan };
+    return { dryRun: false, published: publication.published, plan, applyPlan, discarded };
   } finally {
     release();
   }
@@ -259,24 +268,50 @@ function printPlan(plan: SyncPlan): void {
       `Git remote: ${plan.gitRemote}`,
       `Box: ${plan.box}`,
       `Publish: ${plan.localCheckout} (${plan.message ?? "Store default message"})`,
-      `Update: ${remoteCheckout} with git clone or pull --ff-only`,
+      `Update: ${remoteCheckout} with git clone, or fetch and reset --hard to the pushed commit (box changes are discarded)`,
       "SSH agent forwarding is limited to the box git update.",
       `Apply: ${remoteCheckout} -> ${remoteHome} (force: ${plan.force ? "yes" : "no"})`,
     ].join("\n"),
   );
 }
 
-/** Clone the snapshot on the box when missing; otherwise fast-forward the existing checkout. */
-export function remoteUpdateCommand(checkout: string, remote: string): string {
+/**
+ * Clone the snapshot on the box when missing. Otherwise print the box changes, then reset the
+ * existing checkout to the pushed commit and remove its untracked files, so the box never wins.
+ */
+export function remoteUpdateCommand(checkout: string, remote: string, tip: string | null): string {
   const quotedCheckout = quoteShell(checkout);
   const quotedRemote = quoteShell(remote);
+  const target = tip === null ? "@{upstream}" : tip;
   return [
     `if [ -d ${quoteShell(`${checkout}/.git`)} ]; then`,
-    `git -C ${quotedCheckout} pull --ff-only;`,
+    `${boxChangesCommand(checkout)} &&`,
+    `git -C ${quotedCheckout} fetch --quiet &&`,
+    `git -C ${quotedCheckout} reset --quiet --hard ${quoteShell(target)} &&`,
+    `git -C ${quotedCheckout} clean --quiet --force -d;`,
     `else`,
     `mkdir -p ${quoteShell(posix.dirname(checkout))} && git clone ${quotedRemote} ${quotedCheckout};`,
     `fi`,
   ].join(" ");
+}
+
+/** List modified and untracked files in the box checkout as NUL-separated porcelain output. */
+export function boxChangesCommand(checkout: string): string {
+  return `git -C ${quoteShell(checkout)} status --porcelain=v1 -z --untracked-files=all`;
+}
+
+/** Read the paths from `boxChangesCommand` output. */
+export function changedPaths(stdout: string): string[] {
+  const entries = stdout.split("\0");
+  const paths: string[] = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]!;
+    if (entry.length < 4) continue;
+    paths.push(entry.slice(3));
+    // A rename or copy entry is followed by its source path.
+    if (entry[0] === "R" || entry[0] === "C") index += 1;
+  }
+  return paths.sort();
 }
 
 async function resolveRemoteHome(link: SyncLink, config: OperatorConfig): Promise<string> {
