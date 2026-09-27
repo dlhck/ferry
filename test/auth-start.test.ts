@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthStart, loopbackLoginUrl, mcpLoginCommand, type AuthLink } from "../src/auth-start.ts";
 import { mcpCommand } from "../src/box-mcp.ts";
-import type { ForwardOptions, LinkResult, RunOptions } from "../src/link.ts";
+import type { ForwardOptions, ForwardResult, LinkFailure, LinkResult, LinkSuccess, RunOptions } from "../src/link.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 
 type RunCall = {
@@ -224,7 +224,7 @@ describe("AuthStart", () => {
 
     expect(await auth.finish(started)).toEqual({ kind: "logged-in", provider: "codex" });
     expect(link.forwards).toEqual([
-      { localPort: 1455, remotePort: 1455, remoteHost: "127.0.0.1", timeoutMs: 120_000 },
+      { localPort: 1455, remotePort: 1455, remoteHost: "127.0.0.1", timeoutMs: 120_000, signal: expect.any(AbortSignal) },
     ]);
     expect(link.runs.at(-1)?.command).toBe("codex login status");
   });
@@ -352,7 +352,7 @@ describe("AuthStart MCP logins", () => {
 
   test("forwards the callback port until the timeout, then reports the login", async () => {
     const timeout: LinkResult = { ok: false, error: { code: "forward-timeout", origin: "network", message: "t" } };
-    const link = new FakeLink([success("docs: https://docs.example/mcp (HTTP) - ✓ Connected\n"), success(""), success("")], [timeout]);
+    const link = new FakeLink([success("docs: https://docs.example/mcp (HTTP) - ✓ Connected\n")], [timeout]);
     const auth = new AuthStart(link, BUILTIN_TOOLS);
 
     const result = await auth.finishMcp({
@@ -364,7 +364,9 @@ describe("AuthStart MCP logins", () => {
       timeoutMs: 300_000,
     });
 
-    expect(link.forwards).toEqual([{ localPort: 3118, remotePort: 3118, remoteHost: "127.0.0.1", timeoutMs: 300_000 }]);
+    expect(link.forwards).toEqual([
+      { localPort: 3118, remotePort: 3118, remoteHost: "127.0.0.1", timeoutMs: 300_000, signal: expect.any(AbortSignal) },
+    ]);
     expect(result).toEqual({ kind: "logged-in", provider: "claude/linear" });
   });
 
@@ -380,14 +382,173 @@ describe("AuthStart MCP logins", () => {
     const timeout: LinkResult = { ok: false, error: { code: "forward-timeout", origin: "network", message: "t" } };
     const busy: LinkResult = { ok: false, error: { code: "forward-failed", origin: "network", message: "port in use" } };
 
-    const pending = new FakeLink([success(MCP_LISTS.claude), success(""), success("")], [timeout]);
+    const pending = new FakeLink([success(MCP_LISTS.claude)], [timeout]);
     expect(await new AuthStart(pending, BUILTIN_TOOLS).finishMcp(started)).toMatchObject({ kind: "failed", code: "login-output" });
 
-    const failed = new FakeLink([], [busy]);
+    const failed = new FakeLink([success(MCP_LISTS.claude)], [busy]);
     expect(await new AuthStart(failed, BUILTIN_TOOLS).finishMcp(started)).toMatchObject({
       kind: "link-failure",
       result: { error: { code: "forward-failed" } },
     });
+  });
+});
+
+/**
+ * A Link whose forward holds until its signal aborts, then reports
+ * `forward-stopped`, or until its timeout, then reports `forward-timeout`.
+ * Each run takes its result from `probe`, which gets the number of runs so far.
+ */
+class HeldForwardLink implements AuthLink {
+  readonly runs: string[] = [];
+  readonly forwards: ForwardOptions[] = [];
+  forwardEnd: "stopped" | "timeout" | null = null;
+
+  constructor(
+    private readonly probe: (runs: number) => LinkResult,
+    private readonly forwardFailure?: LinkFailure,
+  ) {}
+
+  async run(command: string): Promise<LinkResult> {
+    this.runs.push(command);
+    return this.probe(this.runs.length);
+  }
+
+  forward(options: ForwardOptions): Promise<ForwardResult> {
+    this.forwards.push(options);
+    if (this.forwardFailure) return Promise.resolve(this.forwardFailure);
+    return new Promise((resolve) => {
+      const stop = () => {
+        clearTimeout(timer);
+        this.forwardEnd ??= "stopped";
+        resolve({ ...(success() as LinkSuccess), stopped: true });
+      };
+      const timer = setTimeout(() => {
+        this.forwardEnd = "timeout";
+        resolve({ ok: false, error: { code: "forward-timeout", origin: "network", message: "t" } });
+      }, options.timeoutMs);
+      if (options.signal?.aborted) stop();
+      options.signal?.addEventListener("abort", stop);
+    });
+  }
+}
+
+describe("AuthStart callback forward", () => {
+  const codexStarted = {
+    kind: "local-port-forward",
+    provider: "codex",
+    url: "https://auth.openai.com/oauth/authorize?state=opaque",
+    localPort: 1455,
+    remotePort: 1455,
+    timeoutMs: 10_000,
+  } as const;
+  const mcpStarted = { ...codexStarted, provider: "claude/linear", url: AUTHORIZE_URL, localPort: 3118, remotePort: 3118 };
+  const fast = { pollMs: 10, timeoutMs: 60_000 };
+  const probeError: LinkFailure = { ok: false, error: { code: "ssh-failed", origin: "network", message: "raw" } };
+
+  test("stops the Codex forward as soon as the probe reports the login, then reports success", async () => {
+    const link = new HeldForwardLink((runs) => (runs < 3 ? loggedOut() : success()));
+
+    const result = await new AuthStart(link, BUILTIN_TOOLS, fast).finish(codexStarted);
+
+    expect(result).toEqual({ kind: "logged-in", provider: "codex" });
+    expect(link.forwardEnd).toBe("stopped");
+    expect(link.runs).toEqual(["codex login status", "codex login status", "codex login status"]);
+    expect(link.forwards[0]?.timeoutMs).toBe(10_000);
+  });
+
+  test("stops the MCP forward as soon as the box no longer lists the server as needing a login", async () => {
+    const link = new HeldForwardLink((runs) => success(runs < 2 ? MCP_LISTS.claude : "linear: ✓ Connected\n"));
+
+    const result = await new AuthStart(link, BUILTIN_TOOLS, fast).finishMcp(mcpStarted);
+
+    expect(result).toEqual({ kind: "logged-in", provider: "claude/linear" });
+    expect(link.forwardEnd).toBe("stopped");
+    expect(link.runs).toEqual([
+      "command -v claude >/dev/null 2>&1 || exit 0; claude mcp list 2>/dev/null || true",
+      "command -v claude >/dev/null 2>&1 || exit 0; claude mcp list 2>/dev/null || true",
+    ]);
+  });
+
+  test("probes once more at the timeout and reports a login that did not finish", async () => {
+    const codex = new HeldForwardLink(() => loggedOut());
+    const mcp = new HeldForwardLink(() => success(MCP_LISTS.claude));
+
+    const codexResult = await new AuthStart(codex, BUILTIN_TOOLS, { pollMs: 40, timeoutMs: 60_000 }).finish({
+      ...codexStarted,
+      timeoutMs: 100,
+    });
+    const mcpResult = await new AuthStart(mcp, BUILTIN_TOOLS, { pollMs: 40, timeoutMs: 60_000 }).finishMcp({
+      ...mcpStarted,
+      timeoutMs: 100,
+    });
+
+    expect(codex.forwardEnd).toBe("timeout");
+    expect(codexResult).toEqual({
+      kind: "failed",
+      provider: "codex",
+      code: "login-unfinished",
+      message: "The codex login did not finish before the port forward closed.",
+    });
+    expect(mcp.forwardEnd).toBe("timeout");
+    expect(mcpResult).toMatchObject({ kind: "failed", provider: "claude/linear", code: "login-output" });
+  });
+
+  test("on Ctrl-C stops the forward, probes once more, and reports the real state", async () => {
+    const operator = new AbortController();
+    const done = new HeldForwardLink((runs) => {
+      if (runs === 1) operator.abort();
+      return runs === 1 ? loggedOut() : success();
+    });
+
+    const result = await new AuthStart(done, BUILTIN_TOOLS, fast).finish(codexStarted, undefined, operator.signal);
+
+    expect(result).toEqual({ kind: "logged-in", provider: "codex" });
+    expect(done.forwardEnd).toBe("stopped");
+    expect(done.runs).toHaveLength(2);
+
+    const stopped = new AbortController();
+    stopped.abort();
+    const pending = new HeldForwardLink(() => success(MCP_LISTS.claude));
+    const mcpResult = await new AuthStart(pending, BUILTIN_TOOLS, fast).finishMcp(mcpStarted, stopped.signal);
+
+    expect(pending.forwardEnd).toBe("stopped");
+    expect(pending.runs).toHaveLength(1);
+    expect(mcpResult).toMatchObject({ kind: "failed", provider: "claude/linear", code: "login-output" });
+  });
+
+  test("on Ctrl-C does not report the forward failure when OpenSSH got the interrupt first", async () => {
+    const operator = new AbortController();
+    operator.abort();
+    const interrupted: LinkFailure = { ok: false, error: { code: "forward-failed", origin: "network", message: "Killed by signal 2." } };
+    const link = new HeldForwardLink(() => loggedOut(), interrupted);
+
+    const result = await new AuthStart(link, BUILTIN_TOOLS, fast).finish(codexStarted, undefined, operator.signal);
+
+    expect(result).toMatchObject({ kind: "failed", provider: "codex", code: "login-unfinished" });
+  });
+
+  test("stops the forward and reports a probe error", async () => {
+    const codex = new HeldForwardLink((runs) => (runs < 2 ? loggedOut() : probeError));
+    const mcp = new HeldForwardLink(() => probeError);
+
+    const codexResult = await new AuthStart(codex, BUILTIN_TOOLS, fast).finish(codexStarted);
+    const mcpResult = await new AuthStart(mcp, BUILTIN_TOOLS, fast).finishMcp(mcpStarted);
+
+    for (const [link, result] of [[codex, codexResult], [mcp, mcpResult]] as const) {
+      expect(link.forwardEnd).toBe("stopped");
+      expect(result).toMatchObject({ kind: "link-failure", result: { error: { code: "ssh-failed", origin: "network" } } });
+      expect(JSON.stringify(result)).not.toContain("raw");
+    }
+  });
+
+  test("reports a forward that failed, after one probe", async () => {
+    const busy: LinkFailure = { ok: false, error: { code: "forward-failed", origin: "network", message: "port in use" } };
+    const link = new HeldForwardLink(() => loggedOut(), busy);
+
+    const result = await new AuthStart(link, BUILTIN_TOOLS, fast).finish(codexStarted);
+
+    expect(result).toMatchObject({ kind: "link-failure", result: { error: { code: "forward-failed" } } });
+    expect(link.runs).toEqual(["codex login status"]);
   });
 });
 

@@ -6,6 +6,7 @@
 
 import type {
   ForwardOptions,
+  ForwardResult,
   LinkError,
   LinkErrorCode,
   LinkFailure,
@@ -15,7 +16,7 @@ import type {
 } from "./link.ts";
 import { mcpBinary, mcpCommand } from "./box-mcp.ts";
 import { quoteShell } from "./box-settings.ts";
-import type { AuthFallback, ToolAuth, ToolDescriptor } from "./registry/types.ts";
+import type { AuthFallback, ToolAuth, ToolDescriptor, ToolMcp } from "./registry/types.ts";
 
 /** Same rule as Manifest: an MCP server name reaches a remote shell command. */
 const MCP_SERVER_NAME = /^[A-Za-z0-9._-]+$/;
@@ -29,7 +30,7 @@ const MCP_LOGIN_LIFETIME_S = 330;
 const MCP_URL_WAIT_S = 30;
 /** A vendor login and its device code stop after this time on the box. */
 export const LOGIN_LIFETIME_S = 900;
-/** How often ferry probes the login state while the operator finishes the login. */
+/** How often ferry probes the login state while the operator finishes the login or a forward is open. */
 const LOGIN_POLL_MS = 5_000;
 /** The setup command talks to the vendor, so it gets more time than one command. */
 const SETUP_TIMEOUT_MS = 120_000;
@@ -76,7 +77,7 @@ export type McpLoginStatus =
 
 export interface AuthLink {
   run(command: string, options?: RunOptions): Promise<LinkResult>;
-  forward(options: ForwardOptions): Promise<LinkResult>;
+  forward(options: ForwardOptions): Promise<ForwardResult>;
 }
 
 export type AuthStartResult =
@@ -241,21 +242,15 @@ export class AuthStart {
   /**
    * Wait until the operator finishes a started login, then run the setup of
    * the tool. A login that waits for a pasted code gets `pastedCode` first.
-   * An already-done login only runs the setup. Other results pass through.
+   * A login with a callback forward holds the forward until the login is
+   * done, `signal` aborts, or the forward times out. An already-done login
+   * only runs the setup. Other results pass through.
    */
-  async finish(started: AuthStartResult, pastedCode?: string): Promise<AuthStartResult> {
-    if (started.kind === "local-port-forward") {
-      const forward = await this.link.forward({
-        localPort: started.localPort,
-        remotePort: started.remotePort,
-        remoteHost: "127.0.0.1",
-        timeoutMs: started.timeoutMs,
-      });
-      // The forward holds until its timeout, so a timeout is the usual end.
-      if (!forward.ok && forward.error.code !== "forward-timeout") {
-        return linkFailure(started.provider, forward);
-      }
-    }
+  async finish(
+    started: AuthStartResult,
+    pastedCode?: string,
+    signal?: AbortSignal,
+  ): Promise<AuthStartResult> {
     if (
       started.kind !== "already-done" &&
       started.kind !== "device-url" &&
@@ -283,9 +278,19 @@ export class AuthStart {
       if (!sent.ok) return linkFailure(provider, sent);
     }
 
-    if (started.kind !== "already-done") {
+    if (started.kind === "local-port-forward") {
+      const probe = auth.probe;
+      const done = await this.holdForward(started, () => this.probeLogin(probe), signal);
+      if (done !== true) {
+        return done ? linkFailure(provider, done) : unfinished(provider, auth, "before the port forward closed");
+      }
+    } else if (started.kind !== "already-done") {
       const done = await this.waitForLogin(auth.probe);
-      if (done !== true) return done ? linkFailure(provider, done) : unfinished(provider, auth, this.wait);
+      if (done !== true) {
+        return done
+          ? linkFailure(provider, done)
+          : unfinished(provider, auth, `in ${Math.round(this.wait.timeoutMs / 1000)} s`);
+      }
     }
     const kind = started.kind === "already-done" ? "already-done" : "logged-in";
     if (!auth.setup) return { kind, provider };
@@ -312,19 +317,12 @@ export class AuthStart {
     const statuses: McpLoginStatus[] = [];
     for (const tool of this.tools) {
       if (!tool.mcp) continue;
-      const result = await this.link.run(
-        `command -v ${mcpBinary(tool.mcp)} >/dev/null 2>&1 || exit 0; ${tool.mcp.list} 2>/dev/null || true`,
-        { timeoutMs: MCP_LIST_TIMEOUT_MS },
+      const loginRequired = await this.mcpLoginRequired(tool.mcp);
+      statuses.push(
+        "error" in loginRequired
+          ? { tool: tool.id, error: safeError(loginRequired.error) }
+          : { tool: tool.id, loginRequired },
       );
-      if (!result.ok) {
-        statuses.push({ tool: tool.id, error: safeError(result.error) });
-        continue;
-      }
-      const pattern = new RegExp(tool.mcp.loginRequired);
-      const loginRequired = plainText(result.stdout)
-        .split("\n")
-        .flatMap((line) => line.match(pattern)?.[1] ?? []);
-      statuses.push({ tool: tool.id, loginRequired });
     }
     return statuses;
   }
@@ -378,34 +376,93 @@ export class AuthStart {
   }
 
   /**
-   * Forward the callback port of a started MCP login until the forward times
-   * out, then report whether the box still lists the server as needing a login.
+   * Forward the callback port of a started MCP login until the box no longer
+   * lists the server as needing a login, `signal` aborts, or the forward
+   * times out. Then report the login.
    */
   async finishMcp(
     started: Extract<AuthStartResult, { kind: "local-port-forward" }>,
+    signal?: AbortSignal,
   ): Promise<AuthStartResult> {
-    const forward = await this.link.forward({
-      localPort: started.localPort,
-      remotePort: started.remotePort,
-      remoteHost: "127.0.0.1",
-      timeoutMs: started.timeoutMs,
-    });
-    // The forward holds until its timeout, so a timeout is the usual end.
-    if (!forward.ok && forward.error.code !== "forward-timeout") {
-      return linkFailure(started.provider, forward);
-    }
-
     const [tool, server] = started.provider.split("/");
-    const status = (await this.mcpStatus()).find((entry) => entry.tool === tool);
-    if (status && "loginRequired" in status && !status.loginRequired.includes(server as string)) {
-      return { kind: "logged-in", provider: started.provider };
-    }
+    const recipe = this.tools.find((candidate) => candidate.id === tool)?.mcp;
+    const done = await this.holdForward(
+      started,
+      async () => {
+        if (!recipe) return false;
+        const loginRequired = await this.mcpLoginRequired(recipe);
+        return "error" in loginRequired ? loginRequired : !loginRequired.includes(server as string);
+      },
+      signal,
+    );
+    if (done === true) return { kind: "logged-in", provider: started.provider };
+    if (done) return linkFailure(started.provider, done);
     return {
       kind: "failed",
       provider: started.provider,
       code: "login-output",
       message: `The ${started.provider} MCP login did not finish before the port forward closed.`,
     };
+  }
+
+  /** The MCP servers that the list command of `recipe` shows as needing a login. */
+  private async mcpLoginRequired(recipe: ToolMcp): Promise<readonly string[] | LinkFailure> {
+    const result = await this.link.run(
+      `command -v ${mcpBinary(recipe)} >/dev/null 2>&1 || exit 0; ${recipe.list} 2>/dev/null || true`,
+      { timeoutMs: MCP_LIST_TIMEOUT_MS },
+    );
+    if (!result.ok) return result;
+    const pattern = new RegExp(recipe.loginRequired);
+    return plainText(result.stdout)
+      .split("\n")
+      .flatMap((line) => line.match(pattern)?.[1] ?? []);
+  }
+
+  /**
+   * Hold the callback forward of `started` and probe the login every poll
+   * interval. The forward stops when `loggedIn` reports the login done or an
+   * error, when `signal` aborts, or at the forward timeout. After a stop by
+   * `signal` or the timeout, `loggedIn` runs once more and gives the result.
+   */
+  private async holdForward(
+    started: Extract<AuthStartResult, { kind: "local-port-forward" }>,
+    loggedIn: () => Promise<boolean | LinkFailure>,
+    signal?: AbortSignal,
+  ): Promise<boolean | LinkFailure> {
+    const stop = new AbortController();
+    const onAbort = () => stop.abort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) stop.abort();
+    const forward = this.link
+      .forward({
+        localPort: started.localPort,
+        remotePort: started.remotePort,
+        remoteHost: "127.0.0.1",
+        timeoutMs: started.timeoutMs,
+        signal: stop.signal,
+      })
+      .finally(() => stop.abort());
+    try {
+      while (!stop.signal.aborted) {
+        await pause(this.wait.pollMs, stop.signal);
+        if (stop.signal.aborted) break;
+        const state = await loggedIn();
+        // Ctrl-C also stops a probe that runs, so a probe after a stop does not count.
+        if (stop.signal.aborted) break;
+        if (state === false) continue;
+        stop.abort();
+        await forward;
+        return state;
+      }
+      const ended = await forward;
+      const state = await loggedIn();
+      if (state === true) return true;
+      // OpenSSH gets Ctrl-C too and can exit with a failure before `signal` aborts.
+      if (!ended.ok && ended.error.code !== "forward-timeout" && !signal?.aborted) return ended;
+      return state;
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   /**
@@ -449,13 +506,32 @@ export class AuthStart {
   private async waitForLogin(probe: string): Promise<true | false | LinkFailure> {
     const deadline = Date.now() + this.wait.timeoutMs;
     for (;;) {
-      const result = await this.link.run(probe);
-      if (result.ok) return true;
-      if (result.error.code !== "command-failed") return result;
+      const done = await this.probeLogin(probe);
+      if (done !== false) return done;
       if (Date.now() >= deadline) return false;
       await new Promise((resolve) => setTimeout(resolve, this.wait.pollMs));
     }
   }
+
+  /** True when the probe passes, false when the login is required, else the Link failure. */
+  private async probeLogin(probe: string): Promise<boolean | LinkFailure> {
+    const result = await this.link.run(probe);
+    if (result.ok) return true;
+    return result.error.code === "command-failed" ? false : result;
+  }
+}
+
+/** Wait `ms`, or less when `signal` aborts. */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const end = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", end);
+      resolve();
+    };
+    const timer = setTimeout(end, ms);
+    signal.addEventListener("abort", end, { once: true });
+  });
 }
 
 function safeUrl(output: string, allowedHosts: readonly string[]): string | null {
@@ -577,12 +653,12 @@ function missingUrl(provider: string): AuthStartResult {
   };
 }
 
-function unfinished(provider: string, auth: ToolAuth, wait: LoginWait): AuthStartResult {
+function unfinished(provider: string, auth: ToolAuth, when: string): AuthStartResult {
   return {
     kind: "failed",
     provider,
     code: "login-unfinished",
-    message: `The ${provider} login did not finish in ${Math.round(wait.timeoutMs / 1000)} s.${auth.setup ? " Ferry did not run the setup steps." : ""}`,
+    message: `The ${provider} login did not finish ${when}.${auth.setup ? " Ferry did not run the setup steps." : ""}`,
   };
 }
 

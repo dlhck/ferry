@@ -67,6 +67,8 @@ export type AuthCommandDependencies = {
   readonly readLoginCode: () => Promise<string | symbol | undefined>;
   readonly writeLine: (line: string) => void;
   readonly progress: Progress;
+  /** Calls `stop` when the operator presses Ctrl-C. Returns a function that removes the handler. */
+  readonly onInterrupt: (stop: () => void) => () => void;
 };
 
 export class InstallAuthCommandError extends Error {
@@ -175,10 +177,14 @@ export async function runAuthCommand(
     if (started.kind !== "local-port-forward") return reportAuth(started, resolved.writeLine);
     resolved.writeLine(`URL: ${started.url}`);
     resolved.writeLine("Open the URL in a browser on this machine.");
-    resolved.writeLine(
-      `Ferry forwards local port ${started.localPort} to the box for ${started.timeoutMs / 1000} s. Press Ctrl-C after the browser reports success.`,
+    resolved.writeLine(forwardLine(started));
+    const result = await step(
+      resolved.progress,
+      waitingStep(started.timeoutMs / 1000),
+      () => untilInterrupt(resolved.onInterrupt, (signal) => auth.finishMcp(started, signal)),
+      authFailed,
     );
-    reportAuth(await auth.finishMcp(started), resolved.writeLine);
+    reportAuth(result, resolved.writeLine);
     return;
   }
 
@@ -221,9 +227,7 @@ export async function runAuthCommand(
       resolved.writeLine("Open the URL in a browser on this machine and enter the code.");
     } else if (started.kind === "local-port-forward") {
       resolved.writeLine("Open the URL in a browser on this machine.");
-      resolved.writeLine(
-        `Ferry forwards local port ${started.localPort} to the box for ${started.timeoutMs / 1000} s. Press Ctrl-C after the browser reports success.`,
-      );
+      resolved.writeLine(forwardLine(started));
     } else if (started.kind === "printed-url" && started.codeInput) {
       resolved.writeLine(
         "Open the URL in a browser on this machine. After the login, paste the code that the browser shows.",
@@ -237,12 +241,15 @@ export async function runAuthCommand(
     }
     const limit =
       started.kind === "local-port-forward" ? started.timeoutMs / 1000 : LOGIN_LIFETIME_S;
-    waiting = `Waiting for you to finish the login in the browser (up to ${Math.ceil(limit / 60)} min)`;
+    waiting = waitingStep(limit);
   }
   const result = await step(
     resolved.progress,
     waiting,
-    () => auth.finish(started, code),
+    () =>
+      started.kind === "local-port-forward"
+        ? untilInterrupt(resolved.onInterrupt, (signal) => auth.finish(started, code, signal))
+        : auth.finish(started, code),
     authFailed,
   );
   reportAuth(result, resolved.writeLine);
@@ -268,7 +275,33 @@ const defaultAuthDependencies: AuthCommandDependencies = {
   readLoginCode: () => prompts.password({ message: "Code from the browser" }),
   writeLine: console.log,
   progress: noProgress,
+  onInterrupt: (stop) => {
+    process.once("SIGINT", stop);
+    return () => process.off("SIGINT", stop);
+  },
 };
+
+function waitingStep(limitSeconds: number): string {
+  return `Waiting for you to finish the login in the browser (up to ${Math.ceil(limitSeconds / 60)} min)`;
+}
+
+function forwardLine(started: Extract<AuthStartResult, { kind: "local-port-forward" }>): string {
+  return `Ferry forwards local port ${started.localPort} to the box for up to ${started.timeoutMs / 1000} s and closes it when the login is done. Press Ctrl-C to stop early.`;
+}
+
+/** Run `work` with a signal that Ctrl-C aborts. Ctrl-C does not stop ferry during `work`. */
+async function untilInterrupt<T>(
+  onInterrupt: AuthCommandDependencies["onInterrupt"],
+  work: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  const stopListening = onInterrupt(() => controller.abort());
+  try {
+    return await work(controller.signal);
+  } finally {
+    stopListening();
+  }
+}
 
 function loadTarget(
   read: () => PartialOperatorConfig | null,

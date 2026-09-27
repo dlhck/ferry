@@ -231,7 +231,7 @@ Ferry first checks the login on the box. If the tool is not logged in, Ferry sta
 
 - `gh`: Ferry prints a one-time code for `https://github.com/login/device`.
 - `claude`: Ferry prints the login URL. After the login, the browser shows a code. Paste it at the Ferry prompt, and Ferry gives it to the login on the box.
-- `codex`: Ferry prints a one-time code for `https://auth.openai.com/codex/device`. If the device login gives no code, Ferry uses the Codex callback login. Ferry then prints the URL and forwards local port 1455 to the box for 120 seconds. Press Ctrl-C after the browser reports success.
+- `codex`: Ferry prints a one-time code for `https://auth.openai.com/codex/device`. If the device login gives no code, Ferry uses the Codex callback login. Ferry then prints the URL and forwards local port 1455 to the box for up to 120 seconds. Ferry checks the login on the box every 5 seconds and closes the forward when the login is done. Press Ctrl-C to stop early. Ferry then checks the login once more and reports it.
 - `cursor`: Ferry prints the login URL.
 
 Pi has no remote login that Ferry can start. SSH to the box, run `pi`, and use `/login`.
@@ -321,7 +321,7 @@ To log in, run the command that status prints:
 ferry auth claude --mcp linear
 ```
 
-Ferry starts the login of the tool on the box. Claude and Codex need a terminal, so Ferry runs the login under `script`, detached from the SSH session. Ferry prints the authorize URL. Open it in a browser on your machine. The browser then goes to a `localhost` callback port. Ferry forwards that port to the box for 300 seconds, so the tool on the box gets the callback and keeps the token. Press Ctrl-C when the browser reports success. If the forward stays open until the end, Ferry checks the login on the box and reports it. The login on the box stops after 330 seconds. The callback port must be free on your machine. For example, Claude uses port 3118. Pi has no MCP support of its own, so Ferry does not declare Pi MCP servers.
+Ferry starts the login of the tool on the box. Claude and Codex need a terminal, so Ferry runs the login under `script`, detached from the SSH session. Ferry prints the authorize URL. Open it in a browser on your machine. The browser then goes to a `localhost` callback port. Ferry forwards that port to the box for up to 300 seconds, so the tool on the box gets the callback and keeps the token. Ferry checks the MCP server list on the box every 5 seconds and closes the forward when the server no longer needs a login. Press Ctrl-C to stop early. Ferry then checks the login once more and reports it. The login on the box stops after 330 seconds. The callback port must be free on your machine. For example, Claude uses port 3118. Pi has no MCP support of its own, so Ferry does not declare Pi MCP servers.
 
 ## Automatic sync
 

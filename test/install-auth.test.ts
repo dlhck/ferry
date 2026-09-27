@@ -297,6 +297,55 @@ describe("auth command", () => {
     ]);
   });
 
+  test("holds the Codex callback forward in the wait step and gives it the Ctrl-C signal", async () => {
+    const output: string[] = [];
+    const progress = recordProgress();
+    let interrupt = () => {};
+    const started = {
+      kind: "local-port-forward",
+      provider: "codex",
+      url: "https://auth.openai.com/oauth/authorize?state=opaque",
+      localPort: 1455,
+      remotePort: 1455,
+      timeoutMs: 120_000,
+    } as const;
+
+    await runAuthCommand(
+      { provider: "codex" },
+      authDependencies({
+        output,
+        progress,
+        onInterrupt: (stop) => {
+          interrupt = stop;
+          return () => {};
+        },
+        createAuthStart: () => ({
+          ...noMcp,
+          start: async () => started,
+          finish: async (_result, code, signal) => {
+            interrupt();
+            output.push(`finish ${code} ${signal?.aborted}`);
+            return { kind: "logged-in", provider: "codex" };
+          },
+        }),
+      }),
+    );
+
+    expect(progress.events).toEqual([
+      "start:Starting the codex login on the box",
+      "done",
+      "start:Waiting for you to finish the login in the browser (up to 2 min)",
+      "done",
+    ]);
+    expect(output).toEqual([
+      `URL: ${started.url}`,
+      "Open the URL in a browser on this machine.",
+      "Ferry forwards local port 1455 to the box for up to 120 s and closes it when the login is done. Press Ctrl-C to stop early.",
+      "finish undefined true",
+      "codex: logged in",
+    ]);
+  });
+
   test("prints the device code, then waits for the login and reports the setup steps", async () => {
     const output: string[] = [];
     const progress = recordProgress();
@@ -671,6 +720,7 @@ function authDependencies(overrides: {
   readonly createAuthStart?: AuthCommandDependencies["createAuthStart"];
   readonly progress?: AuthCommandDependencies["progress"];
   readonly readLoginCode?: AuthCommandDependencies["readLoginCode"];
+  readonly onInterrupt?: AuthCommandDependencies["onInterrupt"];
 } = {}): AuthCommandDependencies {
   return {
     tools: BUILTIN_TOOLS,
@@ -685,6 +735,7 @@ function authDependencies(overrides: {
     }),
     writeLine: (line) => overrides.output?.push(line),
     progress: overrides.progress ?? recordProgress(),
+    onInterrupt: overrides.onInterrupt ?? (() => () => {}),
   };
 }
 
@@ -716,7 +767,7 @@ describe("runAuthCommand with --mcp", () => {
     timeoutMs: 300_000,
   } as const;
 
-  test("prints the URL before the forward, then reports the login", async () => {
+  test("prints the URL before the forward, then waits for the login as a step", async () => {
     const output: string[] = [];
     const calls: string[] = [];
     const progress = recordProgress();
@@ -743,13 +794,47 @@ describe("runAuthCommand with --mcp", () => {
     );
 
     expect(calls).toEqual(["start claude linear", "finish 3 lines printed"]);
-    expect(progress.events).toEqual(["start:Starting the claude/linear MCP login on the box", "done"]);
+    expect(progress.events).toEqual([
+      "start:Starting the claude/linear MCP login on the box",
+      "done",
+      "start:Waiting for you to finish the login in the browser (up to 5 min)",
+      "done",
+    ]);
     expect(output).toEqual([
       `URL: ${started.url}`,
       "Open the URL in a browser on this machine.",
-      "Ferry forwards local port 3118 to the box for 300 s. Press Ctrl-C after the browser reports success.",
+      "Ferry forwards local port 3118 to the box for up to 300 s and closes it when the login is done. Press Ctrl-C to stop early.",
       "claude/linear: logged in",
     ]);
+  });
+
+  test("Ctrl-C during the wait aborts the signal of the forward, and the handler ends after the wait", async () => {
+    const events: string[] = [];
+    let interrupt = () => {};
+
+    await runAuthCommand(
+      { provider: "claude", mcp: "linear" },
+      authDependencies({
+        onInterrupt: (stop) => {
+          events.push("listen");
+          interrupt = stop;
+          return () => events.push("unlisten");
+        },
+        createAuthStart: () => ({
+          ...noMcp,
+          start: noMcp.startMcp,
+          startMcp: async () => started,
+          finishMcp: async (_result, signal) => {
+            events.push(`aborted ${signal?.aborted}`);
+            interrupt();
+            events.push(`aborted ${signal?.aborted}`);
+            return { kind: "logged-in", provider: "claude/linear" };
+          },
+        }),
+      }),
+    );
+
+    expect(events).toEqual(["listen", "aborted false", "aborted true", "unlisten"]);
   });
 
   test("refuses a tool without an MCP login before it reads the config", async () => {
