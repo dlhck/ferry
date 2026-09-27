@@ -523,7 +523,7 @@ describe("ferry --help", () => {
     });
 
     await program.parseAsync(
-      ["move", "Developer/app", "--from-box", "--dry-run", "--remove", "--include-env"],
+      ["move", "Developer/app", "--from-box", "--dry-run", "--remove", "--include-env", "--allow-secrets", "--yes"],
       { from: "user" },
     );
 
@@ -533,6 +533,8 @@ describe("ferry --help", () => {
       dryRun: true,
       remove: true,
       includeEnv: true,
+      allowSecrets: true,
+      yes: true,
     });
   });
 

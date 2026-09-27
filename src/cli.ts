@@ -269,10 +269,19 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .option("--dry-run", "print what Ferry would carry, refuse, and skip without changes")
     .option("--remove", "after verification, move the source copy to a trash directory")
     .option("--include-env", "also carry .env files that pass the token and secret rules")
+    .option("--allow-secrets", "with --include-env, also carry .env files that hold tokens or secrets")
+    .option("--yes", "carry .env files with secrets without a confirmation prompt")
     .action(
       async (
         path: string,
-        options: { fromBox?: boolean; dryRun?: boolean; remove?: boolean; includeEnv?: boolean },
+        options: {
+          fromBox?: boolean;
+          dryRun?: boolean;
+          remove?: boolean;
+          includeEnv?: boolean;
+          allowSecrets?: boolean;
+          yes?: boolean;
+        },
       ) => {
         await withProgress((progress, writeLine) =>
           (dependencies.runMove ?? runMove)(
@@ -282,6 +291,8 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
               dryRun: options.dryRun === true,
               remove: options.remove === true,
               includeEnv: options.includeEnv === true,
+              allowSecrets: options.allowSecrets === true,
+              yes: options.yes === true,
             },
             { writeLine, progress },
           ),
