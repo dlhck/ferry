@@ -27,6 +27,16 @@ const MCP_FORWARD_TIMEOUT_MS = 300_000;
 const MCP_LOGIN_LIFETIME_S = 330;
 /** The box polls this long for the login URL. */
 const MCP_URL_WAIT_S = 30;
+/** A vendor login and its device code stop after this time on the box. */
+export const LOGIN_LIFETIME_S = 900;
+/** How often ferry probes the login state while the operator finishes the login. */
+const LOGIN_POLL_MS = 5_000;
+/** The setup command talks to the vendor, so it gets more time than one command. */
+const SETUP_TIMEOUT_MS = 120_000;
+/** The last line of a setup command when all its steps passed. */
+const SETUP_OK = "ferry-setup-ok";
+/** The first line of the login command output names the login directory on the box. */
+const LOGIN_DIR_LINE = /^ferry-login-dir (\/[A-Za-z0-9._\/-]+)$/;
 
 /** A tool ferry has a login recipe for. */
 export type AuthTool = ToolDescriptor & { readonly auth: ToolAuth };
@@ -70,8 +80,8 @@ export interface AuthLink {
 }
 
 export type AuthStartResult =
-  | { readonly kind: "already-done"; readonly provider: string }
-  | { readonly kind: "logged-in"; readonly provider: string }
+  | { readonly kind: "already-done"; readonly provider: string; readonly notes?: readonly string[] }
+  | { readonly kind: "logged-in"; readonly provider: string; readonly notes?: readonly string[] }
   | {
       readonly kind: "device-url";
       readonly provider: string;
@@ -82,6 +92,8 @@ export type AuthStartResult =
       readonly kind: "printed-url";
       readonly provider: string;
       readonly url: string;
+      /** The input of the login on the box. Set when the login waits for a pasted code. */
+      readonly codeInput?: string;
     }
   | {
       readonly kind: "local-port-forward";
@@ -105,19 +117,23 @@ export type AuthStartResult =
   | {
       readonly kind: "failed";
       readonly provider: string;
-      readonly code: "login-output";
+      readonly code: "login-output" | "login-unfinished" | "login-setup";
       readonly message: string;
     }
   | {
       readonly kind: "refused";
-      readonly code: "credential-input" | "invalid-provider" | "invalid-server";
+      readonly code: "credential-input" | "invalid-provider" | "invalid-server" | "invalid-code";
       readonly message: string;
     };
+
+/** How ferry waits for the operator to finish a login. */
+export type LoginWait = { readonly pollMs: number; readonly timeoutMs: number };
 
 export class AuthStart {
   constructor(
     private readonly link: AuthLink,
     private readonly tools: readonly ToolDescriptor[],
+    private readonly wait: LoginWait = { pollMs: LOGIN_POLL_MS, timeoutMs: LOGIN_LIFETIME_S * 1000 },
   ) {}
 
   /** The providers a login can be started for. Manual providers are not listed. */
@@ -199,27 +215,93 @@ export class AuthStart {
     }
 
     const probe = await this.link.run(auth.probe);
-    if (probe.ok) return { kind: "already-done", provider };
-    if (probe.error.code !== "command-failed") return linkFailure(provider, probe);
-
-    const login = await this.link.run(auth.login);
-    if (!login.ok) {
-      if (auth.fallback && login.error.code === "command-failed") {
-        return this.startFallback(provider, auth.fallback);
-      }
-      return linkFailure(provider, login);
+    if (!probe.ok && probe.error.code !== "command-failed") return linkFailure(provider, probe);
+    if (auth.prepare) {
+      const prepared = await this.link.run(auth.prepare);
+      if (!prepared.ok) return linkFailure(provider, prepared);
     }
+    if (probe.ok) return { kind: "already-done", provider };
+
+    const login = await this.startLogin(auth.login);
+    if (!login.ok) return linkFailure(provider, login);
 
     if (completion.kind === "device-url") {
-      const userCode = completion.codePattern
-        ? login.stdout.match(new RegExp(completion.codePattern))?.[0]
-        : undefined;
-      return userCode
-        ? { kind: "device-url", provider, url: completion.url, userCode }
-        : { kind: "device-url", provider, url: completion.url };
+      if (!completion.codePattern) return { kind: "device-url", provider, url: completion.url };
+      const userCode = login.output.match(new RegExp(completion.codePattern))?.[0];
+      if (userCode) return { kind: "device-url", provider, url: completion.url, userCode };
+      if (auth.fallback) return this.startFallback(provider, auth.fallback);
+      return missingUrl(provider);
     }
-    const url = safeUrl(login.stdout, completion.allowedHosts);
-    return url ? { kind: "printed-url", provider, url } : missingUrl(provider);
+    const url = safeUrl(login.output, completion.allowedHosts);
+    if (!url) return missingUrl(provider);
+    if (!completion.pastedCode) return { kind: "printed-url", provider, url };
+    return login.dir ? { kind: "printed-url", provider, url, codeInput: `${login.dir}/in` } : missingUrl(provider);
+  }
+
+  /**
+   * Wait until the operator finishes a started login, then run the setup of
+   * the tool. A login that waits for a pasted code gets `pastedCode` first.
+   * An already-done login only runs the setup. Other results pass through.
+   */
+  async finish(started: AuthStartResult, pastedCode?: string): Promise<AuthStartResult> {
+    if (started.kind === "local-port-forward") {
+      const forward = await this.link.forward({
+        localPort: started.localPort,
+        remotePort: started.remotePort,
+        remoteHost: "127.0.0.1",
+        timeoutMs: started.timeoutMs,
+      });
+      // The forward holds until its timeout, so a timeout is the usual end.
+      if (!forward.ok && forward.error.code !== "forward-timeout") {
+        return linkFailure(started.provider, forward);
+      }
+    }
+    if (
+      started.kind !== "already-done" &&
+      started.kind !== "device-url" &&
+      started.kind !== "printed-url" &&
+      started.kind !== "local-port-forward"
+    ) {
+      return started;
+    }
+    const provider = started.provider;
+    const auth = this.tools.find((tool) => tool.id === provider)?.auth;
+    if (!auth?.probe) return started;
+
+    if (started.kind === "printed-url" && started.codeInput) {
+      const pattern = auth.completion.kind === "printed-url" ? auth.completion.pastedCode : undefined;
+      if (!pattern || pastedCode === undefined || !new RegExp(pattern).test(pastedCode)) {
+        return {
+          kind: "refused",
+          code: "invalid-code",
+          message: `The ${provider} login code does not have the expected form.`,
+        };
+      }
+      const sent = await this.link.run(
+        `[ -p ${quoteShell(started.codeInput)} ] && printf '%s\\n' ${quoteShell(pastedCode)} > ${quoteShell(started.codeInput)}`,
+      );
+      if (!sent.ok) return linkFailure(provider, sent);
+    }
+
+    if (started.kind !== "already-done") {
+      const done = await this.waitForLogin(auth.probe);
+      if (done !== true) return done ? linkFailure(provider, done) : unfinished(provider, auth, this.wait);
+    }
+    const kind = started.kind === "already-done" ? "already-done" : "logged-in";
+    if (!auth.setup) return { kind, provider };
+
+    const setup = await this.link.run(auth.setup, { timeoutMs: SETUP_TIMEOUT_MS });
+    if (!setup.ok) return linkFailure(provider, setup);
+    const lines = plainText(setup.stdout).split("\n").filter((line) => line.trim() !== "");
+    if (lines.at(-1) !== SETUP_OK) {
+      return {
+        kind: "failed",
+        provider,
+        code: "login-setup",
+        message: `The ${provider} login is complete, but a setup step failed: ${lines.at(-1) ?? "no output"}`,
+      };
+    }
+    return { kind, provider, notes: lines.slice(0, -1) };
   }
 
   /**
@@ -326,19 +408,19 @@ export class AuthStart {
     };
   }
 
-  /** The declared callback path: a second login command plus a local forward. */
+  /**
+   * The declared callback path: a second login, whose URL returns at once.
+   * `finish` holds the local forward after the operator has the URL.
+   */
   private async startFallback(
     provider: string,
     fallback: AuthFallback,
   ): Promise<AuthStartResult> {
-    const login = await this.link.run(fallback.login);
+    const login = await this.startLogin(fallback.login);
     if (!login.ok) return linkFailure(provider, login);
 
-    const url = safeUrl(login.stdout, fallback.allowedHosts);
+    const url = safeUrl(login.output, fallback.allowedHosts);
     if (!url) return missingUrl(provider);
-
-    const forward = await this.link.forward(fallback.forward);
-    if (!forward.ok) return linkFailure(provider, forward, true);
 
     return {
       kind: "local-port-forward",
@@ -348,6 +430,31 @@ export class AuthStart {
       remotePort: fallback.forward.remotePort,
       timeoutMs: fallback.forward.timeoutMs,
     };
+  }
+
+  /** Start a login detached on the box and read its first output. */
+  private async startLogin(
+    login: string,
+  ): Promise<LinkFailure | { readonly ok: true; readonly output: string; readonly dir?: string }> {
+    const result = await this.link.run(vendorLoginCommand(login, LOGIN_LIFETIME_S), {
+      timeoutMs: (MCP_URL_WAIT_S + 30) * 1000,
+    });
+    if (!result.ok) return result;
+    const [first = "", ...rest] = plainText(result.stdout).split("\n");
+    const dir = first.match(LOGIN_DIR_LINE)?.[1];
+    return dir ? { ok: true, output: rest.join("\n"), dir } : { ok: true, output: plainText(result.stdout) };
+  }
+
+  /** Probe until the login is done, a probe fails for another reason, or the wait ends. */
+  private async waitForLogin(probe: string): Promise<true | false | LinkFailure> {
+    const deadline = Date.now() + this.wait.timeoutMs;
+    for (;;) {
+      const result = await this.link.run(probe);
+      if (result.ok) return true;
+      if (result.error.code !== "command-failed") return result;
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, this.wait.pollMs));
+    }
   }
 }
 
@@ -373,6 +480,35 @@ function carriesSecret(url: URL): boolean {
     Boolean(url.hash) ||
     [...url.searchParams.keys()].some((key) => /token|secret|credential|api.?key/i.test(key))
   );
+}
+
+/**
+ * The box command that starts a vendor login detached and prints its output
+ * once a URL appears. The first line names the login directory. The login
+ * reads its input from the FIFO `in` in that directory, and a `sleep` keeps
+ * the FIFO open, so a code can be written to it later. The login gets no
+ * terminal: gh then prints its code without questions. The login and its
+ * directory end after `lifetimeSeconds`.
+ */
+export function vendorLoginCommand(login: string, lifetimeSeconds: number): string {
+  const inner = `BROWSER=true NO_OPEN_BROWSER=1 exec ${login}`;
+  const runner = [
+    'sleep "$1" > "$3/in" & w=$!',
+    'timeout "$1" sh -c "$2" < "$3/in" > "$3/log" 2>&1',
+    'kill "$w" 2>/dev/null',
+    'rm -rf "$3"',
+  ].join("; ");
+  return [
+    'dir=$(mktemp -d "${TMPDIR:-/tmp}/ferry-login.XXXXXX") || exit 1',
+    'mkfifo "$dir/in" || exit 1',
+    `setsid nohup sh -c ${quoteShell(runner)} ferry-login ${lifetimeSeconds} ${quoteShell(inner)} "$dir" </dev/null >/dev/null 2>&1 &`,
+    "i=0",
+    `while [ "$i" -lt ${MCP_URL_WAIT_S} ] && [ -d "$dir" ] && ! grep -q https:// "$dir/log" 2>/dev/null; do sleep 1; i=$((i+1)); done`,
+    "sleep 1",
+    'echo "ferry-login-dir $dir"',
+    'cat "$dir/log" 2>/dev/null',
+    "exit 0",
+  ].join("\n");
 }
 
 /**
@@ -438,6 +574,15 @@ function missingUrl(provider: string): AuthStartResult {
     provider,
     code: "login-output",
     message: `The ${provider} login did not return a safe operator URL.`,
+  };
+}
+
+function unfinished(provider: string, auth: ToolAuth, wait: LoginWait): AuthStartResult {
+  return {
+    kind: "failed",
+    provider,
+    code: "login-unfinished",
+    message: `The ${provider} login did not finish in ${Math.round(wait.timeoutMs / 1000)} s.${auth.setup ? " Ferry did not run the setup steps." : ""}`,
   };
 }
 

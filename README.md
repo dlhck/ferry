@@ -92,6 +92,34 @@ sudo compares the full command path and all arguments. The rule allows only thes
 
 `ferry status` shows `Box sudo: PASSWORDLESS` or `Box sudo: PASSWORD REQUIRED`, and `--json` has the result in `boxSudo`. When `[update] watch = true` and `sudo` asks for a password, `ferry status` shows a warning that the watch cannot update `gh`.
 
+## Log in to the agent tools
+
+Run `ferry auth <tool>` for `gh`, `claude`, `codex`, or `cursor`. Run `ferry auth` to list the tools.
+
+Ferry first checks the login on the box. If the tool is not logged in, Ferry starts the vendor login on the box, detached from the SSH session. Ferry prints the URL, and the code if the tool has one, as soon as the login on the box shows them. Open the URL in a browser on your machine and finish the login there. Ferry then waits, and it checks the login on the box every 5 seconds. It reports the result when the login is complete. The login on the box stops after 15 minutes. If you do not finish in that time, Ferry reports that the login did not finish.
+
+- `gh`: Ferry prints a one-time code for `https://github.com/login/device`.
+- `claude`: Ferry prints the login URL. After the login, the browser shows a code. Paste it at the Ferry prompt, and Ferry gives it to the login on the box.
+- `codex`: Ferry prints a one-time code for `https://auth.openai.com/codex/device`. If the device login gives no code, Ferry uses the Codex callback login. Ferry then prints the URL and forwards local port 1455 to the box for 120 seconds. Press Ctrl-C after the browser reports success.
+- `cursor`: Ferry prints the login URL.
+
+Pi has no remote login that Ferry can start. SSH to the box, run `pi`, and use `/login`.
+
+### GitHub over SSH
+
+`ferry auth gh` sets up GitHub with SSH as the git protocol, so agents on the box can push. Ferry forwards your SSH agent only for its own snapshot update, so the box needs its own key.
+
+1. Before the login, Ferry creates the key `~/.ssh/id_ed25519` on the box if it does not exist. The key has no passphrase and the comment `<box user>@<box host> ferry`. Ferry never replaces an existing key.
+2. The gh login asks for the `admin:public_key` scope, which gh needs to add the key.
+3. After the login, Ferry adds `~/.ssh/id_ed25519.pub` to your GitHub account with the title `<box host> (ferry)`. If GitHub already has the key, Ferry does not add it again.
+4. If the box `~/.ssh/known_hosts` has no `github.com` entry, Ferry reads the ed25519 host key with `ssh-keyscan`. Ferry adds it only if its fingerprint is the same as the fingerprint that the GitHub meta API publishes.
+5. Ferry sets `gh config set -h github.com git_protocol ssh`.
+6. Ferry runs `ssh -T git@github.com` and reports if GitHub accepts the key.
+
+If you do not finish the login, Ferry does not do steps 3 to 6. If gh is already logged in, `ferry auth gh` does only steps 1 and 3 to 6. A gh login without the `admin:public_key` scope cannot add the key. Run `gh auth refresh -h github.com -s admin:public_key` on the box, then run `ferry auth gh` again.
+
+To revoke the box key, delete the key with the title `<box host> (ferry)` in GitHub under Settings > SSH and GPG keys. You can also run `gh ssh-key list` and `gh ssh-key delete <id>`. To remove the key from the box, delete `~/.ssh/id_ed25519` and `~/.ssh/id_ed25519.pub` there.
+
 ## What Ferry carries
 
 Ferry carries these items from the operator machine to the box:

@@ -272,16 +272,184 @@ describe("auth command", () => {
     const progress = recordProgress();
 
     await runAuthCommand(
-      { provider: "gh" },
+      { provider: "cursor" },
       authDependencies({
         output: events,
         progress: { ...progress, done: () => events.push("done") },
-        result: { kind: "printed-url", provider: "gh", url: "https://github.com/login/device" },
+        createAuthStart: () => ({
+          ...noMcp,
+          start: async () => ({ kind: "printed-url", provider: "cursor", url: "https://cursor.com/login" }),
+          finish: async () => ({ kind: "logged-in", provider: "cursor" }),
+        }),
       }),
     );
 
-    expect(progress.events).toEqual(["start:Starting the gh login on the box"]);
-    expect(events).toEqual(["done", "URL: https://github.com/login/device"]);
+    expect(progress.events).toEqual([
+      "start:Starting the cursor login on the box",
+      "start:Waiting for you to finish the login in the browser (up to 15 min)",
+    ]);
+    expect(events).toEqual([
+      "done",
+      "URL: https://cursor.com/login",
+      "Open the URL in a browser on this machine.",
+      "done",
+      "cursor: logged in",
+    ]);
+  });
+
+  test("prints the device code, then waits for the login and reports the setup steps", async () => {
+    const output: string[] = [];
+    const progress = recordProgress();
+    const started: AuthStartResult = {
+      kind: "device-url",
+      provider: "gh",
+      url: "https://github.com/login/device",
+      userCode: "A1B2-C3D4",
+    };
+
+    await runAuthCommand(
+      { provider: "gh" },
+      authDependencies({
+        output,
+        progress,
+        createAuthStart: () => ({
+          ...noMcp,
+          start: async () => started,
+          finish: async (result, code) => {
+            output.push(`finish ${result === started} ${code}`);
+            return { kind: "logged-in", provider: "gh", notes: ["SSH key: added to GitHub as box1 (ferry)"] };
+          },
+        }),
+      }),
+    );
+
+    expect(output).toEqual([
+      "URL: https://github.com/login/device",
+      "Code: A1B2-C3D4",
+      "Open the URL in a browser on this machine and enter the code.",
+      "finish true undefined",
+      "gh: logged in",
+      "SSH key: added to GitHub as box1 (ferry)",
+    ]);
+    expect(progress.events).toEqual([
+      "start:Starting the gh login on the box",
+      "done",
+      "start:Waiting for you to finish the login in the browser (up to 15 min)",
+      "done",
+    ]);
+  });
+
+  test("runs the setup of an already authenticated tool as its own step", async () => {
+    const output: string[] = [];
+    const progress = recordProgress();
+
+    await runAuthCommand(
+      { provider: "gh" },
+      authDependencies({
+        output,
+        progress,
+        createAuthStart: () => ({
+          ...noMcp,
+          start: async () => ({ kind: "already-done", provider: "gh" }),
+          finish: async () => ({ kind: "already-done", provider: "gh", notes: ["SSH key: already on GitHub"] }),
+        }),
+      }),
+    );
+
+    expect(output).toEqual(["gh: already authenticated", "SSH key: already on GitHub"]);
+    expect(progress.events).toEqual([
+      "start:Starting the gh login on the box",
+      "done",
+      "start:Checking the gh setup on the box",
+      "done",
+    ]);
+  });
+
+  test("asks for the code that the browser shows between steps and gives it to the login", async () => {
+    const output: string[] = [];
+    const progress = recordProgress();
+    const started: AuthStartResult = {
+      kind: "printed-url",
+      provider: "claude",
+      url: "https://claude.com/cai/oauth/authorize?state=s",
+      codeInput: "/tmp/ferry-login.abc/in",
+    };
+
+    await runAuthCommand(
+      { provider: "claude" },
+      authDependencies({
+        output,
+        progress,
+        readLoginCode: async () => {
+          output.push(`prompt after ${progress.events.join(",")}`);
+          return " code#state \n";
+        },
+        createAuthStart: () => ({
+          ...noMcp,
+          start: async () => started,
+          finish: async (_result, code) => {
+            output.push(`finish ${code}`);
+            return { kind: "logged-in", provider: "claude" };
+          },
+        }),
+      }),
+    );
+
+    expect(output).toEqual([
+      "URL: https://claude.com/cai/oauth/authorize?state=s",
+      "Open the URL in a browser on this machine. After the login, paste the code that the browser shows.",
+      "prompt after start:Starting the claude login on the box,done",
+      "finish code#state",
+      "claude: logged in",
+    ]);
+  });
+
+  test("stops without waiting when the operator cancels the code prompt", async () => {
+    let finished = false;
+
+    await runAuthCommand(
+      { provider: "claude" },
+      authDependencies({
+        readLoginCode: async () => Symbol("cancel"),
+        createAuthStart: () => ({
+          ...noMcp,
+          start: async () => ({ kind: "printed-url", provider: "claude", url: "https://claude.com/x", codeInput: "/tmp/f/in" }),
+          finish: async (result) => {
+            finished = true;
+            return result;
+          },
+        }),
+      }),
+    );
+
+    expect(finished).toBe(false);
+  });
+
+  test("marks the wait failed when the operator did not finish the login", async () => {
+    const progress = recordProgress();
+
+    await expect(
+      runAuthCommand(
+        { provider: "gh" },
+        authDependencies({
+          progress,
+          createAuthStart: () => ({
+            ...noMcp,
+            start: async () => ({ kind: "device-url", provider: "gh", url: "https://github.com/login/device", userCode: "A1B2-C3D4" }),
+            finish: async () => ({
+              kind: "failed",
+              provider: "gh",
+              code: "login-unfinished",
+              message: "The gh login did not finish in 900 s. Ferry did not run the setup steps.",
+            }),
+          }),
+        }),
+      ),
+    ).rejects.toThrow("box/login-unfinished");
+    expect(progress.events.slice(-2)).toEqual([
+      "start:Waiting for you to finish the login in the browser (up to 15 min)",
+      "fail",
+    ]);
   });
 
   test("marks the login step failed when the box reports a failure", async () => {
@@ -502,6 +670,7 @@ function authDependencies(overrides: {
   readonly createLink?: AuthCommandDependencies["createLink"];
   readonly createAuthStart?: AuthCommandDependencies["createAuthStart"];
   readonly progress?: AuthCommandDependencies["progress"];
+  readonly readLoginCode?: AuthCommandDependencies["readLoginCode"];
 } = {}): AuthCommandDependencies {
   return {
     tools: BUILTIN_TOOLS,
@@ -511,6 +680,9 @@ function authDependencies(overrides: {
       ...noMcp,
       start: async () => overrides.result ?? ({ kind: "already-done", provider: "gh" }),
     })),
+    readLoginCode: overrides.readLoginCode ?? (async () => {
+      throw new Error("unexpected code prompt");
+    }),
     writeLine: (line) => overrides.output?.push(line),
     progress: overrides.progress ?? recordProgress(),
   };
@@ -523,6 +695,7 @@ const noMcp = {
   finishMcp: async (): Promise<AuthStartResult> => {
     throw new Error("unexpected MCP login");
   },
+  finish: async (started: AuthStartResult): Promise<AuthStartResult> => started,
 };
 
 function fakeLink(): AuthLink {
@@ -555,6 +728,7 @@ describe("runAuthCommand with --mcp", () => {
         progress,
         createAuthStart: () => ({
           start: noMcp.startMcp,
+          finish: noMcp.finish,
           startMcp: async (tool: string, server: string) => {
             calls.push(`start ${tool} ${server}`);
             return started;

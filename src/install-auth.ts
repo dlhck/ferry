@@ -1,7 +1,13 @@
 import * as prompts from "@clack/prompts";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { AuthStart, authTools, type AuthLink, type AuthStartResult } from "./auth-start.ts";
+import {
+  AuthStart,
+  authTools,
+  LOGIN_LIFETIME_S,
+  type AuthLink,
+  type AuthStartResult,
+} from "./auth-start.ts";
 import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
 import {
   readOperatorGitIdentity,
@@ -37,7 +43,7 @@ type InstallCommand = {
     reportProgress?: (progress: InstallProgress) => void,
   ): Promise<InstallResult>;
 };
-type AuthCommand = Pick<AuthStart, "start" | "startMcp" | "finishMcp">;
+type AuthCommand = Pick<AuthStart, "start" | "finish" | "startMcp" | "finishMcp">;
 
 export type InstallCommandDependencies = {
   /** The tools this ferry manages. The CLI resolves the registry once. */
@@ -57,6 +63,8 @@ export type AuthCommandDependencies = {
   readonly readConfig: () => PartialOperatorConfig | null;
   readonly createLink: (options: LinkOptions) => CommandLink;
   readonly createAuthStart: (link: CommandLink, tools: readonly ToolDescriptor[]) => AuthCommand;
+  /** Asks the operator for the code that the browser shows after a login. */
+  readonly readLoginCode: () => Promise<string | symbol | undefined>;
   readonly writeLine: (line: string) => void;
   readonly progress: Progress;
 };
@@ -185,10 +193,56 @@ export async function runAuthCommand(
   const target = loadTarget(resolved.readConfig, resolved.writeLine);
   const auth = resolved.createAuthStart(resolved.createLink(target), resolved.tools);
   const provider = input.provider;
-  const result = await step(
+  const started = await step(
     resolved.progress,
     `Starting the ${provider} login on the box`,
     () => auth.start(provider),
+    authFailed,
+  );
+  const hasSetup = resolved.tools.some((tool) => tool.id === provider && tool.auth?.setup);
+  if (
+    started.kind !== "device-url" &&
+    started.kind !== "printed-url" &&
+    started.kind !== "local-port-forward" &&
+    !(started.kind === "already-done" && hasSetup)
+  ) {
+    return reportAuth(started, resolved.writeLine);
+  }
+  let code: string | undefined;
+  let waiting = `Checking the ${provider} setup on the box`;
+  if (
+    started.kind === "device-url" ||
+    started.kind === "printed-url" ||
+    started.kind === "local-port-forward"
+  ) {
+    resolved.writeLine(`URL: ${started.url}`);
+    if (started.kind === "device-url" && started.userCode) {
+      resolved.writeLine(`Code: ${started.userCode}`);
+      resolved.writeLine("Open the URL in a browser on this machine and enter the code.");
+    } else if (started.kind === "local-port-forward") {
+      resolved.writeLine("Open the URL in a browser on this machine.");
+      resolved.writeLine(
+        `Ferry forwards local port ${started.localPort} to the box for ${started.timeoutMs / 1000} s. Press Ctrl-C after the browser reports success.`,
+      );
+    } else if (started.kind === "printed-url" && started.codeInput) {
+      resolved.writeLine(
+        "Open the URL in a browser on this machine. After the login, paste the code that the browser shows.",
+      );
+      // The prompt runs between steps, so no spinner covers it.
+      const answer = await resolved.readLoginCode();
+      if (typeof answer !== "string") return;
+      code = answer.trim();
+    } else {
+      resolved.writeLine("Open the URL in a browser on this machine.");
+    }
+    const limit =
+      started.kind === "local-port-forward" ? started.timeoutMs / 1000 : LOGIN_LIFETIME_S;
+    waiting = `Waiting for you to finish the login in the browser (up to ${Math.ceil(limit / 60)} min)`;
+  }
+  const result = await step(
+    resolved.progress,
+    waiting,
+    () => auth.finish(started, code),
     authFailed,
   );
   reportAuth(result, resolved.writeLine);
@@ -211,6 +265,7 @@ const defaultAuthDependencies: AuthCommandDependencies = {
   readConfig,
   createLink: (options) => new Link(options),
   createAuthStart: (link, tools) => new AuthStart(link, tools),
+  readLoginCode: () => prompts.password({ message: "Code from the browser" }),
   writeLine: console.log,
   progress: noProgress,
 };
@@ -245,9 +300,11 @@ function reportAuth(result: AuthStartResult, writeLine: (line: string) => void):
   switch (result.kind) {
     case "already-done":
       writeLine(`${result.provider}: already authenticated`);
+      for (const note of result.notes ?? []) writeLine(note);
       return;
     case "logged-in":
       writeLine(`${result.provider}: logged in`);
+      for (const note of result.notes ?? []) writeLine(note);
       return;
     case "device-url":
       writeLine(`URL: ${result.url}`);

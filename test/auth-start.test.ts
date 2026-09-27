@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthStart, loopbackLoginUrl, mcpLoginCommand, type AuthLink } from "../src/auth-start.ts";
@@ -57,28 +57,28 @@ const providerCases: readonly {
   {
     provider: "gh",
     probe: /^gh auth status --hostname github\.com$/,
-    login: /^gh auth login .*--hostname github\.com.*--web/,
+    login: /gh auth login .*--hostname github\.com.*--git-protocol ssh.*--web/,
     output: "First copy your one-time code: A1B2-C3D4\nOpen https://github.com/login/device\n",
     action: "device-url",
   },
   {
     provider: "claude",
     probe: /^claude auth status$/,
-    login: /^claude auth login$/,
+    login: /exec claude auth login'/,
     output: "Open https://claude.ai/oauth/authorize?state=opaque in your browser\n",
     action: "printed-url",
   },
   {
     provider: "codex",
     probe: /^codex login status$/,
-    login: /^codex login --device-auth$/,
+    login: /exec codex login --device-auth'/,
     output: "Open https://auth.openai.com/codex/device and enter ABCD-EFGH\n",
     action: "device-url",
   },
   {
     provider: "cursor",
     probe: /^cursor-agent status$/,
-    login: /^cursor-agent login$/,
+    login: /exec cursor-agent login'/,
     output: "Open https://cursor.com/auth/cli?state=opaque in your browser\n",
     action: "printed-url",
   },
@@ -121,13 +121,19 @@ describe("AuthStart", () => {
     ]);
 
     for (const providerCase of providerCases) {
-      const link = new FakeLink([loggedOut(), success(providerCase.output)]);
+      const prepare = providerCase.provider === "gh" ? [success()] : [];
+      const link = new FakeLink([
+        loggedOut(),
+        ...prepare,
+        success(`ferry-login-dir /tmp/ferry-login.abc\n${providerCase.output}`),
+      ]);
 
       const result = await new AuthStart(link, BUILTIN_TOOLS).start(providerCase.provider);
 
-      expect(link.runs).toHaveLength(2);
+      expect(link.runs).toHaveLength(2 + prepare.length);
       expect(link.runs[0]?.command).toMatch(providerCase.probe);
-      expect(link.runs[1]?.command).toMatch(providerCase.login);
+      expect(link.runs.at(-1)?.command).toMatch(providerCase.login);
+      expect(link.runs.at(-1)?.command).toContain("setsid nohup");
       expect(result.kind).toBe(providerCase.action);
     }
   });
@@ -135,9 +141,9 @@ describe("AuthStart", () => {
   test("returns already-done without starting another login", async () => {
     const link = new FakeLink([success()]);
 
-    const result = await new AuthStart(link, BUILTIN_TOOLS).start("gh");
+    const result = await new AuthStart(link, BUILTIN_TOOLS).start("cursor");
 
-    expect(result).toEqual({ kind: "already-done", provider: "gh" });
+    expect(result).toEqual({ kind: "already-done", provider: "cursor" });
     expect(link.runs).toHaveLength(1);
     expect(link.forwards).toHaveLength(0);
   });
@@ -167,7 +173,7 @@ describe("AuthStart", () => {
     const token = "sk-test-secret-value";
     const link = new FakeLink([
       loggedOut(),
-      success(`Open https://cursor.com/auth/cli?state=opaque\nAccess token: ${token}\n`),
+      success(`ferry-login-dir /tmp/ferry-login.abc\nOpen https://cursor.com/auth/cli?state=opaque\nAccess token: ${token}\n`),
     ]);
 
     const result = await new AuthStart(link, BUILTIN_TOOLS).start("cursor");
@@ -180,7 +186,7 @@ describe("AuthStart", () => {
     expect(JSON.stringify(result)).not.toContain(token);
   });
 
-  test("preserves a Link forward-timeout on the Codex callback fallback", async () => {
+  test("returns the Codex fallback URL before the callback forward opens, then forwards and probes", async () => {
     const timeout: LinkResult = {
       ok: false,
       error: {
@@ -192,25 +198,35 @@ describe("AuthStart", () => {
     const link = new FakeLink(
       [
         loggedOut(),
-        loggedOut(),
+        success("ferry-login-dir /tmp/ferry-login.a\nError logging in with device code: status 404\n"),
         success(
-          "Starting local login server on http://localhost:1455.\nOpen https://auth.openai.com/oauth/authorize?state=opaque\n",
+          "ferry-login-dir /tmp/ferry-login.b\nStarting local login server on http://localhost:1455.\nOpen https://auth.openai.com/oauth/authorize?state=opaque\n",
         ),
+        success(),
       ],
       [timeout],
     );
+    const auth = new AuthStart(link, BUILTIN_TOOLS);
 
-    const result = await new AuthStart(link, BUILTIN_TOOLS).start("codex");
+    const started = await auth.start("codex");
 
-    expect(link.runs.map((call) => call.command)).toEqual([
-      "codex login status",
-      "codex login --device-auth",
-      "codex login",
-    ]);
+    expect(link.runs.map((call) => call.command)[1]).toContain("exec codex login --device-auth'");
+    expect(link.runs.map((call) => call.command)[2]).toContain("exec codex login'");
+    expect(link.forwards).toEqual([]);
+    expect(started).toEqual({
+      kind: "local-port-forward",
+      provider: "codex",
+      url: "https://auth.openai.com/oauth/authorize?state=opaque",
+      localPort: 1455,
+      remotePort: 1455,
+      timeoutMs: 120_000,
+    });
+
+    expect(await auth.finish(started)).toEqual({ kind: "logged-in", provider: "codex" });
     expect(link.forwards).toEqual([
       { localPort: 1455, remotePort: 1455, remoteHost: "127.0.0.1", timeoutMs: 120_000 },
     ]);
-    expect(result).toEqual({ kind: "link-failure", provider: "codex", result: timeout });
+    expect(link.runs.at(-1)?.command).toBe("codex login status");
   });
 
   test("returns manual SSH guidance for Pi without starting an interactive TTY", async () => {
@@ -418,5 +434,263 @@ describe("mcpLoginCommand", () => {
     expect(loopbackLoginUrl(output)).toEqual({ url: AUTHORIZE_URL, port: 3118 });
     expect(readFileSync(log, "utf8").split("\n")).toEqual(["mcp", "login", name, "--no-browser", ""]);
     for (const file of ["pwned", "pwned2", "pwned3"]) expect(existsSync(join(directory, file))).toBe(false);
+  });
+});
+
+/**
+ * A Link that runs each box command in a local `sh`. Stub CLIs in `bin` stand
+ * in for the vendor CLIs and the Linux tools, and `HOME` is a test directory.
+ */
+class ShellLink implements AuthLink {
+  readonly commands: string[] = [];
+
+  constructor(private readonly home: string) {}
+
+  async run(command: string): Promise<LinkResult> {
+    this.commands.push(command);
+    const child = Bun.spawn(["sh", "-c", command], {
+      cwd: this.home,
+      env: { PATH: `${join(this.home, "bin")}:/usr/bin:/bin`, HOME: this.home, TMPDIR: this.home },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [code, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+    if (code !== 0) {
+      return { ok: false, error: { code: "command-failed", origin: "box", message: `exit ${code}` } };
+    }
+    return success(stdout);
+  }
+
+  async forward(options: ForwardOptions): Promise<LinkResult> {
+    throw new Error(`unexpected forward: ${JSON.stringify(options)}`);
+  }
+}
+
+const CLAUDE_AUTH_URL =
+  "https://claude.com/cai/oauth/authorize?code=true&client_id=c&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&code_challenge=x&code_challenge_method=S256&state=s";
+const CURSOR_AUTH_URL = "https://cursor.com/loginDeepControl?challenge=x&uuid=u&mode=login";
+
+/**
+ * Each stub login prints its code or URL, then holds for `LOGIN_HOLD_S`
+ * seconds before it logs in (unless `$HOME/abandon` exists) and exits. The
+ * file `$HOME/<tool>-exited` shows that the login has exited.
+ */
+const LOGIN_HOLD_S = 4;
+const STUBS: Record<string, string> = {
+  // Stand-ins for the Linux tools: each one runs the command it wraps.
+  setsid: 'exec "$@"',
+  nohup: 'exec "$@"',
+  timeout: 'shift; exec "$@"',
+  hostname: "echo box1",
+  id: "echo ploi",
+  gh: `
+echo "gh $*" >> "$HOME/calls"
+case "$1 $2" in
+  "auth status") [ -e "$HOME/gh-in" ] ;;
+  "auth login")
+    echo "! First copy your one-time code: A1B2-C3D4" >&2
+    echo "Open this URL to continue in your web browser: https://github.com/login/device" >&2
+    sleep ${LOGIN_HOLD_S}
+    [ -e "$HOME/abandon" ] || touch "$HOME/gh-in"
+    touch "$HOME/gh-exited" ;;
+  "ssh-key list") cat "$HOME/github-keys" 2>/dev/null; true ;;
+  "ssh-key add") printf 'box1 (ferry)\\t%s\\n' "$(cut -d' ' -f1,2 "$3")" >> "$HOME/github-keys" ;;
+  "api meta") echo "SHA256:GHFP" ;;
+  "config set") ;;
+  *) exit 2 ;;
+esac`,
+  "ssh-keygen": `
+echo "ssh-keygen $*" >> "$HOME/calls"
+case "$1" in
+  -F) grep -q "^github.com " "$HOME/.ssh/known_hosts" 2>/dev/null ;;
+  -lf) read -r host type key; echo "256 SHA256:GHFP $host ($type)" ;;
+  *) for f; do file=$f; done; echo private > "$file"; echo "ssh-ed25519 AAAABOXKEY ploi@box1 ferry" > "$file.pub" ;;
+esac`,
+  "ssh-keyscan": "echo 'github.com ssh-ed25519 AAAAGITHUB'",
+  ssh: `echo "ssh $*" >> "$HOME/calls"; echo "Hi op! You've successfully authenticated, but GitHub does not provide shell access." >&2; exit 1`,
+  claude: `
+case "$1 $2" in
+  "auth status") [ -e "$HOME/claude-in" ] ;;
+  "auth login")
+    printf 'Opening browser to sign in\\342\\200\\246\\nIf the browser did not open, visit: \\033]8;;%s\\007%s\\033]8;;\\007\\nPaste code here if prompted > ' '${CLAUDE_AUTH_URL}' '${CLAUDE_AUTH_URL}'
+    read -r code
+    echo "$code" > "$HOME/claude-code"
+    touch "$HOME/claude-in" "$HOME/claude-exited" ;;
+esac`,
+  codex: `
+case "$1 $2" in
+  "login status") [ -e "$HOME/codex-in" ] ;;
+  "login --device-auth")
+    printf '\\nFollow these steps to sign in with ChatGPT using device code authorization:\\n\\n1. Open this link in your browser and sign in to your account\\n   \\033[94mhttps://auth.openai.com/codex/device\\033[0m\\n\\n2. Enter this one-time code \\033[90m(expires in 15 minutes)\\033[0m\\n   \\033[94mABCD-EFGHJ\\033[0m\\n'
+    sleep ${LOGIN_HOLD_S}
+    touch "$HOME/codex-in" "$HOME/codex-exited" ;;
+esac`,
+  "cursor-agent": `
+case "$1" in
+  status) [ -e "$HOME/cursor-in" ] ;;
+  login)
+    [ -n "$NO_OPEN_BROWSER" ] || exit 3
+    printf 'Waiting for browser authentication...\\nOpen a browser and navigate to this link: ${CURSOR_AUTH_URL}\\n'
+    sleep ${LOGIN_HOLD_S}
+    touch "$HOME/cursor-in" "$HOME/cursor-exited" ;;
+esac`,
+};
+
+describe("AuthStart vendor logins against stub CLIs", () => {
+  setDefaultTimeout(30_000);
+
+  const homes: string[] = [];
+  afterEach(() => {
+    for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+  });
+
+  function box(): string {
+    const home = mkdtempSync(join(tmpdir(), "ferry-vendor-login-"));
+    homes.push(home);
+    mkdirSync(join(home, "bin"));
+    for (const [name, body] of Object.entries(STUBS)) {
+      writeFileSync(join(home, "bin", name), `#!/bin/sh\n${body}\n`);
+      chmodSync(join(home, "bin", name), 0o755);
+    }
+    return home;
+  }
+
+  function calls(home: string): string[] {
+    return existsSync(join(home, "calls")) ? readFileSync(join(home, "calls"), "utf8").trim().split("\n") : [];
+  }
+
+  const quick = { pollMs: 100, timeoutMs: 10_000 };
+
+  test("returns the gh code before the login exits, then waits for the login and sets up SSH", async () => {
+    const home = box();
+    const auth = new AuthStart(new ShellLink(home), BUILTIN_TOOLS, quick);
+
+    const started = await auth.start("gh");
+
+    expect(started).toEqual({
+      kind: "device-url",
+      provider: "gh",
+      url: "https://github.com/login/device",
+      userCode: "A1B2-C3D4",
+    });
+    expect(existsSync(join(home, "gh-exited"))).toBe(false);
+    expect(calls(home)).toContain(
+      "gh auth login --hostname github.com --git-protocol ssh --skip-ssh-key --scopes admin:public_key --web",
+    );
+    expect(calls(home)).toContain(`ssh-keygen -q -t ed25519 -N  -C ploi@box1 ferry -f ${home}/.ssh/id_ed25519`);
+
+    const finished = await auth.finish(started);
+
+    expect(existsSync(join(home, "gh-exited"))).toBe(true);
+    expect(finished).toEqual({
+      kind: "logged-in",
+      provider: "gh",
+      notes: [
+        "SSH key: added to GitHub as box1 (ferry)",
+        "known_hosts: added github.com",
+        "git protocol: ssh",
+        "ssh -T git@github.com: authenticated",
+      ],
+    });
+    expect(readFileSync(join(home, "github-keys"), "utf8")).toBe("box1 (ferry)\tssh-ed25519 AAAABOXKEY\n");
+    expect(readFileSync(join(home, ".ssh", "known_hosts"), "utf8")).toBe("github.com ssh-ed25519 AAAAGITHUB\n");
+    expect(calls(home)).toContain("gh config set -h github.com git_protocol ssh");
+    expect(calls(home)).toContain("ssh -T -o BatchMode=yes git@github.com");
+  });
+
+  test("keeps an existing box key and does not upload a key that GitHub already has", async () => {
+    const home = box();
+    mkdirSync(join(home, ".ssh"));
+    writeFileSync(join(home, ".ssh", "id_ed25519"), "existing\n");
+    writeFileSync(join(home, ".ssh", "id_ed25519.pub"), "ssh-ed25519 AAAAEXISTING old@laptop\n");
+    writeFileSync(join(home, ".ssh", "known_hosts"), "github.com ssh-ed25519 AAAAGITHUB\n");
+    writeFileSync(join(home, "github-keys"), "laptop\tssh-ed25519 AAAAEXISTING\t2026-01-01\t1\tauthentication\n");
+    writeFileSync(join(home, "gh-in"), "");
+    const auth = new AuthStart(new ShellLink(home), BUILTIN_TOOLS, quick);
+
+    const started = await auth.start("gh");
+    const finished = await auth.finish(started);
+
+    expect(started).toEqual({ kind: "already-done", provider: "gh" });
+    expect(finished).toEqual({
+      kind: "already-done",
+      provider: "gh",
+      notes: ["SSH key: already on GitHub", "git protocol: ssh", "ssh -T git@github.com: authenticated"],
+    });
+    expect(readFileSync(join(home, ".ssh", "id_ed25519"), "utf8")).toBe("existing\n");
+    expect(calls(home).filter((call) => call.startsWith("gh ssh-key add") || call.startsWith("ssh-keygen -q"))).toEqual([]);
+    expect(calls(home).some((call) => call.startsWith("gh auth login"))).toBe(false);
+  });
+
+  test("refuses a github.com host key that does not match the GitHub fingerprint", async () => {
+    const home = box();
+    writeFileSync(join(home, "bin", "ssh-keyscan"), "#!/bin/sh\necho 'github.com ssh-rsa AAAAOTHER'\n");
+    writeFileSync(join(home, "gh-in"), "");
+    const keygen = STUBS["ssh-keygen"]!.replace("SHA256:GHFP $host", "SHA256:OTHER $host");
+    writeFileSync(join(home, "bin", "ssh-keygen"), `#!/bin/sh\n${keygen}\n`);
+    const auth = new AuthStart(new ShellLink(home), BUILTIN_TOOLS, quick);
+
+    const finished = await auth.finish(await auth.start("gh"));
+
+    expect(finished).toMatchObject({ kind: "failed", provider: "gh", code: "login-setup" });
+    expect((finished as { message: string }).message).toContain("known_hosts");
+    expect(existsSync(join(home, ".ssh", "known_hosts"))).toBe(false);
+  });
+
+  test("reports a login that the operator did not finish and uploads nothing", async () => {
+    const home = box();
+    writeFileSync(join(home, "abandon"), "");
+    const auth = new AuthStart(new ShellLink(home), BUILTIN_TOOLS, { pollMs: 100, timeoutMs: 1_000 });
+
+    const started = await auth.start("gh");
+    const finished = await auth.finish(started);
+
+    expect(started).toMatchObject({ kind: "device-url", userCode: "A1B2-C3D4" });
+    expect(finished).toMatchObject({ kind: "failed", provider: "gh", code: "login-unfinished" });
+    expect(calls(home).filter((call) => /^gh (ssh-key|config|api)|^ssh /.test(call))).toEqual([]);
+    expect(existsSync(join(home, "github-keys"))).toBe(false);
+  });
+
+  test("returns the Claude URL, then gives the pasted code to the login on the box", async () => {
+    const home = box();
+    const auth = new AuthStart(new ShellLink(home), BUILTIN_TOOLS, quick);
+
+    const started = await auth.start("claude");
+
+    expect(started).toMatchObject({ kind: "printed-url", provider: "claude", url: CLAUDE_AUTH_URL });
+    expect(started).toHaveProperty("codeInput");
+    expect(existsSync(join(home, "claude-exited"))).toBe(false);
+
+    expect(await auth.finish(started, "x'; touch pwned #")).toMatchObject({ kind: "refused", code: "invalid-code" });
+    expect(await auth.finish(started, "auth-Code_1#state-2")).toEqual({ kind: "logged-in", provider: "claude" });
+    expect(readFileSync(join(home, "claude-code"), "utf8")).toBe("auth-Code_1#state-2\n");
+    expect(existsSync(join(home, "pwned"))).toBe(false);
+  });
+
+  test("returns the Codex device code before the login exits", async () => {
+    const home = box();
+    const auth = new AuthStart(new ShellLink(home), BUILTIN_TOOLS, quick);
+
+    const started = await auth.start("codex");
+
+    expect(started).toEqual({
+      kind: "device-url",
+      provider: "codex",
+      url: "https://auth.openai.com/codex/device",
+      userCode: "ABCD-EFGHJ",
+    });
+    expect(existsSync(join(home, "codex-exited"))).toBe(false);
+    expect(await auth.finish(started)).toEqual({ kind: "logged-in", provider: "codex" });
+  });
+
+  test("returns the Cursor URL before the login exits, with browser opening turned off", async () => {
+    const home = box();
+    const auth = new AuthStart(new ShellLink(home), BUILTIN_TOOLS, quick);
+
+    const started = await auth.start("cursor");
+
+    expect(started).toEqual({ kind: "printed-url", provider: "cursor", url: CURSOR_AUTH_URL });
+    expect(existsSync(join(home, "cursor-exited"))).toBe(false);
+    expect(await auth.finish(started)).toEqual({ kind: "logged-in", provider: "cursor" });
   });
 });
