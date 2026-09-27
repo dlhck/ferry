@@ -56,7 +56,16 @@ export type AuthCompletion =
       readonly codePattern?: string;
     }
   /** The tool prints the login URL. Only these hosts are passed on. */
-  | { readonly kind: "printed-url"; readonly allowedHosts: readonly string[] }
+  | {
+      readonly kind: "printed-url";
+      readonly allowedHosts: readonly string[];
+      /**
+       * Regular expression source for the code that the browser shows after
+       * the login. The operator pastes it, and ferry gives it to the login on
+       * the box. Without it, the login finishes without input.
+       */
+      readonly pastedCode?: string;
+    }
   /** The tool has no remote login ferry can drive. The operator finishes it by hand. */
   | { readonly kind: "manual"; readonly command: string; readonly instruction: string };
 
@@ -81,6 +90,14 @@ export type ToolAuth = {
   readonly login?: string;
   readonly completion: AuthCompletion;
   readonly fallback?: AuthFallback;
+  /** A box command that runs before the login, and also when the tool is already logged in. */
+  readonly prepare?: string;
+  /**
+   * A box command that runs after the login completes, and also when the tool
+   * is already logged in. It prints one line for each step, and the line
+   * `ferry-setup-ok` last when all steps passed.
+   */
+  readonly setup?: string;
 };
 
 /** How ferry updates a tool. */

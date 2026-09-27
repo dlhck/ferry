@@ -9,6 +9,47 @@
 import type { HarnessDescriptor, ToolDescriptor } from "./types.ts";
 
 const USER_CODE_PATTERN = "\\b[A-Z0-9]{4}-[A-Z0-9]{4}\\b";
+/** The Codex device code has more characters after the hyphen than the gh code. */
+const CODEX_CODE_PATTERN = "\\b[A-Z0-9]{4,6}-[A-Z0-9]{4,6}\\b";
+
+/** Create the box SSH key for GitHub. An existing key is never replaced. */
+const GH_SSH_KEY = [
+  '[ -e "$HOME/.ssh/id_ed25519" ] && exit 0',
+  'mkdir -p -m 700 "$HOME/.ssh"',
+  'ssh-keygen -q -t ed25519 -N "" -C "$(id -un)@$(hostname) ferry" -f "$HOME/.ssh/id_ed25519"',
+].join("\n");
+
+/**
+ * Give GitHub the box SSH key, trust the github.com host key, and make git use
+ * SSH. The host key must match the fingerprint that the GitHub meta API
+ * publishes. Each step prints one line, and a failed step stops the setup.
+ */
+const GH_SSH_SETUP = [
+  'pub="$HOME/.ssh/id_ed25519.pub"',
+  'key=$(cut -d" " -f2 "$pub" 2>/dev/null)',
+  '[ -n "$key" ] || { echo "SSH key: $pub is missing"; exit 0; }',
+  'keys=$(gh ssh-key list 2>/dev/null) || { echo "SSH key: gh ssh-key list failed. The gh login needs the admin:public_key scope."; exit 0; }',
+  'case "$keys" in',
+  '  *"$key"*) echo "SSH key: already on GitHub" ;;',
+  '  *) gh ssh-key add "$pub" --title "$(hostname) (ferry)" >/dev/null 2>&1 || { echo "SSH key: gh ssh-key add failed"; exit 0; }',
+  '     echo "SSH key: added to GitHub as $(hostname) (ferry)" ;;',
+  "esac",
+  'if ! ssh-keygen -F github.com >/dev/null 2>&1; then',
+  '  want=$(gh api meta --jq .ssh_key_fingerprints.SHA256_ED25519 2>/dev/null)',
+  '  line=$(ssh-keyscan -t ed25519 github.com 2>/dev/null)',
+  '  got=$(printf "%s\\n" "$line" | ssh-keygen -lf - 2>/dev/null | cut -d" " -f2)',
+  '  [ -n "$want" ] && [ "$got" = "$want" ] || { echo "known_hosts: the github.com host key does not match the GitHub fingerprint"; exit 0; }',
+  '  printf "%s\\n" "$line" >> "$HOME/.ssh/known_hosts"',
+  '  echo "known_hosts: added github.com"',
+  "fi",
+  'gh config set -h github.com git_protocol ssh >/dev/null 2>&1 || { echo "git protocol: gh config set failed"; exit 0; }',
+  'echo "git protocol: ssh"',
+  'case "$(ssh -T -o BatchMode=yes git@github.com 2>&1)" in',
+  '  *"successfully authenticated"*) echo "ssh -T git@github.com: authenticated" ;;',
+  '  *) echo "ssh -T git@github.com: not authenticated"; exit 0 ;;',
+  "esac",
+  "echo ferry-setup-ok",
+].join("\n");
 
 export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
   {
@@ -80,12 +121,16 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
     update: { command: "sudo apt update && sudo apt install gh -y" },
     auth: {
       probe: "gh auth status --hostname github.com",
-      login: "gh auth login --hostname github.com --git-protocol https --web",
+      // Without a terminal, gh prints the code, asks no questions, and skips its own SSH key upload.
+      login:
+        "gh auth login --hostname github.com --git-protocol ssh --skip-ssh-key --scopes admin:public_key --web",
       completion: {
         kind: "device-url",
         url: "https://github.com/login/device",
         codePattern: USER_CODE_PATTERN,
       },
+      prepare: GH_SSH_KEY,
+      setup: GH_SSH_SETUP,
     },
   },
   {
@@ -95,7 +140,12 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
     auth: {
       probe: "claude auth status",
       login: "claude auth login",
-      completion: { kind: "printed-url", allowedHosts: ["claude.ai", "anthropic.com"] },
+      // The browser shows a code after the login, and the login on the box reads it from its input.
+      completion: {
+        kind: "printed-url",
+        allowedHosts: ["claude.com", "claude.ai", "anthropic.com"],
+        pastedCode: "^[A-Za-z0-9._~-]+#[A-Za-z0-9._~-]+$",
+      },
     },
     mcp: {
       register: {
@@ -119,9 +169,10 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
       completion: {
         kind: "device-url",
         url: "https://auth.openai.com/codex/device",
-        codePattern: USER_CODE_PATTERN,
+        codePattern: CODEX_CODE_PATTERN,
       },
       // Codex without device auth prints a URL and waits on a local callback.
+      // Ferry uses it when the device login prints no code.
       fallback: {
         login: "codex login",
         allowedHosts: ["openai.com"],
