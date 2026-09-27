@@ -76,7 +76,12 @@ function dependencies(
         calls.reads.push("link.readBoxGitIdentity");
         return online("100.64.0.8", "user.name Box Agent\nuser.email box@example.com\n");
       },
+      async readBoxSudo() {
+        calls.reads.push("link.readBoxSudo");
+        return online("100.64.0.8", "yes\n");
+      },
     },
+    updateWatch: false,
     operator: {
       async gitIdentity() {
         calls.reads.push("operator.gitIdentity");
@@ -140,6 +145,7 @@ describe("Status composer", () => {
         matchesOperator: false,
         error: null,
       },
+      boxSudo: { passwordless: true, watchUpdateBlocked: false, error: null },
       managedPaths: {
         allHealthy: false,
         unhealthy: [
@@ -184,6 +190,7 @@ describe("Status composer", () => {
       "link.readBoxTip",
       "link.readBoxChanges",
       "link.readBoxGitIdentity",
+      "link.readBoxSudo",
       "operator.gitIdentity",
       "store.inspectTips",
       "apply.plan",
@@ -220,7 +227,12 @@ describe("Status composer", () => {
           calls.mutations.push("offline box read");
           return online();
         },
+        async readBoxSudo() {
+          calls.mutations.push("offline box read");
+          return online();
+        },
       },
+      updateWatch: true,
       store: {
         async inspectTips(boxTip) {
           calls.reads.push("store.inspectTips");
@@ -253,6 +265,7 @@ describe("Status composer", () => {
       matchesOperator: null,
       error: null,
     });
+    expect(report.boxSudo).toEqual({ passwordless: null, watchUpdateBlocked: false, error: null });
     expect(report.managedPaths.allHealthy).toBeNull();
     expect(report.auth.providers).toEqual([]);
     expect(report.paseo).toEqual({ address: null, port: 6767, listen: null });
@@ -275,6 +288,9 @@ describe("Status composer", () => {
         },
         async readBoxGitIdentity() {
           throw new Error("box identity failed");
+        },
+        async readBoxSudo() {
+          throw new Error("box sudo failed");
         },
       },
       operator: {
@@ -305,6 +321,7 @@ describe("Status composer", () => {
       { code: "inspection-failed", origin: "box", message: "box: box tip failed" },
       { code: "inspection-failed", origin: "box", message: "box: box changes failed" },
       { code: "inspection-failed", origin: "box", message: "box: box identity failed" },
+      { code: "inspection-failed", origin: "box", message: "box: box sudo failed" },
       {
         code: "inspection-failed",
         origin: "operator",
@@ -343,5 +360,44 @@ describe("Status composer", () => {
     const report = await composeStatus(deps);
 
     expect(report.gitIdentity).toMatchObject({ boxConfigured: true, matchesOperator: true });
+  });
+
+  test("reports sudo on the box that asks for a password", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const deps = dependencies(calls);
+    deps.link.readBoxSudo = async () => online("100.64.0.8", "no\n");
+
+    const report = await composeStatus(deps);
+
+    expect(report.boxSudo).toEqual({
+      passwordless: false,
+      watchUpdateBlocked: false,
+      error: null,
+    });
+  });
+
+  test("blocks the watch update only when the watch update is on and sudo asks for a password", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const password = dependencies(calls, { updateWatch: true });
+    password.link.readBoxSudo = async () => online("100.64.0.8", "no\n");
+    const passwordless = dependencies(calls, { updateWatch: true });
+
+    expect((await composeStatus(password)).boxSudo.watchUpdateBlocked).toBe(true);
+    expect((await composeStatus(passwordless)).boxSudo.watchUpdateBlocked).toBe(false);
+  });
+
+  test("refuses unexpected sudo check output", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const deps = dependencies(calls);
+    deps.link.readBoxSudo = async () => online("100.64.0.8", "maybe\n");
+
+    const report = await composeStatus(deps);
+
+    expect(report.boxSudo.passwordless).toBeNull();
+    expect(report.errors).toContainEqual({
+      code: "inspection-failed",
+      origin: "box",
+      message: "box: unexpected sudo check output",
+    });
   });
 });

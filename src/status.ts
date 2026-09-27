@@ -22,7 +22,11 @@ export type StatusDependencies = {
     readBoxTip(): Promise<LinkResult>;
     readBoxChanges(): Promise<LinkResult>;
     readBoxGitIdentity(): Promise<LinkResult>;
+    /** Print `yes` when sudo on the box runs without a password, else `no`. */
+    readBoxSudo(): Promise<LinkResult>;
   };
+  /** The `[update]` config key `watch`. */
+  readonly updateWatch: boolean;
   readonly operator: {
     gitIdentity(): Promise<GitIdentity>;
   };
@@ -58,6 +62,12 @@ export type StatusReport = {
     readonly operator: GitIdentity | null;
     readonly boxConfigured: boolean | null;
     readonly matchesOperator: boolean | null;
+    readonly error: LinkError | StatusDependencyError | null;
+  };
+  readonly boxSudo: {
+    readonly passwordless: boolean | null;
+    /** True when the watch runs updates and sudo asks for a password, so the gh update fails. */
+    readonly watchUpdateBlocked: boolean;
     readonly error: LinkError | StatusDependencyError | null;
   };
   readonly managedPaths: {
@@ -146,6 +156,20 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     }
     if (gitIdentityError) errors.push(gitIdentityError);
   }
+
+  let boxSudoError: LinkError | StatusDependencyError | null = null;
+  let passwordless: boolean | null = null;
+  if (online) {
+    try {
+      const result = await dependencies.link.readBoxSudo();
+      if (result.ok) passwordless = parseSudoCheck(result.stdout);
+      else boxSudoError = result.error;
+    } catch (cause) {
+      boxSudoError = dependencyError("box", cause);
+    }
+    if (boxSudoError) errors.push(boxSudoError);
+  }
+
   let operatorIdentity: GitIdentity | null = null;
   try {
     operatorIdentity = await dependencies.operator.gitIdentity();
@@ -214,6 +238,11 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
       matchesOperator,
       error: gitIdentityError,
     },
+    boxSudo: {
+      passwordless,
+      watchUpdateBlocked: dependencies.updateWatch && passwordless === false,
+      error: boxSudoError,
+    },
     managedPaths: { allHealthy, unhealthy, error: managedPathsError },
     auth: { providers, loginRequired, error: authError },
     paseo: {
@@ -224,6 +253,13 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     denyList,
     errors,
   };
+}
+
+function parseSudoCheck(stdout: string): boolean {
+  const answer = stdout.trim();
+  if (answer === "yes") return true;
+  if (answer === "no") return false;
+  throw new Error("unexpected sudo check output");
 }
 
 function emptyTips(box: string | null): TipReport {

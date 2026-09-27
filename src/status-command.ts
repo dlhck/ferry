@@ -22,6 +22,8 @@ import { RealGitRunner, Store, type TipReport } from "./store.ts";
 import { boxChangesCommand } from "./sync.ts";
 
 const STORE_RELATIVE_PATH = ".ferry/store";
+/** `sudo -n` fails when sudo asks for a password. Only the answer goes to stdout. */
+const BOX_SUDO_COMMAND = "sudo -n /usr/bin/true >/dev/null 2>&1 && echo yes || echo no";
 
 export type StatusCommandInput = {
   readonly json: boolean;
@@ -85,7 +87,11 @@ export async function runStatusCommand(
       async readBoxGitIdentity() {
         return link.run(BOX_GIT_IDENTITY_COMMAND);
       },
+      async readBoxSudo() {
+        return link.run(BOX_SUDO_COMMAND);
+      },
     },
+    updateWatch: config.update?.watch === true,
     operator: { gitIdentity: () => resolved.readOperatorGitIdentity(home) },
     store,
     apply: {
@@ -125,6 +131,8 @@ export function formatStatus(report: StatusReport): string {
     ...report.boxCheckout.changes.map((path) => `  - ${path}`),
     "",
     gitIdentity(report),
+    "",
+    ...boxSudo(report),
     "",
     managedPaths(report),
     ...report.managedPaths.unhealthy.map((action) => `  - ${managedPath(action)}`),
@@ -241,6 +249,20 @@ function gitIdentity(report: StatusReport): string {
   if (matchesOperator) return `Box git identity: MATCHES operator (${person(box)})`;
   if (operator === null) return `Box git identity: SET (${person(box)})`;
   return `Box git identity: DIFFERENT from operator (${person(box)}, operator: ${person(operator)})`;
+}
+
+function boxSudo(report: StatusReport): string[] {
+  const { passwordless, watchUpdateBlocked } = report.boxSudo;
+  if (passwordless === null) return ["Box sudo: unavailable"];
+  if (passwordless) return ["Box sudo: PASSWORDLESS"];
+  return [
+    "Box sudo: PASSWORD REQUIRED",
+    ...(watchUpdateBlocked
+      ? [
+          "  WARNING: [update] watch = true, but the watch cannot update gh because sudo on the box asks for a password. See the sudoers rule in the README.",
+        ]
+      : []),
+  ];
 }
 
 function person(identity: GitIdentity): string {

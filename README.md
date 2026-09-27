@@ -69,6 +69,17 @@ ferry update --dry-run
 
 A failed update does not stop the other updates. After all updates, Ferry names each failed update and exits with a non-zero code.
 
+The `gh` update uses `sudo` on the box. When `ferry watch` runs the update, no terminal is available to type a password. Membership in the `sudo` group is not sufficient, because the default rule on Ubuntu and Debian asks for a password. To let the watch update `gh`, add this rule on the box. Replace `<ssh-user>` with the SSH user of the box:
+
+```
+# /etc/sudoers.d/ferry  (edit with: sudo visudo -f /etc/sudoers.d/ferry)
+<ssh-user> ALL=(root) NOPASSWD: /usr/bin/true, /usr/bin/apt update, /usr/bin/apt install gh -y
+```
+
+sudo compares the full command path and all arguments. The rule allows only these three commands, with these exact arguments. `/usr/bin/apt update` and `/usr/bin/apt install gh -y` are the two commands of the `gh` update. `/usr/bin/true` does nothing. `ferry status` runs `sudo -n /usr/bin/true` to find out if `sudo` asks for a password. Ferry does not write sudoers files on the box.
+
+`ferry status` shows `Box sudo: PASSWORDLESS` or `Box sudo: PASSWORD REQUIRED`, and `--json` has the result in `boxSudo`. When `[update] watch = true` and `sudo` asks for a password, `ferry status` shows a warning that the watch cannot update `gh`.
+
 ## What Ferry carries
 
 Ferry carries these items from the operator machine to the box:
