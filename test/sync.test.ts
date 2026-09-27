@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { ApplyError } from "../src/apply.ts";
 import { buildProgram } from "../src/cli.ts";
 import type { OperatorConfig } from "../src/config.ts";
@@ -448,14 +448,14 @@ describe("runSync", () => {
     );
 
     expect(events).toEqual([
-      "create-link",
-      "resolve-home",
-      "plan",
       "store-lock",
       "open-store",
       "publish:chore: ship skills",
       "store-unlock",
       "lock",
+      "create-link",
+      "resolve-home",
+      "plan",
       "update-box",
       "apply",
       "write-path",
@@ -1044,8 +1044,8 @@ describe("runSync progress", () => {
     expect(terminal.table()).toEqual([
       "Step                              Result     Detail                    Time",
       "Reading the portable set          ✔ done     0 skills                  0.1s",
-      "Connecting to ferry@box           ✔ done                               0.1s",
       "Publishing the snapshot           ✔ done     published abc123          0.1s",
+      "Connecting to ferry@box           ✔ done                               0.1s",
       "Updating the box checkout         ✔ done     discarded 1 box change    0.1s",
       "Applying the snapshot on the box  ✔ done     0 changes                 0.1s",
       "Installing Claude plugins         ✔ done     1 warning                 0.1s",
@@ -1056,7 +1056,7 @@ describe("runSync progress", () => {
     ]);
   });
 
-  test("ends the summary table at a failed step, with the error as detail", async () => {
+  test("marks the failed box step, with the error as detail, and still adopts after the publish", async () => {
     const terminal = fakeTerminal();
     const update: LinkResult = {
       ok: false,
@@ -1069,11 +1069,12 @@ describe("runSync progress", () => {
     terminal.progress.finish();
 
     expect(terminal.table()).toEqual([
-      "Step                       Result     Detail                               Time",
-      "Reading the portable set   ✔ done     0 skills                             0.1s",
-      "Connecting to ferry@box    ✔ done                                          0.1s",
-      "Publishing the snapshot    ✔ done     published abc123                     0.1s",
-      "Updating the box checkout  ✖ failed   box: failed to update ferry@box…     0.1s",
+      "Step                             Result     Detail                         Time",
+      "Reading the portable set         ✔ done     0 skills                       0.1s",
+      "Publishing the snapshot          ✔ done     published abc123               0.1s",
+      "Connecting to ferry@box          ✔ done                                    0.1s",
+      "Updating the box checkout        ✖ failed   box: failed to update ferr…    0.1s",
+      "Adopting published local skills  ✔ done                                    0.1s",
     ]);
   });
 
@@ -1087,11 +1088,11 @@ describe("runSync progress", () => {
       "start:Reading the portable set",
       "done",
       "line:Skipped hook: hook entry that refers to a home path outside the managed set: ~/.claude/hooks/notify.sh",
+      "start:Publishing the snapshot",
+      "done",
       "start:Connecting to ferry@box",
       "done",
       "plan",
-      "start:Publishing the snapshot",
-      "done",
       "start:Updating the box checkout",
       "done",
       "line:Discarded box change: /srv/ferry/.ferry/store/skills/x/SKILL.md",
@@ -1125,7 +1126,7 @@ describe("runSync progress", () => {
     await expect(runSync({ home: "/operator" }, dependencies(events, progress, update))).rejects.toBeInstanceOf(
       SyncError,
     );
-    expect(events.slice(-2)).toEqual(["start:Updating the box checkout", "fail"]);
+    expect(events.slice(-4, -2)).toEqual(["start:Updating the box checkout", "fail"]);
   });
 
   test("a dry run shows only the local read step", async () => {
@@ -1695,7 +1696,7 @@ describe("sync locks", () => {
           message: expect.stringContaining("a@box-a"),
         }),
       );
-      expect(secondEvents).toEqual(["a@box-a:resolve-home"]);
+      expect(secondEvents).toEqual([]);
 
       release.resolve();
       await first;
@@ -1721,7 +1722,7 @@ describe("sync locks", () => {
           },
         ),
       ).rejects.toEqual(expect.objectContaining({ code: "concurrent-sync" }));
-      expect(events).toEqual(["a@box-a:resolve-home", "a@box-a:publish", "a@box-a:published"]);
+      expect(events).toEqual(["a@box-a:publish", "a@box-a:published", "a@box-a:adopt"]);
       expect(readdirSync(join(home, ".ferry"))).toEqual([]);
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -1747,7 +1748,7 @@ describe("sync locks", () => {
           },
         ),
       ).rejects.toEqual(expect.objectContaining({ code: "publish-failure" }));
-      expect(events).toEqual(["a@box-a:resolve-home"]);
+      expect(events).toEqual([]);
       expect(readdirSync(join(home, ".ferry"))).toEqual([]);
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -1769,5 +1770,283 @@ describe("sync locks", () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe("sync with more than one box", () => {
+  const homes: string[] = [];
+  afterEach(() => {
+    for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+  });
+
+  function box(name: string, paseo?: boolean) {
+    return {
+      name,
+      host: { transport: "ssh" as const, destination: `dev@box-${name}.example` },
+      ...(paseo === undefined ? {} : { integrations: { paseo } }),
+    };
+  }
+
+  /** Box a has Paseo on from `[integrations]`. Box b turns it off. */
+  const fleetConfig = {
+    version: 1 as const,
+    publisher: "operator-machine",
+    snapshotUrl: "git@example.test:operator/ferry-store.git",
+    integrations: { paseo: true },
+    boxes: [box("a"), box("b", false)],
+  };
+
+  function fleet(
+    options: {
+      readonly config?: typeof fleetConfig;
+      readonly offline?: readonly string[];
+      readonly apply?: (box: string) => Promise<void>;
+      readonly publish?: () => Promise<{ published: boolean; tip: string | null }>;
+    } = {},
+  ) {
+    const home = mkdtempSync(join(tmpdir(), "ferry-sync-fleet-"));
+    homes.push(home);
+    const events: string[] = [];
+    const lines: string[] = [];
+    const steps: string[] = [];
+    const nameOf = (destination: string) => /box-([a-z0-9-]+)\./.exec(destination)?.[1] ?? destination;
+    const dependencies: SyncDependencies = {
+      readConfig: () => options.config ?? fleetConfig,
+      publisher: () => "operator-machine",
+      readSeed: () => seed,
+      createLink: (target) => {
+        const name = nameOf((target as { destination: string }).destination);
+        events.push(`${name}:link`);
+        return {
+          run: async (command) => {
+            if (command.startsWith("printf")) {
+              events.push(`${name}:resolve-home`);
+              if (options.offline?.includes(name)) {
+                return { ok: false, error: { origin: "network", code: "host-offline", message: "no route" } } as LinkResult;
+              }
+              return { ok: true, address: name, stdout: `/home/${name}\n`, stderr: "" };
+            }
+            if (command.includes("git clone")) events.push(`${name}:update`);
+            return { ok: true, address: name, stdout: "", stderr: "" };
+          },
+        };
+      },
+      openStore: async () => ({
+        path: join(home, ".ferry", "store"),
+        publish: async () => {
+          events.push("publish");
+          return (await options.publish?.()) ?? { published: true, tip: "abc123" };
+        },
+      }),
+      apply: async (input) => {
+        const name = posix.basename(input.targetHome);
+        events.push(`${name}:apply`);
+        await options.apply?.(name);
+        events.push(`${name}:applied`);
+        return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] };
+      },
+      adopt: () => {
+        events.push("adopt");
+      },
+      writeLine: (line) => lines.push(line),
+      progress: { ...noProgress, start: (step) => steps.push(step) },
+    };
+    return { home, events, lines, steps, dependencies };
+  }
+
+  function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+    let resolve = () => {};
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  test("publishes once, syncs two boxes in parallel, then adopts once", async () => {
+    const bApplied = deferred();
+    const sync = fleet({
+      apply: async (name) => {
+        if (name === "a") await bApplied.promise;
+        else bApplied.resolve();
+      },
+    });
+
+    const result = await runSync({ home: sync.home }, sync.dependencies);
+
+    expect(sync.events.filter((event) => event === "publish")).toHaveLength(1);
+    expect(sync.events.indexOf("publish")).toBeLessThan(sync.events.indexOf("a:link"));
+    expect(sync.events.indexOf("b:applied")).toBeLessThan(sync.events.indexOf("a:applied"));
+    expect(sync.events.filter((event) => event === "adopt")).toEqual(["adopt"]);
+    expect(sync.events.at(-1)).toBe("adopt");
+    expect(result.boxes.map((entry) => [entry.name, entry.plan.box, entry.plan.remoteHome, entry.failure])).toEqual([
+      ["a", "dev@box-a.example", "/home/a", undefined],
+      ["b", "dev@box-b.example", "/home/b", undefined],
+    ]);
+    expect(readdirSync(join(sync.home, ".ferry"))).toEqual([]);
+  });
+
+  test("syncs the other box when one box is offline, adopts once, and names the failed box and step", async () => {
+    const sync = fleet({ offline: ["b"] });
+
+    const error = await runSync({ home: sync.home }, sync.dependencies).then(
+      () => null,
+      (cause: unknown) => cause,
+    );
+
+    expect(error).toBeInstanceOf(SyncError);
+    expect(error).toMatchObject({ code: "box-failure", origin: "box" });
+    expect((error as Error).message).toBe(
+      "box: sync failed on 1 of 2 boxes.\n[b] Connecting to dev@box-b.example: box: failed to resolve home on dev@box-b.example: network/host-offline: no route",
+    );
+    expect(sync.events).toContain("a:applied");
+    expect(sync.events.filter((event) => event.startsWith("b:"))).toEqual(["b:link", "b:resolve-home"]);
+    expect(sync.events.filter((event) => event === "adopt")).toHaveLength(1);
+    expect(readdirSync(join(sync.home, ".ferry"))).toEqual([]);
+  });
+
+  test("the CLI exits 1 when one box fails", async () => {
+    const sync = fleet({ offline: ["b"] });
+    let exitCode = 0;
+    const { runCli } = await import("../src/cli.ts");
+
+    await runCli(["sync"], {
+      readConfig: () => fleetConfig,
+      createProgress: () => noProgress,
+      writeLine: () => {},
+      runSync: (input, dependencies) => runSync({ ...input, home: sync.home }, { ...dependencies, ...sync.dependencies }),
+    }, { renderError: () => {}, setExitCode: (code) => (exitCode = code) });
+
+    expect(exitCode).toBe(1);
+    expect(sync.events).toContain("a:applied");
+  });
+
+  test("refuses before the publish and names the box when a sync is active for one box", async () => {
+    const sync = fleet();
+    const digest = createHash("sha256").update("ssh:dev@box-b.example").digest("hex").slice(0, 16);
+    mkdirSync(join(sync.home, ".ferry"));
+    writeFileSync(join(sync.home, ".ferry", `sync-${digest}.lock`), JSON.stringify({ pid: process.pid }));
+
+    await expect(runSync({ home: sync.home }, sync.dependencies)).rejects.toEqual(
+      expect.objectContaining({
+        code: "concurrent-sync",
+        message: "operator: another sync is active for box b (ssh:dev@box-b.example)",
+      }),
+    );
+    expect(sync.events).toEqual([]);
+  });
+
+  test("changes no box when the publish fails", async () => {
+    const sync = fleet({
+      publish: async () => {
+        throw new Error("push rejected");
+      },
+    });
+
+    await expect(runSync({ home: sync.home }, sync.dependencies)).rejects.toEqual(
+      expect.objectContaining({ code: "publish-failure" }),
+    );
+    expect(sync.events).toEqual(["publish"]);
+  });
+
+  test("runs the Paseo steps only on a box with Paseo on", async () => {
+    const sync = fleet();
+
+    await runSync({ home: sync.home }, sync.dependencies);
+
+    expect(sync.steps.filter((step) => step.includes("Paseo"))).toEqual([
+      "[a] Carrying Paseo agent profiles",
+      "[a] Updating the Paseo unit PATH",
+    ]);
+  });
+
+  test("puts the box name before each box step and each box line", async () => {
+    const sync = fleet();
+
+    await runSync({ home: sync.home }, sync.dependencies);
+
+    expect(sync.steps.filter((step) => step.startsWith("[b] "))).toEqual([
+      "[b] Connecting to dev@box-b.example",
+      "[b] Updating the box checkout",
+      "[b] Applying the snapshot on the box",
+      "[b] Installing Claude plugins",
+      "[b] Merging settings on the box",
+      "[b] Declaring MCP servers",
+      "[b] Writing the box PATH",
+    ]);
+    expect(sync.steps.filter((step) => !step.startsWith("["))).toEqual([
+      "Reading the portable set",
+      "Publishing the snapshot",
+      "Adopting published local skills",
+    ]);
+    const plan = sync.lines.find((line) => line.startsWith("[b] Sync plan:"))?.split("\n") ?? [];
+    expect(plan).toContain("[b] Box: dev@box-b.example");
+    expect(plan.every((line) => line.startsWith("[b] "))).toBe(true);
+  });
+
+  test("keeps the output of one selected box without a prefix", async () => {
+    const sync = fleet();
+
+    await runSync({ home: sync.home, boxes: ["b"] }, sync.dependencies);
+
+    expect(sync.steps).toEqual([
+      "Reading the portable set",
+      "Publishing the snapshot",
+      "Connecting to dev@box-b.example",
+      "Updating the box checkout",
+      "Applying the snapshot on the box",
+      "Installing Claude plugins",
+      "Merging settings on the box",
+      "Declaring MCP servers",
+      "Writing the box PATH",
+      "Adopting published local skills",
+    ]);
+    expect(sync.lines.find((line) => line.startsWith("Sync plan:"))).toContain("Box: dev@box-b.example");
+    expect(sync.events.some((event) => event.startsWith("a:"))).toBe(false);
+  });
+
+  test("refuses an unknown box before it publishes", async () => {
+    const sync = fleet();
+
+    await expect(runSync({ home: sync.home, boxes: ["c"] }, sync.dependencies)).rejects.toEqual(
+      expect.objectContaining({ code: "invalid-config", message: expect.stringContaining("unknown box c") }),
+    );
+    expect(sync.events).toEqual([]);
+  });
+
+  test("runs at most 4 boxes at the same time", async () => {
+    const config = { ...fleetConfig, boxes: ["a", "b", "c", "d", "e", "f"].map((name) => box(name)) };
+    let active = 0;
+    let most = 0;
+    const sync = fleet({
+      config,
+      apply: async () => {
+        active += 1;
+        most = Math.max(most, active);
+        await new Promise((done) => setTimeout(done, 20));
+        active -= 1;
+      },
+    });
+
+    const result = await runSync({ home: sync.home }, sync.dependencies);
+
+    expect(most).toBe(4);
+    expect(result.boxes.map((entry) => entry.name)).toEqual(["a", "b", "c", "d", "e", "f"]);
+  });
+
+  test("the dry run prints one plan for each box and stays offline", async () => {
+    const sync = fleet();
+    const plans: SyncPlan[] = [];
+
+    const result = await runSync(
+      { home: sync.home, dryRun: true },
+      { ...sync.dependencies, writePlan: (plan) => plans.push(plan) },
+    );
+
+    expect(sync.events).toEqual([]);
+    expect(plans.map((plan) => [plan.box, plan.paseoProfiles])).toEqual([
+      ["dev@box-a.example", []],
+      ["dev@box-b.example", null],
+    ]);
+    expect(result.boxes.map((entry) => entry.plan)).toEqual(plans);
   });
 });

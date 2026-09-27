@@ -4,7 +4,7 @@ import { parseGitIdentity, type GitIdentity } from "./git-identity.ts";
 import type { LinkError, LinkResult } from "./link.ts";
 import type { IntegrationHealth, IntegrationId } from "./integrations/types.ts";
 import type { DenyRuleDescription } from "./manifest.ts";
-import { noProgress, plural, step, type Progress } from "./progress.ts";
+import { groupProgress, noProgress, plural, step, type Progress } from "./progress.ts";
 import type { TipReport } from "./store.ts";
 import { changedPaths } from "./sync.ts";
 import type { ToolStatus } from "./tools/check.ts";
@@ -483,6 +483,8 @@ function orderedProgress(
   names: readonly string[],
 ): { readonly views: readonly Progress[]; end(index: number): void } {
   if (names.length === 1) return { views: [progress], end() {} };
+  // A reporter with groups shows the boxes at the same time, with real step durations.
+  if (progress.group) return { views: names.map((box) => groupProgress(progress, box)), end() {} };
   let head = 0;
   const queues = names.map((): Array<() => void> => []);
   const ended = names.map(() => false);

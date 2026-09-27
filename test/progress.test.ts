@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { lineProgress, plainProgress, step } from "../src/progress.ts";
+import { groupProgress, lineProgress, noProgress, plainProgress, step } from "../src/progress.ts";
 import { fakeTerminal, recordProgress } from "./fake-progress.ts";
 
 const HIDE = "\x1b[?25l";
@@ -135,6 +135,92 @@ describe("lineProgress", () => {
     terminal.progress.finish();
 
     expect(terminal.writes).toEqual([]);
+  });
+});
+
+describe("parallel groups", () => {
+  test("the plain reporter prefixes each line of a group with its name and counts each group apart", () => {
+    const lines: string[] = [];
+    const progress = plainProgress((line) => lines.push(line));
+    const a = progress.group!("a");
+    const b = progress.group!("b");
+
+    progress.start("Publishing the snapshot");
+    progress.done();
+    a.start("Installing Claude plugins");
+    b.start("Applying the snapshot on the box");
+    a.count(1, 2);
+    b.done();
+    a.done();
+
+    expect(lines).toEqual([
+      "Publishing the snapshot...",
+      "[a] Installing Claude plugins...",
+      "[b] Applying the snapshot on the box...",
+      "[a] Installing Claude plugins (1/2)...",
+    ]);
+  });
+
+  test("the live line shows every running group step, and the table keeps real durations grouped by box", () => {
+    const writes: string[] = [];
+    let clock = 0;
+    const progress = lineProgress({ write: (text) => writes.push(text), columns: 100, color: false, now: () => clock });
+    const a = progress.group!("a");
+    const b = progress.group!("b");
+
+    progress.plan(5);
+    progress.start("Publishing the snapshot");
+    clock = 1000;
+    progress.done("published abc1234");
+    a.start("Applying the snapshot on the box");
+    clock = 1500;
+    b.start("Updating the box checkout");
+    b.count(1, 3);
+    clock = 3500;
+    b.fail("host-offline");
+    clock = 7000;
+    a.done("2 changes");
+    progress.start("Adopting published local skills");
+    clock = 7100;
+    progress.done();
+    progress.finish();
+
+    expect(writes).toContain(`${CLEAR}◒ [3/5] [a] Applying the snapshot on the box · [b] Updating the box checkout`);
+    expect(writes).toContain(`${CLEAR}◒ [3/5] [a] Applying the snapshot on the box · [b] Updating the box checkout (1/3)`);
+    expect(writes).toContain(`${CLEAR}◒ [3/5] [a] Applying the snapshot on the box`);
+    expect(writes.at(-1)?.trimEnd().split("\n")).toEqual([
+      "Step                                  Result     Detail               Time",
+      "Publishing the snapshot               ✔ done     published abc1234    1.0s",
+      "[a] Applying the snapshot on the box  ✔ done     2 changes            6.0s",
+      "[b] Updating the box checkout         ✖ failed   host-offline         2.0s",
+      "Adopting published local skills       ✔ done                          0.1s",
+    ]);
+  });
+
+  test("a group does not print the table or end the live line of another group", () => {
+    const terminal = fakeTerminal();
+    const a = terminal.progress.group!("a");
+    const b = terminal.progress.group!("b");
+
+    a.start("Applying the snapshot on the box");
+    b.start("Updating the box checkout");
+    a.finish();
+    a.done();
+
+    expect(terminal.table()).toEqual([]);
+    expect(terminal.writes.at(-1)).toBe(`${CLEAR}◒ [b] Updating the box checkout`);
+  });
+
+  test("groupProgress prefixes the steps of a reporter without groups", () => {
+    const progress = recordProgress();
+    const a = groupProgress(progress, "a");
+
+    a.start("Writing the box PATH");
+    a.done();
+    a.finish();
+
+    expect(progress.events).toEqual(["start:[a] Writing the box PATH", "done"]);
+    expect(groupProgress(noProgress, "a").start).toBeFunction();
   });
 });
 

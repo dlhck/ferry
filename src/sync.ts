@@ -1,4 +1,4 @@
-/** Publish the operator snapshot and apply it to the configured box. */
+/** Publish the operator snapshot and apply it to the selected boxes. */
 
 import { createHash, randomUUID } from "node:crypto";
 import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
@@ -11,8 +11,10 @@ import {
   readConfig as readOperatorConfig,
   resolveLinkOptions,
   type OperatorConfig,
+  type OperatorHostConfig,
   type PartialOperatorConfig,
 } from "./config.ts";
+import { resolveBoxes, type ResolvedBox } from "./boxes.ts";
 import { denyRules, readSeed as readManifest, type StoreUpdate } from "./manifest.ts";
 import { Link, type LinkOptions, type LinkResult, type RunOptions } from "./link.ts";
 import {
@@ -32,7 +34,7 @@ import {
   refreshUnitPath,
   type AgentProfile,
 } from "./integrations/paseo.ts";
-import { noProgress, plural, step, type Progress } from "./progress.ts";
+import { groupProgress, noProgress, plural, step, type Progress } from "./progress.ts";
 import { boxPathDirs, profileBlockCommand } from "./tools/path.ts";
 
 export type SyncInput = {
@@ -40,6 +42,8 @@ export type SyncInput = {
   readonly dryRun?: boolean;
   readonly force?: boolean;
   readonly message?: string;
+  /** The names from `--box`. None selects all boxes. */
+  readonly boxes?: readonly string[];
 };
 
 export type SyncDependencies = {
@@ -106,10 +110,23 @@ export type SettingsChange = { readonly harness: string; readonly keys: readonly
 export type SyncResult = {
   readonly dryRun: boolean;
   readonly published: boolean;
+  /** The plan of the first selected box. `boxes` has the plan of each box. */
+  readonly plan: SyncPlan;
+  /** The Apply plan of the first selected box. */
+  readonly applyPlan?: ApplyPlan;
+  /** Box checkout paths that the update discarded on the first selected box, relative to the checkout. */
+  readonly discarded?: readonly string[];
+  /** One result for each selected box, in config order. */
+  readonly boxes: readonly BoxSyncResult[];
+};
+
+export type BoxSyncResult = {
+  readonly name: string;
   readonly plan: SyncPlan;
   readonly applyPlan?: ApplyPlan;
-  /** Box checkout paths that the update discarded, relative to the checkout. */
   readonly discarded?: readonly string[];
+  /** The step that failed on this box, and its error. */
+  readonly failure?: { readonly step: string; readonly error: unknown };
 };
 
 export type SyncErrorCode =
@@ -125,7 +142,8 @@ export type SyncErrorCode =
   | "lock-failure"
   | "publish-failure"
   | "remote-update-failure"
-  | "apply-failure";
+  | "apply-failure"
+  | "box-failure";
 export type SyncErrorOrigin = "operator" | "git remote" | "box";
 
 export class SyncError extends Error {
@@ -140,6 +158,28 @@ export class SyncError extends Error {
   }
 }
 
+/** One or more of the selected boxes failed. `results` has the result of each box. */
+export class BoxesSyncError extends SyncError {
+  constructor(readonly results: readonly BoxSyncResult[]) {
+    const failed = results.filter((result) => result.failure !== undefined);
+    super(
+      "box-failure",
+      "box",
+      [
+        `sync failed on ${failed.length} of ${plural(results.length, "box", "boxes")}.`,
+        ...failed.map((result) => `[${result.name}] ${result.failure?.step}: ${messageOf(result.failure?.error)}`),
+      ].join("\n"),
+    );
+    this.name = "BoxesSyncError";
+  }
+}
+
+/** The number of boxes that sync at the same time. */
+const BOX_LIMIT = 4;
+
+/** Box steps without the Paseo steps: connect, update, Apply, plugins, settings, MCP, PATH. */
+const BOX_STEPS = 7;
+
 export async function runSync(
   input: SyncInput,
   dependencies: SyncDependencies = {},
@@ -147,46 +187,61 @@ export async function runSync(
   const home = input.home ?? homedir();
   const progress = dependencies.progress ?? noProgress;
   const writeLine = dependencies.writeLine ?? console.log;
-  const writePlan = dependencies.writePlan ?? ((plan: SyncPlan) => printPlan(plan, writeLine));
-  progress.plan(input.dryRun ? 1 : 10);
-  const { config, registry, seed, profiles, pathDirs } = await step(
+  progress.plan(input.dryRun ? 1 : 3 + BOX_STEPS);
+  const { config, registry, seed, boxes } = await step(
     progress,
     "Reading the portable set",
     async () => {
-      const source = inspectSyncSource(home, dependencies);
+      const source = inspectSyncSource(home, dependencies, input.boxes);
       await refuseChangedStoreCopies(home, source.config, source.seed);
+      const profiles = source.boxes.some((box) => box.integrations.paseo === true) ? paseoProfiles(home) : null;
+      // A box tools override changes only a version policy, so all boxes have the PATH directories of the registry.
+      const pathDirs = pathDirsOf(source.registry);
       return {
         ...source,
-        profiles: source.config.integrations?.paseo === true ? paseoProfiles(home) : null,
-        pathDirs: pathDirsOf(source.registry),
+        boxes: source.boxes.map((box) => ({
+          ...box,
+          profiles: box.integrations.paseo === true ? profiles : null,
+          pathDirs,
+        })),
       };
     },
     undefined,
     (source) => plural(source.seed.skills.length, "skill"),
   );
-  if (!input.dryRun && profiles !== null) progress.plan(12);
+  const planned = input.dryRun ? 1 : boxes.reduce((total, box) => total + BOX_STEPS + (box.profiles === null ? 0 : 2), 3);
+  if (planned !== (input.dryRun ? 1 : 3 + BOX_STEPS)) progress.plan(planned);
   for (const leftover of seed.leftovers) {
     const label = leftover.code === "hook-path" ? "hook" : leftover.code === "mcp-local" ? "MCP server" : null;
     if (!label) continue;
     writeLine(`Skipped ${label}: ${leftover.reason}: ${leftover.path}`);
   }
 
+  // With one box, the output stays as before. With more boxes, each box line and step starts with `[<name>] `.
+  const several = boxes.length > 1;
+  const output = (box: SyncBox) => {
+    const boxLine = several
+      ? (line: string) => writeLine(line.split("\n").map((part) => `[${box.name}] ${part}`).join("\n"))
+      : writeLine;
+    return {
+      progress: several ? groupProgress(progress, box.name) : progress,
+      writeLine: boxLine,
+      writePlan: dependencies.writePlan ?? ((plan: SyncPlan) => printPlan(plan, boxLine)),
+    };
+  };
+
   if (input.dryRun) {
-    const plan = makePlan(input, config, home, null, registry, seed, profiles, pathDirs);
-    writePlan(plan);
-    return { dryRun: true, published: false, plan };
+    const results = boxes.map((box) => {
+      const plan = makePlan(input, config, box, home, null, registry, seed);
+      output(box).writePlan(plan);
+      return { name: box.name, plan };
+    });
+    return { dryRun: true, published: false, plan: results[0]!.plan, boxes: results };
   }
 
-  const target = { ...resolveLinkOptions(config.host), pathDirs };
-  const link = dependencies.createLink?.(target) ?? new Link(target);
-  const remoteHome = await step(progress, `Connecting to ${targetLabel(config)}`, () =>
-    resolveRemoteHome(link, config),
-  );
-  const plan = makePlan(input, config, home, remoteHome, registry, seed, profiles, pathDirs);
-  writePlan(plan);
-
-  const host = targetKey(config);
-  refuseActiveSync(home, host);
+  for (const box of boxes) {
+    refuseActiveSync(home, targetKey(box.host), several ? `box ${box.name} (${targetKey(box.host)})` : undefined);
+  }
   let store: SyncStore;
   let publication: PublishResult;
   try {
@@ -227,206 +282,297 @@ export async function runSync(
     writeLine(`Updated store skill ${update.name} from ${update.path}`);
   }
 
-  // Another sync for this target can take the box lock after refuseActiveSync. Then this sync fails here, after the publish.
-  const release = takeLock(dependencies, home, host);
-  let applyPlan: ApplyPlan;
-  let discarded: string[];
-  try {
-    const update = await step(
-      progress,
-      "Updating the box checkout",
-      async () => {
-        const result = await link.run(
-          remoteUpdateCommand(required(plan.remoteCheckout), config.snapshotUrl, publication.tip),
-          { agentForwarding: "git" },
+  /** Run the box steps on one box. A failure ends this box only. */
+  const syncBox = async (box: SyncBox): Promise<BoxSyncResult> => {
+    const { progress, writeLine, writePlan } = output(box);
+    let current = "Locking the box";
+    const boxStep = <T>(
+      name: string,
+      work: () => T | Promise<T>,
+      describe?: (result: T) => string | undefined,
+    ): Promise<T> => {
+      current = name;
+      return step(progress, name, work, undefined, describe);
+    };
+    const target = { ...resolveLinkOptions(box.host), pathDirs: box.pathDirs };
+    let plan = makePlan(input, config, box, home, null, registry, seed);
+    try {
+      // Another sync for this box can take the box lock after refuseActiveSync. Then this box fails here, after the publish.
+      const release = takeLock(dependencies, home, targetKey(box.host));
+      try {
+        const link = dependencies.createLink?.(target) ?? new Link(target);
+        const remoteHome = await boxStep(`Connecting to ${targetLabel(box.host)}`, () =>
+          resolveRemoteHome(link, box.host),
         );
-        if (!result.ok) {
-          throw new SyncError(
-            "remote-update-failure",
-            "box",
-            `failed to update ${plan.box} from ${config.snapshotUrl}: ${result.error.origin}/${result.error.code}: ${result.error.message}`,
-          );
-        }
-        return result;
-      },
-      undefined,
-      (result) => {
-        const discarded = changedPaths(result.stdout).length;
-        return discarded > 0 ? `discarded ${plural(discarded, "box change")}` : undefined;
-      },
-    );
-    discarded = changedPaths(update.stdout);
-    for (const path of discarded) {
-      writeLine(`Discarded box change: ${posix.join(required(plan.remoteCheckout), path)}`);
-    }
-
-    try {
-      applyPlan = await step(
-        progress,
-        "Applying the snapshot on the box",
-        () =>
-          (dependencies.apply ?? applyStore)({
-            checkout: required(plan.remoteCheckout),
-            targetHome: required(plan.remoteHome),
-            harnesses: registry.harnesses,
-            force: input.force === true,
-            dryRun: false,
-            link,
-          }),
-        undefined,
-        (result) => plural(result.actions.length, "change"),
-      );
-    } catch (cause) {
-      throw new SyncError(
-        "apply-failure",
-        "box",
-        `Apply failed on ${plan.box}: ${messageOf(cause)}`,
-        { cause },
-      );
-    }
-
-    // Claude rewrites a marketplace entry when it adds one, so the merge runs last.
-    try {
-      const warnings = await step(
-        progress,
-        "Installing Claude plugins",
-        () => installBoxPlugins({ settings: seed.settings, link, progress }),
-        undefined,
-        (warnings) => (warnings.length > 0 ? plural(warnings.length, "warning") : undefined),
-      );
-      for (const warning of warnings) writeLine(`Box plugins: ${warning}`);
-      await step(progress, "Merging settings on the box", () =>
-        mergeBoxSettings({
-          remoteHome: required(plan.remoteHome),
-          harnesses: registry.harnesses,
-          settings: seed.settings,
+        plan = makePlan(input, config, box, home, remoteHome, registry, seed);
+        writePlan(plan);
+        const { applyPlan, discarded } = await applyOnBox({
+          plan,
+          box,
           link,
-        }),
-      );
-    } catch (cause) {
-      throw new SyncError(
-        "apply-failure",
-        "box",
-        `could not apply the carried settings keys on ${plan.box}: ${messageOf(cause)}`,
-        { cause },
-      );
-    }
-
-    try {
-      const warnings = await step(
-        progress,
-        "Declaring MCP servers",
-        () =>
-          registerBoxMcp({
-            remoteHome: required(plan.remoteHome),
-            harnesses: registry.harnesses,
-            tools: registry.tools,
-            mcp: seed.mcp,
-            link,
-            progress,
-          }),
-        undefined,
-        (warnings) =>
-          [plural(plan.mcpServers.length, "server"), warnings.length > 0 && plural(warnings.length, "warning")]
-            .filter(Boolean)
-            .join(", "),
-      );
-      for (const warning of warnings) writeLine(`Box MCP: ${warning}`);
-    } catch (cause) {
-      throw new SyncError(
-        "apply-failure",
-        "box",
-        `could not declare the carried MCP servers on ${plan.box}: ${messageOf(cause)}`,
-        { cause },
-      );
-    }
-
-    await step(
-      progress,
-      "Writing the box PATH",
-      async () => {
-        const result = await link.run(profileBlockCommand(pathDirs));
-        if (!result.ok) {
-          throw new SyncError(
-            "apply-failure",
-            "box",
-            `could not write the PATH block of ~/.profile on ${plan.box}: ${result.error.origin}/${result.error.code}: ${result.error.message}`,
-          );
-        }
-        return result.stdout.trim() === "unchanged" ? "no changes" : "updated ~/.profile";
-      },
-      undefined,
-      (detail) => detail,
-    );
-
-    // The Paseo steps run last and only warn on failure, so the Paseo daemon never blocks the core sync.
-    if (profiles !== null) {
-      try {
-        const carry = await step(
+          publication,
+          config,
+          registry,
+          seed,
+          force: input.force === true,
+          apply: dependencies.apply ?? applyStore,
+          boxStep,
           progress,
-          "Carrying Paseo agent profiles",
-          () => carryAgentProfiles(link, profiles),
-          undefined,
-          (carry) =>
-            profiles.length === 0
-              ? "no profiles"
-              : [
-                  plural(carry.carried.length, "profile"),
-                  carry.warnings.length > 0 && `${carry.warnings.length} skipped`,
-                  carry.carried.length > 0 && !carry.changed && "no changes",
-                ]
-                  .filter(Boolean)
-                  .join(", "),
-        );
-        for (const warning of carry.warnings) writeLine(`Warning: ${warning}`);
-      } catch (cause) {
-        writeLine(`Warning: Ferry could not carry the Paseo agent profiles: ${messageOf(cause)}. The sync is complete.`);
+          writeLine,
+        });
+        return { name: box.name, plan, applyPlan, discarded };
+      } finally {
+        release();
       }
-      // The restart also applies the profiles, so it runs after the carry.
-      try {
-        const restarted = await step(
-          progress,
-          "Updating the Paseo unit PATH",
-          () => refreshUnitPath(link, pathDirs),
-          undefined,
-          (restarted) => (restarted ? "restarted" : "no changes"),
-        );
-        if (restarted) {
-          writeLine(
-            "The box PATH changed, so Ferry updated ferry-paseo.service and restarted the Paseo daemon. The restart stopped the agents that ran on the box.",
-          );
-        }
-      } catch (cause) {
-        writeLine(`Warning: Ferry could not update the PATH of ferry-paseo.service: ${messageOf(cause)}. The sync is complete.`);
-      }
+    } catch (error) {
+      return { name: box.name, plan, failure: { step: current, error } };
     }
-  } finally {
-    release();
-  }
+  };
+  const results = await mapLimit(boxes, BOX_LIMIT, syncBox);
+  const failed = results.filter((result) => result.failure !== undefined);
 
-  // Adopt changes only the operator machine, so it runs after the box steps and outside the box lock.
+  // Adopt changes only the operator machine and needs only the publish, so it runs once, after all boxes end.
   try {
     await step(progress, "Adopting published local skills", () =>
       (dependencies.adopt ?? adoptPublishedSkills)(home, store.path, registry.harnesses, seed),
     );
   } catch (cause) {
-    throw new SyncError(
+    const error = new SyncError(
       "apply-failure",
       "operator",
       `could not adopt a published local skill: ${messageOf(cause)}`,
       { cause },
     );
+    if (failed.length === 0) throw error;
+    writeLine(`Warning: ${error.message}`);
   }
 
-  return { dryRun: false, published: publication.published, plan, applyPlan, discarded };
+  if (failed.length > 0) throw several ? new BoxesSyncError(results) : failed[0]!.failure!.error;
+  const first = results[0]!;
+  return {
+    dryRun: false,
+    published: publication.published,
+    plan: first.plan,
+    applyPlan: first.applyPlan,
+    discarded: first.discarded,
+    boxes: results,
+  };
 }
 
+/** A selected box with its Paseo profiles (`null` when Paseo is off for it) and its PATH directories. */
+type SyncBox = ResolvedBox & {
+  readonly profiles: readonly AgentProfile[] | null;
+  readonly pathDirs: readonly string[];
+};
+
+/** The box steps after the connect: checkout update, Apply, plugins, settings, MCP, PATH, and Paseo. */
+async function applyOnBox(context: {
+  readonly plan: SyncPlan;
+  readonly box: SyncBox;
+  readonly link: SyncLink;
+  readonly publication: PublishResult;
+  readonly config: SyncOperatorConfig;
+  readonly registry: Registry;
+  readonly seed: Seed;
+  readonly force: boolean;
+  readonly apply: (input: RemoteApplyInput) => Promise<ApplyPlan>;
+  readonly boxStep: <T>(name: string, work: () => T | Promise<T>, describe?: (result: T) => string | undefined) => Promise<T>;
+  readonly progress: Progress;
+  readonly writeLine: (line: string) => void;
+}): Promise<{ applyPlan: ApplyPlan; discarded: string[] }> {
+  const { plan, box, link, publication, config, registry, seed, boxStep, progress, writeLine } = context;
+  const { profiles, pathDirs } = box;
+  const update = await boxStep(
+    "Updating the box checkout",
+    async () => {
+      const result = await link.run(
+        remoteUpdateCommand(required(plan.remoteCheckout), config.snapshotUrl, publication.tip),
+        { agentForwarding: "git" },
+      );
+      if (!result.ok) {
+        throw new SyncError(
+          "remote-update-failure",
+          "box",
+          `failed to update ${plan.box} from ${config.snapshotUrl}: ${result.error.origin}/${result.error.code}: ${result.error.message}`,
+        );
+      }
+      return result;
+    },
+    (result) => {
+      const discarded = changedPaths(result.stdout).length;
+      return discarded > 0 ? `discarded ${plural(discarded, "box change")}` : undefined;
+    },
+  );
+  const discarded = changedPaths(update.stdout);
+  for (const path of discarded) {
+    writeLine(`Discarded box change: ${posix.join(required(plan.remoteCheckout), path)}`);
+  }
+
+  let applyPlan: ApplyPlan;
+  try {
+    applyPlan = await boxStep(
+      "Applying the snapshot on the box",
+      () =>
+        context.apply({
+          checkout: required(plan.remoteCheckout),
+          targetHome: required(plan.remoteHome),
+          harnesses: registry.harnesses,
+          force: context.force,
+          dryRun: false,
+          link,
+        }),
+      (result) => plural(result.actions.length, "change"),
+    );
+  } catch (cause) {
+    throw new SyncError(
+      "apply-failure",
+      "box",
+      `Apply failed on ${plan.box}: ${messageOf(cause)}`,
+      { cause },
+    );
+  }
+
+  // Claude rewrites a marketplace entry when it adds one, so the merge runs last.
+  try {
+    const warnings = await boxStep(
+      "Installing Claude plugins",
+      () => installBoxPlugins({ settings: seed.settings, link, progress }),
+      (warnings) => (warnings.length > 0 ? plural(warnings.length, "warning") : undefined),
+    );
+    for (const warning of warnings) writeLine(`Box plugins: ${warning}`);
+    await boxStep("Merging settings on the box", () =>
+      mergeBoxSettings({
+        remoteHome: required(plan.remoteHome),
+        harnesses: registry.harnesses,
+        settings: seed.settings,
+        link,
+      }),
+    );
+  } catch (cause) {
+    throw new SyncError(
+      "apply-failure",
+      "box",
+      `could not apply the carried settings keys on ${plan.box}: ${messageOf(cause)}`,
+      { cause },
+    );
+  }
+
+  try {
+    const warnings = await boxStep(
+      "Declaring MCP servers",
+      () =>
+        registerBoxMcp({
+          remoteHome: required(plan.remoteHome),
+          harnesses: registry.harnesses,
+          tools: registry.tools,
+          mcp: seed.mcp,
+          link,
+          progress,
+        }),
+      (warnings) =>
+        [plural(plan.mcpServers.length, "server"), warnings.length > 0 && plural(warnings.length, "warning")]
+          .filter(Boolean)
+          .join(", "),
+    );
+    for (const warning of warnings) writeLine(`Box MCP: ${warning}`);
+  } catch (cause) {
+    throw new SyncError(
+      "apply-failure",
+      "box",
+      `could not declare the carried MCP servers on ${plan.box}: ${messageOf(cause)}`,
+      { cause },
+    );
+  }
+
+  await boxStep(
+    "Writing the box PATH",
+    async () => {
+      const result = await link.run(profileBlockCommand(pathDirs));
+      if (!result.ok) {
+        throw new SyncError(
+          "apply-failure",
+          "box",
+          `could not write the PATH block of ~/.profile on ${plan.box}: ${result.error.origin}/${result.error.code}: ${result.error.message}`,
+        );
+      }
+      return result.stdout.trim() === "unchanged" ? "no changes" : "updated ~/.profile";
+    },
+    (detail) => detail,
+  );
+
+  // The Paseo steps run last and only warn on failure, so the Paseo daemon never blocks the core sync.
+  if (profiles !== null) {
+    try {
+      const carry = await boxStep(
+        "Carrying Paseo agent profiles",
+        () => carryAgentProfiles(link, profiles),
+        (carry) =>
+          profiles.length === 0
+            ? "no profiles"
+            : [
+                plural(carry.carried.length, "profile"),
+                carry.warnings.length > 0 && `${carry.warnings.length} skipped`,
+                carry.carried.length > 0 && !carry.changed && "no changes",
+              ]
+                .filter(Boolean)
+                .join(", "),
+      );
+      for (const warning of carry.warnings) writeLine(`Warning: ${warning}`);
+    } catch (cause) {
+      writeLine(`Warning: Ferry could not carry the Paseo agent profiles: ${messageOf(cause)}. The sync is complete.`);
+    }
+    // The restart also applies the profiles, so it runs after the carry.
+    try {
+      const restarted = await boxStep(
+        "Updating the Paseo unit PATH",
+        () => refreshUnitPath(link, pathDirs),
+        (restarted) => (restarted ? "restarted" : "no changes"),
+      );
+      if (restarted) {
+        writeLine(
+          "The box PATH changed, so Ferry updated ferry-paseo.service and restarted the Paseo daemon. The restart stopped the agents that ran on the box.",
+        );
+      }
+    } catch (cause) {
+      writeLine(`Warning: Ferry could not update the PATH of ferry-paseo.service: ${messageOf(cause)}. The sync is complete.`);
+    }
+  }
+  return { applyPlan, discarded };
+}
+
+/** Run `work` for each item, with at most `limit` items at the same time. The results keep the item order. */
+async function mapLimit<T, R>(items: readonly T[], limit: number, work: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await work(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+/** Read the config, the registry, and the seed, and select the boxes. None in `selection` selects all boxes. */
 export function inspectSyncSource(
   home: string,
   dependencies: Pick<SyncDependencies, "readConfig" | "loadRegistry" | "readSeed" | "publisher"> = {},
-): { readonly config: OperatorConfig; readonly registry: Registry; readonly seed: Seed } {
+  selection: readonly string[] = [],
+): {
+  readonly config: SyncOperatorConfig;
+  readonly boxes: readonly ResolvedBox[];
+  readonly registry: Registry;
+  readonly seed: Seed;
+} {
   const loadedConfig = loadConfig(home, dependencies.readConfig ?? readOperatorConfig);
   const config = loadedConfig.operator;
+  let boxes: ResolvedBox[];
+  try {
+    boxes = resolveBoxes(loadedConfig.source, selection);
+  } catch (cause) {
+    throw new SyncError("invalid-config", "operator", messageOf(cause), { cause });
+  }
   const currentPublisher = dependencies.publisher?.() ?? hostname();
   if (currentPublisher !== config.publisher) {
     throw new SyncError(
@@ -449,7 +595,7 @@ export function inspectSyncSource(
     ];
     throw new SyncError("manifest-refusal", "operator", `Manifest refused publisher ${config.publisher}: ${details.join("; ")}`);
   }
-  return { config, registry, seed };
+  return { config, boxes, registry, seed };
 }
 
 /**
@@ -457,7 +603,7 @@ export function inspectSyncSource(
  * unpublished changes. Otherwise the update is a clash, as Manifest reports it
  * without store updates.
  */
-async function refuseChangedStoreCopies(home: string, config: OperatorConfig, seed: Seed): Promise<void> {
+async function refuseChangedStoreCopies(home: string, config: SyncOperatorConfig, seed: Seed): Promise<void> {
   const checkout = join(home, ".ferry", "store");
   const changed: string[] = [];
   for (const update of seed.storeUpdates) {
@@ -489,19 +635,18 @@ function paseoProfiles(home: string): readonly AgentProfile[] {
 
 function makePlan(
   input: SyncInput,
-  config: OperatorConfig,
+  config: SyncOperatorConfig,
+  box: SyncBox,
   home: string,
   remoteHome: string | null,
   registry: Registry,
   seed: Seed,
-  profiles: readonly AgentProfile[] | null,
-  pathDirs: readonly string[],
 ): SyncPlan {
   const localCheckout = join(home, ".ferry", "store");
   return {
     operator: config.publisher,
     gitRemote: config.snapshotUrl,
-    box: targetLabel(config),
+    box: targetLabel(box.host),
     localCheckout,
     remoteHome,
     remoteCheckout: remoteHome ? posix.join(remoteHome, ".ferry", "store") : null,
@@ -510,8 +655,8 @@ function makePlan(
     settingsChanges: settingsChanges(localCheckout, registry.harnesses, seed),
     mcpServers: seed.mcp.flatMap((entry) => entry.servers.map((server) => `${entry.harness}/${server.name}`)),
     storeUpdates: seed.storeUpdates,
-    paseoProfiles: profiles === null ? null : profiles.map(profileName),
-    pathDirs,
+    paseoProfiles: box.profiles === null ? null : box.profiles.map(profileName),
+    pathDirs: box.pathDirs,
   };
 }
 
@@ -623,8 +768,8 @@ export function changedPaths(stdout: string): string[] {
   return paths.sort();
 }
 
-async function resolveRemoteHome(link: SyncLink, config: OperatorConfig): Promise<string> {
-  const box = targetLabel(config);
+async function resolveRemoteHome(link: SyncLink, host: OperatorHostConfig): Promise<string> {
+  const box = targetLabel(host);
   const result = await link.run(`printf '%s\\n' "$HOME"`);
   if (!result.ok) {
     throw new SyncError(
@@ -665,10 +810,10 @@ async function takeStoreLock(dependencies: SyncDependencies, home: string): Prom
   }
 }
 
-/** Fail before the publish when a live sync holds the box lock of this target. */
-function refuseActiveSync(home: string, host: string): void {
+/** Fail before the publish when a live sync holds the box lock of this target. `label` names the box in the error. */
+function refuseActiveSync(home: string, host: string, label = host): void {
   if (!staleLock(boxLockPath(home, host))) {
-    throw new SyncError("concurrent-sync", "operator", `another sync is active for ${host}`);
+    throw new SyncError("concurrent-sync", "operator", `another sync is active for ${label}`);
   }
 }
 
@@ -763,7 +908,7 @@ function isCode(error: unknown, code: string): boolean {
 function loadConfig(
   home: string,
   read: (home: string) => SyncConfig | null,
-): { readonly source: SyncConfig; readonly operator: OperatorConfig } {
+): { readonly source: SyncConfig; readonly operator: SyncOperatorConfig } {
   try {
     const source = read(home);
     return { source: source ?? {}, operator: completeConfig(source) };
@@ -810,26 +955,25 @@ function pathDirsOf(registry: Registry): readonly string[] {
   }
 }
 
-function completeConfig(config: PartialOperatorConfig | null): OperatorConfig {
-  const host = completeHostConfig(config?.host);
-  if (config?.version !== 1 || !config.publisher || !config.snapshotUrl || !host) {
+/** The shared part of the config. Each box has its own host, integrations, and tools. */
+type SyncOperatorConfig = Pick<OperatorConfig, "version" | "publisher" | "snapshotUrl">;
+
+function completeConfig(config: PartialOperatorConfig | null): SyncOperatorConfig {
+  if (
+    config?.version !== 1 ||
+    !config.publisher ||
+    !config.snapshotUrl ||
+    (!config.boxes && !completeHostConfig(config.host))
+  ) {
     throw new SyncError("invalid-config", "operator", "Ferry config is incomplete. Run ferry init.");
   }
-  return {
-    version: 1,
-    publisher: config.publisher,
-    snapshotUrl: config.snapshotUrl,
-    host,
-    ...(config.integrations ? { integrations: config.integrations } : {}),
-  };
+  return { version: 1, publisher: config.publisher, snapshotUrl: config.snapshotUrl };
 }
 
-function targetLabel(config: OperatorConfig): string {
-  return config.host.transport === "ssh"
-    ? config.host.destination
-    : `${config.host.sshUser}@${config.host.tailscale}`;
+function targetLabel(host: OperatorHostConfig): string {
+  return host.transport === "ssh" ? host.destination : `${host.sshUser}@${host.tailscale}`;
 }
 
-function targetKey(config: OperatorConfig): string {
-  return `${config.host.transport === "ssh" ? "ssh" : "tailscale"}:${targetLabel(config)}`;
+function targetKey(host: OperatorHostConfig): string {
+  return `${host.transport === "ssh" ? "ssh" : "tailscale"}:${targetLabel(host)}`;
 }
