@@ -34,7 +34,7 @@ export async function readLocalVersion(
       timeoutMs: VERSION_TIMEOUT_MS,
     });
     if (result.timedOut || result.exitCode !== 0) return null;
-    // Some tools, such as pgsync and java, print the version on standard error.
+    // Some tools print the version on standard error.
     return parseVersion(result.stdout) ?? parseVersion(result.stderr);
   } catch {
     return null;

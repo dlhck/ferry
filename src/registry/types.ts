@@ -2,9 +2,10 @@
  * Descriptors for the harnesses ferry manages and the tools it installs and
  * logs in.
  *
- * A descriptor is data. Ferry never loads code from one. Only a builtin tool
- * sets `recipe`, which builds a command from a version. A descriptor names
- * paths and commands; it cannot widen the deny set, which stays in Manifest.
+ * A descriptor is data. Ferry never loads code from one. Only a tool that the
+ * operator defines in a `[tools.<id>]` table of the config has a `recipe`,
+ * which builds a command from a version. A descriptor names paths and
+ * commands; it cannot widen the deny set, which stays in Manifest.
  */
 
 /**
@@ -134,8 +135,9 @@ export type ToolMcp = {
 };
 
 /**
- * `agent` is the vendor CLI of a harness. `tool` is every other program, such
- * as gh, node, or pnpm. The kind sets the defaults in TOOL_KIND_DEFAULTS.
+ * `agent` is the vendor CLI of a harness. `tool` is every other program: gh,
+ * and each tool that the config defines. The kind sets the defaults in
+ * TOOL_KIND_DEFAULTS.
  */
 export type ToolKind = "agent" | "tool";
 
@@ -146,7 +148,7 @@ export type ToolKind = "agent" | "tool";
 export type ToolInstallMode = "always" | "mirror";
 
 /**
- * A value in the `[tools]` table of the config. `operator` is the version on
+ * The version policy of a tool in the config. `operator` is the version on
  * the operator machine, `latest` follows the vendor, and any other value is an
  * exact version that the config parser validated.
  */
@@ -160,15 +162,12 @@ export const TOOL_KIND_DEFAULTS: Readonly<
 };
 
 /**
- * One program on the box: a vendor agent CLI or another tool. The config
- * `[tools]` table sets the version policy of each one.
+ * One program on the box: a vendor agent CLI, gh, or a tool that the config
+ * defines. The config `[tools]` table sets the version policy of each one.
  */
 export type ToolDescriptor = {
   readonly id: string;
-  /**
-   * Every builtin sets it. A `[[tool]]` entry from the config has no kind and
-   * counts as `agent`, so it keeps the behaviour it had before kinds.
-   */
+  /** The registry sets it on each tool. A descriptor without a kind counts as `agent`. */
   readonly kind?: ToolKind;
   /** The label that `ferry tools` prints. */
   readonly name?: string;
@@ -187,8 +186,9 @@ export type ToolDescriptor = {
   readonly install?: { readonly command: string };
   readonly update?: ToolUpdate;
   /**
-   * Recipes for one exact version. Ferry validates `version` before the call.
-   * A tool without them can follow only the `latest` policy.
+   * Recipes for one version. Each one puts the shell-quoted version in place
+   * of `{version}` in the command of the config. A tool without them can
+   * follow only the `latest` policy.
    */
   readonly recipe?: {
     readonly install: (version: string) => string;

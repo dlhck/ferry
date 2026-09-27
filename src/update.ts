@@ -191,7 +191,7 @@ function loadTarget(read: () => PartialOperatorConfig | null): {
   return { target, config };
 }
 
-/** The builtin tools and the `[[tool]]` entries of the config, as `ferry update` in the CLI resolves them. */
+/** The builtin tools and the `[tools.<id>]` tables of the config, as `ferry update` in the CLI resolves them. */
 function registryTools(config: PartialOperatorConfig | null): readonly ToolDescriptor[] {
   const registry = loadRegistry(config ?? {});
   if (!registry.ok) {

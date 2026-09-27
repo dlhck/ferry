@@ -20,8 +20,35 @@ export type OperatorConfig = {
   readonly tools?: ToolsConfig;
 };
 
-/** The version policy of each tool, by tool id. A tool that is not here uses the default of its kind. */
-export type ToolsConfig = { readonly [id: string]: ToolPolicy };
+/**
+ * The `[tools]` table, by tool id. A string sets the policy of a builtin tool.
+ * A `[tools.<id>]` table defines a tool. A tool without a policy uses the
+ * default of its kind.
+ */
+export type ToolsConfig = { readonly [id: string]: ToolPolicy | ToolDefinition };
+
+/**
+ * A tool that the operator defines in a `[tools.<id>]` table. `version` is the
+ * policy. `local` and `box` print the version on this machine and on the box.
+ * `install` and `update` run on the box, and `update` defaults to `install`.
+ * `path` holds directories relative to the home for the box `PATH`, and
+ * `depends` names the tools to install first.
+ */
+export type ToolDefinition = {
+  readonly version?: ToolPolicy;
+  readonly local: string;
+  readonly box?: string;
+  readonly install: string;
+  readonly update?: string;
+  readonly path?: readonly string[];
+  readonly depends?: readonly string[];
+};
+
+/** The policy that the config sets for a tool, or undefined for the default of its kind. */
+export function toolPolicy(tools: ToolsConfig | undefined, id: string): ToolPolicy | undefined {
+  const entry = tools?.[id];
+  return typeof entry === "string" ? entry : entry?.version;
+}
 
 /** Each key turns on one integration. A missing key means that the integration is off. */
 export type IntegrationsConfig = { readonly paseo?: boolean };
@@ -73,6 +100,9 @@ const SECTION_KEYS: Record<string, readonly string[]> = {
   "[tools]": BUILTIN_TOOLS.map((tool) => tool.id),
 };
 
+/** The keys of a `[tools.<id>]` table, in the order that writeConfig writes them. */
+const TOOL_KEYS = ["version", "local", "box", "install", "update", "path", "depends"] as const;
+
 /** An exact version, such as 1.4.2 or 2026.09.15-d2fe57e. It goes into box commands, so the characters stay few. */
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 
@@ -104,10 +134,12 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     harness: Record<string, string>[];
     update?: { watch?: boolean };
     integrations?: { paseo?: boolean };
-    tools?: Record<string, ToolPolicy>;
+    tools?: Record<string, ToolPolicy | Record<string, unknown>>;
   } = { host: {}, harness: [] };
   let section = "";
   let harness: Record<string, string> | null = null;
+  let tool: Record<string, unknown> | null = null;
+  const definitions: [string, Record<string, unknown>][] = [];
 
   for (const sourceLine of readFileSync(path, "utf8").split(/\r?\n/)) {
     const line = sourceLine.trim();
@@ -115,26 +147,45 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     if (line === "[host]") {
       section = "[host]";
       harness = null;
+      tool = null;
       continue;
     }
     if (line === "[update]" || line === "[integrations]" || line === "[tools]") {
       section = line;
       harness = null;
+      tool = null;
       continue;
     }
     if (line === "[[harness]]") {
       section = "[[harness]]";
       harness = {};
+      tool = null;
       config.harness.push(harness);
+      continue;
+    }
+    const toolHeader = /^\[tools\.([A-Za-z0-9_-]+)\]$/.exec(line);
+    if (toolHeader) {
+      const id = toolHeader[1] ?? "";
+      if (config.tools?.[id] !== undefined) throw new ConfigError(`duplicate tool ${id} in [tools] of ${path}`);
+      section = line;
+      harness = null;
+      tool = {};
+      config.tools = { ...config.tools, [id]: tool };
+      definitions.push([section, tool]);
       continue;
     }
 
     const match = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(line);
     if (!match) throw new ConfigError(`unsupported line ${line} in ${path}`);
-    const [, key = "", encoded] = match;
+    const [, key = "", encoded = ""] = match;
+    if (tool) {
+      readToolKey(tool, key, encoded, section, path);
+      continue;
+    }
     if (section === "[tools]" && !SECTION_KEYS[section]?.includes(key)) {
       throw new ConfigError(
-        `unknown tool ${key} in [tools] of ${path}. Known tools: ${SECTION_KEYS["[tools]"]?.join(", ")}`,
+        `unknown tool ${key} in [tools] of ${path}. Known tools: ${SECTION_KEYS["[tools]"]?.join(", ")}. ` +
+          `To define a tool, add a [tools.${key}] table.`,
       );
     }
     if (!SECTION_KEYS[section]?.includes(key)) {
@@ -155,17 +206,12 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     }
 
     if (section === "[tools]") {
-      const policy = /^"[^"]*"$/.test(encoded ?? "") ? parseString(encoded ?? "", path) : "";
-      if (policy !== "operator" && policy !== "latest" && !EXACT_VERSION.test(policy)) {
-        throw new ConfigError(
-          `invalid policy for ${key} in [tools] of ${path}. Use "operator", "latest", or an exact version such as 1.4.2.`,
-        );
-      }
-      config.tools = { ...config.tools, [key]: policy };
+      if (config.tools?.[key] !== undefined) throw new ConfigError(`duplicate tool ${key} in [tools] of ${path}`);
+      config.tools = { ...config.tools, [key]: parsePolicy(encoded, `${key} in [tools]`, path) };
       continue;
     }
 
-    const value = parseString(encoded ?? "", path);
+    const value = parseString(encoded, path);
     if (section === "" && key === "publisher") config.publisher = value;
     else if (section === "" && key === "snapshot_url") config.snapshotUrl = value;
     else if (section === "[host]" && key === "transport") {
@@ -179,8 +225,57 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     else if (harness) harness[HARNESS_KEYS[key as keyof typeof HARNESS_KEYS]] = value;
   }
 
+  for (const [table, definition] of definitions) {
+    for (const key of ["local", "install"]) {
+      if (definition[key] === undefined) {
+        throw new ConfigError(`missing ${key} in ${table} of ${path}. A tool table needs local and install.`);
+      }
+    }
+  }
+
   if (config.harness.length === 0) delete (config as { harness?: unknown }).harness;
-  return config;
+  return config as PartialOperatorConfig;
+}
+
+/** Read one key of a `[tools.<id>]` table. Each error names the table and the key. */
+function readToolKey(tool: Record<string, unknown>, key: string, encoded: string, section: string, path: string): void {
+  if (!(TOOL_KEYS as readonly string[]).includes(key)) {
+    throw new ConfigError(`unknown key ${key} in ${section} of ${path}. Known keys: ${TOOL_KEYS.join(", ")}`);
+  }
+  if (key === "version") {
+    tool.version = parsePolicy(encoded, `version in ${section}`, path);
+    return;
+  }
+  if (key === "path" || key === "depends") {
+    const list = parseJson(encoded);
+    if (!Array.isArray(list) || list.some((item) => typeof item !== "string" || item === "")) {
+      throw new ConfigError(`invalid value for ${key} in ${section} of ${path}. Use a list of strings, such as [".local/bin"].`);
+    }
+    tool[key] = list;
+    return;
+  }
+  const value = tomlString(encoded);
+  if (!value) throw new ConfigError(`invalid value for ${key} in ${section} of ${path}. Use a string.`);
+  // A `{...}` after `$` is a shell expansion, not a placeholder.
+  const allowed = key === "install" || key === "update" ? ["{version}"] : [];
+  for (const [token] of value.matchAll(/(?<!\$)\{[^{}]*\}/g)) {
+    if (!allowed.includes(token)) {
+      throw new ConfigError(
+        `unknown placeholder ${token} in ${key} of ${section} of ${path}. {version} in install and update is the only placeholder.`,
+      );
+    }
+  }
+  tool[key] = value;
+}
+
+function parsePolicy(encoded: string, label: string, path: string): ToolPolicy {
+  const policy = /^"[^"]*"$/.test(encoded) ? parseString(encoded, path) : "";
+  if (policy !== "operator" && policy !== "latest" && !EXACT_VERSION.test(policy)) {
+    throw new ConfigError(
+      `invalid policy for ${label} of ${path}. Use "operator", "latest", or an exact version such as 1.4.2.`,
+    );
+  }
+  return policy;
 }
 
 export function writeConfig(config: OperatorConfig, home = homedir()): void {
@@ -219,17 +314,28 @@ export function writeConfig(config: OperatorConfig, home = homedir()): void {
       ...(config.integrations?.paseo !== undefined
         ? ["[integrations]", `paseo = ${config.integrations.paseo}`, ""]
         : []),
-      ...(config.tools && Object.keys(config.tools).length > 0
-        ? [
-            "[tools]",
-            ...Object.entries(config.tools).map(([id, policy]) => `${id} = ${JSON.stringify(policy)}`),
-            "",
-          ]
-        : []),
+      ...toolLines(config.tools ?? {}),
     ].join("\n"),
     { mode: 0o600 },
   );
   renameSync(temporaryPath, path);
+}
+
+/** The `[tools]` policies first, then one `[tools.<id>]` table for each defined tool. */
+function toolLines(tools: ToolsConfig): string[] {
+  const entries = Object.entries(tools);
+  const policies = entries.filter(([, entry]) => typeof entry === "string");
+  const definitions = entries.flatMap(([id, entry]) => (typeof entry === "string" ? [] : [[id, entry] as const]));
+  return [
+    ...(policies.length > 0
+      ? ["[tools]", ...policies.map(([id, policy]) => `${id} = ${JSON.stringify(policy)}`), ""]
+      : []),
+    ...definitions.flatMap(([id, definition]) => [
+      `[tools.${id}]`,
+      ...TOOL_KEYS.flatMap((key) => (definition[key] === undefined ? [] : [`${key} = ${JSON.stringify(definition[key])}`])),
+      "",
+    ]),
+  ];
 }
 
 /** Set one `[integrations]` key and keep the rest of the config. The config must be complete. */
@@ -278,13 +384,27 @@ export function completeHostConfig(
 }
 
 function parseString(encoded: string, path: string): string {
-  try {
-    const value: unknown = JSON.parse(encoded);
-    if (typeof value === "string") return value;
-  } catch {
-    // Report one config error below.
-  }
+  const value = tomlString(encoded);
+  if (value !== undefined) return value;
   throw new ConfigError(`invalid string in ${path}`);
+}
+
+/**
+ * A basic string in double quotes, or a literal string in single quotes. A
+ * literal string keeps backslashes and double quotes, which suits shell commands.
+ */
+function tomlString(encoded: string): string | undefined {
+  if (/^'[^'\n]*'$/.test(encoded)) return encoded.slice(1, -1);
+  const value = parseJson(encoded);
+  return typeof value === "string" ? value : undefined;
+}
+
+function parseJson(encoded: string): unknown {
+  try {
+    return JSON.parse(encoded);
+  } catch {
+    return undefined;
+  }
 }
 
 function nonempty(value: string | undefined): value is string {

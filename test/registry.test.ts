@@ -2,9 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { Install } from "../src/install.ts";
+import type { ToolDefinition } from "../src/config.ts";
 import { readSeed } from "../src/manifest.ts";
-import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
+import { BUILTIN_HARNESSES, BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 import type { Refusal } from "../src/manifest.ts";
 import { loadRegistry } from "../src/registry/load.ts";
 import type { Registry, RegistryConfig, RegistryProblem } from "../src/registry/load.ts";
@@ -46,6 +46,20 @@ function refusalOf(home: string, registry: Registry): Refusal {
   return result;
 }
 
+const PNPM: ToolDefinition = {
+  local: "pnpm --version",
+  box: "pnpm --version",
+  install: 'npm install -g --prefix "$HOME/.local" pnpm@{version}',
+  path: [".local/bin"],
+  depends: ["node"],
+};
+
+const NODE: ToolDefinition = {
+  local: "node --version",
+  install: "nvm install {version}",
+  path: [".nvm/current/bin"],
+};
+
 describe("operator entries", () => {
   test("an empty config yields the builtin harnesses and tools", () => {
     const registry = registryOf({});
@@ -57,26 +71,12 @@ describe("operator entries", () => {
       "pi",
       "cursor",
     ]);
-    expect(registry.tools.map((tool) => tool.id)).toEqual([
-      "gh",
-      "claude",
-      "codex",
-      "pi",
-      "cursor",
-      "node",
-      "npm",
-      "pnpm",
-      "bun",
-      "docker",
-      "vercel",
-      "infisical",
-      "playwright",
-    ]);
+    expect(registry.tools.map((tool) => tool.id)).toEqual(["gh", "claude", "codex", "pi", "cursor"]);
   });
 
-  test("the kind of each builtin tool sets its install mode and default policy", () => {
+  test("the builtin tools are the agent CLIs and gh, and the kind sets the install mode and default policy", () => {
     const defaults = Object.fromEntries(
-      registryOf({}).tools.map((tool) => [tool.id, `${tool.kind} ${toolDefaults(tool).mode} ${toolDefaults(tool).policy}`]),
+      BUILTIN_TOOLS.map((tool) => [tool.id, `${tool.kind} ${toolDefaults(tool).mode} ${toolDefaults(tool).policy}`]),
     );
 
     expect(defaults).toEqual({
@@ -85,50 +85,54 @@ describe("operator entries", () => {
       codex: "agent always latest",
       pi: "agent always latest",
       cursor: "agent always latest",
-      node: "tool mirror operator",
-      npm: "tool mirror operator",
-      pnpm: "tool mirror operator",
-      bun: "tool mirror operator",
-      docker: "tool mirror operator",
-      vercel: "tool mirror operator",
-      infisical: "tool mirror operator",
-      playwright: "tool mirror operator",
     });
   });
 
-  test("a [[tool]] entry without a kind keeps the agent defaults", () => {
-    const tool = registryOf({ tool: [{ id: "aider", install: { command: "pipx install aider-chat" } }] }).tools.at(-1);
-
-    expect(tool && toolDefaults(tool)).toEqual({ mode: "always", policy: "latest" });
-  });
-
-  test("every builtin tool names a version command, and each dependency is a builtin tool", () => {
-    const tools = registryOf({}).tools;
-    const ids = new Set(tools.map((tool) => tool.id));
-
-    for (const tool of tools) {
+  test("every builtin tool names a version command and a PATH directory inside the home", () => {
+    for (const tool of BUILTIN_TOOLS) {
       expect(tool.name).toBeString();
       expect(tool.localVersion).toBeString();
       expect(tool.boxVersion).toBeString();
-      for (const dependency of tool.dependsOn ?? []) expect(ids.has(dependency)).toBe(true);
+      expect(tool.dependsOn).toBeUndefined();
       for (const dir of tool.pathDirs ?? []) expect(dir.startsWith("/") || dir.includes("..")).toBe(false);
     }
-    expect(Object.fromEntries(tools.filter((tool) => tool.dependsOn).map((tool) => [tool.id, tool.dependsOn]))).toEqual({
-      npm: ["node"],
-      pnpm: ["node"],
-      vercel: ["node"],
-      playwright: ["node"],
+  });
+
+  test("a [tools.<id>] table adds a tool of kind tool after the builtin tools", () => {
+    const registry = registryOf({ tools: { gh: "latest", node: NODE, pnpm: PNPM } });
+    const pnpm = registry.tools.find((tool) => tool.id === "pnpm");
+
+    expect(registry.tools.map((tool) => tool.id)).toEqual(["gh", "claude", "codex", "pi", "cursor", "node", "pnpm"]);
+    expect(pnpm).toMatchObject({
+      id: "pnpm",
+      kind: "tool",
+      localVersion: "pnpm --version",
+      boxVersion: "pnpm --version",
+      pathDirs: [".local/bin"],
+      dependsOn: ["node"],
     });
-    expect(Object.fromEntries(tools.filter((tool) => tool.pathDirs).map((tool) => [tool.id, tool.pathDirs]))).toEqual({
-      claude: [".local/bin"],
-      codex: [".local/bin"],
-      pi: [".pi/agent/bin"],
-      cursor: [".local/bin"],
-      node: [".nvm/current/bin"],
-      pnpm: [".local/bin"],
-      bun: [".bun/bin"],
-      vercel: [".local/bin"],
+    expect(pnpm && toolDefaults(pnpm)).toEqual({ mode: "mirror", policy: "operator" });
+    expect(pnpm?.install).toBeUndefined();
+    expect(pnpm?.update).toBeUndefined();
+  });
+
+  test("the recipe replaces {version} with a shell-quoted version, and update defaults to install", () => {
+    const registry = registryOf({
+      tools: { node: NODE, pnpm: { ...PNPM, update: "pnpm self-update {version}" } },
     });
+    const node = registry.tools.find((tool) => tool.id === "node");
+    const pnpm = registry.tools.find((tool) => tool.id === "pnpm");
+
+    expect(node?.recipe?.install("24.16.0")).toBe("nvm install '24.16.0'");
+    expect(node?.recipe?.update("24.16.0")).toBe("nvm install '24.16.0'");
+    expect(pnpm?.recipe?.install("10.2.0")).toBe(`npm install -g --prefix "$HOME/.local" pnpm@'10.2.0'`);
+    expect(pnpm?.recipe?.update("it's")).toBe(`pnpm self-update 'it'"'"'s'`);
+  });
+
+  test("a config tool may depend on a builtin tool", () => {
+    const registry = registryOf({ tools: { hub: { local: "hub --version", install: "x", depends: ["gh"] } } });
+
+    expect(registry.tools.at(-1)?.dependsOn).toEqual(["gh"]);
   });
 
   test("a registered harness contributes its skills to the seed", () => {
@@ -144,101 +148,59 @@ describe("operator entries", () => {
     expect(seed.ok && seed.skills.map((skill) => skill.name)).toEqual(["unslop"]);
   });
 
-  test("a registered tool is planned with the builtin install commands", () => {
-    const registry = registryOf({
-      tool: [{ id: "opencode", install: { command: "curl -fsSL https://opencode.ai/install | sh" } }],
-    });
-
-    const link = { async run() { throw new Error("Install must not run a command to plan"); } };
-    const plan = new Install(link, registry.tools).plan();
-
-    expect(plan.at(-1)).toEqual({
-      tool: "opencode",
-      command: "curl -fsSL https://opencode.ai/install | sh",
-    });
-  });
-
   test("an entry that reuses a registered id is refused", () => {
     const problems = problemsOf({
       harness: [{ id: "claude", name: "Claude fork", skillRoot: ".claude-fork/skills" }],
-      tool: [{ id: "gh", install: { command: "brew install gh" } }],
+      tools: { gh: { local: "gh --version", install: "brew install gh" } },
     });
 
-    expect(problems.map((problem) => problem.code)).toEqual(["duplicate-id", "duplicate-id"]);
+    expect(problems).toEqual([
+      { code: "duplicate-id", reason: "harness claude is already registered" },
+      {
+        code: "duplicate-id",
+        reason: 'tool gh is built in. Set its policy with gh = "<policy>" in [tools], or pick another id.',
+      },
+    ]);
   });
 
-  test("an entry that does nothing is refused", () => {
-    const problems = problemsOf({
-      harness: [{ id: "empty", name: "Empty" }],
-      tool: [{ id: "idle" }],
-    });
-
-    expect(problems.map((problem) => problem.code)).toEqual(["invalid-entry", "invalid-entry"]);
-  });
-
-  test("an incomplete tool login recipe is refused", () => {
-    const problems = problemsOf({
-      tool: [{ id: "opencode", auth: { completion: { kind: "device-url", url: "https://x.dev" } } }],
-    });
-
-    expect(problems.map((problem) => problem.code)).toEqual(["invalid-entry"]);
-  });
-});
-
-describe("registered login recipes", () => {
-  test("a code pattern that cannot compile is refused before any login runs", () => {
-    const problems = problemsOf({
-      tool: [
-        {
-          id: "opencode",
-          auth: {
-            probe: "opencode auth status",
-            login: "opencode auth login",
-            completion: {
-              kind: "device-url",
-              url: "https://opencode.ai/device",
-              codePattern: "[unterminated",
-            },
-          },
-        },
-      ],
-    });
+  test("a harness entry that does nothing is refused", () => {
+    const problems = problemsOf({ harness: [{ id: "empty", name: "Empty" }] });
 
     expect(problems.map((problem) => problem.code)).toEqual(["invalid-entry"]);
   });
 
-  test("a device URL that is not https is refused", () => {
-    const problems = problemsOf({
-      tool: [
-        {
-          id: "opencode",
-          auth: {
-            probe: "opencode auth status",
-            login: "opencode auth login",
-            completion: { kind: "device-url", url: "http://evil.example/collect" },
-          },
-        },
-      ],
-    });
+  test("a dependency on an unknown tool is refused", () => {
+    const problems = problemsOf({ tools: { pnpm: PNPM } });
 
-    expect(problems.map((problem) => problem.code)).toEqual(["invalid-entry"]);
+    expect(problems).toEqual([{ code: "unknown-dependency", reason: "tool pnpm depends on node, which is not a known tool" }]);
   });
 
-  test("an allowed host that is a bare label is refused", () => {
+  test("a dependency cycle is refused", () => {
     const problems = problemsOf({
-      tool: [
-        {
-          id: "opencode",
-          auth: {
-            probe: "opencode auth status",
-            login: "opencode auth login",
-            completion: { kind: "printed-url", allowedHosts: ["com"] },
-          },
-        },
-      ],
+      tools: {
+        a: { local: "a", install: "a", depends: ["b"] },
+        b: { local: "b", install: "b", depends: ["c"] },
+        c: { local: "c", install: "c", depends: ["a"] },
+        self: { local: "s", install: "s", depends: ["self"] },
+      },
     });
 
-    expect(problems.map((problem) => problem.code)).toEqual(["invalid-entry"]);
+    expect(problems).toEqual([
+      { code: "dependency-cycle", reason: "tools depend on each other in a cycle: a -> b -> c -> a" },
+      { code: "dependency-cycle", reason: "tools depend on each other in a cycle: self -> self" },
+    ]);
+  });
+
+  test.each([
+    ["an absolute directory", "/usr/local/bin"],
+    ["a directory that leaves the home", "../bin"],
+    ["the home itself", "."],
+  ])("a PATH directory that is %s is refused", (_label, dir) => {
+    const problems = problemsOf({ tools: { pnpm: { ...PNPM, depends: [], path: [dir] } } });
+
+    expect(problems).toEqual([
+      { code: "unsafe-path", reason: `tool pnpm path ${dir} must be a directory inside the home` },
+    ]);
   });
 });
 

@@ -567,15 +567,26 @@ describe("ferry init", () => {
       'ssh_user = "david"',
       "",
       "[tools]",
-      'node = "operator"',
-      'bun = "1.4.2"',
+      'gh = "operator"',
+      "",
+      "[tools.bun]",
+      'version = "1.4.2"',
+      'local = "bun --version"',
+      'install = "curl -fsSL https://bun.sh/install | bash -s bun-v{version}"',
       "",
     ].join("\n"));
     const { deps } = dependencies(home);
 
     await runInit({ home, harnesses: BUILTIN_HARNESSES }, deps);
 
-    expect(readConfig(home)?.tools).toEqual({ node: "operator", bun: "1.4.2" });
+    expect(readConfig(home)?.tools).toEqual({
+      gh: "operator",
+      bun: {
+        version: "1.4.2",
+        local: "bun --version",
+        install: "curl -fsSL https://bun.sh/install | bash -s bun-v{version}",
+      },
+    });
   });
 
   test("a second run keeps the integration switches", async () => {
