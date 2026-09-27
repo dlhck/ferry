@@ -4,6 +4,7 @@ import { BUILTIN_BOX_PATH_DIRS, pathExport } from "./tools/path.ts";
 
 export type HostCommand = {
   readonly argv: readonly string[];
+  /** `Number.POSITIVE_INFINITY` runs the command without a timeout. */
   readonly timeoutMs: number;
   /** Bytes for the standard input of the command. Without input, stdin is closed. */
   readonly input?: Uint8Array;
@@ -98,6 +99,15 @@ export type ForwardOptions = {
   readonly signal?: AbortSignal;
 };
 
+export type TunnelPort = { readonly localPort: number; readonly remotePort: number };
+
+export type TunnelOptions = {
+  /** Each local port forwards to `127.0.0.1` on the box, in one OpenSSH connection. */
+  readonly ports: readonly TunnelPort[];
+  /** The tunnel has no timeout. It is stopped and returns `ForwardStopped` when this signal aborts. */
+  readonly signal?: AbortSignal;
+};
+
 const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
@@ -165,30 +175,66 @@ export class Link {
       `127.0.0.1:${options.localPort}:${remoteHost}:${options.remotePort}`,
       resolved.destination,
     ];
+    return this.runForward(resolved.address, argv, options.timeoutMs, options.signal);
+  }
 
+  /**
+   * Forward several local ports to `127.0.0.1` on the box in one OpenSSH
+   * connection, until the signal aborts or the connection drops. Keepalives
+   * let OpenSSH notice a dropped connection.
+   */
+  async tunnel(options: TunnelOptions): Promise<ForwardResult> {
+    const invalid = this.validateConfig() ?? validateTunnel(options);
+    if (invalid) return invalid;
+
+    const resolved = await this.resolve();
+    if (!resolved.ok) return resolved;
+
+    const argv = [
+      "ssh",
+      "-N",
+      "-o",
+      "ExitOnForwardFailure=yes",
+      "-o",
+      "ServerAliveInterval=15",
+      "-o",
+      "ServerAliveCountMax=3",
+      ...this.sshOptions(),
+      ...options.ports.flatMap((port) => ["-L", `127.0.0.1:${port.localPort}:127.0.0.1:${port.remotePort}`]),
+      resolved.destination,
+    ];
+    return this.runForward(resolved.address, argv, Number.POSITIVE_INFINITY, options.signal);
+  }
+
+  private async runForward(
+    address: string,
+    argv: readonly string[],
+    timeoutMs: number,
+    signal: AbortSignal | undefined,
+  ): Promise<ForwardResult> {
     let execution: HostCommandResult;
     try {
       execution = await this.adapter.run({
         argv,
-        timeoutMs: options.timeoutMs,
-        ...(options.signal ? { signal: options.signal } : {}),
+        timeoutMs,
+        ...(signal ? { signal } : {}),
       });
     } catch (error) {
       return failure("ssh-start-failed", "operator", messageOf(error, "could not start OpenSSH"));
     }
 
-    if (options.signal?.aborted) return { ...success(resolved.address, execution), stopped: true };
+    if (signal?.aborted) return { ...success(address, execution), stopped: true };
     if (execution.timedOut) {
       return failure(
         "forward-timeout",
         "network",
-        `the port forward timed out after ${options.timeoutMs} ms`,
+        `the port forward timed out after ${timeoutMs} ms`,
       );
     }
     if (execution.exitCode !== 0) {
       return failure("forward-failed", "network", outputMessage(execution, "the port forward failed"));
     }
-    return success(resolved.address, execution);
+    return success(address, execution);
   }
 
   private validateConfig(): LinkFailure | null {
@@ -311,7 +357,7 @@ export class BunHostAdapter implements HostAdapter {
     const stderr = new Response(process.stderr).text();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), command.timeoutMs);
+      if (Number.isFinite(command.timeoutMs)) timer = setTimeout(() => resolve("timeout"), command.timeoutMs);
     });
     const exited = process.exited.then((exitCode) => ({ exitCode }));
     const stop = () => process.kill();
@@ -374,6 +420,16 @@ function validateForward(options: ForwardOptions): LinkFailure | null {
   }
   if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
     return failure("invalid-config", "operator", "the port-forward timeout must be greater than zero");
+  }
+  return null;
+}
+
+function validateTunnel(options: TunnelOptions): LinkFailure | null {
+  if (options.ports.length === 0) {
+    return failure("invalid-config", "operator", "a tunnel needs at least one port");
+  }
+  if (options.ports.some((port) => !validPort(port.localPort) || !validPort(port.remotePort))) {
+    return failure("invalid-config", "operator", "port numbers must be integers from 1 through 65535");
   }
   return null;
 }

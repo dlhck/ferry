@@ -287,6 +287,78 @@ describe("Link", () => {
     expect(outcome.exitCode).not.toBe(0);
   });
 
+  test("a tunnel forwards several ports in one OpenSSH connection without a timeout", async () => {
+    const host = new FakeHost([result({ exitCode: 255, stderr: "Connection to box.example closed by remote host." })]);
+    const link = new Link({ destination: "user@box.example" }, host);
+
+    const outcome = await link.tunnel({
+      ports: [
+        { localPort: 3000, remotePort: 3000 },
+        { localPort: 4000, remotePort: 5173 },
+      ],
+    });
+
+    expect(host.commands[0]).toEqual({
+      argv: [
+        "ssh",
+        "-N",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-L",
+        "127.0.0.1:3000:127.0.0.1:3000",
+        "-L",
+        "127.0.0.1:4000:127.0.0.1:5173",
+        "user@box.example",
+      ],
+      timeoutMs: Number.POSITIVE_INFINITY,
+    });
+    expect(outcome).toEqual({
+      ok: false,
+      error: {
+        code: "forward-failed",
+        origin: "network",
+        message: "Connection to box.example closed by remote host.",
+      },
+    });
+  });
+
+  test("an aborted signal stops the tunnel and reports it as stopped", async () => {
+    const stop = new AbortController();
+    const host = new FakeHost([result({ exitCode: 255 })]);
+    const link = new Link({ destination: "user@box.example" }, host);
+    stop.abort();
+
+    const outcome = await link.tunnel({ ports: [{ localPort: 3000, remotePort: 3000 }], signal: stop.signal });
+
+    expect(host.commands[0]?.signal).toBe(stop.signal);
+    expect(outcome).toEqual({ ok: true, stopped: true, address: "user@box.example", stdout: "", stderr: "" });
+  });
+
+  test("a tunnel refuses an empty port list and invalid ports", async () => {
+    const link = new Link({ destination: "user@box.example" }, new FakeHost([]));
+
+    for (const ports of [[], [{ localPort: 0, remotePort: 3000 }], [{ localPort: 3000, remotePort: 65_536 }]]) {
+      expect(await link.tunnel({ ports })).toEqual({
+        ok: false,
+        error: { code: "invalid-config", origin: "operator", message: expect.any(String) },
+      });
+    }
+  });
+
+  test("the host adapter does not time out a command with an infinite timeout", async () => {
+    const outcome = await new BunHostAdapter().run({ argv: ["sleep", "0.2"], timeoutMs: Number.POSITIVE_INFINITY });
+
+    expect(outcome).toEqual({ exitCode: 0, stdout: "", stderr: "", timedOut: false });
+  });
+
   test("a direct port forward uses the SSH destination without Tailscale", async () => {
     const host = new FakeHost([result()]);
     const link = new Link({ destination: "user@box.example" }, host);

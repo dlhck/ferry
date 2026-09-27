@@ -123,7 +123,7 @@ Ferry never carries:
 
 A carried file that looks like a secret stops the sync, and the error names the file, never the value. Logins happen on the box, and the tokens stay there.
 
-Ferry opens no public listening port. The Codex callback login forwards local port 1455 to the box for 120 seconds. Ferry never turns off SSH host-key checks, and it never falls back from Tailscale to direct SSH. Ferry forwards your SSH agent to the box only for the snapshot update. `ferry auth gh` creates an SSH key without a passphrase on the box and adds it to your GitHub account, so agents on the box can push. See [GitHub over SSH](#github-over-ssh).
+Ferry opens no public listening port. The Codex callback login forwards local port 1455 to the box for 120 seconds. `ferry tunnel` binds its local ports to `127.0.0.1` only. Ferry never turns off SSH host-key checks, and it never falls back from Tailscale to direct SSH. Ferry forwards your SSH agent to the box only for the snapshot update. `ferry auth gh` creates an SSH key without a passphrase on the box and adds it to your GitHub account, so agents on the box can push. See [GitHub over SSH](#github-over-ssh).
 
 Ferry runs commands on the box with your SSH user. Use a box and an SSH user that you trust with the agents that run there.
 
@@ -317,6 +317,7 @@ Other box commands:
 Select a box with the `--box <name>` option:
 
 - `install`, `auth`, `move`, and `integrations enable|disable` change one box. They use the box of `--box`, else `default_box`, else the only box. If there is more than one box and no `default_box`, they stop and ask for `--box`. They accept one `--box` only.
+- `tunnel` uses one box, with the same rules. See [Open a box port locally](#open-a-box-port-locally).
 - With box tables, `integrations enable|disable` writes the key to `[box.<name>.integrations]` of that box. The command prints the name of the table that it changed.
 - `status` works on all boxes, or on the boxes of `--box`. Give `--box` more than one time to select more boxes. See [Status](#status).
 - `update` works on all boxes, or on the boxes of `--box`. Ferry updates the boxes one after the other. Each box gets the tool versions of its own policy, and the Paseo update only if Paseo is on for that box. The agent CLI updates on this machine run one time, not one time for each box. If a box is offline or an update on a box fails, Ferry continues with the other boxes. At the end, Ferry prints one result line for each box and exits with code 1 if a box failed. With more than one box, each box line starts with `[<name>]`.
@@ -609,6 +610,34 @@ A folder without git has no clone. Ferry copies all its files with the same skip
 `--dry-run` prints the plan: the clone, and each file that Ferry carries, refuses, or skips. It does not write on either machine. With `--from-box`, Ferry reads the box files into a temporary directory on this machine for the deny checks, and removes that directory after the run.
 
 If a step fails after the clone, the destination copy is incomplete. Ferry does not remove it. Move it away before you try again.
+
+## Open a box port locally
+
+Use `ferry tunnel` to open a dev server of the box in a browser on this machine.
+
+```sh
+ferry tunnel 3000             # box 127.0.0.1:3000 -> http://localhost:3000
+ferry tunnel 3000 5173 8080   # several ports in one SSH connection
+ferry tunnel 3000:4000        # box port 3000 -> local port 4000
+ferry tunnel --list           # list the TCP ports that listen on the box
+ferry tunnel 3000 --box lab   # a box other than the default box
+```
+
+Ferry prints one line for each port, then keeps the tunnel open until you press Ctrl-C:
+
+```text
+http://localhost:3000 -> lab:127.0.0.1:3000
+http://localhost:4000 -> lab:127.0.0.1:5173
+Press Ctrl-C to close the tunnel.
+Tunnel closed.
+```
+
+- The local end binds to `127.0.0.1` only. Other machines on your network cannot use the tunnel.
+- The box end is `127.0.0.1` on the box. A dev server that listens only on `::1` does not answer. Start it on `127.0.0.1` or on all interfaces.
+- Before it connects, Ferry binds each local port for a moment. If a local port is in use, Ferry stops and names the port. Use `box:local` to pick another local port.
+- All ports use one SSH connection with `ssh -N`. If the connection drops, Ferry prints the SSH error and exits with a non-zero code. Ferry does not reconnect, and it has no background mode.
+- `--list` runs one read-only command on the box: `ss -ltnpH`. If the box has no `ss`, Ferry uses `netstat -ltnp`, then `/proc/net/tcp`. The list shows the ports that listen on loopback or on all interfaces. Without root, the box can hide the process names of other users. The list shows `-` for them.
+- The box is `--box`, then `default_box`, then the only box.
 
 ## What Ferry carries
 
