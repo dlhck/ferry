@@ -25,6 +25,7 @@ import {
 } from "./registry/load.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
 import { composeStatus, type StatusReport } from "./status.ts";
+import { effectivePolicy } from "./tools/resolve.ts";
 import { RealGitRunner, Store, type TipReport } from "./store.ts";
 import { boxChangesCommand } from "./sync.ts";
 
@@ -102,7 +103,7 @@ export async function runStatusCommand(
         return link.run(BOX_SUDO_COMMAND);
       },
     },
-    updateWatch: config.update?.watch === true,
+    watchUpdatesGh: config.update?.watch === true && watchUpdates(registry.tools, config, "gh"),
     operator: { gitIdentity: () => resolved.readOperatorGitIdentity(home) },
     store,
     apply: {
@@ -215,6 +216,12 @@ function configuredTarget(config: StatusConfig): LinkOptions {
   return target;
 }
 
+/** The daily watch update changes only the tools whose policy is `latest`. */
+function watchUpdates(tools: readonly ToolDescriptor[], config: PartialOperatorConfig, id: string): boolean {
+  const tool = tools.find((entry) => entry.id === id);
+  return tool !== undefined && effectivePolicy(tool, config.tools) === "latest";
+}
+
 function effectiveRegistry(
   config: RegistryConfig,
   load: StatusCommandDependencies["loadRegistry"],
@@ -282,7 +289,7 @@ function boxSudo(report: StatusReport): string[] {
     "Box sudo: PASSWORD REQUIRED",
     ...(watchUpdateBlocked
       ? [
-          "  WARNING: [update] watch = true, but the watch cannot update gh because sudo on the box asks for a password. See the sudoers rule in the README.",
+          "  WARNING: [update] watch = true and the gh policy is \"latest\", but the watch cannot update gh because sudo on the box asks for a password. See the sudoers rule in the README.",
         ]
       : []),
   ];

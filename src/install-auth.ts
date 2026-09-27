@@ -8,23 +8,19 @@ import {
   type AuthLink,
   type AuthStartResult,
 } from "./auth-start.ts";
-import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
+import { readConfig, resolveLinkOptions, type PartialOperatorConfig, type ToolsConfig } from "./config.ts";
 import {
   readOperatorGitIdentity,
   setBoxGitIdentityCommand,
   type GitIdentity,
 } from "./git-identity.ts";
-import {
-  Install,
-  type InstallProgress,
-  type InstallRecipe,
-  type InstallResult,
-} from "./install.ts";
+import { Install, outputLines, type InstallProgress, type InstallResult } from "./install.ts";
 import { Link, type LinkError, type LinkOptions } from "./link.ts";
 import { noProgress, step, type Progress } from "./progress.ts";
 import { BUILTIN_TOOLS } from "./registry/builtin.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
 import { RealGitRunner } from "./store.ts";
+import { describeStep, ToolPlanError, type ToolStep } from "./tools/resolve.ts";
 
 const STORE_RELATIVE_PATH = ".ferry/store";
 
@@ -37,9 +33,10 @@ export type AuthCommandInput = {
 
 type CommandLink = AuthLink;
 type InstallCommand = {
-  plan(): readonly InstallRecipe[];
+  plan(): Promise<readonly ToolStep[]>;
   run(
     confirmed: boolean,
+    plan: readonly ToolStep[],
     reportProgress?: (progress: InstallProgress) => void,
   ): Promise<InstallResult>;
 };
@@ -51,7 +48,11 @@ export type InstallCommandDependencies = {
   readonly readConfig: () => PartialOperatorConfig | null;
   readonly createLink: (options: LinkOptions) => CommandLink;
   readonly readOperatorGitIdentity: () => Promise<GitIdentity>;
-  readonly createInstall: (link: CommandLink, tools: readonly ToolDescriptor[]) => InstallCommand;
+  readonly createInstall: (
+    link: CommandLink,
+    tools: readonly ToolDescriptor[],
+    config: ToolsConfig | undefined,
+  ) => InstallCommand;
   readonly progress: Progress;
   readonly confirm: () => Promise<boolean | symbol | undefined>;
   readonly writeLine: (line: string) => void;
@@ -83,14 +84,21 @@ export async function runInstallCommand(
   dependencies: Partial<InstallCommandDependencies> = {},
 ): Promise<void> {
   const resolved = { ...defaultInstallDependencies, ...dependencies };
-  const target = loadTarget(resolved.readConfig, resolved.writeLine);
+  const { target, config } = loadTarget(resolved.readConfig, resolved.writeLine);
   const link = resolved.createLink(target);
-  const install = resolved.createInstall(link, resolved.tools);
+  const install = resolved.createInstall(link, resolved.tools, config?.tools);
 
-  const plan = install.plan();
-  resolved.progress.plan(plan.length + 1);
-  for (const recipe of plan) {
-    resolved.writeLine(`${recipe.tool}: ${recipe.command}`);
+  let plan: readonly ToolStep[];
+  try {
+    plan = await step(resolved.progress, "Checking the tool versions", () => install.plan());
+  } catch (error) {
+    if (!(error instanceof ToolPlanError)) throw error;
+    fail("operator/tool-plan", `Install stopped before it changed the box. ${error.message}`, resolved.writeLine);
+  }
+  // The version check, each tool change, and the box git identity.
+  resolved.progress.plan(plan.filter((entry) => entry.command !== undefined).length + 2);
+  for (const entry of plan) {
+    resolved.writeLine(`${entry.tool}: ${describeStep(entry)}`);
   }
   const { name, email } = await resolved.readOperatorGitIdentity();
   const identityCommand =
@@ -111,12 +119,14 @@ export async function runInstallCommand(
   let active = false;
   let result: InstallResult;
   try {
-    result = await install.run(true, (update) => {
+    result = await install.run(true, plan, (update) => {
       active = update.phase === "started";
       if (update.phase === "started") {
         progress.start(`Installing ${update.tool} (${update.current}/${update.total})`);
       } else {
         progress.done();
+        // The installer output can hold a warning, such as the gh fallback to the latest version.
+        for (const line of outputLines(update.stdout)) resolved.writeLine(`  ${line}`);
       }
     });
   } catch (error) {
@@ -169,7 +179,7 @@ export async function runAuthCommand(
         resolved.writeLine,
       );
     }
-    const target = loadTarget(resolved.readConfig, resolved.writeLine);
+    const { target } = loadTarget(resolved.readConfig, resolved.writeLine);
     const auth = resolved.createAuthStart(resolved.createLink(target), resolved.tools);
     const { provider, mcp } = input;
     const started = await step(
@@ -200,7 +210,7 @@ export async function runAuthCommand(
     );
   }
 
-  const target = loadTarget(resolved.readConfig, resolved.writeLine);
+  const { target } = loadTarget(resolved.readConfig, resolved.writeLine);
   const auth = resolved.createAuthStart(resolved.createLink(target), resolved.tools);
   const provider = input.provider;
   const started = await step(
@@ -266,7 +276,7 @@ const defaultInstallDependencies: InstallCommandDependencies = {
   createLink: (options) => new Link(options),
   readOperatorGitIdentity: () =>
     readOperatorGitIdentity(new RealGitRunner(), join(homedir(), STORE_RELATIVE_PATH)),
-  createInstall: (link, tools) => new Install(link, tools),
+  createInstall: (link, tools, config) => new Install(link, tools, config),
   progress: noProgress,
   confirm: () => prompts.confirm({ message: "Run these commands on the box?" }),
   writeLine: console.log,
@@ -311,7 +321,7 @@ async function untilInterrupt<T>(
 function loadTarget(
   read: () => PartialOperatorConfig | null,
   writeLine: (line: string) => void,
-): LinkOptions {
+): { target: LinkOptions; config: PartialOperatorConfig | null } {
   let config: PartialOperatorConfig | null;
   try {
     config = read();
@@ -323,7 +333,7 @@ function loadTarget(
   if (!target) {
     fail("operator/invalid-config", "Ferry config has no complete host. Run ferry init.", writeLine);
   }
-  return target;
+  return { target, config };
 }
 
 function authFailed(result: AuthStartResult): boolean {

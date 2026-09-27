@@ -7,10 +7,12 @@ import {
   type InstallCommandDependencies,
 } from "../src/install-auth.ts";
 import type { GitIdentity } from "../src/git-identity.ts";
-import type { InstallProgress, InstallRecipe, InstallResult } from "../src/install.ts";
+import { Install, type InstallProgress, type InstallResult } from "../src/install.ts";
+import type { ToolDescriptor } from "../src/registry/types.ts";
 import type { LinkResult } from "../src/link.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 import { noProgress } from "../src/progress.ts";
+import { ToolPlanError, type ToolStep } from "../src/tools/resolve.ts";
 import { recordProgress } from "./fake-progress.ts";
 
 const config = {
@@ -21,9 +23,11 @@ const config = {
 };
 
 describe("install command", () => {
-  const plan: readonly InstallRecipe[] = [
-    { tool: "gh", command: "install gh\nwith the full command" },
-    { tool: "codex", command: "install codex" },
+  const plan: readonly ToolStep[] = [
+    { tool: "gh", policy: "operator", version: "2.92.0", action: "install", command: "install gh\nwith the full command", dependsOn: [] },
+    { tool: "codex", policy: "latest", version: null, action: "install", command: "install codex", dependsOn: [] },
+    { tool: "node", policy: "operator", version: "24.16.0", action: "skip-same", dependsOn: [] },
+    { tool: "bun", policy: "operator", version: null, action: "skip-not-on-operator", dependsOn: [] },
   ];
 
   test("prints the exact plan before confirmation", async () => {
@@ -43,9 +47,150 @@ describe("install command", () => {
     );
 
     expect(outputAtPrompt).toEqual([
-      ...plan.map((recipe) => `${recipe.tool}: ${recipe.command}`),
+      "gh: install 2.92.0 (policy operator): install gh\nwith the full command",
+      "codex: install latest (policy latest): install codex",
+      "node: skipped, the box has 24.16.0 (policy operator)",
+      "bun: skipped, not on the operator machine (policy operator)",
       `git identity: ${identityCommand}`,
     ]);
+  });
+
+  test("passes the [tools] config to the install and runs the plan that it printed", async () => {
+    let received: unknown;
+    let ran: readonly ToolStep[] = [];
+    const tools = { gh: "latest" };
+
+    await runInstallCommand(
+      { yes: true },
+      {
+        ...installDependencies({ plan }),
+        readConfig: () => ({ ...config, tools }),
+        createInstall: (_link, _tools, toolsConfig) => {
+          received = toolsConfig;
+          return {
+            plan: async () => plan,
+            run: async (_confirmed, planned) => {
+              ran = planned;
+              return { ok: true };
+            },
+          };
+        },
+      },
+    );
+
+    expect(received).toEqual(tools);
+    expect(ran).toBe(plan);
+  });
+
+  test("prints the output of an installer after its step, such as the gh fallback warning", async () => {
+    const output: string[] = [];
+    const progress: string[] = [];
+    const events = { output, progress };
+
+    await runInstallCommand(
+      { yes: true },
+      {
+        ...installDependencies({
+          plan,
+          progress,
+          run: async (_confirmed, _plan, reportProgress) => {
+            reportProgress?.({ phase: "started", tool: "gh", current: 1, total: 1 });
+            reportProgress?.({
+              phase: "completed",
+              tool: "gh",
+              current: 1,
+              total: 1,
+              stdout: "Warning: the GitHub apt repository has no gh 2.92.0. Ferry installs the latest gh.\n\nReading package lists...\n",
+            });
+            return { ok: true };
+          },
+        }),
+        writeLine: (line) => {
+          events.output.push(line);
+          events.progress.push(`line:${line}`);
+        },
+      },
+    );
+
+    expect(output).toContain("  Warning: the GitHub apt repository has no gh 2.92.0. Ferry installs the latest gh.");
+    expect(output).toContain("  Reading package lists...");
+    expect(output).not.toContain("  ");
+    const warning = progress.indexOf("line:  Warning: the GitHub apt repository has no gh 2.92.0. Ferry installs the latest gh.");
+    expect(progress.slice(warning - 2, warning)).toEqual(["start:Installing gh (1/1)", "done"]);
+  });
+
+  test("prints the plan of the real install from the versions on this machine and on the box", async () => {
+    const output: string[] = [];
+    const PREFIX_END = 'cd "$HOME" || exit 1; ';
+    const localVersions: Record<string, string> = { "gh --version": "gh version 2.92.0", "bun --version": "1.4.2" };
+    const boxVersions: Record<string, string> = { "bun --version": "1.4.2" };
+    const read = (script: string, versions: Record<string, string>) =>
+      versions[script.slice(script.indexOf(PREFIX_END) + PREFIX_END.length)];
+    const bun: ToolDescriptor = {
+      id: "bun",
+      kind: "tool",
+      localVersion: "bun --version",
+      boxVersion: "bun --version",
+      recipe: { install: (version) => `install bun ${version}`, update: (version) => `install bun ${version}` },
+    };
+
+    await runInstallCommand(
+      { yes: false },
+      {
+        ...installDependencies({ plan, output, confirm: async () => false }),
+        tools: [BUILTIN_TOOLS[0]!, BUILTIN_TOOLS[1]!, bun],
+        createLink: () => ({
+          ...fakeLink(),
+          run: async (command) => {
+            const stdout = read(command, boxVersions);
+            if (stdout === undefined) return { ok: false, error: { code: "command-failed", origin: "box", message: "missing" } };
+            return { ok: true, address: "builder", stdout, stderr: "" };
+          },
+        }),
+        createInstall: (link, tools, toolsConfig) =>
+          new Install(link, tools, toolsConfig, {
+            run: async (command) => {
+              const stdout = read(command.argv.at(-1) ?? "", localVersions);
+              return { exitCode: stdout === undefined ? 127 : 0, stdout: stdout ?? "", stderr: "", timedOut: false };
+            },
+          }),
+      },
+    );
+
+    expect(output.map((line) => line.split("\n")[0])).toEqual([
+      "gh: install 2.92.0 (policy operator): (type -p wget >/dev/null || (sudo apt update && sudo apt install wget -y)) \\",
+      "claude: install latest (policy latest): curl -fsSL https://claude.ai/install.sh | bash",
+      "bun: skipped, the box has 1.4.2 (policy operator)",
+      `git identity: ${identityCommand}`,
+    ]);
+  });
+
+  test("stops before any box change when the plan is refused", async () => {
+    const output: string[] = [];
+    const linkRuns: string[] = [];
+    let runs = 0;
+
+    await expect(
+      runInstallCommand(
+        { yes: true },
+        {
+          ...installDependencies({ plan, output, linkRuns }),
+          createInstall: () => ({
+            plan: async () => {
+              throw new ToolPlanError("pnpm depends on node, which is not on the operator machine.");
+            },
+            run: async () => {
+              runs += 1;
+              return { ok: true };
+            },
+          }),
+        },
+      ),
+    ).rejects.toThrow(
+      "operator/tool-plan: Install stopped before it changed the box. pnpm depends on node, which is not on the operator machine.",
+    );
+    expect(runs).toBe(0);
+    expect(linkRuns).toEqual([]);
   });
 
   test("does not run when confirmation is false", async () => {
@@ -160,7 +305,7 @@ describe("install command", () => {
       installDependencies({
         plan,
         progress,
-        run: async (_confirmed, reportProgress) => {
+        run: async (_confirmed, _plan, reportProgress) => {
           reportProgress?.({ phase: "started", tool: "gh", current: 1, total: 2 });
           reportProgress?.({ phase: "completed", tool: "gh", current: 1, total: 2 });
           reportProgress?.({ phase: "started", tool: "codex", current: 2, total: 2 });
@@ -171,6 +316,8 @@ describe("install command", () => {
     );
 
     expect(progress).toEqual([
+      "start:Checking the tool versions",
+      "done",
       "start:Installing gh (1/2)",
       "done",
       "start:Installing codex (2/2)",
@@ -191,7 +338,7 @@ describe("install command", () => {
           plan,
           output,
           progress,
-          run: async (_confirmed, reportProgress) => {
+          run: async (_confirmed, _plan, reportProgress) => {
             reportProgress?.({ phase: "started", tool: "gh", current: 1, total: 2 });
             return {
               ok: false,
@@ -205,7 +352,7 @@ describe("install command", () => {
         }),
       ),
     ).rejects.toThrow("Install stopped because Link reported command-failed from box.");
-    expect(progress).toEqual(["start:Installing gh (1/2)", "fail"]);
+    expect(progress).toEqual(["start:Checking the tool versions", "done", "start:Installing gh (1/2)", "fail"]);
     expect(output.join("\n")).toContain("box/command-failed");
     expect(output.join("\n")).not.toContain("token-secret");
   });
@@ -674,7 +821,7 @@ const identityCommand =
   "{ git config --global --get user.email >/dev/null || git config --global user.email 'operator@example.com'; }";
 
 function installDependencies(overrides: {
-  readonly plan: readonly InstallRecipe[];
+  readonly plan: readonly ToolStep[];
   readonly output?: string[];
   readonly linkRuns?: string[];
   readonly linkResult?: LinkResult;
@@ -683,6 +830,7 @@ function installDependencies(overrides: {
   readonly confirm?: () => Promise<boolean | symbol | undefined>;
   readonly run?: (
     confirmed: boolean,
+    plan: readonly ToolStep[],
     reportProgress?: (progress: InstallProgress) => void,
   ) => Promise<InstallResult>;
 }): InstallCommandDependencies {
@@ -699,7 +847,7 @@ function installDependencies(overrides: {
     readOperatorGitIdentity: async () =>
       overrides.operatorIdentity ?? { name: "Operator O'Neil", email: "operator@example.com" },
     createInstall: () => ({
-      plan: () => overrides.plan,
+      plan: async () => overrides.plan,
       run: overrides.run ?? (async () => ({ ok: true })),
     }),
     progress: {

@@ -30,6 +30,7 @@ export type ToolsConfig = { readonly [id: string]: ToolPolicy | ToolDefinition }
 /**
  * A tool that the operator defines in a `[tools.<id>]` table. `version` is the
  * policy. `local` and `box` print the version on this machine and on the box.
+ * `latest` prints the newest version on this machine, for the `latest` policy.
  * `install` and `update` run on the box, and `update` defaults to `install`.
  * `path` holds directories relative to the home for the box `PATH`, and
  * `depends` names the tools to install first.
@@ -38,6 +39,7 @@ export type ToolDefinition = {
   readonly version?: ToolPolicy;
   readonly local: string;
   readonly box?: string;
+  readonly latest?: string;
   readonly install: string;
   readonly update?: string;
   readonly path?: readonly string[];
@@ -101,7 +103,7 @@ const SECTION_KEYS: Record<string, readonly string[]> = {
 };
 
 /** The keys of a `[tools.<id>]` table, in the order that writeConfig writes them. */
-const TOOL_KEYS = ["version", "local", "box", "install", "update", "path", "depends"] as const;
+const TOOL_KEYS = ["version", "local", "box", "latest", "install", "update", "path", "depends"] as const;
 
 /** An exact version, such as 1.4.2 or 2026.09.15-d2fe57e. It goes into box commands, so the characters stay few. */
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;

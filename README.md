@@ -100,14 +100,14 @@ mv ferry-darwin-arm64 ~/.local/bin/ferry
 
 ```sh
 ferry init          # record the box and the snapshot URL, seed the snapshot, link this machine
-ferry install       # install gh, Claude Code, Codex, Pi, and Cursor Agent on the box
+ferry install       # install gh, the agent CLIs, and the tools that you define on the box
 ferry sync          # publish the snapshot and apply it on the box
 ferry auth gh       # start a login on the box, finish it in a browser here
 ferry auth claude
 ferry status        # check the link, the snapshot, the managed paths, and the box logins
 ```
 
-`ferry install` shows each install command and asks for confirmation before it runs the command on the box. Repeat `ferry auth` for each tool that you use. Add `--dry-run` to `init`, `sync`, or `update` to see the changes before Ferry makes them.
+`ferry install` shows the plan for each tool and asks for confirmation before it runs a command on the box. Repeat `ferry auth` for each tool that you use. Add `--dry-run` to `init`, `sync`, or `update` to see the changes before Ferry makes them.
 
 ## Security model
 
@@ -224,6 +224,12 @@ Each tool has a kind:
 
 A policy is `"operator"` (the version on this machine), `"latest"` (the latest vendor release), or an exact version such as `"1.4.2"`. A tool without a policy uses the default of its kind: `"latest"` for an agent, `"operator"` for a tool.
 
+- `"operator"`: Ferry reads the version on this machine. When this machine does not have the tool, Ferry skips a `tool` and installs an `agent` at the latest version.
+- `"latest"`: the builtin tools use their own install recipe, which installs the latest release. A tool that you define needs a `latest` command, which prints the newest version. Ferry runs it on this machine. Ferry refuses a tool with the `"latest"` policy and no `latest` command.
+- An exact version: Ferry installs that version.
+
+The mirror rule of a `tool` applies only to the `"operator"` policy, because Ferry has no version to copy when this machine does not have the tool. A `"latest"` policy or an exact version in your config tells Ferry to install the tool, so Ferry installs it also when this machine does not have it.
+
 To set the policy of a builtin tool, write a string in the `[tools]` table:
 
 ```toml
@@ -251,7 +257,8 @@ depends = ["node"]
 | --- | --- | --- |
 | `version` | No | The policy. The default is `"operator"`. |
 | `local` | Yes | A command that prints the version on this machine. Ferry loads nvm first when nvm is there, and runs the command in your home directory. A failed command means that this machine does not have the tool. |
-| `box` | No | A command that prints the version on the box. |
+| `box` | No | A command that prints the version on the box. Without it, Ferry cannot see the box version, and `ferry install` always runs `install`. |
+| `latest` | No | A command that prints the newest version, for example `npm view pnpm version`. Ferry runs it on this machine, in the same way as `local`. The `"latest"` policy needs it. |
 | `install` | Yes | The command that installs the tool on the box. |
 | `update` | No | The command that updates the tool on the box. The default is `install`. |
 | `path` | No | Directories relative to the home for the box `PATH`. |
@@ -341,24 +348,46 @@ depends = ["node"]
 
 `ferry tools` lists the builtin tools and the tools that you define. For each tool, it shows the kind, the install mode, the policy, and the version on this machine. `ferry tools` does not connect to the box.
 
-What works now: the `[tools]` policies, the tool tables, and `ferry tools`. What comes next:
+### Install and update the tools
 
-- `ferry install` and `ferry update` run the recipes of the tools that you define, and apply the policy and the install mode. Until then, they work as before: `ferry install` installs `gh` and the agent CLIs, and `ferry update` shows the tools that you define as skipped.
-- A "Tools" section in `ferry status` with the box versions.
+`ferry install` and `ferry update` use the same rules for each tool:
+
+1. Ferry selects the version from the policy, as [Version policy](#version-policy) tells.
+2. Ferry reads the box version with the `box` command. When the box has the selected version, Ferry skips the tool.
+3. Ferry changes the tools in `depends` order. A tool comes after the tools that it depends on.
+
+`ferry install` runs `install` for each tool that it does not skip. `ferry update` runs `update` for a tool that the box has, and `install` for a tool that the box does not have. The agent CLIs keep their builtin recipes, which install the latest release. Ferry cannot see that version first, so it runs the recipe each time. `gh` installs the selected version with `apt`. When the GitHub apt repository does not have that version, `gh` falls back to the latest version with a warning. With the `"latest"` policy, `gh` uses its latest recipe.
+
+Both commands print the plan first, with the policy, the version, and the action of each tool:
+
+```
+node: skipped, the box has 24.16.0 (policy operator)
+pnpm: install 11.17.0 (policy operator): npm install -g --prefix "$HOME/.local" pnpm@'11.17.0'
+bun: skipped, not on the operator machine (policy operator)
+claude: install latest (policy latest): curl -fsSL https://claude.ai/install.sh | bash
+```
+
+Ferry prints the output of each install and update command after its step, for example a warning that `gh` falls back to the latest version.
+
+Ferry refuses the plan and changes nothing when a tool is refused, or when it must change a tool that depends on a tool that this machine does not have. The error names the tool and what to change. When an install fails, `ferry install` stops, so no tool that depends on it runs. When an update fails, `ferry update` skips the tools that depend on it, runs the other updates, and names each failure at the end.
+
+The daily update of `ferry watch` changes only the tools with the `"latest"` policy. A tool with the `"operator"` policy or an exact version changes only when you run `ferry update`.
+
+What comes next: a "Tools" section in `ferry status` with the box versions.
 
 ## Update the agent tools
 
-`ferry update` runs the update command of each agent tool on the box and on this machine:
+`ferry update` updates the tools on the box with the rules in [Install and update the tools](#install-and-update-the-tools). These are the update commands of the builtin tools, on the box and on this machine:
 
 | Tool | Update command | On this machine |
 | --- | --- | --- |
-| `gh` | `sudo apt update && sudo apt install gh -y` | Skipped. `gh` has no own update command, and Ferry does not guess the package manager here. |
+| `gh` | `sudo apt update && sudo apt install gh -y` for the `"latest"` policy. For a version, `sudo apt install gh=<version>`, with the fallback to the latest version. | Skipped. `gh` has no own update command, and Ferry does not guess the package manager here. |
 | Claude | `claude update` | Runs if `claude` is installed. |
 | Codex | `codex update` | Runs if `codex` is installed. |
 | Pi | `pi update` | Runs if `pi` is installed. This updates Pi only, not its packages. |
 | Cursor Agent | `cursor-agent update` | Runs if `cursor-agent` is installed. |
 
-On this machine, Ferry uses `command -v` to find each tool. It updates only a tool that is already installed. It never installs a tool here.
+On this machine, Ferry uses `command -v` to find each tool. It updates only a tool that is already installed. It never installs a tool here, and it never runs the recipes of the tools that you define here.
 
 Ferry prints the plan first and asks for confirmation. Add `--yes` to skip the prompt. Add `--dry-run` to print the plan and change nothing:
 
@@ -368,7 +397,7 @@ ferry update --dry-run
 
 A failed update does not stop the other updates. After all updates, Ferry names each failed update and exits with a non-zero code.
 
-The `gh` update uses `sudo` on the box. When `ferry watch` runs the update, no terminal is available to type a password. Membership in the `sudo` group is not sufficient, because the default rule on Ubuntu and Debian asks for a password. To let the watch update `gh`, add this rule on the box. Replace `<ssh-user>` with the SSH user of the box:
+The `gh` update uses `sudo` on the box. The daily update of `ferry watch` updates `gh` only when its policy is `"latest"`. When the watch runs the update, no terminal is available to type a password. Membership in the `sudo` group is not sufficient, because the default rule on Ubuntu and Debian asks for a password. To let the watch update `gh`, add this rule on the box. Replace `<ssh-user>` with the SSH user of the box:
 
 ```
 # /etc/sudoers.d/ferry  (edit with: sudo visudo -f /etc/sudoers.d/ferry)
@@ -377,7 +406,7 @@ The `gh` update uses `sudo` on the box. When `ferry watch` runs the update, no t
 
 sudo compares the full command path and all arguments. The rule allows only these three commands, with these exact arguments. `/usr/bin/apt update` and `/usr/bin/apt install gh -y` are the two commands of the `gh` update. `/usr/bin/true` does nothing. `ferry status` runs `sudo -n /usr/bin/true` to find out if `sudo` asks for a password. Ferry does not write sudoers files on the box.
 
-`ferry status` shows `Box sudo: PASSWORDLESS` or `Box sudo: PASSWORD REQUIRED`, and `--json` has the result in `boxSudo`. When `[update] watch = true` and `sudo` asks for a password, `ferry status` shows a warning that the watch cannot update `gh`.
+`ferry status` shows `Box sudo: PASSWORDLESS` or `Box sudo: PASSWORD REQUIRED`, and `--json` has the result in `boxSudo`. When `[update] watch = true`, the `gh` policy is `"latest"`, and `sudo` asks for a password, `ferry status` shows a warning that the watch cannot update `gh`. With another `gh` policy, the watch does not update `gh`, so Ferry shows no warning.
 
 ## Log in to the agent tools
 
@@ -582,7 +611,7 @@ Ferry refuses `daemon-keypair.json` (the Paseo relay key pair) and `hub-credenti
 
 `ferry watch` runs in the foreground. It watches the Manifest identity for every configured global skill root, `~/AGENTS.md`, the Claude subagents and commands, and the carried Claude settings keys. It does not watch project-local skills. After an accepted change stays stable for one second, Ferry runs the normal sync without `--force`. Network, SSH, and Git failures retry with a backoff capped at 60 seconds. Manifest refusals name the local path and wait for another edit.
 
-`ferry watch` can also run `ferry update --yes` once each day. This is off by default. To turn it on, add this section to `~/.ferry/config.toml`:
+`ferry watch` can also run `ferry update --yes` once each day, for the tools with the `"latest"` policy only. This is off by default. To turn it on, add this section to `~/.ferry/config.toml`:
 
 ```toml
 [update]

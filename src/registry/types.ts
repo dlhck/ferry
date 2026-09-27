@@ -182,6 +182,11 @@ export type ToolDescriptor = {
   readonly localVersion?: string;
   /** A shell command that prints the version on the box. The same rules apply. */
   readonly boxVersion?: string;
+  /**
+   * A shell command that prints the newest version. Ferry runs it on the
+   * operator machine for the `latest` policy of a tool that the config defines.
+   */
+  readonly latestVersion?: string;
   /** The recipe for the `latest` policy. The agent CLIs use it today. */
   readonly install?: { readonly command: string };
   readonly update?: ToolUpdate;

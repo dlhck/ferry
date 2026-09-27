@@ -308,7 +308,65 @@ describe("watch daily update", () => {
       },
     );
 
-    expect(inputs).toEqual([{ yes: true, dryRun: false, includeIntegrations: false }]);
+    expect(inputs).toEqual([{ yes: true, dryRun: false, includeIntegrations: false, latestOnly: true }]);
     expect(paseoCalls).toEqual([]);
+  });
+
+  test("the default daily update changes only the tools whose policy is latest", async () => {
+    const controller = new AbortController();
+    const boxCommands: string[] = [];
+    const localCommands: string[] = [];
+    let scans = 0;
+    const tool = (id: string, kind: "agent" | "tool") => ({
+      id,
+      kind,
+      localVersion: `${id} --version`,
+      boxVersion: `${id} --version`,
+      install: { command: `install ${id}` },
+      update: { command: `${id} update`, binary: id },
+    });
+
+    await runWatch(
+      { signal: controller.signal, pollMs: 1, debounceMs: 1, dailyUpdate: true },
+      {
+        observe: () => {
+          scans += 1;
+          if (scans > 1) controller.abort();
+          return accepted("one");
+        },
+        sleep: async () => {},
+        readState: () => null,
+        writeState: () => {},
+        writeLine: () => {},
+        now: () => DAY_MS * 10,
+        readUpdateState: () => null,
+        writeUpdateState: () => {},
+        runUpdate: (input, dependencies) =>
+          runUpdateCommand(input, {
+            ...dependencies,
+            // gh follows the operator version, codex an exact version, and claude the latest release.
+            tools: [tool("gh", "tool"), tool("claude", "agent"), tool("codex", "agent")],
+            integrations: [],
+            readConfig: () => ({ host: { transport: "ssh", destination: "user@box.example" }, tools: { codex: "0.156.1" } }),
+            createLink: () => ({
+              run: async (command) => {
+                if (!command.includes('cd "$HOME"')) boxCommands.push(command);
+                return { ok: true, address: "box", stdout: command.includes("--version") ? "1.0.0" : "", stderr: "" };
+              },
+            }),
+            local: {
+              run: async (command) => {
+                const script = command.argv.at(-1) ?? "";
+                if (script.startsWith("command -v ")) return { exitCode: 0, stdout: "", stderr: "", timedOut: false };
+                if (!script.includes('cd "$HOME"')) localCommands.push(script);
+                return { exitCode: 0, stdout: "2.0.0", stderr: "", timedOut: false };
+              },
+            },
+          }),
+      },
+    );
+
+    expect(boxCommands).toEqual(["claude update"]);
+    expect(localCommands).toEqual(["claude update"]);
   });
 });
