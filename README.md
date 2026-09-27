@@ -52,6 +52,22 @@ Ferry never copies logins. OAuth sessions stay on the machine that created them.
 
 ## Install
 
+Install Ferry on the operator machine. The box does not need Ferry, but you can install it there too.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dlhck/ferry/main/install.sh | sh
+```
+
+The script downloads the standalone executable for your platform from the latest GitHub release, verifies it against the `SHA256SUMS` file of the release, and installs it to `~/.local/bin/ferry`. It supports macOS and Linux on arm64 or x64. It needs `curl` or `wget`, and `sha256sum` or `shasum`. If `~/.local/bin` is not on your `PATH`, the script tells you the line to add to your shell profile.
+
+Run the same command again to update Ferry. The watch service keeps the old executable until it restarts, so restart it after an update: `launchctl kickstart -k gui/$(id -u)/dev.ferry.watch` on macOS, or `systemctl --user restart ferry-watch.service` on Linux.
+
+Set these variables to change the install:
+
+- `FERRY_VERSION` installs a specific release, for example `curl -fsSL https://raw.githubusercontent.com/dlhck/ferry/main/install.sh | FERRY_VERSION=v0.2.0 sh`.
+- `FERRY_INSTALL_DIR` installs to a different directory.
+- `FERRY_SKIP_CHECKSUM=1` installs a release that has no `SHA256SUMS` file, v0.1.1 or earlier. The script then does not verify the download.
+
 With npm:
 
 ```sh
@@ -73,7 +89,7 @@ bun link
 
 `bun link` puts `ferry` on your `PATH`. It runs `src/cli.ts` with bun.
 
-The release workflow attaches standalone executables to each GitHub release: `ferry-darwin-arm64`, `ferry-darwin-x64`, `ferry-linux-arm64`, and `ferry-linux-x64`. These executables do not need bun. Download the file for your platform, make it executable, and move it to a directory on your `PATH`:
+The release workflow attaches standalone executables to each GitHub release: `ferry-darwin-arm64`, `ferry-darwin-x64`, `ferry-linux-arm64`, and `ferry-linux-x64`, with their checksums in `SHA256SUMS`. These executables do not need bun. To install one without the script, download the file for your platform, make it executable, and move it to a directory on your `PATH`:
 
 ```sh
 chmod +x ferry-darwin-arm64
