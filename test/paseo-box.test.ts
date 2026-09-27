@@ -122,6 +122,29 @@ function paseoWith(version: string | null) {
   return createPaseo({ platform: "linux", linuxInstallDir: installDir, host, pollIntervalMs: 0, sleep: async () => {} });
 }
 
+/** A Paseo integration with no local app. `npm view` prints `latest`, or fails when it is null. */
+function paseoUnpinned(latest: string | null, calls: string[] = []) {
+  const host: HostAdapter = {
+    run: async ({ argv }) => {
+      calls.push(argv.join(" "));
+      return latest === null
+        ? { exitCode: 1, stdout: "", stderr: "npm error network", timedOut: false }
+        : { exitCode: 0, stdout: `${latest}\n`, stderr: "", timedOut: false };
+    },
+  };
+  return createPaseo({ platform: "linux", linuxInstallDir: "/nonexistent", host, pollIntervalMs: 0, sleep: async () => {} });
+}
+
+/** Mark the unit active, so `paseo daemon status --json` gives the box version. */
+function activeUnit(box: FakeBox): void {
+  writeFileSync(join(box.state, "active-ferry-paseo.service"), "");
+}
+
+const CURRENT = (version: string) =>
+  `Paseo ${version} is current. Ferry does not install it or restart ferry-paseo.service.`;
+const UNREADABLE =
+  "Warning: Ferry could not read the Paseo version on the box. Ferry installs Paseo and restarts ferry-paseo.service.";
+
 function touch(path: string, body = ""): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, body);
@@ -322,8 +345,19 @@ describe("Paseo disable", () => {
 });
 
 describe("Paseo update", () => {
-  test("installs the local version and restarts the unit", async () => {
+  test("does not install or restart when the box runs the local version", async () => {
     const box = fakeBox();
+    activeUnit(box);
+
+    const lines = await paseoWith("0.9.2").update(box, noProgress);
+
+    expect(box.log()).toEqual([]);
+    expect(lines).toEqual([CURRENT("0.9.2")]);
+  });
+
+  test("installs the local version and restarts the unit when the box version differs", async () => {
+    const box = fakeBox();
+    activeUnit(box);
 
     const lines = await paseoWith("0.9.3").update(box, noProgress);
 
@@ -332,6 +366,59 @@ describe("Paseo update", () => {
       "systemctl restart ferry-paseo.service",
     ]);
     expect(lines).toEqual(["Paseo 0.9.2 runs on the box."]);
+  });
+
+  test("updates with a warning when it cannot read the box version", async () => {
+    const box = fakeBox();
+
+    const lines = await paseoWith("0.9.2").update(box, noProgress);
+
+    expect(box.log()).toEqual([
+      `npm install -g --prefix ${box.home}/.local @getpaseo/cli@0.9.2`,
+      "systemctl restart ferry-paseo.service",
+    ]);
+    expect(lines).toEqual([UNREADABLE, "Paseo 0.9.2 runs on the box."]);
+  });
+
+  test("without a local app, compares the box version with the npm latest version", async () => {
+    const box = fakeBox();
+    activeUnit(box);
+    const calls: string[] = [];
+
+    const lines = await paseoUnpinned("0.9.2", calls).update(box, noProgress);
+
+    expect(calls).toEqual(["npm view @getpaseo/cli version"]);
+    expect(box.log()).toEqual([]);
+    expect(lines).toEqual([CURRENT("0.9.2")]);
+  });
+
+  test("without a local app, installs the npm latest version when the box version differs", async () => {
+    const box = fakeBox();
+    activeUnit(box);
+
+    const lines = await paseoUnpinned("0.10.0").update(box, noProgress);
+
+    expect(box.log()).toEqual([
+      `npm install -g --prefix ${box.home}/.local @getpaseo/cli@0.10.0`,
+      "systemctl restart ferry-paseo.service",
+    ]);
+    expect(lines).toEqual(["Paseo 0.9.2 runs on the box. The version is not pinned."]);
+  });
+
+  test("without a local app, installs the latest tag with a warning when npm view fails", async () => {
+    const box = fakeBox();
+    activeUnit(box);
+
+    const lines = await paseoUnpinned(null).update(box, noProgress);
+
+    expect(box.log()).toEqual([
+      `npm install -g --prefix ${box.home}/.local @getpaseo/cli@latest`,
+      "systemctl restart ferry-paseo.service",
+    ]);
+    expect(lines).toEqual([
+      "Warning: npm view @getpaseo/cli version failed. Ferry installs the npm latest tag and restarts ferry-paseo.service.",
+      "Paseo 0.9.2 runs on the box. The version is not pinned.",
+    ]);
   });
 });
 
@@ -391,6 +478,53 @@ describe("Paseo plan", () => {
 
     expect(await paseo.plan("disable")).not.toContain(uninstall);
     expect(await paseo.plan("purge")).toContain(uninstall);
+  });
+
+  test("the enable, disable and purge plans make no box call, also with a link", async () => {
+    const box = fakeBox();
+    const paseo = paseoWith("0.9.2");
+
+    await paseo.plan("enable", box);
+    await paseo.plan("disable", box);
+    await paseo.plan("purge", box);
+
+    expect(box.commands).toEqual([]);
+  });
+
+  test("the update plan shows the skip when the box runs the local version, and changes nothing", async () => {
+    const box = fakeBox();
+    activeUnit(box);
+
+    const lines = await paseoWith("0.9.2").plan("update", box);
+
+    expect(lines.slice(1)).toEqual([CURRENT("0.9.2")]);
+    expect(box.log()).toEqual([]);
+  });
+
+  test("the update plan shows the box commands when the box version differs", async () => {
+    const box = fakeBox();
+    activeUnit(box);
+
+    const lines = await paseoWith("0.9.3").plan("update", box);
+
+    expect(lines.slice(1)).toEqual([
+      "Box: Paseo 0.9.2",
+      "Box commands:",
+      '  npm install -g --prefix "$HOME/.local" @getpaseo/cli@0.9.3',
+      "  systemctl --user restart ferry-paseo.service",
+      "  systemctl --user is-active --quiet ferry-paseo.service && paseo daemon status --json",
+      "The restart stops the agents that run on the box.",
+    ]);
+    expect(box.log()).toEqual([]);
+  });
+
+  test("the update plan warns when it cannot read the box version", async () => {
+    const box = fakeBox();
+
+    const lines = await paseoWith("0.9.2").plan("update", box);
+
+    expect(lines[1]).toBe(UNREADABLE);
+    expect(lines).toContain("  systemctl --user restart ferry-paseo.service");
   });
 });
 
