@@ -408,6 +408,8 @@ describe("the deny set", () => {
     ["id_ed25519", "key", "private-key"],
     ["deploy.pem", "key", "private-key"],
     ["token.json", "{}", "token"],
+    ["daemon-keypair.json", "{}", "token"],
+    ["hub-credentials.json", "{}", "credentials"],
     ["Credentials.json", "{}", "credentials"],
     ["AUTH.JSON", "{}", "credentials"],
     [".ENV", "SECRET=1", "dotenv"],
@@ -602,6 +604,28 @@ describe("password and secret fields in config files", () => {
       expect(refusalOf(home).forbidden.map((hit) => hit.code)).toEqual(["secret-field"]);
     },
   );
+
+  test.each(["secretKeyB64", "db_password_hash", "OPENAI_API_KEY", "accessToken", "signingPrivateKeyPem"])(
+    "the key %s holds a secret word, so it matches too",
+    (key) => {
+      const home = makeHome();
+      write(home, ".claude/agents/config.json", formats.json(key, value));
+
+      const refusal = refusalOf(home);
+
+      expect(refusal.forbidden).toEqual([
+        { path: join(home, ".claude/agents/config.json"), code: "secret-field", reason: `key ${key} holds a password or secret` },
+      ]);
+      expect(JSON.stringify(refusal)).not.toContain(value);
+    },
+  );
+
+  test("a key with a secret word and a placeholder or number value does not refuse", () => {
+    const home = makeHome();
+    write(home, ".claude/agents/config.json", JSON.stringify({ secretKeyB64: "xxxx", maxTokens: 4096 }));
+
+    expect(seedOf(home).roots.find((root) => root.path === ".claude/agents")?.files).toHaveLength(1);
+  });
 
   const allowed = ["", "x", "XXXX", "0000", "xxxx-xxxx", "xx_xx"];
   const allowedCases = Object.keys(formats).flatMap((ext) => allowed.map((v) => [ext, v] as const));
