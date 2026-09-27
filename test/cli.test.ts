@@ -13,6 +13,7 @@ import { createPaseo } from "../src/integrations/paseo.ts";
 import { denyRules } from "../src/manifest.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 import { Link } from "../src/link.ts";
+import type { PartialOperatorConfig } from "../src/config.ts";
 import type { SyncInput, SyncResult } from "../src/sync.ts";
 import type { UninstallInput, UninstallResult } from "../src/uninstall.ts";
 import { lineProgress, noProgress, type Progress } from "../src/progress.ts";
@@ -700,6 +701,186 @@ describe("ferry --help", () => {
     expect(help).toContain("--project");
     expect(help).toContain("Global copy installs match Ferry's snapshot model");
     expect(help).toContain("ferry sync");
+  });
+});
+
+describe("--box", () => {
+  const HOST: PartialOperatorConfig = {
+    version: 1,
+    publisher: "operator",
+    snapshotUrl: "snapshot.git",
+    host: { transport: "ssh", destination: "dev@box-a.example" },
+    integrations: { paseo: true },
+  };
+  const BOXES: PartialOperatorConfig = {
+    version: 1,
+    publisher: "operator",
+    snapshotUrl: "snapshot.git",
+    defaultBox: "a",
+    integrations: { paseo: true },
+    tools: { codex: "operator" },
+    boxes: [
+      { name: "a", host: { transport: "ssh", destination: "dev@box-a.example" } },
+      { name: "b", host: { tailscale: "box-b", sshUser: "dev" }, integrations: { paseo: false }, tools: { codex: "latest" } },
+    ],
+  };
+
+  /** Run one command and return the config that the command reads, or undefined when the CLI passes none. */
+  async function readBy(config: PartialOperatorConfig, args: string[]): Promise<PartialOperatorConfig | null | undefined> {
+    let read: (() => PartialOperatorConfig | null) | undefined;
+    const capture = async (_input: unknown, dependencies?: { readConfig?: (home: string) => PartialOperatorConfig | null }) => {
+      read = dependencies?.readConfig ? () => dependencies.readConfig!("/home/user") : undefined;
+    };
+    await buildProgram({
+      readConfig: () => config,
+      runInstall: capture,
+      runAuth: capture,
+      runMove: capture,
+      runIntegration: capture,
+      runUpdate: capture,
+      runStatus: capture,
+      runSync: async (input, dependencies) => {
+        await capture(input, dependencies);
+        return { dryRun: false, published: false } as unknown as SyncResult;
+      },
+      createProgress: () => noProgress,
+      writeLine: () => {},
+    }).parseAsync(args, { from: "user" });
+    return read?.();
+  }
+
+  const B_VIEW: PartialOperatorConfig = {
+    version: 1,
+    publisher: "operator",
+    snapshotUrl: "snapshot.git",
+    host: { tailscale: "box-b", sshUser: "dev" },
+    integrations: { paseo: false },
+    tools: { codex: "latest" },
+  };
+
+  test("a [host] config without --box reaches each command as before", async () => {
+    for (const args of [["install"], ["auth", "codex"], ["move", "project"], ["integrations", "enable", "paseo"], ["sync"], ["status"], ["update"]]) {
+      expect(await readBy(HOST, args)).toBeUndefined();
+    }
+  });
+
+  test("single-target commands read the config as the named box", async () => {
+    for (const args of [["install"], ["auth", "codex"], ["move", "project"], ["integrations", "enable", "paseo"], ["integrations", "disable", "paseo"]]) {
+      expect(await readBy(BOXES, [...args, "--box", "b"])).toEqual(B_VIEW);
+    }
+  });
+
+  test("--box can come before the command", async () => {
+    expect(await readBy(BOXES, ["--box", "b", "install"])).toEqual(B_VIEW);
+  });
+
+  test("single-target commands use default_box, then the only box", async () => {
+    expect((await readBy(BOXES, ["install"]))?.host).toEqual({ transport: "ssh", destination: "dev@box-a.example" });
+    const onlyB = { ...BOXES, defaultBox: undefined, boxes: BOXES.boxes?.slice(1) };
+    expect((await readBy(onlyB, ["move", "project"]))?.host).toEqual({ tailscale: "box-b", sshUser: "dev" });
+  });
+
+  test("single-target commands refuse more than one --box, and no box with no default_box", async () => {
+    await expect(readBy(BOXES, ["install", "--box", "a", "--box", "b"])).rejects.toThrow(
+      "ferry install changes one box. Give --box once.",
+    );
+    await expect(readBy({ ...BOXES, defaultBox: undefined }, ["auth", "codex"])).rejects.toThrow("Add --box <name>");
+  });
+
+  test("an unknown or invalid box name is refused", async () => {
+    await expect(readBy(BOXES, ["install", "--box", "c"])).rejects.toThrow("unknown box c. Known boxes: a, b.");
+    await expect(readBy(HOST, ["sync", "--box", "a"])).rejects.toThrow("unknown box a. Known boxes: default.");
+    await expect(readBy(BOXES, ["install", "--box", "Box"])).rejects.toThrow("invalid box name Box");
+  });
+
+  test("a [host] config accepts --box default", async () => {
+    expect((await readBy(HOST, ["install", "--box", "default"]))?.host).toEqual(HOST.host);
+  });
+
+  test("multi-target commands refuse more than one box", async () => {
+    for (const command of ["sync", "status", "update"]) {
+      await expect(readBy(BOXES, [command])).rejects.toThrow(
+        `multi-box ${command} is not available yet. Select one box with --box <name>.`,
+      );
+      await expect(readBy(BOXES, [command, "--box", "a", "--box", "b"])).rejects.toThrow(
+        `multi-box ${command} is not available yet.`,
+      );
+    }
+  });
+
+  test("multi-target commands read the config as the one selected box", async () => {
+    for (const command of ["sync", "status", "update"]) {
+      expect(await readBy(BOXES, [command, "--box", "b"])).toEqual(B_VIEW);
+    }
+  });
+
+  test("watch refuses box tables and refuses --box", async () => {
+    const program = (config = BOXES) => buildProgram({ readConfig: () => config, runWatch: async () => {} });
+    await expect(program().parseAsync(["watch"], { from: "user" })).rejects.toThrow(
+      "multi-box watch is not available yet.",
+    );
+    await expect(
+      program({ ...BOXES, defaultBox: undefined, boxes: BOXES.boxes?.slice(0, 1) }).parseAsync(["watch"], { from: "user" }),
+    ).rejects.toThrow("ferry watch works only with a [host] config.");
+    await expect(program().parseAsync(["watch", "--box", "a"], { from: "user" })).rejects.toThrow(
+      "--box does not apply to ferry watch.",
+    );
+  });
+
+  test("commands that do not touch a box refuse --box", async () => {
+    const program = buildProgram({ readConfig: () => BOXES, runUninstall: () => ({ restored: 0, removed: 0 }) as UninstallResult });
+    await expect(program.parseAsync(["uninstall", "--yes", "--box", "a"], { from: "user" })).rejects.toThrow(
+      "--box does not apply to ferry uninstall.",
+    );
+    await expect(buildProgram({ readConfig: () => BOXES }).parseAsync(["box", "list", "--box", "a"], { from: "user" })).rejects.toThrow(
+      "--box does not apply to ferry box list.",
+    );
+  });
+
+  test("integrations enable with box tables writes the key of the box", async () => {
+    let setIntegration: ((id: "paseo", enabled: boolean) => void) | undefined;
+    await buildProgram({
+      readConfig: () => BOXES,
+      runIntegration: async (_input, dependencies) => {
+        setIntegration = dependencies?.setIntegration;
+      },
+    }).parseAsync(["integrations", "enable", "paseo", "--box", "b"], { from: "user" });
+    expect(setIntegration).toBeFunction();
+
+    let hostSet: unknown = "not set";
+    await buildProgram({
+      readConfig: () => HOST,
+      runIntegration: async (_input, dependencies) => {
+        hostSet = dependencies?.setIntegration;
+      },
+    }).parseAsync(["integrations", "enable", "paseo"], { from: "user" });
+    expect(hostSet).toBeUndefined();
+  });
+
+  test("init gets the one --box", async () => {
+    let received: InitInput | undefined;
+    const program = buildProgram({
+      readConfig: () => BOXES,
+      runInit: async (input) => {
+        received = input;
+        return { dryRun: false, leftovers: [], published: false };
+      },
+      writeLine: () => {},
+    });
+    await program.parseAsync(["init", "--box", "b"], { from: "user" });
+    expect(received?.box).toBe("b");
+  });
+
+  test("box list prints the boxes of the config", async () => {
+    const lines: string[] = [];
+    await buildProgram({ readConfig: () => BOXES, writeLine: (line) => lines.push(line) }).parseAsync(["box", "list"], {
+      from: "user",
+    });
+    expect(lines).toEqual([
+      "Box  Transport  Destination        Default",
+      "a    ssh        dev@box-a.example  yes",
+      "b    tailscale  dev@box-b",
+    ]);
   });
 });
 
