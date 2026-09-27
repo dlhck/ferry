@@ -10,6 +10,7 @@ import type { GitIdentity } from "../src/git-identity.ts";
 import type { InstallProgress, InstallRecipe, InstallResult } from "../src/install.ts";
 import type { LinkResult } from "../src/link.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
+import { noProgress } from "../src/progress.ts";
 import { recordProgress } from "./fake-progress.ts";
 
 const config = {
@@ -447,7 +448,7 @@ describe("auth command", () => {
     expect(output).toEqual([
       "URL: https://claude.com/cai/oauth/authorize?state=s",
       "Open the URL in a browser on this machine. After the login, paste the code that the browser shows.",
-      "prompt after start:Starting the claude login on the box,done",
+      "prompt after start:Starting the claude login on the box,done,pause",
       "finish code#state",
       "claude: logged in",
     ]);
@@ -702,6 +703,7 @@ function installDependencies(overrides: {
       run: overrides.run ?? (async () => ({ ok: true })),
     }),
     progress: {
+      ...noProgress,
       start: (step) => overrides.progress?.push(`start:${step}`),
       count: (current, total) => overrides.progress?.push(`count:${current}/${total}`),
       done: () => overrides.progress?.push("done"),

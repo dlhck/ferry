@@ -470,6 +470,7 @@ describe("ferry init", () => {
       "done",
       "start:Reading the SSH host keys of github.com on the box",
       "done",
+      "pause",
       "prompt",
       "start:Trusting the SSH host keys of github.com on the box",
       "done",
