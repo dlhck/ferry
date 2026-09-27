@@ -510,3 +510,99 @@ describe("ferry move --from-box", () => {
     expect(existsSync(join(w.operator, "Developer/app"))).toBe(false);
   });
 });
+
+describe("ferry move with integrations", () => {
+  const PASEO_ON = () => ({
+    host: { transport: "ssh" as const, destination: "user@box.example" },
+    integrations: { paseo: true },
+  });
+
+  /** A `paseo` on the box PATH that logs its arguments to ~/paseo.log and exits with `exitCode`. */
+  function boxPaseo(w: World, exitCode = 0): string {
+    const log = join(w.box, "paseo.log");
+    const bin = join(w.root, "box-bin", "paseo");
+    write(bin, `#!/bin/sh\necho "$*" >> "${log}"\n${exitCode === 0 ? "" : "echo directory_not_found >&2\n"}exit ${exitCode}\n`);
+    chmodSync(bin, 0o755);
+    return log;
+  }
+
+  test("registers the moved project in Paseo as its own step", async () => {
+    const w = world();
+    project(w, w.operator);
+    const log = boxPaseo(w);
+
+    const result = await move(w, { path: "Developer/app" }, { readConfig: PASEO_ON });
+
+    expect(result.error).toBeNull();
+    expect(readFileSync(log, "utf8")).toBe(`project create ${join(w.box, "Developer/app")}\n`);
+    expect(result.events.slice(-2)).toEqual(["start:Registering the project in Paseo", "done"]);
+    expect(result.lines.at(-1)).toMatch(/^Moved ~\/Developer\/app to the box:/);
+  });
+
+  for (const [label, config] of [
+    ["no [integrations] section", {}],
+    ["paseo = false", { integrations: { paseo: false } }],
+  ] as const) {
+    test(`runs no Paseo step and prints nothing about Paseo with ${label}`, async () => {
+      const w = world();
+      project(w, w.operator);
+      const log = boxPaseo(w);
+
+      const result = await move(
+        w,
+        { path: "Developer/app", remove: true },
+        { readConfig: () => ({ host: { transport: "ssh", destination: "user@box.example" }, ...config }) },
+      );
+
+      expect(result.error).toBeNull();
+      expect(existsSync(log)).toBe(false);
+      expect(result.events.join("\n")).not.toMatch(/paseo/i);
+      expect(result.lines.join("\n")).not.toMatch(/paseo/i);
+    });
+  }
+
+  test("a failed Paseo step only warns, and the move completes", async () => {
+    const w = world();
+    project(w, w.operator);
+    boxPaseo(w, 1);
+
+    const result = await move(w, { path: "Developer/app" }, { readConfig: PASEO_ON });
+
+    expect(result.error).toBeNull();
+    expect(existsSync(join(w.box, "Developer/app/README.md"))).toBe(true);
+    expect(result.events.slice(-2)).toEqual(["start:Registering the project in Paseo", "fail"]);
+    expect(result.lines).toContain(
+      "WARNING: Ferry could not register ~/Developer/app in Paseo: paseo project create failed: directory_not_found. The move is complete.",
+    );
+  });
+
+  test("--remove prints a hint and never deletes the source Paseo project", async () => {
+    const w = world();
+    project(w, w.operator);
+    const log = boxPaseo(w);
+
+    const result = await move(w, { path: "Developer/app", remove: true }, { readConfig: PASEO_ON });
+
+    expect(result.error).toBeNull();
+    expect(readFileSync(log, "utf8")).not.toContain("delete");
+    expect(w.commands.some(({ command }) => /project (delete|archive)/.test(command))).toBe(false);
+    expect(result.lines).toContain(
+      "Paseo still lists ~/Developer/app on this machine. Ferry does not remove it. To remove it from Paseo, run paseo project ls to find its ID, then paseo project delete <id>. The files stay.",
+    );
+  });
+
+  test("--from-box does not register the project on this machine, and --remove hints for the box", async () => {
+    const w = world();
+    project(w, w.box);
+    const log = boxPaseo(w);
+
+    const result = await move(w, { path: "Developer/app", fromBox: true, remove: true }, { readConfig: PASEO_ON });
+
+    expect(result.error).toBeNull();
+    expect(existsSync(log)).toBe(false);
+    expect(result.events.join("\n")).not.toContain("Registering");
+    expect(result.lines).toContain(
+      "Paseo still lists ~/Developer/app on the box. Ferry does not remove it. To remove it from Paseo, run paseo project ls to find its ID, then paseo project delete <id>. The files stay.",
+    );
+  });
+});
