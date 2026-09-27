@@ -44,6 +44,7 @@ import {
   type UninstallInput,
   type UninstallResult,
 } from "./uninstall.ts";
+import { runSkillsAdd, SkillsAddError, type RunProcess } from "./skills-add.ts";
 
 const DESCRIPTION = `Ferry keeps a remote Linux agent box in the same shape as this machine.
 
@@ -74,6 +75,7 @@ type CliDependencies = {
     input?: WatchServiceInput,
     dependencies?: WatchServiceDependencies,
   ) => Promise<WatchServiceResult>;
+  readonly runProcess?: RunProcess;
   readonly readConfig?: () => PartialOperatorConfig | null;
   readonly prompt?: InitPrompt;
   readonly approveHostKeys?: (request: SnapshotHostKeyApproval) => Promise<boolean>;
@@ -215,6 +217,28 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       const result = await (dependencies.installWatchService ?? installWatchService)();
       (dependencies.writeLine ?? console.log)(`Installed ${result.manager} service at ${result.path}`);
     });
+
+  program
+    .command("skills")
+    .description("Install skills into the global harness roots that Ferry manages")
+    .command("add")
+    .description(`Run npx skills add as a global copy install.
+
+Ferry adds -g and --copy unless you pass them.
+Global copy installs match Ferry's snapshot model. The skill is a real
+directory in a global harness root, and the next sync links it to the store.
+Put arguments after -- to keep Ferry from reading them.
+Run ferry sync or ferry watch to publish the skill.`)
+    .argument("<source>", "skill source, such as owner/repo or a git URL")
+    .argument("[args...]", "other npx skills add arguments, passed through unchanged")
+    .option("--project", "install into the current project and do not add -g")
+    .allowUnknownOption()
+    .action(async (source: string, args: string[], options: { project?: boolean }) => {
+      await runSkillsAdd(
+        { args: [source, ...args], project: options.project === true },
+        dependencies.runProcess,
+      );
+    });
   return program;
 }
 
@@ -229,7 +253,7 @@ export async function runCli(
     if (!(error instanceof InstallAuthCommandError)) {
       (runtime.renderError ?? renderError)(errorMessage(error));
     }
-    (runtime.setExitCode ?? setExitCode)(1);
+    (runtime.setExitCode ?? setExitCode)(error instanceof SkillsAddError ? error.exitCode : 1);
   }
 }
 

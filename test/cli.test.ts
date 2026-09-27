@@ -440,4 +440,107 @@ describe("ferry --help", () => {
       "Installed systemd service at /home/me/.config/systemd/user/ferry-watch.service",
     ]);
   });
+
+  test("wires skills add to npx with global copy flags and passes other arguments through", async () => {
+    const calls: (readonly string[])[] = [];
+    const program = buildProgram({
+      readConfig: () => {
+        throw new Error("config read");
+      },
+      runProcess: async (argv) => {
+        calls.push(argv);
+        return 0;
+      },
+    });
+
+    await program.parseAsync(
+      [
+        "skills",
+        "add",
+        "vercel-labs/agent-skills",
+        "--skill",
+        "frontend-design",
+        "-a",
+        "claude-code",
+        "-y",
+      ],
+      { from: "user" },
+    );
+
+    expect(calls).toEqual([
+      [
+        "npx",
+        "skills",
+        "add",
+        "vercel-labs/agent-skills",
+        "--skill",
+        "frontend-design",
+        "-a",
+        "claude-code",
+        "-y",
+        "-g",
+        "--copy",
+      ],
+    ]);
+  });
+
+  test("skills add --project omits -g and does not pass --project to npx", async () => {
+    const calls: (readonly string[])[] = [];
+    const program = buildProgram({
+      runProcess: async (argv) => {
+        calls.push(argv);
+        return 0;
+      },
+    });
+
+    await program.parseAsync(["skills", "add", "owner/repo", "-y", "--project"], { from: "user" });
+
+    expect(calls).toEqual([["npx", "skills", "add", "owner/repo", "-y", "--copy"]]);
+  });
+
+  test("skills add passes arguments after -- through unchanged", async () => {
+    const calls: (readonly string[])[] = [];
+    const program = buildProgram({
+      runProcess: async (argv) => {
+        calls.push(argv);
+        return 0;
+      },
+    });
+
+    await program.parseAsync(["skills", "add", "--", "owner/repo", "--project", "--help"], {
+      from: "user",
+    });
+
+    expect(calls).toEqual([
+      ["npx", "skills", "add", "owner/repo", "--project", "--help", "-g", "--copy"],
+    ]);
+  });
+
+  test("a failed npx skills add sets the child exit code", async () => {
+    const errors: string[] = [];
+    const exitCodes: number[] = [];
+
+    await runCli(
+      ["skills", "add", "owner/repo"],
+      { runProcess: async () => 3 },
+      {
+        renderError: (message) => errors.push(message),
+        setExitCode: (code) => exitCodes.push(code),
+      },
+    );
+
+    expect(errors).toEqual(["npx skills add exited with code 3."]);
+    expect(exitCodes).toEqual([3]);
+  });
+
+  test("skills add help states that global copies match the snapshot model", () => {
+    const help = buildProgram().commands
+      .find((command) => command.name() === "skills")
+      ?.commands.find((command) => command.name() === "add")
+      ?.helpInformation();
+
+    expect(help).toContain("--project");
+    expect(help).toContain("Global copy installs match Ferry's snapshot model");
+    expect(help).toContain("ferry sync");
+  });
 });

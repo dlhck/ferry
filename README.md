@@ -35,6 +35,18 @@ Add `--dry-run` to inspect the SSH probe, snapshot publish, config write, and ma
 
 Run `ferry uninstall` to remove the local store and config, remove Ferry-managed symlinks, and restore the paths that existed before the first `ferry init`. The command refuses to write if a managed symlink was replaced with local content. Backups from older Ferry versions are restored when Ferry can identify one unambiguous backup for a managed path. The command asks for confirmation first. Add `--yes` to skip the prompt.
 
+## Add skills
+
+After `ferry init`, use `ferry skills add` to install skills. The command runs `npx skills add` and passes your arguments through unchanged:
+
+```sh
+ferry skills add vercel-labs/agent-skills --skill frontend-design -a claude-code -y
+```
+
+Ferry adds `-g` and `--copy` if you do not pass them. The example runs `npx skills add vercel-labs/agent-skills --skill frontend-design -a claude-code -y -g --copy`. A global copy install puts each skill in a real directory in a global harness root, and the next sync links it to the store. A plain `npx skills add` installs into the current project, and Ferry does not see that install. Add `--project` to keep a project install. Ferry then does not add `-g`. Put arguments after `--` to keep Ferry from reading them. A failed `npx skills add` makes Ferry exit with the same code.
+
+The install does not publish the skill. Run `ferry sync` or keep `ferry watch` running to publish it to the snapshot and apply it on the box.
+
 ## Automatic sync
 
 `ferry watch` runs in the foreground. It watches the Manifest identity for every configured global skill root and `~/AGENTS.md`. It does not watch project-local skills. After an accepted change stays stable for one second, Ferry runs the normal sync without `--force`. Network, SSH, and Git failures retry with a backoff capped at 60 seconds. Manifest refusals name the local path and wait for another edit.
