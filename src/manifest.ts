@@ -39,6 +39,19 @@ const DENY_RULES = {
     reason: "symlink that leaves the skill directory",
     verdict: "refuse",
   },
+  "github-token": { code: "github-token", reason: "GitHub token in file content", verdict: "refuse" },
+  "anthropic-key": {
+    code: "anthropic-key",
+    reason: "Anthropic API key in file content",
+    verdict: "refuse",
+  },
+  "openai-key": { code: "openai-key", reason: "OpenAI API key in file content", verdict: "refuse" },
+  "slack-token": { code: "slack-token", reason: "Slack token in file content", verdict: "refuse" },
+  "aws-access-key": {
+    code: "aws-access-key",
+    reason: "AWS access key ID in file content",
+    verdict: "refuse",
+  },
   history: { code: "history", reason: "session history", verdict: "skip" },
   database: { code: "database", reason: "sqlite or other database file", verdict: "skip" },
   cache: { code: "cache", reason: "cache or build output", verdict: "skip" },
@@ -84,6 +97,15 @@ const DATABASE_EXTS = [".sqlite", ".sqlite3", ".db"];
 const CACHE_DIRS = new Set([".git", "node_modules", ".cache", "__pycache__"]);
 const SETTINGS_NAMES = new Set(["settings.json", "settings.local.json", "mcp.json", ".mcp.json"]);
 const PRIVATE_KEY_HEADER = /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/;
+// A bare prefix in prose is not a token. Each pattern needs a token-length tail.
+const TOKEN_PATTERNS = [
+  [/\bgh[opsu]_[A-Za-z0-9]{30,}/, DENY_RULES["github-token"]],
+  [/\bgithub_pat_[A-Za-z0-9_]{40,}/, DENY_RULES["github-token"]],
+  [/\bsk-ant-[A-Za-z0-9_-]{20,}/, DENY_RULES["anthropic-key"]],
+  [/\bsk-proj-[A-Za-z0-9_-]{20,}/, DENY_RULES["openai-key"]],
+  [/\bxox[bp]-[A-Za-z0-9-]{20,}/, DENY_RULES["slack-token"]],
+  [/\bAKIA[0-9A-Z]{16}\b/, DENY_RULES["aws-access-key"]],
+] as const satisfies readonly (readonly [RegExp, DenyRule])[];
 
 /** A file whose path relative to its skill directory is `path`. */
 export type SeedFile = { readonly path: string; readonly bytes: Uint8Array };
@@ -152,6 +174,7 @@ export function readSeed(home: string, harnesses: readonly HarnessDescriptor[]):
   }
 
   const instructions = readInstructions(home, leftovers);
+  if (instructions) forbidden.push(...tokenHits(join(home, INSTRUCTION_FILE), instructions.bytes));
 
   if (clashes.length > 0 || forbidden.length > 0) {
     return { ok: false, clashes, forbidden };
@@ -267,8 +290,23 @@ function walk(root: string, dir: string, rootReal: string, seen: Set<string>, sc
       scan.forbidden.push(note(path, DENY_RULES["private-key"]));
       continue;
     }
+    const tokens = tokenHits(path, bytes);
+    if (tokens.length > 0) {
+      scan.forbidden.push(...tokens);
+      continue;
+    }
     scan.files.push({ path: relative(root, path), bytes });
   }
+}
+
+/** Name each token kind found in `bytes`. The hit never holds the token itself. */
+function tokenHits(path: string, bytes: Uint8Array): ForbiddenHit[] {
+  const text = Buffer.from(bytes).toString("latin1");
+  const hits = new Map<string, ForbiddenHit>();
+  for (const [pattern, rule] of TOKEN_PATTERNS) {
+    if (!hits.has(rule.code) && pattern.test(text)) hits.set(rule.code, note(path, rule));
+  }
+  return [...hits.values()];
 }
 
 /**
