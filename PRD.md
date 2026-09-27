@@ -30,7 +30,7 @@ Ferry is a small CLI I run on the operator machine (macOS or Linux). It is MIT l
 
 `ferry status` reports link reachability, whether the store tip matches the box clone, whether harness paths are the expected symlinks, which CLIs still need a login, and the resolved address or destination plus the usual Paseo daemon port. It writes nothing. `--json` exists for scripts.
 
-The portable set is user-global skills, one `AGENTS.md`, the Claude subagents and commands (`~/.claude/agents`, `~/.claude/commands`), and an allowlist of Claude settings keys (`enabledPlugins`, `extraKnownMarketplaces`, `permissions`, and `hooks` of `~/.claude/settings.json`). The forbidden set is credentials, host tokens, session history, caches, databases, MCP tokens, and whole settings files. Project-local skill directories stay in the project git repo.
+The portable set is user-global skills, one `AGENTS.md`, the Claude subagents and commands (`~/.claude/agents`, `~/.claude/commands`), and an allowlist of Claude settings keys (`enabledPlugins`, `extraKnownMarketplaces`, `permissions`, and `hooks` of `~/.claude/settings.json`), and the name, transport, and HTTPS URL of each remote MCP server of Claude, Codex, and Cursor Agent. The forbidden set is credentials, host tokens, session history, caches, databases, MCP tokens, and whole settings files. Project-local skill directories stay in the project git repo.
 
 First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link and apply. I add the Paseo host myself.
 
@@ -126,7 +126,7 @@ First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link
 
 45. As an operator, I want project-local skill directories left alone, so that those files travel with the project clone.
 
-46. As an operator, I want MCP configs and portable settings left out of v1, so that secrets and format translation stay out of the first ship.
+46. As an operator, I want local MCP servers, MCP tokens, and settings beyond the carried key list left out of v1, so that secrets and format translation stay out of the first ship. I want my remote MCP servers declared on the box and a login I finish in my browser, so that agents on the box can use Linear.
 
 47. As an operator, I want a deleted skill on the laptop to disappear from managed symlink targets on the box, so that a rename does not leave the old name.
 
@@ -262,7 +262,8 @@ First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link
 
 - Secrets. No age vault, no 1Password. Token values stay out of ferry output.
 
-- MCP is not in the snapshot. Of the settings files, only an explicit key list of a builtin harness is in the snapshot. For Claude, the list is `enabledPlugins`, `extraKnownMarketplaces`, `permissions`, and `hooks`. Keys that can hold secrets, such as `env` and `apiKeyHelper`, are not on the list. The box merges these keys into its settings file, keeps its other keys, removes a listed key the operator does not have, and installs the declared plugins with the `claude` CLI. Manifest leaves out each hook entry whose command refers to a home path outside the managed set: a `~/`, `$HOME/`, or `${HOME}/` word outside the managed skill roots, extra roots, and instruction files, or an absolute path under the operator home. It removes a matcher group with no hooks left and an event with no groups left, and carries all other hooks. Such a hook does not refuse the snapshot. `ferry sync` and `ferry sync --dry-run` name each hook that Manifest leaves out. `ferry sync --dry-run` lists the carried keys that differ from the last publish in the local store, without a remote call.
+- Sync reads the remote MCP servers of Claude (`mcpServers` of `~/.claude.json`), Codex (`[mcp_servers]` of `~/.codex/config.toml`), and Cursor Agent (`mcpServers` of `~/.cursor/mcp.json`) and declares them on the box. The snapshot repository does not hold them. A server keeps only its name, transport, and HTTPS URL. Manifest skips a local or non-HTTPS server, and sync names each one. Manifest refuses a remote server with headers, a bearer token variable, environment values, arguments, a credential in the URL, or a token, and a server name with characters other than letters, digits, `.`, `_`, and `-`. The box declares a server with `claude mcp add` or `codex mcp add`, or writes it into `~/.cursor/mcp.json`. It keeps a declared server with the same URL and never removes a box server. `ferry status` lists the box MCP servers that need a login. `ferry auth <tool> --mcp <server>` starts the login on the box, prints the authorize URL, and forwards the loopback callback port, so the token stays on the box.
+- Of the settings files, only an explicit key list of a builtin harness is in the snapshot. For Claude, the list is `enabledPlugins`, `extraKnownMarketplaces`, `permissions`, and `hooks`. Keys that can hold secrets, such as `env` and `apiKeyHelper`, are not on the list. The box merges these keys into its settings file, keeps its other keys, removes a listed key the operator does not have, and installs the declared plugins with the `claude` CLI. Manifest leaves out each hook entry whose command refers to a home path outside the managed set: a `~/`, `$HOME/`, or `${HOME}/` word outside the managed skill roots, extra roots, and instruction files, or an absolute path under the operator home. It removes a matcher group with no hooks left and an event with no groups left, and carries all other hooks. Such a hook does not refuse the snapshot. `ferry sync` and `ferry sync --dry-run` name each hook that Manifest leaves out. `ferry sync --dry-run` lists the carried keys that differ from the last publish in the local store, without a remote call.
 
 - Concurrency. One sync at a time per host.
 
@@ -296,7 +297,7 @@ Prior art: none in this repository. The first tests are these interface tests.
 
 - Copy or proxy of Claude, Codex, `gh`, Cursor Agent, or Pi sessions from the operator machine onto the box.
 - 1Password, `op run`, age vaults, or any secret manager.
-- MCP declarations, Linear OAuth as a ferry verb, and settings sync beyond the carried key list.
+- Local MCP servers (a `command`, `args`, or `env`), MCP tokens, MCP servers of Pi through third-party packages, and settings sync beyond the carried key list.
 - agentsync-style projection of one config format into every harness.
 - skillshare, chezmoi, or other tools as a required runtime.
 - Herdr remote attach, SSH_AUTH_SOCK repair, or tmux-style sessions.
