@@ -268,12 +268,15 @@ Other box commands:
 Select a box with the `--box <name>` option:
 
 - `install`, `auth`, `move`, and `integrations enable|disable` change one box. They use the box of `--box`, else `default_box`, else the only box. If there is more than one box and no `default_box`, they stop and ask for `--box`. They accept one `--box` only.
-- With box tables, `integrations enable|disable` writes the key to `[box.<name>.integrations]` of that box.
+- With box tables, `integrations enable|disable` writes the key to `[box.<name>.integrations]` of that box. The command prints the name of the table that it changed.
 - `status` works on all boxes, or on the boxes of `--box`. Give `--box` more than one time to select more boxes. See [Status](#status).
-- `sync` and `update` work on one box for now. With more than one box, give `--box <name>`. Support for more than one box at a time comes in a later version.
+- `update` works on all boxes, or on the boxes of `--box`. Ferry updates the boxes one after the other. Each box gets the tool versions of its own policy, and the Paseo update only if Paseo is on for that box. The agent CLI updates on this machine run one time, not one time for each box. If a box is offline or an update on a box fails, Ferry continues with the other boxes. At the end, Ferry prints one result line for each box and exits with code 1 if a box failed. With more than one box, each box line starts with `[<name>]`.
+- `integrations` (the list) shows one block for each box, with the state of each integration on that box and the connect steps for that box. `--box` limits the list to the named boxes.
+- `tools` adds one `BOX <name>` column for each box, or for each box of `--box`. The column shows the version policy of that box. `ferry tools` reads this machine only, so it does not show the version on the box.
+- `sync` works on one box for now. With more than one box, give `--box <name>`. Support for more than one box at a time comes in a later version.
 - `ferry watch` works only with a `[host]` config for now.
 - With box tables, `ferry init` runs again for the box of `--box`, else `default_box`, else the only box. It keeps all box tables and `default_box`. It does not accept `--host`, `--ssh-user`, or `--ssh-destination`. Use `ferry box add` to add a box.
-- Other commands, such as `uninstall`, `tools`, and `skills add`, do not accept `--box`.
+- Other commands, such as `uninstall` and `skills add`, do not accept `--box`.
 
 ## Add skills
 
