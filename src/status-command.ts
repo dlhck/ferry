@@ -4,6 +4,11 @@ import { apply, type ApplyPlan, type RemoteApplyInput } from "./apply.ts";
 import { AuthStart, type AuthLink, type AuthStatusReport } from "./auth-start.ts";
 import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
 import { Link, type LinkOptions } from "./link.ts";
+import {
+  BOX_GIT_IDENTITY_COMMAND,
+  readOperatorGitIdentity,
+  type GitIdentity,
+} from "./git-identity.ts";
 import { denyRules, type DenyRuleDescription } from "./manifest.ts";
 import {
   loadRegistry,
@@ -37,6 +42,7 @@ export type StatusCommandDependencies = {
   readonly home: () => string;
   readonly createLink: (options: LinkOptions) => StatusLink;
   readonly createStore: (home: string) => StatusStore;
+  readonly readOperatorGitIdentity: (home: string) => Promise<GitIdentity>;
   readonly inspectApply: (input: RemoteApplyInput) => Promise<ApplyPlan>;
   readonly createAuthStart: (
     link: StatusLink,
@@ -76,7 +82,11 @@ export async function runStatusCommand(
         const checkout = posix.join(required(boxHome), STORE_RELATIVE_PATH);
         return link.run(`${boxChangesCommand(checkout)} 2>/dev/null || true`);
       },
+      async readBoxGitIdentity() {
+        return link.run(BOX_GIT_IDENTITY_COMMAND);
+      },
     },
+    operator: { gitIdentity: () => resolved.readOperatorGitIdentity(home) },
     store,
     apply: {
       plan() {
@@ -113,6 +123,8 @@ export function formatStatus(report: StatusReport): string {
     "",
     boxCheckout(report),
     ...report.boxCheckout.changes.map((path) => `  - ${path}`),
+    "",
+    gitIdentity(report),
     "",
     managedPaths(report),
     ...report.managedPaths.unhealthy.map((action) => `  - ${managedPath(action)}`),
@@ -158,6 +170,8 @@ const defaultDependencies: StatusCommandDependencies = {
   createLink: (options) => new Link(options),
   createStore: (home) =>
     new Store(new RealGitRunner(), join(home, STORE_RELATIVE_PATH), ""),
+  readOperatorGitIdentity: (home) =>
+    readOperatorGitIdentity(new RealGitRunner(), join(home, STORE_RELATIVE_PATH)),
   inspectApply: (input) => apply(input),
   createAuthStart: (link, tools) => new AuthStart(link, tools),
   denyRules,
@@ -215,6 +229,22 @@ function boxCheckout(report: StatusReport): string {
   return report.boxCheckout.dirty
     ? `Box checkout: DIRTY (${report.boxCheckout.changes.length}), the next sync discards these changes`
     : "Box checkout: CLEAN";
+}
+
+function gitIdentity(report: StatusReport): string {
+  const { box, operator, boxConfigured, matchesOperator } = report.gitIdentity;
+  if (box === null) return "Box git identity: unavailable";
+  if (!boxConfigured) {
+    const missing = [box.name === null && "user.name", box.email === null && "user.email"];
+    return `Box git identity: MISSING ${missing.filter(Boolean).join(" and ")}, run ferry install`;
+  }
+  if (matchesOperator) return `Box git identity: MATCHES operator (${person(box)})`;
+  if (operator === null) return `Box git identity: SET (${person(box)})`;
+  return `Box git identity: DIFFERENT from operator (${person(box)}, operator: ${person(operator)})`;
+}
+
+function person(identity: GitIdentity): string {
+  return `${identity.name ?? "no user.name"} <${identity.email ?? "no user.email"}>`;
 }
 
 function managedPaths(report: StatusReport): string {

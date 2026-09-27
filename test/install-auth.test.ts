@@ -6,7 +6,9 @@ import {
   type AuthCommandDependencies,
   type InstallCommandDependencies,
 } from "../src/install-auth.ts";
+import type { GitIdentity } from "../src/git-identity.ts";
 import type { InstallProgress, InstallRecipe, InstallResult } from "../src/install.ts";
+import type { LinkResult } from "../src/link.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 
 const config = {
@@ -38,17 +40,22 @@ describe("install command", () => {
       }),
     );
 
-    expect(outputAtPrompt).toEqual(plan.map((recipe) => `${recipe.tool}: ${recipe.command}`));
+    expect(outputAtPrompt).toEqual([
+      ...plan.map((recipe) => `${recipe.tool}: ${recipe.command}`),
+      `git identity: ${identityCommand}`,
+    ]);
   });
 
   test("does not run when confirmation is false", async () => {
     let runs = 0;
+    const linkRuns: string[] = [];
 
     await runInstallCommand(
       { yes: false },
       installDependencies({
         plan,
         confirm: async () => false,
+        linkRuns,
         run: async () => {
           runs += 1;
           return { ok: true };
@@ -57,6 +64,64 @@ describe("install command", () => {
     );
 
     expect(runs).toBe(0);
+    expect(linkRuns).toEqual([]);
+  });
+
+  test("sets a missing box git identity after the tools install", async () => {
+    const events: string[] = [];
+
+    await runInstallCommand(
+      { yes: true },
+      installDependencies({
+        plan,
+        linkRuns: events,
+        run: async () => {
+          events.push("install.run");
+          return { ok: true };
+        },
+      }),
+    );
+
+    expect(events).toEqual(["install.run", identityCommand]);
+  });
+
+  test("skips the box git identity when the operator has none", async () => {
+    const output: string[] = [];
+    const linkRuns: string[] = [];
+
+    await runInstallCommand(
+      { yes: true },
+      installDependencies({
+        plan,
+        output,
+        linkRuns,
+        operatorIdentity: { name: "Operator", email: null },
+      }),
+    );
+
+    expect(output).toContain(
+      "git identity: skipped, the operator machine has no git user.name and user.email",
+    );
+    expect(linkRuns).toEqual([]);
+  });
+
+  test("fails safely when the box git identity cannot be set", async () => {
+    const output: string[] = [];
+
+    await expect(
+      runInstallCommand(
+        { yes: true },
+        installDependencies({
+          plan,
+          output,
+          linkResult: {
+            ok: false,
+            error: { code: "command-failed", origin: "box", message: "raw stderr" },
+          },
+        }),
+      ),
+    ).rejects.toThrow("Install stopped because Link reported command-failed from box.");
+    expect(output.join("\n")).not.toContain("raw stderr");
   });
 
   test("--yes skips confirmation and runs once", async () => {
@@ -354,9 +419,16 @@ describe("auth command", () => {
   });
 });
 
+const identityCommand =
+  "{ git config --global --get user.name >/dev/null || git config --global user.name 'Operator O'\"'\"'Neil'; } && " +
+  "{ git config --global --get user.email >/dev/null || git config --global user.email 'operator@example.com'; }";
+
 function installDependencies(overrides: {
   readonly plan: readonly InstallRecipe[];
   readonly output?: string[];
+  readonly linkRuns?: string[];
+  readonly linkResult?: LinkResult;
+  readonly operatorIdentity?: GitIdentity;
   readonly progress?: string[];
   readonly confirm?: () => Promise<boolean | symbol | undefined>;
   readonly run?: (
@@ -367,7 +439,15 @@ function installDependencies(overrides: {
   return {
     tools: BUILTIN_TOOLS,
     readConfig: () => config,
-    createLink: fakeLink,
+    createLink: () => ({
+      ...fakeLink(),
+      run: async (command) => {
+        overrides.linkRuns?.push(command);
+        return overrides.linkResult ?? { ok: true, address: "builder", stdout: "", stderr: "" };
+      },
+    }),
+    readOperatorGitIdentity: async () =>
+      overrides.operatorIdentity ?? { name: "Operator O'Neil", email: "operator@example.com" },
     createInstall: () => ({
       plan: () => overrides.plan,
       run: overrides.run ?? (async () => ({ ok: true })),

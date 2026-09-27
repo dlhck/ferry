@@ -1,5 +1,6 @@
 import type { ApplyAction, ApplyPlan } from "./apply.ts";
 import type { AuthProviderStatus, AuthStatusReport } from "./auth-start.ts";
+import { parseGitIdentity, type GitIdentity } from "./git-identity.ts";
 import type { LinkError, LinkResult } from "./link.ts";
 import type { DenyRuleDescription } from "./manifest.ts";
 import type { TipReport } from "./store.ts";
@@ -20,6 +21,10 @@ export type StatusDependencies = {
     probe(): Promise<LinkResult>;
     readBoxTip(): Promise<LinkResult>;
     readBoxChanges(): Promise<LinkResult>;
+    readBoxGitIdentity(): Promise<LinkResult>;
+  };
+  readonly operator: {
+    gitIdentity(): Promise<GitIdentity>;
   };
   readonly store: {
     inspectTips(boxTip: string | null): Promise<TipReport>;
@@ -46,6 +51,13 @@ export type StatusReport = {
   readonly boxCheckout: {
     readonly dirty: boolean | null;
     readonly changes: readonly string[];
+    readonly error: LinkError | StatusDependencyError | null;
+  };
+  readonly gitIdentity: {
+    readonly box: GitIdentity | null;
+    readonly operator: GitIdentity | null;
+    readonly boxConfigured: boolean | null;
+    readonly matchesOperator: boolean | null;
     readonly error: LinkError | StatusDependencyError | null;
   };
   readonly managedPaths: {
@@ -122,6 +134,34 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     if (boxCheckoutError) errors.push(boxCheckoutError);
   }
 
+  let gitIdentityError: LinkError | StatusDependencyError | null = null;
+  let boxIdentity: GitIdentity | null = null;
+  if (online) {
+    try {
+      const result = await dependencies.link.readBoxGitIdentity();
+      if (result.ok) boxIdentity = parseGitIdentity(result.stdout);
+      else gitIdentityError = result.error;
+    } catch (cause) {
+      gitIdentityError = dependencyError("box", cause);
+    }
+    if (gitIdentityError) errors.push(gitIdentityError);
+  }
+  let operatorIdentity: GitIdentity | null = null;
+  try {
+    operatorIdentity = await dependencies.operator.gitIdentity();
+  } catch (cause) {
+    const operatorError = dependencyError("operator", cause);
+    gitIdentityError ??= operatorError;
+    errors.push(operatorError);
+  }
+  const boxConfigured = boxIdentity && boxIdentity.name !== null && boxIdentity.email !== null;
+  const matchesOperator =
+    boxIdentity && operatorIdentity
+      ? Boolean(boxConfigured) &&
+        boxIdentity.name === operatorIdentity.name &&
+        boxIdentity.email === operatorIdentity.email
+      : null;
+
   let storeError: StatusDependencyError | null = null;
   let store = emptyTips(boxTip);
   try {
@@ -167,6 +207,13 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     link: { online, address, error: linkError },
     store: { ...store, error: storeError },
     boxCheckout: { dirty, changes, error: boxCheckoutError },
+    gitIdentity: {
+      box: boxIdentity,
+      operator: operatorIdentity,
+      boxConfigured,
+      matchesOperator,
+      error: gitIdentityError,
+    },
     managedPaths: { allHealthy, unhealthy, error: managedPathsError },
     auth: { providers, loginRequired, error: authError },
     paseo: {

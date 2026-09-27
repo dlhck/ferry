@@ -72,6 +72,16 @@ function dependencies(
         calls.reads.push("link.readBoxChanges");
         return online("100.64.0.8", " M skills/tdd/SKILL.md\0?? skills/scratch/SKILL.md\0");
       },
+      async readBoxGitIdentity() {
+        calls.reads.push("link.readBoxGitIdentity");
+        return online("100.64.0.8", "user.name Box Agent\nuser.email box@example.com\n");
+      },
+    },
+    operator: {
+      async gitIdentity() {
+        calls.reads.push("operator.gitIdentity");
+        return { name: "Operator O'Neil", email: "operator@example.com" };
+      },
     },
     store: {
       async inspectTips(boxTip) {
@@ -123,6 +133,13 @@ describe("Status composer", () => {
         changes: ["skills/scratch/SKILL.md", "skills/tdd/SKILL.md"],
         error: null,
       },
+      gitIdentity: {
+        box: { name: "Box Agent", email: "box@example.com" },
+        operator: { name: "Operator O'Neil", email: "operator@example.com" },
+        boxConfigured: true,
+        matchesOperator: false,
+        error: null,
+      },
       managedPaths: {
         allHealthy: false,
         unhealthy: [
@@ -166,6 +183,8 @@ describe("Status composer", () => {
       "link.probe",
       "link.readBoxTip",
       "link.readBoxChanges",
+      "link.readBoxGitIdentity",
+      "operator.gitIdentity",
       "store.inspectTips",
       "apply.plan",
       "auth.status",
@@ -197,6 +216,10 @@ describe("Status composer", () => {
           calls.mutations.push("offline box read");
           return online();
         },
+        async readBoxGitIdentity() {
+          calls.mutations.push("offline box read");
+          return online();
+        },
       },
       store: {
         async inspectTips(boxTip) {
@@ -223,6 +246,13 @@ describe("Status composer", () => {
     expect(report.link).toEqual({ online: false, address: null, error: offline.error });
     expect(report.store.box).toBeNull();
     expect(report.boxCheckout).toEqual({ dirty: null, changes: [], error: null });
+    expect(report.gitIdentity).toEqual({
+      box: null,
+      operator: { name: "Operator O'Neil", email: "operator@example.com" },
+      boxConfigured: null,
+      matchesOperator: null,
+      error: null,
+    });
     expect(report.managedPaths.allHealthy).toBeNull();
     expect(report.auth.providers).toEqual([]);
     expect(report.paseo).toEqual({ address: null, port: 6767, listen: null });
@@ -242,6 +272,14 @@ describe("Status composer", () => {
         },
         async readBoxChanges() {
           throw new Error("box changes failed");
+        },
+        async readBoxGitIdentity() {
+          throw new Error("box identity failed");
+        },
+      },
+      operator: {
+        async gitIdentity() {
+          throw new Error("operator identity failed");
         },
       },
       store: {
@@ -266,6 +304,12 @@ describe("Status composer", () => {
     expect(report.errors).toEqual([
       { code: "inspection-failed", origin: "box", message: "box: box tip failed" },
       { code: "inspection-failed", origin: "box", message: "box: box changes failed" },
+      { code: "inspection-failed", origin: "box", message: "box: box identity failed" },
+      {
+        code: "inspection-failed",
+        origin: "operator",
+        message: "operator: operator identity failed",
+      },
       {
         code: "inspection-failed",
         origin: "git-remote",
@@ -274,5 +318,30 @@ describe("Status composer", () => {
       { code: "inspection-failed", origin: "box", message: "box: link inspection failed" },
       { code: "inspection-failed", origin: "box", message: "box: auth probe failed" },
     ]);
+  });
+
+  test("reports a missing box git identity", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const deps = dependencies(calls);
+    deps.link.readBoxGitIdentity = async () => online("100.64.0.8", "user.name Box Agent\n");
+
+    const report = await composeStatus(deps);
+
+    expect(report.gitIdentity).toMatchObject({
+      box: { name: "Box Agent", email: null },
+      boxConfigured: false,
+      matchesOperator: false,
+    });
+  });
+
+  test("reports a box git identity that matches the operator", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const deps = dependencies(calls);
+    deps.link.readBoxGitIdentity = async () =>
+      online("100.64.0.8", "user.name Operator O'Neil\nuser.email operator@example.com\n");
+
+    const report = await composeStatus(deps);
+
+    expect(report.gitIdentity).toMatchObject({ boxConfigured: true, matchesOperator: true });
   });
 });
