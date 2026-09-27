@@ -600,3 +600,68 @@ describe("Status composer with more than one box", () => {
     ]);
   });
 });
+
+describe("Status composer tools", () => {
+  const row = { id: "bun", mode: "mirror", policy: "operator", operator: "1.4.2", target: "1.4.2" } as const;
+
+  test("checks the tools as one box step, and counts the warnings", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const checks: boolean[] = [];
+    const progress = recordProgress();
+    const deps = dependencies(calls, {
+      tools: {
+        async check(isOnline) {
+          checks.push(isOnline);
+          return [{ ...row, box: null, state: "missing" }];
+        },
+      },
+    });
+
+    const report = await composeStatus({ ...deps, progress });
+
+    expect(checks).toEqual([true]);
+    expect(report.boxes[0]!.tools).toEqual([{ ...row, box: null, state: "missing" }]);
+    expect(progress.events.slice(-2)).toEqual(["start:Checking tools on the box", "done"]);
+  });
+
+  test("an offline box skips the step and still gets its rows", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const checks: boolean[] = [];
+    const progress = recordProgress();
+    const deps = dependencies(calls, {
+      link: { ...box(calls).link, probe: async () => offline },
+      tools: {
+        async check(isOnline) {
+          checks.push(isOnline);
+          return [{ ...row, box: null, state: "unknown", reason: "host offline" }];
+        },
+      },
+    });
+
+    const report = await composeStatus({ ...deps, progress });
+
+    expect(checks).toEqual([false]);
+    expect(report.boxes[0]!.tools?.[0]?.state).toBe("unknown");
+    expect(progress.events.at(-1)).toBe("skip:Checking tools on the box");
+  });
+
+  test("a failed tools check is a box error with no rows", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const deps = dependencies(calls, {
+      tools: {
+        async check() {
+          throw new Error("box command timed out");
+        },
+      },
+    });
+
+    const report = await composeStatus(deps);
+
+    expect(report.boxes[0]!.tools).toEqual([]);
+    expect(report.boxes[0]!.errors).toContainEqual({
+      code: "inspection-failed",
+      origin: "box",
+      message: "box: box command timed out",
+    });
+  });
+});

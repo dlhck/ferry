@@ -10,7 +10,7 @@ const VERSION_TIMEOUT_MS = 15_000;
  * ones of the nvm default Node. The command runs in the home directory, so
  * the package.json of the current directory cannot change the pnpm version.
  */
-const PREFIX =
+export const PREFIX =
   'nvm_sh="${NVM_DIR:-$HOME/.nvm}/nvm.sh"; [ -s "$nvm_sh" ] && . "$nvm_sh" >/dev/null 2>&1; cd "$HOME" || exit 1; ';
 
 /** The first version in the output: `v24.16.0` gives `24.16.0`, and `chromium 1234` gives `1234`. */

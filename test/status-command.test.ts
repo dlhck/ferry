@@ -5,6 +5,7 @@ import { buildProgram } from "../src/cli.ts";
 import { createPaseo } from "../src/integrations/paseo.ts";
 import type { Integration, IntegrationHealth } from "../src/integrations/types.ts";
 import type { LinkResult } from "../src/link.ts";
+import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 import type { Registry } from "../src/registry/load.ts";
 import type { ToolDescriptor } from "../src/registry/types.ts";
 import type { TipReport } from "../src/store.ts";
@@ -468,6 +469,8 @@ describe("ferry status progress", () => {
       "done",
       "start:Checking MCP logins on the box",
       "done",
+      "start:Checking tools on the box",
+      "done",
     ]);
   });
 
@@ -489,6 +492,7 @@ describe("ferry status progress", () => {
       "skip:Checking managed links on the box",
       "skip:Checking logins on the box",
       "skip:Checking MCP logins on the box",
+      "skip:Checking tools on the box",
     ]);
   });
 
@@ -515,6 +519,7 @@ describe("ferry status progress", () => {
       "Checking managed links on the box  – skipped  host offline",
       "Checking logins on the box         – skipped  host offline",
       "Checking MCP logins on the box     – skipped  host offline",
+      "Checking tools on the box          – skipped  host offline",
     ]);
     expect(lines[0]).toStartWith("Store tips:");
     expect(lines[0]).toContain("Box default (ferry@box)\nHost: OFFLINE");
@@ -774,6 +779,7 @@ describe("ferry status with more than one box", () => {
       "[a] Checking managed links on the box",
       "[a] Checking logins on the box",
       "[a] Checking MCP logins on the box",
+      "[a] Checking tools on the box",
       "[a] Checking Paseo on the box",
       "[b] Connecting to the box",
       "[b] Reading the box store tip",
@@ -783,6 +789,7 @@ describe("ferry status with more than one box", () => {
       "[b] Checking managed links on the box",
       "[b] Checking logins on the box",
       "[b] Checking MCP logins on the box",
+      "[b] Checking tools on the box",
     ]);
   });
 });
@@ -795,5 +802,243 @@ describe("ferry status with one box", () => {
 
     expect(stack.output[0]).toContain("\n\nBox default (ferry@box)\nHost: ONLINE\nAddress: 100.64.0.8\n");
     expect(stack.output[0]!.match(/^Box \S+ \(/gm)).toHaveLength(1);
+  });
+});
+
+describe("ferry status tools", () => {
+  const configTool = (id: string, extra: Partial<ToolDescriptor> = {}): ToolDescriptor => ({
+    id,
+    kind: "tool",
+    localVersion: `${id} --version`,
+    boxVersion: `${id} --version`,
+    recipe: { install: (v) => `install ${id} ${v}`, update: (v) => `update ${id} ${v}` },
+    ...extra,
+  });
+
+  /** One line of the box tools script: the same version with the ferry PATH and in the login shell, unless `login` differs. */
+  const boxLines = (versions: Record<string, string | null>, login: Record<string, string | null> = {}) =>
+    Object.entries(versions)
+      .flatMap(([id, version]) => {
+        const loginVersion = id in login ? login[id]! : version;
+        return [
+          version === null ? `${id}\tferry\t127\t\t` : `${id}\tferry\t0\t${version}\t`,
+          loginVersion === null ? `${id}\tlogin\t127\t\t` : `${id}\tlogin\t0\t${loginVersion}\t`,
+        ];
+      })
+      .join("\n");
+
+  /**
+   * A fake stack with `tools` in the registry. `boxOutput` is the tools script
+   * output of each box, by box name. `boxes` replaces the one `[host]` box.
+   */
+  function toolStack(options: {
+    readonly tools: readonly ToolDescriptor[];
+    readonly operator: Record<string, string>;
+    readonly boxOutput: Record<string, string>;
+    readonly config?: Record<string, unknown>;
+    readonly online?: boolean;
+  }) {
+    const base = fakeStack(options.online ?? true);
+    const readConfig = base.dependencies.readConfig!;
+    const baseLink = base.dependencies.createLink!({ host: "unused", user: "unused" });
+    const toolCalls: string[] = [];
+    const localCalls: string[] = [];
+    const dependencies: Partial<StatusCommandDependencies> = {
+      ...base.dependencies,
+      readConfig: () => ({ ...readConfig(), ...options.config }),
+      loadRegistry: () => ({ ok: true as const, harnesses: registry.harnesses, tools: options.tools }),
+      createAuthStart: () => ({
+        async status() {
+          return { providers: [] };
+        },
+        async mcpStatus() {
+          return [];
+        },
+        async start() {},
+      }),
+      createLink: (linkOptions) => {
+        const name = "destination" in linkOptions ? linkOptions.destination : linkOptions.host;
+        return {
+          ...baseLink,
+          async run(command: string) {
+            if (!command.includes("ferry_tool()")) return baseLink.run(command);
+            toolCalls.push(name);
+            if (options.online === false) return baseLink.run(command);
+            return { ok: true, address: "100.64.0.8", stdout: `${options.boxOutput[name] ?? ""}\n`, stderr: "" };
+          },
+        };
+      },
+      local: {
+        async run(command) {
+          const script = command.argv.at(-1) ?? "";
+          localCalls.push(script);
+          const entry = Object.entries(options.operator).find(([id]) => script.endsWith(`${id} --version`));
+          return entry
+            ? { exitCode: 0, stdout: `${entry[1]}\n`, stderr: "", timedOut: false }
+            : { exitCode: 127, stdout: "", stderr: "", timedOut: false };
+        },
+      },
+    };
+    return { output: base.output, mutations: base.mutations, toolCalls, localCalls, dependencies };
+  }
+
+  const sixStates = () =>
+    toolStack({
+      tools: [
+        configTool("bun"),
+        configTool("node"),
+        configTool("pnpm"),
+        configTool("uv"),
+        configTool("go"),
+        configTool("docker", { boxVersion: undefined }),
+      ],
+      operator: { bun: "1.4.2", node: "v24.16.0", pnpm: "11.17.0", uv: "0.9.2", docker: "29.4.0" },
+      boxOutput: {
+        box: boxLines({ bun: "1.4.2", node: "v22.22.1", pnpm: null, uv: "0.9.2", go: "1.22.7" }, { uv: null }),
+      },
+    });
+
+  test("prints one row for each tool with ok, drift, missing, hidden, skipped, and unknown, and a warning for each tool to fix", async () => {
+    const stack = sixStates();
+
+    await runStatusCommand({ json: false }, stack.dependencies);
+
+    expect(stack.output[0]).toContain(
+      [
+        "Tools:",
+        "  bun     operator  operator 1.4.2    target 1.4.2    box 1.4.2    ok",
+        "  node    operator  operator 24.16.0  target 24.16.0  box 22.22.1  DRIFT",
+        "  pnpm    operator  operator 11.17.0  target 11.17.0  box -        MISSING",
+        "  uv      operator  operator 0.9.2    target 0.9.2    box 0.9.2    HIDDEN",
+        "  go      operator  operator -        target -        box 1.22.7   skipped (not on the operator machine)",
+        "  docker  operator  operator 29.4.0   target 29.4.0   box -        unknown (no box version command)",
+        "  WARNING: node is 22.22.1 on the box, and the target is 24.16.0. Run ferry update.",
+        "  WARNING: pnpm is not on the box. Run ferry install.",
+        "  WARNING: uv: the login shell PATH does not find it. Run ferry sync to write the PATH block of ~/.profile.",
+        "",
+        "Authentication:",
+      ].join("\n"),
+    );
+    expect(stack.mutations).toEqual([]);
+  });
+
+  test("puts the rows in the box entry of the JSON report", async () => {
+    const stack = sixStates();
+
+    await runStatusCommand({ json: true }, stack.dependencies);
+
+    expect(JSON.parse(stack.output[0]!).boxes[0].tools).toEqual([
+      { id: "bun", mode: "mirror", policy: "operator", operator: "1.4.2", target: "1.4.2", box: "1.4.2", state: "ok" },
+      { id: "node", mode: "mirror", policy: "operator", operator: "24.16.0", target: "24.16.0", box: "22.22.1", state: "drift" },
+      { id: "pnpm", mode: "mirror", policy: "operator", operator: "11.17.0", target: "11.17.0", box: null, state: "missing" },
+      {
+        id: "uv",
+        mode: "mirror",
+        policy: "operator",
+        operator: "0.9.2",
+        target: "0.9.2",
+        box: "0.9.2",
+        state: "hidden",
+        reason: "the login shell PATH does not find it",
+      },
+      {
+        id: "go",
+        mode: "mirror",
+        policy: "operator",
+        operator: null,
+        target: null,
+        box: "1.22.7",
+        state: "skipped",
+        reason: "not on the operator machine",
+      },
+      {
+        id: "docker",
+        mode: "mirror",
+        policy: "operator",
+        operator: "29.4.0",
+        target: "29.4.0",
+        box: null,
+        state: "unknown",
+        reason: "no box version command",
+      },
+    ]);
+  });
+
+  test("reads all box versions with one box command", async () => {
+    const stack = sixStates();
+
+    await runStatusCommand({ json: false }, stack.dependencies);
+
+    expect(stack.toolCalls).toEqual(["box"]);
+  });
+
+  test("an offline box has unknown rows and no tools command", async () => {
+    const stack = toolStack({
+      tools: [configTool("bun")],
+      operator: { bun: "1.4.2" },
+      boxOutput: {},
+      online: false,
+    });
+
+    const report = await runStatusCommand({ json: false }, stack.dependencies);
+
+    expect(stack.toolCalls).toEqual([]);
+    expect(report.boxes[0]!.tools).toEqual([
+      { id: "bun", mode: "mirror", policy: "operator", operator: "1.4.2", target: "1.4.2", box: null, state: "unknown", reason: "host offline" },
+    ]);
+    expect(stack.output[0]).toContain("  bun  operator  operator 1.4.2  target 1.4.2  box -  unknown (host offline)");
+  });
+
+  test("two boxes use their own policies, share the operator version read, and each get one tools command", async () => {
+    const stack = toolStack({
+      tools: [configTool("bun")],
+      operator: { bun: "1.4.2" },
+      boxOutput: {
+        "dev@box-a.example": boxLines({ bun: "1.4.2" }),
+        "dev@box-b.example": boxLines({ bun: "1.4.2" }),
+      },
+      config: {
+        host: undefined,
+        boxes: [
+          { name: "a", host: { transport: "ssh" as const, destination: "dev@box-a.example" } },
+          { name: "b", host: { transport: "ssh" as const, destination: "dev@box-b.example" }, tools: { bun: "1.3.9" } },
+        ],
+      },
+    });
+
+    const report = await runStatusCommand({ json: false }, stack.dependencies);
+
+    expect(report.boxes.map((box) => box.tools?.map((tool) => [tool.policy, tool.target, tool.state]))).toEqual([
+      [["operator", "1.4.2", "ok"]],
+      [["1.3.9", "1.3.9", "drift"]],
+    ]);
+    expect(stack.toolCalls.sort()).toEqual(["dev@box-a.example", "dev@box-b.example"]);
+    expect(stack.localCalls.filter((call) => call.endsWith("bun --version"))).toHaveLength(1);
+    expect(stack.output[0]).toContain("WARNING: bun is 1.4.2 on the box, and the target is 1.3.9. Run ferry update.");
+  });
+
+  test("with only the built-in tools, prints one line for each built-in and nothing about Paseo or projects", async () => {
+    const stack = toolStack({
+      tools: BUILTIN_TOOLS,
+      operator: { gh: "gh version 2.92.0 (2026-04-01)", claude: "2.1.0 (Claude Code)" },
+      boxOutput: {
+        box: boxLines({ gh: "gh version 2.92.0", claude: "2.1.0", codex: "codex-cli 0.50.0", pi: "0.60.0", cursor: null }),
+      },
+    });
+
+    await runStatusCommand({ json: false }, stack.dependencies);
+
+    const text = stack.output[0]!;
+    const tools = text.slice(text.indexOf("Tools:"), text.indexOf("\n\nAuthentication:")).split("\n");
+    expect(tools).toEqual([
+      "Tools:",
+      "  gh      operator  operator 2.92.0  target 2.92.0  box 2.92.0  ok",
+      "  claude  latest    operator 2.1.0   target latest  box 2.1.0   ok",
+      "  codex   latest    operator -       target latest  box 0.50.0  ok",
+      "  pi      latest    operator -       target latest  box 0.60.0  ok",
+      "  cursor  latest    operator -       target latest  box -       MISSING",
+      "  WARNING: cursor is not on the box. Run ferry install.",
+    ]);
+    expect(text).not.toMatch(/paseo|project/i);
   });
 });

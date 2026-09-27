@@ -216,6 +216,10 @@ With more than one box, each progress step starts with the box name, for example
       "managedPaths": { "allHealthy": true, "unhealthy": [], "error": null },
       "auth": { "providers": [{ "provider": "gh", "status": "authenticated" }], "loginRequired": [], "error": null },
       "mcpLogins": { "loginRequired": [], "error": null },
+      "tools": [
+        { "id": "gh", "mode": "mirror", "policy": "operator", "operator": "2.92.0", "target": "2.92.0", "box": "2.92.0", "state": "ok" },
+        { "id": "claude", "mode": "always", "policy": "latest", "operator": "2.1.0", "target": null, "box": "2.1.0", "state": "ok" }
+      ],
       "errors": []
     },
     {
@@ -235,6 +239,10 @@ With more than one box, each progress step starts with the box name, for example
       "managedPaths": { "allHealthy": null, "unhealthy": [], "error": null },
       "auth": { "providers": [], "loginRequired": [], "error": null },
       "mcpLogins": { "loginRequired": [], "error": null },
+      "tools": [
+        { "id": "gh", "mode": "mirror", "policy": "operator", "operator": "2.92.0", "target": "2.92.0", "box": null, "state": "unknown", "reason": "host offline" },
+        { "id": "claude", "mode": "always", "policy": "latest", "operator": "2.1.0", "target": null, "box": null, "state": "unknown", "reason": "host offline" }
+      ],
       "errors": [{ "code": "host-offline", "origin": "network", "message": "Tailscale host box-b is offline" }]
     }
   ],
@@ -243,6 +251,47 @@ With more than one box, each progress step starts with the box name, for example
 ```
 
 `host` is the SSH destination, or `<ssh_user>@<tailscale host>` for a Tailscale box. The top-level `errors` has only the operator and git remote errors. Each box has its own `errors`. A box entry has `integrations` only when an integration is on for that box.
+
+#### Tools in status
+
+Each box block has a `Tools` part with one row for each tool in the registry: the built-in tools and each `[tools.<id>]` table. A row shows the policy of the tool for that box, the version on this machine, the target version, the version on the box, and a state. Ferry does not read your projects to find tools.
+
+```
+Tools:
+  gh      operator  operator 2.92.0   target 2.92.0   box 2.92.0   ok
+  claude  latest    operator 2.1.0    target latest   box 2.1.0    ok
+  bun     operator  operator 1.4.2    target 1.4.2    box 1.4.2    ok
+  node    operator  operator 24.16.0  target 24.16.0  box 22.22.1  DRIFT
+  pnpm    operator  operator 11.17.0  target 11.17.0  box -        MISSING
+  uv      operator  operator 0.9.2    target 0.9.2    box 0.9.2    HIDDEN
+  go      operator  operator -        target -        box 1.22.7   skipped (not on the operator machine)
+  docker  operator  operator 29.4.0   target 29.4.0   box -        unknown (no box version command)
+  WARNING: node is 22.22.1 on the box, and the target is 24.16.0. Run ferry update.
+  WARNING: pnpm is not on the box. Run ferry install.
+  WARNING: uv: the login shell PATH does not find it. Run ferry sync to write the PATH block of ~/.profile.
+```
+
+The target comes from the policy, with the same rules as `ferry install`. Ferry reads the version on this machine one time and uses it for all boxes. The states are:
+
+| State | Meaning | What to do |
+|---|---|---|
+| `ok` | The box has the target version. For the `latest` policy, the box has the tool. | Nothing. |
+| `drift` | The box has another version. | `ferry update` |
+| `missing` | The box does not have the tool. | `ferry install` |
+| `hidden` | The box has the tool, but a login shell on the box does not find the same version. The ferry block of `~/.profile` is missing or old. | `ferry sync` |
+| `skipped` | The tool has no target: a mirror tool that this machine does not have, or the `latest` policy without a `latest` command. The reason is in the row. | Nothing, or fix the config. |
+| `unknown` | Ferry cannot read the tool on the box: the tool has no `box` command, the box is offline, or the box command failed. | See the reason. |
+
+For each box, the step "Checking tools on the box" runs one SSH command that reads all tools. It runs the `box` command of each tool two times:
+
+1. With the ferry PATH, which each Ferry box command gets. This is the box version.
+2. In a clean login shell: `env -i HOME="$HOME" USER="$USER" LOGNAME="$LOGNAME" PATH=/usr/local/bin:/usr/bin:/bin sh -lc '<box command>'`. This shell reads `/etc/profile` and `~/.profile`, as a new SSH login does.
+
+When the second run prints another version or no version, the state is `hidden`. Both runs load nvm first, as `ferry install` does. A login shell that is bash and has a `~/.bash_profile` does not read `~/.profile`. Ferry does not check that case.
+
+For the `latest` policy, `ferry status` does not run the `latest` command of a tool. That command asks the vendor server and can take many seconds, so the target shows `latest`. The row is `ok` when the box has the tool. `ferry update` and the daily update of `ferry watch` install the newest version.
+
+`ferry status --json` has the rows in `tools` of each box entry, with `id`, `mode`, `policy`, `operator`, `target`, `box`, `state`, and `reason` for `hidden`, `skipped`, and `unknown`. When the tools check fails, `tools` is empty and the error is in `errors` of the box.
 
 ## Several boxes
 
@@ -470,7 +519,7 @@ Ferry refuses the plan and changes nothing when a tool is refused, or when it mu
 
 The daily update of `ferry watch` changes only the tools with the `"latest"` policy. A tool with the `"operator"` policy or an exact version changes only when you run `ferry update`.
 
-What comes next: a "Tools" section in `ferry status` with the box versions.
+`ferry status` shows the box version and the state of each tool. See [Tools in status](#tools-in-status).
 
 ## Update the agent tools
 
