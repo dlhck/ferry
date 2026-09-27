@@ -142,11 +142,12 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # No registry-url: with it, setup-node writes an .npmrc that reads NODE_AUTH_TOKEN.
+      # npm uses the default registry and gets a short-lived token through OIDC.
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
 
       - name: Download executables
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -162,10 +163,14 @@ jobs:
         env:
           VERSION: ${{ needs.version.outputs.version }}
           DIST_TAG: ${{ needs.version.outputs.dist-tag }}
-          # Only for the first release. Trusted publishing (OIDC) replaces it. See RELEASING.md.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          npm --version
+          # Trusted publishing (OIDC) needs npm 11.5.1 or later. There is no token. See RELEASING.md.
+          npm_version=$(npm --version)
+          echo "npm $npm_version"
+          if [ "$(printf '%s\n' 11.5.1 "$npm_version" | sort -V | head -n1)" != 11.5.1 ]; then
+            echo "::error::npm $npm_version cannot use trusted publishing. It needs npm 11.5.1 or later."
+            exit 1
+          fi
           # Platform packages first, so the main package never points at a missing version.
           for dir in ./out/ferry-darwin-arm64 ./out/ferry-darwin-x64 ./out/ferry-linux-arm64 ./out/ferry-linux-x64 ./out/ferry; do
             name=$(node -p "require('$dir/package.json').name")
