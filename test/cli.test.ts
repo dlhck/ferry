@@ -93,7 +93,7 @@ describe("ferry --help", () => {
         received = input;
         return {
           dryRun: false,
-          address: "ubuntu@orb",
+          address: "user@box.example",
           paseoPort: 6767,
           leftovers: [],
           published: false,
@@ -103,12 +103,12 @@ describe("ferry --help", () => {
     });
 
     await program.parseAsync(
-      ["init", "--ssh-destination", "ubuntu@orb", "--snapshot-url", "snapshot.git"],
+      ["init", "--ssh-destination", "user@box.example", "--snapshot-url", "snapshot.git"],
       { from: "user" },
     );
 
     expect(received).toMatchObject({
-      sshDestination: "ubuntu@orb",
+      sshDestination: "user@box.example",
       snapshotUrl: "snapshot.git",
     });
   });
@@ -130,7 +130,7 @@ describe("ferry --help", () => {
         initDependencies = dependencies;
         return {
           dryRun: false,
-          address: "ubuntu@orb",
+          address: "user@box.example",
           paseoPort: 6767,
           leftovers: [],
           published: false,
@@ -141,7 +141,7 @@ describe("ferry --help", () => {
     });
 
     await program.parseAsync(
-      ["init", "--ssh-destination", "ubuntu@orb", "--snapshot-url", "snapshot.git"],
+      ["init", "--ssh-destination", "user@box.example", "--snapshot-url", "snapshot.git"],
       { from: "user" },
     );
 

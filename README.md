@@ -1,10 +1,107 @@
 # ferry
 
+[![CI](https://github.com/dlhck/ferry/actions/workflows/ci.yml/badge.svg)](https://github.com/dlhck/ferry/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/dlhck/ferry)](https://github.com/dlhck/ferry/releases)
+
+```mermaid
+flowchart LR
+    subgraph laptop["💻 Your machine · source of truth"]
+        direction TB
+        set["🧰 skills<br/>AGENTS.md<br/>Claude agents + commands<br/>settings allowlist<br/>remote MCP servers"]
+        vault["🔐 logins and tokens<br/>never leave"]
+    end
+
+    snap[("📦 private snapshot repo")]
+
+    subgraph fleet["☁️ Linux agent boxes"]
+        direction TB
+        b1["🖥️ build-box<br/>claude · codex<br/>pi · cursor"]
+        b2["🖥️ gpu-box<br/>claude · codex<br/>pi · cursor"]
+        b3["🖥️ lab-box<br/>claude · codex<br/>pi · cursor"]
+    end
+
+    set == "ferry sync<br/>commit + push" ==> snap
+    snap ==> b1
+    snap == "pull + symlink<br/>over SSH or Tailscale" ==> b2
+    snap ==> b3
+    laptop -. "ferry auth<br/>login starts on the box,<br/>you finish it in a browser" .-> fleet
+
+    classDef source fill:#1f6feb,stroke:#1f6feb,color:#fff
+    classDef secret fill:#da3633,stroke:#da3633,color:#fff
+    classDef repo fill:#8957e5,stroke:#8957e5,color:#fff
+    classDef box fill:#238636,stroke:#238636,color:#fff
+    class set source
+    class vault secret
+    class snap repo
+    class b1,b2,b3 box
+```
+
 Ferry keeps a remote Linux agent box in the same shape as the machine you work on. Your machine is the source of truth. A private git repository holds the skills, the one global instruction file, the Claude subagents and commands, and the Claude plugin declarations. Both machines clone that repository and point their harness directories at the clone with symlinks. Ferry uses Tailscale by default and also accepts an explicit OpenSSH destination for local machines and existing SSH configurations.
 
 Ferry never copies logins. OAuth sessions stay on the machine that created them. Ferry starts a vendor login on the box and you finish it in a browser here.
 
-`PRD.md` holds the v1 specification.
+## Requirements
+
+- An operator machine with macOS or Linux. Ferry runs here. Windows is not supported.
+- A Linux box that you can reach with SSH. The box does not run Ferry. `ferry install` and `ferry update` use `apt` for `gh`, so Debian or Ubuntu is the tested target.
+- Tailscale on both machines, or one OpenSSH destination such as `user@box.example`.
+- An empty private git repository for the snapshot, for example `git@github.com:you/ferry-snapshot.git`. Ferry does not create it.
+- For an SSH snapshot URL, an SSH agent on the operator machine with a loaded key that can read and push the snapshot repository.
+- [bun](https://bun.sh) 1.4 or later, to install from source.
+
+## Install
+
+npm: see #84.
+
+From source:
+
+```sh
+git clone https://github.com/dlhck/ferry.git
+cd ferry
+bun install
+bun link
+```
+
+`bun link` puts `ferry` on your `PATH`. It runs `src/cli.ts` with bun.
+
+The release workflow attaches standalone executables to each tagged GitHub release: `ferry-darwin-arm64`, `ferry-darwin-x64`, `ferry-linux-arm64`, and `ferry-linux-x64`. These executables do not need bun. Download the file for your platform, make it executable, and move it to a directory on your `PATH`:
+
+```sh
+chmod +x ferry-darwin-arm64
+mv ferry-darwin-arm64 ~/.local/bin/ferry
+```
+
+## Quick start
+
+```sh
+ferry init          # record the box and the snapshot URL, seed the snapshot, link this machine
+ferry install       # install gh, Claude Code, Codex, Pi, and Cursor Agent on the box
+ferry sync          # publish the snapshot and apply it on the box
+ferry auth gh       # start a login on the box, finish it in a browser here
+ferry auth claude
+ferry status        # check the link, the snapshot, the managed paths, and the box logins
+```
+
+`ferry install` shows each install command and asks for confirmation before it runs the command on the box. Repeat `ferry auth` for each tool that you use. Add `--dry-run` to `init`, `sync`, or `update` to see the changes before Ferry makes them.
+
+## Security model
+
+Ferry carries skills, `~/AGENTS.md`, the Claude subagents and commands, an allowlist of Claude settings keys, and the name and HTTPS URL of each remote MCP server. [What Ferry carries](#what-ferry-carries) has the full list.
+
+Ferry never carries:
+
+- credential files, OAuth sessions, or Keychain items;
+- tokens, API keys, or MCP tokens and request headers;
+- settings keys that can hold secrets, such as `env` and `apiKeyHelper`;
+- local MCP servers, which have a `command`, `args`, or `env`;
+- session history, caches, databases, or whole settings files.
+
+A carried file that looks like a secret stops the sync, and the error names the file, never the value. Logins happen on the box, and the tokens stay there.
+
+Ferry opens no public listening port. The Codex callback login forwards local port 1455 to the box for 120 seconds. Ferry never turns off SSH host-key checks, and it never falls back from Tailscale to direct SSH. Ferry forwards your SSH agent to the box only for the snapshot update. `ferry auth gh` creates an SSH key without a passphrase on the box and adds it to your GitHub account, so agents on the box can push. See [GitHub over SSH](#github-over-ssh).
+
+Ferry runs commands on the box with your SSH user. Use a box and an SSH user that you trust with the agents that run there.
 
 ## Usage
 
@@ -23,7 +120,7 @@ Or use an explicit OpenSSH destination:
 
 ```sh
 ferry init \
-  --ssh-destination ubuntu@orb \
+  --ssh-destination user@box.example \
   --snapshot-url git@github.com:you/ferry-snapshot.git
 ```
 
@@ -51,7 +148,7 @@ Ferry adds `-g` and `--copy` if you do not pass them. The example runs `npx skil
 
 The install does not publish the skill. Run `ferry sync` or keep `ferry watch` running to publish it to the snapshot and apply it on the box.
 
-Some installers replace the store link of a skill in one harness root with a real directory that holds a newer version. For example, `vendurehq/ai-stack` does this in `~/.agents/skills`. Sync then updates the store copy from that directory, publishes it, and links the directory to the store. Sync does this only when all of these conditions are true:
+Some installers replace the store link of a skill in one harness root with a real directory that holds a newer version, for example in `~/.agents/skills`. Sync then updates the store copy from that directory, publishes it, and links the directory to the store. Sync does this only when all of these conditions are true:
 
 - Exactly one harness root has a real directory for the skill.
 - Each other harness root that has the skill links to `~/.ferry/store/skills/<name>`, directly or through a chain of links.
@@ -263,11 +360,12 @@ Ferry needs [bun](https://bun.sh) 1.4 or later.
 ```sh
 bun install
 bun test
+bun run typecheck
 bun run build
 ```
 
-`bun run build` compiles a standalone executable to `dist/ferry` for the current platform.
+`bun run build` compiles a standalone executable to `dist/ferry` for the current platform. See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [LICENSE](LICENSE).

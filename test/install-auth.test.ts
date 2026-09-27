@@ -475,7 +475,7 @@ describe("auth command", () => {
       authDependencies({
         readConfig: () => ({
           ...config,
-          host: { transport: "ssh", destination: "ubuntu@orb" },
+          host: { transport: "ssh", destination: "user@box.example" },
         }),
         createLink: (options) => {
           linkOptions = options;
@@ -484,7 +484,7 @@ describe("auth command", () => {
       }),
     );
 
-    expect(linkOptions).toEqual({ destination: "ubuntu@orb" });
+    expect(linkOptions).toEqual({ destination: "user@box.example" });
   });
 
   const renderCases: readonly {

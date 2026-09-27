@@ -88,15 +88,15 @@ describe("Link", () => {
   });
 
   test("runs a command through an explicit SSH destination without Tailscale", async () => {
-    const host = new FakeHost([result({ stdout: "/home/davidhoeck\n" })]);
-    const link = new Link({ destination: "ubuntu@orb" }, host);
+    const host = new FakeHost([result({ stdout: "/home/user\n" })]);
+    const link = new Link({ destination: "user@box.example" }, host);
 
     const outcome = await link.run(`printf '%s\\n' "$HOME"`);
 
     expect(outcome).toEqual({
       ok: true,
-      address: "ubuntu@orb",
-      stdout: "/home/davidhoeck\n",
+      address: "user@box.example",
+      stdout: "/home/user\n",
       stderr: "",
     });
     expect(host.commands).toEqual([
@@ -107,7 +107,7 @@ describe("Link", () => {
           "BatchMode=yes",
           "-o",
           "ConnectTimeout=10",
-          "ubuntu@orb",
+          "user@box.example",
           `${BOX_PATH}printf '%s\\n' "$HOME"`,
         ],
         timeoutMs: 30_000,
@@ -144,7 +144,7 @@ describe("Link", () => {
 
   test("the box shell finds vendor CLIs in the user install directories", async () => {
     const host = new FakeHost([result()]);
-    const link = new Link({ destination: "ubuntu@orb" }, host);
+    const link = new Link({ destination: "user@box.example" }, host);
 
     await link.run(`printf '%s|%s' "$PATH" "a b"`);
 
@@ -225,7 +225,7 @@ describe("Link", () => {
 
   test("a direct port forward uses the SSH destination without Tailscale", async () => {
     const host = new FakeHost([result()]);
-    const link = new Link({ destination: "ubuntu@orb" }, host);
+    const link = new Link({ destination: "user@box.example" }, host);
 
     await link.forward({ localPort: 1455, remotePort: 1455, timeoutMs: 2_000 });
 
@@ -240,7 +240,7 @@ describe("Link", () => {
       "ConnectTimeout=10",
       "-L",
       "127.0.0.1:1455:127.0.0.1:1455",
-      "ubuntu@orb",
+      "user@box.example",
     ]);
   });
 });

@@ -154,7 +154,7 @@ describe("union of the managed harnesses", () => {
     function installerHome(): { home: string; real: string } {
       const home = makeHome();
       const stored = writeSkill(home, ".ferry/store/skills", "unslop", { "SKILL.md": "v1" });
-      const real = writeSkill(home, ".agents/skills", "unslop", { "SKILL.md": "v2", ".ai-stack-source": "stack" });
+      const real = writeSkill(home, ".agents/skills", "unslop", { "SKILL.md": "v2", ".installer-source": "stack" });
       mkdirSync(join(home, ".claude", "skills"), { recursive: true });
       symlinkSync(stored, join(home, ".claude", "skills", "unslop"));
       mkdirSync(join(home, ".codex", "skills"), { recursive: true });
@@ -170,7 +170,7 @@ describe("union of the managed harnesses", () => {
       if (!seed.ok) throw new Error(`expected a seed, got a refusal: ${JSON.stringify(seed)}`);
       expect(seed.storeUpdates).toEqual([{ name: "unslop", path: real }]);
       expect(bodyOf(seed, "unslop", "SKILL.md")).toBe("v2");
-      expect(bodyOf(seed, "unslop", ".ai-stack-source")).toBe("stack");
+      expect(bodyOf(seed, "unslop", ".installer-source")).toBe("stack");
     });
 
     test("is a clash when the caller does not ask for store updates", () => {

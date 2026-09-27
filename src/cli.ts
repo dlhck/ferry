@@ -407,7 +407,7 @@ function promptMessage(field: InitField): string {
     case "sshUser":
       return "SSH user";
     case "sshDestination":
-      return "SSH destination, such as ubuntu@orb";
+      return "SSH destination, such as user@box.example";
     case "snapshotUrl":
       return "Private snapshot git URL";
   }

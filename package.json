@@ -2,6 +2,28 @@
   "name": "ferry",
   "version": "0.0.0",
   "private": true,
+  "description": "Keep a remote Linux agent box in the same shape as your machine: skills, AGENTS.md, and Claude settings, without copying credentials.",
+  "keywords": [
+    "ai-agents",
+    "agent-skills",
+    "claude-code",
+    "codex",
+    "cursor",
+    "ssh",
+    "tailscale",
+    "dotfiles",
+    "cli",
+    "bun"
+  ],
+  "homepage": "https://github.com/dlhck/ferry#readme",
+  "bugs": {
+    "url": "https://github.com/dlhck/ferry/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dlhck/ferry.git"
+  },
+  "author": "David Höck (https://github.com/dlhck)",
   "license": "MIT",
   "type": "module",
   "bin": {
