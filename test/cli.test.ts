@@ -6,6 +6,7 @@ import type {
   InitResult,
   SnapshotHostKeyApproval,
 } from "../src/init.ts";
+import { denyRules } from "../src/manifest.ts";
 import type { SyncInput, SyncResult } from "../src/sync.ts";
 import type { UninstallInput, UninstallResult } from "../src/uninstall.ts";
 
@@ -178,6 +179,10 @@ describe("ferry --help", () => {
     expect(received?.dryRun).toBe(true);
     expect(output).toContain("Init plan (no changes will be made):");
     expect(output).toContain("Probe: SSH connection to david@box");
+    expect(output).toContain("Deny list:");
+    for (const rule of denyRules()) {
+      expect(output).toContain(`  ${rule.code}: ${rule.behavior} ${rule.description}`);
+    }
   });
 
   test("init help lists every non-interactive flag", () => {

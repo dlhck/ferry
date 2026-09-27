@@ -21,6 +21,7 @@ import {
   type InstallCommandInput,
 } from "./install-auth.ts";
 import {
+  denyListLines,
   runSync as runSyncCommand,
   type SyncInput,
   type SyncResult,
@@ -406,6 +407,7 @@ function reportInit(result: InitResult, writeLine: (line: string) => void): void
     for (const link of plan.links) {
       writeLine(`Link (${link.harness}): ${link.path} -> ${link.target}`);
     }
+    for (const line of denyListLines()) writeLine(line);
     return;
   }
   writeLine(`Paseo: ${result.address}:${result.paseoPort}`);
