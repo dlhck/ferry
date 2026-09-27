@@ -1,0 +1,109 @@
+name: npm packaging
+
+# Checks the npm packages on pull requests that change the packaging.
+# This workflow never publishes. It has no npm token and no id-token permission.
+
+on:
+  pull_request:
+    paths:
+      - "npm/**"
+      - "package.json"
+      - "bun.lock"
+      - "test/launcher.test.ts"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/npm-pack.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  pack:
+    name: Pack, dry-run publish, and install
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: bun ci
+
+      - name: Test launcher
+        run: bun test test/launcher.test.ts
+
+      - name: Compile executables
+        run: |
+          for target in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+            bun build --compile --target="bun-$target" src/cli.ts --outfile "dist/ferry-$target"
+          done
+
+      - name: Stage packages
+        run: node npm/stage.mjs "0.0.0-pr.${{ github.event.pull_request.number }}" dist out
+
+      - name: Dry-run publish
+        run: |
+          for dir in ./out/ferry-darwin-arm64 ./out/ferry-darwin-x64 ./out/ferry-linux-arm64 ./out/ferry-linux-x64 ./out/ferry; do
+            npm publish "$dir" --dry-run --access public --tag next
+          done
+
+      - name: Install packed packages and run ferry
+        run: |
+          mkdir -p packs
+          npm pack ./out/ferry-linux-x64 ./out/ferry --pack-destination packs
+          # --offline: the main package's other optional dependencies are not on npm, so npm skips them.
+          npm install --global --offline --prefix "$RUNNER_TEMP/prefix" ./packs/*.tgz
+          "$RUNNER_TEMP/prefix/bin/ferry" --help
+
+  macos:
+    name: Build, sign, and run ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # The same targets and runners as the release build. See release.yml.
+          - target: bun-darwin-arm64
+            asset: ferry-darwin-arm64
+            os: macos-latest
+          - target: bun-darwin-x64
+            asset: ferry-darwin-x64
+            os: macos-15-intel
+    env:
+      VERSION: 0.0.0-pr.${{ github.event.pull_request.number }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
+
+      - name: Install dependencies
+        run: bun ci
+
+      - name: Compile executable
+        run: >-
+          bun build --compile --target=${{ matrix.target }}
+          --define "FERRY_VERSION=\"$VERSION\"" src/cli.ts
+          --outfile dist/${{ matrix.asset }}
+
+      - name: Sign executable
+        run: |
+          codesign --force --sign - "dist/${{ matrix.asset }}"
+          codesign -v "dist/${{ matrix.asset }}"
+
+      - name: Run executable
+        run: |
+          "dist/${{ matrix.asset }}" --help
+          test "$("dist/${{ matrix.asset }}" --version)" = "$VERSION"

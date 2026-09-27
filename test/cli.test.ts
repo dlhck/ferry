@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { buildProgram, runCli } from "../src/cli.ts";
 import type {
   InitDependencies,
@@ -705,5 +708,32 @@ describe("progress selection", () => {
     await program.parseAsync(["watch"], { from: "user" });
 
     expect(received).toBe(plain);
+  });
+});
+
+describe("ferry --version", () => {
+  test("prints the development version when the build sets no version", () => {
+    const output: string[] = [];
+    const program = buildProgram().exitOverride();
+    program.configureOutput({ writeOut: (text) => output.push(text), writeErr: () => {} });
+    expect(() => program.parse(["--version"], { from: "user" })).toThrow("0.0.0-dev");
+    expect(output).toEqual(["0.0.0-dev\n"]);
+  });
+
+  test("prints the version that the build sets with --define", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ferry-version-"));
+    try {
+      const outfile = join(dir, "cli.js");
+      const build = Bun.spawnSync([
+        process.execPath, "build", "--target=bun", "--define", 'FERRY_VERSION="1.2.3-rc.1"',
+        join(import.meta.dir, "..", "src", "cli.ts"), "--outfile", outfile,
+      ]);
+      expect(build.exitCode).toBe(0);
+      const run = Bun.spawnSync([process.execPath, outfile, "--version"]);
+      expect(run.stdout.toString()).toBe("1.2.3-rc.1\n");
+      expect(run.exitCode).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
