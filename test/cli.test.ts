@@ -358,6 +358,7 @@ describe("ferry --help", () => {
         message: "chore: ship skills",
         force: true,
         settingsChanges: [],
+        mcpServers: [],
       },
     };
     const program = buildProgram({

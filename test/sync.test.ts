@@ -478,6 +478,84 @@ describe("runSync", () => {
     expect(write?.command).toContain('"review@team": true');
   });
 
+  test("declares the carried MCP servers on the box after the settings, and prints each warning", async () => {
+    const events: string[] = [];
+    const lines: string[] = [];
+    const link = {
+      run: async (command: string) => {
+        let stdout = "";
+        if (command.startsWith("printf")) stdout = "/srv/ferry\n";
+        else if (command.includes("claude mcp add")) {
+          events.push("declare-mcp");
+          stdout = "S\tlinear\n";
+        }
+        return { ok: true as const, address: "box", stdout, stderr: "" };
+      },
+    };
+
+    await runSync(
+      { home: "/operator" },
+      {
+        readConfig: () => config,
+        publisher: () => "operator-machine",
+        readSeed: () => ({
+          ...seed,
+          mcp: [{ harness: "claude", servers: [{ name: "linear", type: "http", url: "https://mcp.linear.app/mcp" }] }],
+        }),
+        createLink: () => link,
+        writePlan: () => {},
+        writeLine: (line) => lines.push(line),
+        acquireLock: () => () => events.push("unlock"),
+        openStore: async () => ({
+          path: "/operator/.ferry/store",
+          publish: async () => ({ published: true, tip: "abc123" }),
+        }),
+        apply: async (input) => {
+          events.push("apply");
+          return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] };
+        },
+        adopt: () => events.push("adopt"),
+      },
+    );
+
+    expect(events).toEqual(["apply", "declare-mcp", "adopt", "unlock"]);
+    expect(lines).toContain("Box MCP: could not declare claude MCP server linear");
+  });
+
+  test("dry-run names a skipped local MCP server and plans the carried one", async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "ferry-sync-mcp-")));
+    try {
+      writeFileSync(
+        join(home, ".claude.json"),
+        JSON.stringify({
+          mcpServers: {
+            repl: { command: "node", env: { KEY: "value" } },
+            linear: { type: "http", url: "https://mcp.linear.app/mcp" },
+          },
+        }),
+      );
+      const lines: string[] = [];
+      const printed: SyncPlan[] = [];
+
+      await runSync(
+        { home, dryRun: true },
+        {
+          readConfig: () => config,
+          publisher: () => "operator-machine",
+          writePlan: (plan) => printed.push(plan),
+          writeLine: (line) => lines.push(line),
+        },
+      );
+
+      expect(lines).toEqual([
+        `Skipped MCP server: MCP server repl is not a remote HTTPS server: ${join(home, ".claude.json")}`,
+      ]);
+      expect(printed[0]?.mcpServers).toEqual(["claude/linear"]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("uses a direct SSH destination for Link, plans, and locking", async () => {
     const directConfig: OperatorConfig = {
       ...config,

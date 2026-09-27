@@ -146,13 +146,13 @@ function step(kind: "M" | "P", name: string, command: string): string {
   ].join(" ");
 }
 
-function readCommand(path: string): string {
+export function readCommand(path: string): string {
   const quoted = quoteShell(path);
   return `if [ -e ${quoted} ]; then printf 'F' && cat ${quoted}; else printf 'M'; fi`;
 }
 
 /** Write through a temporary file, so Claude never reads a half-written file. */
-function writeCommand(path: string, text: string): string {
+export function writeCommand(path: string, text: string): string {
   const temporary = quoteShell(`${path}.ferry-tmp`);
   return [
     "umask 077 &&",
@@ -162,7 +162,7 @@ function writeCommand(path: string, text: string): string {
   ].join(" ");
 }
 
-async function checked(
+export async function checked(
   link: BoxSettingsLink,
   command: string,
   options?: RunOptions,
@@ -178,13 +178,13 @@ function parse(entry: SeedSettings): Record<string, unknown> {
   return record(JSON.parse(Buffer.from(entry.bytes).toString()));
 }
 
-function record(value: unknown): Record<string, unknown> {
+export function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
 }
 
-function quoteShell(value: string): string {
+export function quoteShell(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
