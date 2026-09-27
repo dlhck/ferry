@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { createPaseo } from "../src/integrations/paseo.ts";
+import type { Integration } from "../src/integrations/types.ts";
 import type { HostCommand, HostCommandResult, LinkResult } from "../src/link.ts";
 import { noProgress } from "../src/progress.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
@@ -245,5 +247,85 @@ describe("update command", () => {
     await expect(
       runUpdateCommand({ yes: true, dryRun: false }, { ...deps, readConfig: () => null }),
     ).rejects.toThrow("Ferry config has no complete host. Run ferry init.");
+  });
+});
+
+describe("update command with integrations", () => {
+  /** A Paseo stand-in that records its update calls. */
+  function fakePaseo(calls: string[], fail = false): Integration {
+    return {
+      ...createPaseo({ platform: "win32" }),
+      plan: async (action) => [`${action} commands`],
+      update: async () => {
+        calls.push("paseo update");
+        if (fail) throw new Error("restart failed");
+        return ["Paseo 0.9.2 runs on the box."];
+      },
+    };
+  }
+
+  const enabled = { ...config, integrations: { paseo: true } };
+
+  test("updates an enabled integration after the tools when the caller includes the integrations", async () => {
+    const { recorder, deps } = dependencies();
+    const calls: string[] = [];
+
+    await runUpdateCommand(
+      { yes: true, dryRun: false, includeIntegrations: true },
+      { ...deps, readConfig: () => enabled, integrations: [fakePaseo(calls)] },
+    );
+
+    expect(calls).toEqual(["paseo update"]);
+    expect(recorder.output).toContain("Box paseo:");
+    expect(recorder.output).toContain("  update commands");
+    expect(recorder.output.at(-1)).toBe("Paseo 0.9.2 runs on the box.");
+  });
+
+  test("skips the integrations by default, also when they are enabled", async () => {
+    const { recorder, deps } = dependencies();
+    const calls: string[] = [];
+
+    await runUpdateCommand({ yes: true, dryRun: false }, { ...deps, readConfig: () => enabled, integrations: [fakePaseo(calls)] });
+
+    expect(calls).toEqual([]);
+    expect(recorder.output.some((line) => line.includes("paseo"))).toBe(false);
+  });
+
+  test("skips a disabled integration", async () => {
+    const { deps } = dependencies();
+    const calls: string[] = [];
+
+    await runUpdateCommand(
+      { yes: true, dryRun: false, includeIntegrations: true },
+      { ...deps, integrations: [fakePaseo(calls)] },
+    );
+
+    expect(calls).toEqual([]);
+  });
+
+  test("a failed integration update fails the command", async () => {
+    const { recorder, deps } = dependencies();
+
+    await expect(
+      runUpdateCommand(
+        { yes: true, dryRun: false, includeIntegrations: true },
+        { ...deps, readConfig: () => enabled, integrations: [fakePaseo([], true)] },
+      ),
+    ).rejects.toThrow("1 of 6 updates failed: box paseo");
+    expect(recorder.output).toContain("Failed to update box paseo: restart failed");
+  });
+
+  test("dry run prints the integration plan and updates nothing", async () => {
+    const { recorder, deps } = dependencies();
+    const calls: string[] = [];
+
+    await runUpdateCommand(
+      { yes: false, dryRun: true, includeIntegrations: true },
+      { ...deps, readConfig: () => enabled, integrations: [fakePaseo(calls)] },
+    );
+
+    expect(calls).toEqual([]);
+    expect(recorder.box).toEqual([]);
+    expect(recorder.output.slice(-2)).toEqual(["Box paseo:", "  update commands"]);
   });
 });

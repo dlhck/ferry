@@ -6,6 +6,7 @@
 
 import * as prompts from "@clack/prompts";
 import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
+import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
 import { BunHostAdapter, Link, type HostAdapter, type LinkOptions } from "./link.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
 import { BUILTIN_TOOLS } from "./registry/builtin.ts";
@@ -33,11 +34,20 @@ export type UpdatePlan = {
   readonly skipped: readonly UpdateSkip[];
 };
 
-export type UpdateCommandInput = { readonly yes: boolean; readonly dryRun: boolean };
+export type UpdateCommandInput = {
+  readonly yes: boolean;
+  readonly dryRun: boolean;
+  /**
+   * Also update the enabled integrations. A restart stops the agents on the
+   * box, so only `ferry update` sets it. `ferry watch` never does.
+   */
+  readonly includeIntegrations?: boolean;
+};
 
 export type UpdateCommandDependencies = {
   /** The tools this ferry manages. */
   readonly tools: readonly ToolDescriptor[];
+  readonly integrations: readonly Integration[];
   readonly readConfig: () => PartialOperatorConfig | null;
   readonly createLink: (options: LinkOptions) => Pick<Link, "run">;
   /** Runs commands on the operator machine. Tests inject a recording fake. */
@@ -84,7 +94,10 @@ export async function runUpdateCommand(
   dependencies: Partial<UpdateCommandDependencies> = {},
 ): Promise<void> {
   const resolved = { ...defaultDependencies, ...dependencies };
-  const target = loadTarget(resolved.readConfig);
+  const { target, config } = loadTarget(resolved.readConfig);
+  const integrations = input.includeIntegrations === true
+    ? resolved.integrations.filter((integration) => config?.integrations?.[integration.id] === true)
+    : [];
   const plan = await step(
     resolved.progress,
     "Checking the installed tools",
@@ -92,7 +105,7 @@ export async function runUpdateCommand(
     undefined,
     (plan) => `${plural(plan.steps.length, "update")}, ${plan.skipped.length} skipped`,
   );
-  resolved.progress.plan(input.dryRun ? 1 : 1 + plan.steps.length);
+  resolved.progress.plan(input.dryRun ? 1 : 1 + plan.steps.length + integrations.length);
 
   // One line for each tool on each side, in registry order.
   for (const side of ["box", "operator"] as const) {
@@ -102,6 +115,10 @@ export async function runUpdateCommand(
       if (step) resolved.writeLine(`${label(side)} ${tool.id}: ${step.command}`);
       if (skip) resolved.writeLine(`${label(side)} ${tool.id}: skipped, ${skip.reason}`);
     }
+  }
+  for (const integration of integrations) {
+    resolved.writeLine(`Box ${integration.id}:`);
+    for (const line of await integration.plan("update")) resolved.writeLine(`  ${line}`);
   }
   if (input.dryRun) return;
   if (!input.yes) {
@@ -113,7 +130,7 @@ export async function runUpdateCommand(
   }
 
   const link = resolved.createLink(target);
-  const failed: UpdateStep[] = [];
+  const failed: string[] = [];
   for (const [index, step] of plan.steps.entries()) {
     resolved.progress.start(`Updating ${step.target} ${step.tool} (${index + 1}/${plan.steps.length})`);
     const failure =
@@ -125,21 +142,28 @@ export async function runUpdateCommand(
       resolved.writeLine(`Updated ${step.target} ${step.tool}.`);
     } else {
       resolved.progress.fail(failure);
-      failed.push(step);
+      failed.push(`${step.target} ${step.tool}`);
       resolved.writeLine(`Failed to update ${step.target} ${step.tool}: ${failure}`);
+    }
+  }
+  for (const integration of integrations) {
+    try {
+      for (const line of await integration.update(link, resolved.progress)) resolved.writeLine(line);
+    } catch (error) {
+      failed.push(`box ${integration.id}`);
+      resolved.writeLine(`Failed to update box ${integration.id}: ${messageOf(error)}`);
     }
   }
   if (failed.length > 0) {
     throw new UpdateError(
-      `${failed.length} of ${plan.steps.length} updates failed: ${failed
-        .map((step) => `${step.target} ${step.tool}`)
-        .join(", ")}`,
+      `${failed.length} of ${plan.steps.length + integrations.length} updates failed: ${failed.join(", ")}`,
     );
   }
 }
 
 const defaultDependencies: UpdateCommandDependencies = {
   tools: BUILTIN_TOOLS,
+  integrations: INTEGRATIONS,
   readConfig,
   createLink: (options) => new Link(options),
   local: new BunHostAdapter(),
@@ -152,7 +176,10 @@ function label(target: UpdateTarget): string {
   return target === "box" ? "Box" : "Operator";
 }
 
-function loadTarget(read: () => PartialOperatorConfig | null): LinkOptions {
+function loadTarget(read: () => PartialOperatorConfig | null): {
+  target: LinkOptions;
+  config: PartialOperatorConfig | null;
+} {
   let config: PartialOperatorConfig | null;
   try {
     config = read();
@@ -161,7 +188,7 @@ function loadTarget(read: () => PartialOperatorConfig | null): LinkOptions {
   }
   const target = resolveLinkOptions(config?.host);
   if (!target) throw new UpdateError("Ferry config has no complete host. Run ferry init.");
-  return target;
+  return { target, config };
 }
 
 async function isInstalled(local: HostAdapter, binary: string): Promise<boolean> {
@@ -187,6 +214,10 @@ async function runOnOperator(local: HostAdapter, command: string): Promise<strin
     if (result.exitCode === 0) return null;
     return result.stderr.trim() || result.stdout.trim() || `the command exited with ${result.exitCode}`;
   } catch (error) {
-    return error instanceof Error && error.message ? error.message : String(error);
+    return messageOf(error);
   }
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : String(error);
 }

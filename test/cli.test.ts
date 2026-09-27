@@ -509,7 +509,7 @@ describe("ferry --help", () => {
 
     await program.parseAsync(["update", "--yes", "--dry-run"], { from: "user" });
 
-    expect(received).toEqual({ yes: true, dryRun: true });
+    expect(received).toEqual({ yes: true, dryRun: true, includeIntegrations: true });
   });
 
   test("wires every move flag to the move module", async () => {

@@ -208,7 +208,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .action(async (options: { yes?: boolean; dryRun?: boolean }) => {
       await withProgress((progress, writeLine) =>
         (dependencies.runUpdate ?? runUpdateCommand)(
-          { yes: options.yes === true, dryRun: options.dryRun === true },
+          { yes: options.yes === true, dryRun: options.dryRun === true, includeIntegrations: true },
           { tools: registry().tools, progress, writeLine },
         ),
       );
