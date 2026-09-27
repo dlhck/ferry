@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { isRetryableWatchError, runWatch, type WatchObservation } from "../src/watch.ts";
 import { StoreRefusal } from "../src/store.ts";
 import { SyncError } from "../src/sync.ts";
+import { createPaseo } from "../src/integrations/paseo.ts";
+import type { Integration } from "../src/integrations/types.ts";
+import { runUpdateCommand } from "../src/update.ts";
 
 function accepted(identity: string): WatchObservation {
   return { ok: true, identity };
@@ -260,5 +263,52 @@ describe("watch daily update", () => {
     finish();
     await run;
     expect(record.updates).toBe(1);
+  });
+
+  test("the default daily update never includes the integrations, also when Paseo is enabled", async () => {
+    const controller = new AbortController();
+    const inputs: unknown[] = [];
+    const paseoCalls: string[] = [];
+    let scans = 0;
+    const paseo: Integration = {
+      ...createPaseo({ platform: "win32" }),
+      plan: async () => [],
+      update: async () => {
+        paseoCalls.push("update");
+        return [];
+      },
+    };
+
+    await runWatch(
+      { signal: controller.signal, pollMs: 1, debounceMs: 1, dailyUpdate: true },
+      {
+        observe: () => {
+          scans += 1;
+          if (scans > 1) controller.abort();
+          return accepted("one");
+        },
+        sleep: async () => {},
+        readState: () => null,
+        writeState: () => {},
+        writeLine: () => {},
+        now: () => DAY_MS * 10,
+        readUpdateState: () => null,
+        writeUpdateState: () => {},
+        runUpdate: (input, dependencies) => {
+          inputs.push(input);
+          return runUpdateCommand(input, {
+            ...dependencies,
+            tools: [],
+            integrations: [paseo],
+            readConfig: () => ({ host: { transport: "ssh", destination: "ploi@box" }, integrations: { paseo: true } }),
+            createLink: () => ({ run: async () => ({ ok: true, address: "box", stdout: "", stderr: "" }) }),
+            local: { run: async () => ({ exitCode: 1, stdout: "", stderr: "", timedOut: false }) },
+          });
+        },
+      },
+    );
+
+    expect(inputs).toEqual([{ yes: true, dryRun: false, includeIntegrations: false }]);
+    expect(paseoCalls).toEqual([]);
   });
 });

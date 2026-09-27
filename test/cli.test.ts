@@ -205,20 +205,25 @@ describe("ferry --help", () => {
       "    Open Paseo Desktop.",
       "    Open Settings → Add host → Remote SSH.",
       "    Enter ssh://ploi@box.",
-      "",
-      "Ferry does not set up integrations on the box in this release.",
     ]);
   });
 
-  test("integrations has no enable or disable command in this release", async () => {
-    const program = buildProgram({ readConfig: () => null, writeLine: () => {} }).exitOverride();
-    program.configureOutput({ writeOut: () => {}, writeErr: () => {} });
-    program.commands
-      .find((command) => command.name() === "integrations")
-      ?.exitOverride()
-      .configureOutput({ writeOut: () => {}, writeErr: () => {} });
+  test("wires integrations enable and disable with their flags", async () => {
+    const received: unknown[] = [];
+    const program = buildProgram({
+      readConfig: () => null,
+      runIntegration: async (input) => {
+        received.push(input);
+      },
+    });
 
-    await expect(program.parseAsync(["integrations", "enable", "paseo"], { from: "user" })).rejects.toThrow();
+    await program.parseAsync(["integrations", "enable", "paseo", "--dry-run", "--yes"], { from: "user" });
+    await program.parseAsync(["integrations", "disable", "paseo", "--purge"], { from: "user" });
+
+    expect(received).toEqual([
+      { action: "enable", name: "paseo", dryRun: true, yes: true },
+      { action: "disable", name: "paseo", purge: true, yes: false },
+    ]);
   });
 
   test("init help lists every non-interactive flag", () => {
@@ -494,7 +499,7 @@ describe("ferry --help", () => {
   });
 
   test("wires update --yes --dry-run to the update command", async () => {
-    let received: { yes: boolean; dryRun: boolean } | undefined;
+    let received: { yes: boolean; dryRun: boolean; includeIntegrations?: boolean } | undefined;
     const program = buildProgram({
       readConfig: () => null,
       runUpdate: async (input) => {
@@ -504,7 +509,7 @@ describe("ferry --help", () => {
 
     await program.parseAsync(["update", "--yes", "--dry-run"], { from: "user" });
 
-    expect(received).toEqual({ yes: true, dryRun: true });
+    expect(received).toEqual({ yes: true, dryRun: true, includeIntegrations: true });
   });
 
   test("wires every move flag to the move module", async () => {

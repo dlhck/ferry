@@ -197,6 +197,26 @@ export function writeConfig(config: OperatorConfig, home = homedir()): void {
   renameSync(temporaryPath, path);
 }
 
+/** Set one `[integrations]` key and keep the rest of the config. The config must be complete. */
+export function setIntegration(id: keyof IntegrationsConfig, enabled: boolean, home = homedir()): void {
+  const config = readConfig(home);
+  const host = completeHostConfig(config?.host);
+  if (config?.version !== 1 || config.publisher === undefined || config.snapshotUrl === undefined || host === null) {
+    throw new ConfigError(`Ferry config at ${configPath(home)} is not complete. Run ferry init.`);
+  }
+  writeConfig(
+    {
+      ...config,
+      version: 1,
+      publisher: config.publisher,
+      snapshotUrl: config.snapshotUrl,
+      host,
+      integrations: { ...config.integrations, [id]: enabled },
+    },
+    home,
+  );
+}
+
 export function resolveLinkOptions(host: OperatorHostConfig): LinkOptions;
 export function resolveLinkOptions(
   host: PartialOperatorConfig["host"],

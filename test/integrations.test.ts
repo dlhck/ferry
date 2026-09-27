@@ -3,11 +3,14 @@ import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { PartialOperatorConfig } from "../src/config.ts";
+import {
+  runIntegrationCommand,
+  type IntegrationCommandDependencies,
+} from "../src/integrations/command.ts";
 import { INTEGRATIONS, integrationLines } from "../src/integrations/index.ts";
 import { createPaseo, paseoSourceHint } from "../src/integrations/paseo.ts";
 import type { Integration, IntegrationLink } from "../src/integrations/types.ts";
 import { BunHostAdapter, type HostAdapter, type HostCommand, type LinkResult } from "../src/link.ts";
-import { noProgress } from "../src/progress.ts";
 
 const roots: string[] = [];
 
@@ -147,18 +150,6 @@ describe("Paseo integration", () => {
     expect(createPaseo().connectSteps("fd7a:115c:a1e0::1")).toContain(
       "Enter ssh://[fd7a:115c:a1e0::1].",
     );
-  });
-
-  test("the box steps are not implemented in this release", async () => {
-    const paseo = createPaseo();
-    const link = { run: async () => { throw new Error("no box call"); } };
-
-    await expect(paseo.plan(link)).rejects.toThrow("not implemented in this release");
-    await expect(paseo.enable(link, noProgress)).rejects.toThrow("not implemented in this release");
-    await expect(paseo.disable(link, noProgress, { purge: true })).rejects.toThrow(
-      "not implemented in this release",
-    );
-    await expect(paseo.update(link, noProgress)).rejects.toThrow("not implemented in this release");
   });
 });
 
@@ -412,8 +403,6 @@ describe("integration list", () => {
     expect(await integrationLines(CONFIG, [paseo])).toEqual([
       "paseo  disabled  Paseo daemon on the box",
       `  Local app: 0.9.2 (${cli})`,
-      "",
-      "Ferry does not set up integrations on the box in this release.",
     ]);
   });
 
@@ -427,8 +416,6 @@ describe("integration list", () => {
       "    Open Paseo Desktop.",
       "    Open Settings → Add host → Remote SSH.",
       "    Enter ssh://ploi@box.",
-      "",
-      "Ferry does not set up integrations on the box in this release.",
     ]);
   });
 
@@ -441,5 +428,120 @@ describe("integration list", () => {
     };
 
     expect(await integrationLines(config, [paseo])).toContain("    Enter ssh://ferry@box.");
+  });
+});
+
+describe("integrations enable and disable", () => {
+  type Recorder = { events: string[]; output: string[] };
+
+  /** A fake integration that records each call. `failEnable` makes enable throw. */
+  function fakeIntegration(recorder: Recorder, failEnable = false): Integration {
+    const paseo = createPaseo({ platform: "win32" });
+    return {
+      ...paseo,
+      plan: async (action) => {
+        recorder.events.push(`plan ${action}`);
+        return [`Box: ${action} commands`];
+      },
+      enable: async () => {
+        recorder.events.push("enable");
+        if (failEnable) throw new Error("npm install failed");
+        return ["Paseo 0.9.2 runs on the box."];
+      },
+      disable: async (_link, _progress, options) => {
+        recorder.events.push(`disable purge=${options.purge}`);
+        return ["Stopped."];
+      },
+    };
+  }
+
+  function dependencies(recorder: Recorder, overrides: Partial<IntegrationCommandDependencies> = {}) {
+    return {
+      integrations: [fakeIntegration(recorder)],
+      readConfig: () => CONFIG,
+      setIntegration: (id: string, enabled: boolean) => recorder.events.push(`config ${id}=${enabled}`),
+      createLink: () => {
+        recorder.events.push("link");
+        return { run: async () => { throw new Error("no box call"); } };
+      },
+      confirm: async () => {
+        recorder.events.push("confirm");
+        return true;
+      },
+      writeLine: (line: string) => recorder.output.push(line),
+      ...overrides,
+    } satisfies Partial<IntegrationCommandDependencies>;
+  }
+
+  test("enable shows the plan, asks, runs the box steps, then sets the config flag and prints the connect steps", async () => {
+    const recorder: Recorder = { events: [], output: [] };
+
+    await runIntegrationCommand({ action: "enable", name: "paseo", yes: false, dryRun: false }, dependencies(recorder));
+
+    expect(recorder.events).toEqual(["plan enable", "confirm", "link", "enable", "config paseo=true"]);
+    expect(recorder.output[0]).toBe("Enable Paseo:");
+    expect(recorder.output).toContain("Paseo 0.9.2 runs on the box.");
+    expect(recorder.output.slice(-4)).toEqual([
+      "Connect Paseo to the box:",
+      "  Open Paseo Desktop.",
+      "  Open Settings → Add host → Remote SSH.",
+      "  Enter ssh://ploi@box.",
+    ]);
+  });
+
+  test("enable does not set the config flag when a box step fails", async () => {
+    const recorder: Recorder = { events: [], output: [] };
+
+    await expect(
+      runIntegrationCommand(
+        { action: "enable", name: "paseo", yes: true, dryRun: false },
+        dependencies(recorder, { integrations: [fakeIntegration(recorder, true)] }),
+      ),
+    ).rejects.toThrow("npm install failed");
+    expect(recorder.events).toEqual(["plan enable", "link", "enable"]);
+  });
+
+  test("--dry-run prints the plan and does not connect, ask or write", async () => {
+    const recorder: Recorder = { events: [], output: [] };
+
+    await runIntegrationCommand({ action: "enable", name: "paseo", yes: false, dryRun: true }, dependencies(recorder));
+
+    expect(recorder.events).toEqual(["plan enable"]);
+    expect(recorder.output).toEqual(["Enable Paseo:", "Box: enable commands", "Dry run: Ferry made no changes."]);
+  });
+
+  test("a refused confirmation changes nothing", async () => {
+    const recorder: Recorder = { events: [], output: [] };
+
+    await runIntegrationCommand(
+      { action: "disable", name: "paseo", yes: false, purge: false },
+      dependencies(recorder, { confirm: async () => false }),
+    );
+
+    expect(recorder.events).toEqual(["plan disable"]);
+    expect(recorder.output.at(-1)).toBe("Disable cancelled.");
+  });
+
+  test("disable --purge runs the purge plan, then sets the config flag to false", async () => {
+    const recorder: Recorder = { events: [], output: [] };
+
+    await runIntegrationCommand({ action: "disable", name: "paseo", yes: true, purge: true }, dependencies(recorder));
+
+    expect(recorder.events).toEqual(["plan purge", "link", "disable purge=true", "config paseo=false"]);
+  });
+
+  test("refuses an unknown integration and a config without a host", async () => {
+    const recorder: Recorder = { events: [], output: [] };
+
+    await expect(
+      runIntegrationCommand({ action: "enable", name: "slack", yes: true, dryRun: false }, dependencies(recorder)),
+    ).rejects.toThrow("Unknown integration slack. Known integrations: paseo.");
+    await expect(
+      runIntegrationCommand(
+        { action: "enable", name: "paseo", yes: true, dryRun: true },
+        dependencies(recorder, { readConfig: () => null }),
+      ),
+    ).rejects.toThrow("Ferry config has no complete host. Run ferry init.");
+    expect(recorder.events).toEqual([]);
   });
 });

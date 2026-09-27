@@ -358,7 +358,41 @@ paseo = true
 
 A repeat `ferry init` keeps this section. Ferry refuses an unknown integration name.
 
-This release does not set up Paseo on the box. It has no `ferry integrations enable` or `disable` command, and `ferry update` does not use the key. When the key is `true`, `ferry integrations` prints the steps to connect Paseo Desktop to the box: open Settings → Add host → Remote SSH and enter `ssh://<box destination>`. Ferry cannot add the host for you, because Paseo Desktop has no command for it.
+### Enable Paseo
+
+```sh
+ferry integrations enable paseo --dry-run   # print the box commands. Ferry does not connect or write.
+ferry integrations enable paseo             # print the plan, ask, then run it
+ferry integrations enable paseo --yes       # run without the prompt
+```
+
+Enable does these steps on the box, in this order:
+
+1. Node. Paseo needs Node 22 or later. If the box has an older Node or no npm, Ferry installs `nodejs` and `npm` with apt, as the Pi install does. If the box still has no Node 22 after that, Ferry stops and changes nothing more.
+2. Paseo CLI. `npm install -g --prefix "$HOME/.local" @getpaseo/cli@<version>`. The version is the version of the local app. With no local app, Ferry installs the npm `latest` tag and tells you that the version is not pinned.
+3. Old unit. If `~/.config/systemd/user/paseo.service` exists and is active or enabled, Ferry stops and disables it, so two daemons never run. Ferry does not delete that file.
+4. New unit. Ferry writes `~/.config/systemd/user/ferry-paseo.service`. The unit runs `paseo daemon run` with the same `PATH` as a Ferry box command, `PASEO_LISTEN=127.0.0.1:6767` and `PASEO_RELAY_ENABLED=false`. These variables override the Paseo `config.json`, so a change in the app cannot open the listen address or turn on the relay.
+5. Start. `systemctl --user daemon-reload`, `systemctl --user enable --now ferry-paseo.service` and `loginctl enable-linger "$USER"`. Then Ferry reads `paseo daemon status --json` until the daemon is running, for a maximum of 60 seconds.
+6. Projects. Ferry registers each git clone in the box home directory, to a depth of three directories, with `paseo project create`. It does not search hidden directories or `node_modules`. A project that Paseo refuses gives a warning. It does not stop the enable.
+
+Then Ferry sets `paseo = true` in `~/.ferry/config.toml` and prints the steps to connect Paseo Desktop to the box: open Settings → Add host → Remote SSH and enter `ssh://<box destination>`. Ferry cannot add the host for you, because Paseo Desktop has no command for it. If a box step fails, Ferry does not change the config.
+
+The daemon has no password. Any process of any user on the box can control it through `127.0.0.1:6767`. Use this integration only on a box that has one user.
+
+`enable --now` does not restart a daemon that already runs. To load a new Paseo version, use `ferry update`.
+
+### Update Paseo
+
+`ferry update` updates Paseo only when `paseo = true`. It installs the local app version with npm, then runs `systemctl --user restart ferry-paseo.service`. `paseo daemon restart` is not sufficient, because it keeps the old binary. The restart stops the agents that run on the box. For this reason, the daily update of `ferry watch` never updates Paseo.
+
+### Disable Paseo
+
+```sh
+ferry integrations disable paseo           # stop the daemon and remove the unit
+ferry integrations disable paseo --purge   # also uninstall the Paseo CLI
+```
+
+Disable runs `systemctl --user disable --now ferry-paseo.service`, removes the unit file, and sets `paseo = false`. With `--purge`, it also runs `npm uninstall -g --prefix "$HOME/.local" @getpaseo/cli`. Linger stays on, because other user services can need it. Ferry never removes `~/.paseo`. It holds the Paseo config, the agent state, and worktrees that can have work that is not committed.
 
 ### Status and move
 

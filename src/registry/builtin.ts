@@ -51,6 +51,19 @@ const GH_SSH_SETUP = [
   "echo ferry-setup-ok",
 ].join("\n");
 
+/**
+ * Install Node and npm from apt when the box has no Node of version
+ * `major.minor` or later, or no npm. The Pi recipe and the Paseo integration use it.
+ */
+export function nodeBootstrap(major: number, minor: number): string {
+  return (
+    "(command -v node >/dev/null \\\n" +
+    `&& node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > ${major} || (major === ${major} && minor >= ${minor}) ? 0 : 1)' >/dev/null \\\n` +
+    "&& command -v npm >/dev/null \\\n" +
+    "|| (sudo apt update && sudo apt install nodejs npm -y))"
+  );
+}
+
 export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
   {
     id: "agents",
@@ -199,12 +212,7 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
   {
     id: "pi",
     install: {
-      command:
-        "(command -v node >/dev/null \\\n" +
-        "&& node -e 'const [major, minor] = process.versions.node.split(\".\").map(Number); process.exit(major > 22 || (major === 22 && minor >= 19) ? 0 : 1)' >/dev/null \\\n" +
-        "&& command -v npm >/dev/null \\\n" +
-        "|| (sudo apt update && sudo apt install nodejs npm -y)) \\\n" +
-        "&& curl -fsSL https://pi.dev/install.sh | sh",
+      command: `${nodeBootstrap(22, 19)} \\\n&& curl -fsSL https://pi.dev/install.sh | sh`,
     },
     // Without a target, pi update updates pi only, not its packages.
     update: { command: "pi update", binary: "pi" },

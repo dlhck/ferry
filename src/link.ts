@@ -103,8 +103,10 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
  * contain the user install directories of the vendor CLIs. The Claude, Codex and
  * Cursor installers use ~/.local/bin. The managed Pi installer uses ~/.pi/agent/bin
  * when no user bin directory is on PATH. Child processes get the same PATH.
+ * The directories are relative to the home directory.
  */
-const BOX_PATH = 'export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH"; ';
+export const BOX_PATH_DIRS: readonly string[] = [".local/bin", ".pi/agent/bin"];
+const BOX_PATH = `export PATH="${BOX_PATH_DIRS.map((dir) => `$HOME/${dir}`).join(":")}:$PATH"; `;
 
 export class Link {
   constructor(

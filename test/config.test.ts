@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { configPath, readConfig, writeConfig } from "../src/config.ts";
+import { configPath, readConfig, setIntegration, writeConfig } from "../src/config.ts";
 
 const homes: string[] = [];
 
@@ -162,5 +162,31 @@ describe("operator config", () => {
     const home = homeWithConfig([...BASE, "", "[[tool]]", 'id = "aider"']);
 
     expect(() => readConfig(home)).toThrow("unsupported line [[tool]]");
+  });
+});
+
+describe("setIntegration", () => {
+  test("sets one integration key and keeps the other sections", () => {
+    const home = homeWithConfig([...BASE, "", "[[harness]]", 'id = "zed"', 'skill_root = ".zed/skills"', "", "[update]", "watch = true"]);
+
+    setIntegration("paseo", true, home);
+    expect(readConfig(home)).toEqual({
+      version: 1,
+      publisher: "operator",
+      snapshotUrl: "snapshot.git",
+      host: { tailscale: "box", sshUser: "ferry" },
+      harness: [{ id: "zed", skillRoot: ".zed/skills" }],
+      update: { watch: true },
+      integrations: { paseo: true },
+    });
+
+    setIntegration("paseo", false, home);
+    expect(readConfig(home)?.integrations).toEqual({ paseo: false });
+  });
+
+  test("refuses an incomplete config", () => {
+    const home = homeWithConfig(["version = 1"]);
+
+    expect(() => setIntegration("paseo", true, home)).toThrow("is not complete. Run ferry init.");
   });
 });

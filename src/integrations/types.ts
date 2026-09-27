@@ -14,6 +14,9 @@ export type LocalVersion =
   | { readonly version: string; readonly source: string }
   | { readonly version: null; readonly source: null };
 
+/** The work that `plan` describes. `purge` is disable with `--purge`. */
+export type IntegrationAction = "enable" | "disable" | "purge" | "update";
+
 /** The result of the health check. `ferry status` shows it. */
 export type IntegrationHealth = {
   /** Human lines for `ferry status`. */
@@ -31,18 +34,18 @@ export interface Integration {
   readonly description: string;
   /** Find the local app version. It runs only on the operator machine. */
   localVersion(): Promise<LocalVersion>;
-  /** Lines that describe the enable steps. Ferry prints them before it asks for confirmation. */
-  plan(link: IntegrationLink): Promise<readonly string[]>;
-  /** Install and start the service on the box. A repeat run gives the same result. */
-  enable(link: IntegrationLink, progress: Progress): Promise<void>;
-  /** Stop and remove the service. `purge` also removes the package and its data on the box. */
+  /** Lines with the exact box commands of `action`. Ferry prints them before it asks for confirmation. It does not connect to the box. */
+  plan(action: IntegrationAction): Promise<readonly string[]>;
+  /** Install and start the service on the box. A repeat run gives the same result. Returns report lines. */
+  enable(link: IntegrationLink, progress: Progress): Promise<readonly string[]>;
+  /** Stop and remove the service. `purge` also removes the package on the box. Returns report lines. */
   disable(
     link: IntegrationLink,
     progress: Progress,
     options: { readonly purge: boolean },
-  ): Promise<void>;
-  /** Install the local app version on the box and restart the service. Only `ferry update` calls it. */
-  update(link: IntegrationLink, progress: Progress): Promise<void>;
+  ): Promise<readonly string[]>;
+  /** Install the local app version on the box and restart the service. Only `ferry update` calls it. Returns report lines. */
+  update(link: IntegrationLink, progress: Progress): Promise<readonly string[]>;
   /** Read the state of the service on the box without changes. */
   health(link: IntegrationLink): Promise<IntegrationHealth>;
   /** Tell the service about a project that `ferry move` put at `path` on the box. */

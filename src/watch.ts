@@ -38,6 +38,8 @@ export type WatchDependencies = {
   readonly writeState?: (home: string, identity: string) => void;
   readonly writeLine?: (line: string) => void;
   readonly update?: () => Promise<void>;
+  /** The update command that the default daily update runs. */
+  readonly runUpdate?: typeof runUpdateCommand;
   readonly now?: () => number;
   readonly readUpdateState?: (home: string) => number | null;
   readonly writeUpdateState?: (home: string, time: number) => void;
@@ -64,8 +66,12 @@ export async function runWatch(
   const writeState = dependencies.writeState ?? writeWatchState;
   let accepted = readState(home);
   let refusal = "";
+  // The daily update never includes the integrations. A Paseo restart stops the agents on the box.
   const update = dependencies.update ??
-    (() => runUpdateCommand({ yes: true, dryRun: false }, { writeLine, progress }));
+    (() => (dependencies.runUpdate ?? runUpdateCommand)(
+      { yes: true, dryRun: false, includeIntegrations: false },
+      { writeLine, progress },
+    ));
   const now = dependencies.now ?? Date.now;
   const readUpdateState = dependencies.readUpdateState ?? readUpdateTime;
   const writeUpdateState = dependencies.writeUpdateState ?? writeUpdateTime;

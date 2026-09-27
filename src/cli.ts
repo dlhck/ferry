@@ -30,6 +30,11 @@ import {
 import { noProgress, plainProgress, terminalProgress, type Progress } from "./progress.ts";
 import { readConfig, type PartialOperatorConfig } from "./config.ts";
 import { INTEGRATIONS, integrationLines, type Integration } from "./integrations/index.ts";
+import {
+  runIntegrationCommand,
+  type IntegrationCommandDependencies,
+  type IntegrationCommandInput,
+} from "./integrations/command.ts";
 import { loadRegistry, type Registry } from "./registry/load.ts";
 import {
   runStatusCommand,
@@ -94,6 +99,10 @@ type CliDependencies = {
     input?: WatchServiceInput,
     dependencies?: WatchServiceDependencies,
   ) => Promise<WatchServiceResult>;
+  readonly runIntegration?: (
+    input: IntegrationCommandInput,
+    dependencies?: Partial<IntegrationCommandDependencies>,
+  ) => Promise<void>;
   readonly runProcess?: RunProcess;
   readonly readConfig?: () => PartialOperatorConfig | null;
   readonly integrations?: readonly Integration[];
@@ -199,7 +208,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .action(async (options: { yes?: boolean; dryRun?: boolean }) => {
       await withProgress((progress, writeLine) =>
         (dependencies.runUpdate ?? runUpdateCommand)(
-          { yes: options.yes === true, dryRun: options.dryRun === true },
+          { yes: options.yes === true, dryRun: options.dryRun === true, includeIntegrations: true },
           { tools: registry().tools, progress, writeLine },
         ),
       );
@@ -292,12 +301,40 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       );
     });
 
-  program
+  const integrations = program
     .command("integrations")
     .description("List the integrations, whether each one is enabled, and the local app versions")
     .action(async () => {
       const lines = await integrationLines(config(), dependencies.integrations ?? INTEGRATIONS);
       for (const line of lines) writeLine(line);
+    });
+  integrations
+    .command("enable")
+    .description("Install and start an integration on the box, then turn it on in the config")
+    .argument("<name>", "integration name, such as paseo")
+    .option("--dry-run", "print the box commands without connecting or writing")
+    .option("--yes", "run without a confirmation prompt")
+    .action(async (name: string, options: { dryRun?: boolean; yes?: boolean }) => {
+      await withProgress((progress, writeLine) =>
+        (dependencies.runIntegration ?? runIntegrationCommand)(
+          { action: "enable", name, dryRun: options.dryRun === true, yes: options.yes === true },
+          { progress, writeLine, ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}) },
+        ),
+      );
+    });
+  integrations
+    .command("disable")
+    .description("Stop and remove an integration on the box, then turn it off in the config")
+    .argument("<name>", "integration name, such as paseo")
+    .option("--purge", "also uninstall the integration package on the box")
+    .option("--yes", "run without a confirmation prompt")
+    .action(async (name: string, options: { purge?: boolean; yes?: boolean }) => {
+      await withProgress((progress, writeLine) =>
+        (dependencies.runIntegration ?? runIntegrationCommand)(
+          { action: "disable", name, purge: options.purge === true, yes: options.yes === true },
+          { progress, writeLine, ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}) },
+        ),
+      );
     });
 
   const watch = program
