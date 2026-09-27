@@ -6,6 +6,7 @@
  * entry travel the same path.
  */
 
+import { quoteShell } from "../box-settings.ts";
 import type { HarnessDescriptor, ToolDescriptor } from "./types.ts";
 
 const USER_CODE_PATTERN = "\\b[A-Z0-9]{4}-[A-Z0-9]{4}\\b";
@@ -50,6 +51,34 @@ const GH_SSH_SETUP = [
   "esac",
   "echo ferry-setup-ok",
 ].join("\n");
+
+/** Add the GitHub CLI apt repository and its key, then read the package lists. */
+const GH_APT_SOURCE =
+  "(type -p wget >/dev/null || (sudo apt update && sudo apt install wget -y)) \\\n" +
+  "&& sudo mkdir -p -m 755 /etc/apt/keyrings \\\n" +
+  "&& out=$(mktemp) && wget -nv -O$out https://cli.github.com/packages/githubcli-archive-keyring.gpg \\\n" +
+  "&& cat $out | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \\\n" +
+  "&& sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \\\n" +
+  "&& sudo mkdir -p -m 755 /etc/apt/sources.list.d \\\n" +
+  '&& echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \\\n' +
+  "&& sudo apt update";
+
+/**
+ * Install gh at `version` from the GitHub apt repository. When the repository
+ * does not have that version, print a warning and install the latest gh.
+ * An older version replaces a newer one.
+ */
+function ghVersion(version: string): string {
+  const quoted = quoteShell(version);
+  return (
+    `if apt-cache madison gh | cut -d "|" -f 2 | tr -d " " | grep -qxF -- ${quoted}; then\n` +
+    `  sudo apt install gh=${quoted} -y --allow-downgrades\n` +
+    "else\n" +
+    `  echo ${quoteShell(`Warning: the GitHub apt repository has no gh ${version}. Ferry installs the latest gh.`)}\n` +
+    "  sudo apt install gh -y\n" +
+    "fi"
+  );
+}
 
 /**
  * Install Node and npm from apt when the box has no Node of version
@@ -127,25 +156,15 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
     binary: "gh",
     localVersion: "gh --version",
     boxVersion: "gh --version",
-    // An exact version needs `sudo apt install gh=<version>`. The recipe must
-    // first check that the GitHub apt repository has that version, and else
-    // install the latest version with a warning.
-    install: {
-      command:
-        "(type -p wget >/dev/null || (sudo apt update && sudo apt install wget -y)) \\\n" +
-        "&& sudo mkdir -p -m 755 /etc/apt/keyrings \\\n" +
-        "&& out=$(mktemp) && wget -nv -O$out https://cli.github.com/packages/githubcli-archive-keyring.gpg \\\n" +
-        "&& cat $out | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \\\n" +
-        "&& sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \\\n" +
-        "&& sudo mkdir -p -m 755 /etc/apt/sources.list.d \\\n" +
-        '&& echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \\\n' +
-        "&& sudo apt update \\\n" +
-        "&& sudo apt install gh -y",
-    },
+    install: { command: `${GH_APT_SOURCE} \\\n&& sudo apt install gh -y` },
     // gh has no own update command. The install added the apt source, so apt
     // upgrades it on the box. The operator machine can use another package
     // manager, so ferry does not update gh there.
     update: { command: "sudo apt update && sudo apt install gh -y" },
+    recipe: {
+      install: (version) => `${GH_APT_SOURCE} \\\n&& ${ghVersion(version)}`,
+      update: (version) => `sudo apt update \\\n&& ${ghVersion(version)}`,
+    },
     auth: {
       probe: "gh auth status --hostname github.com",
       // Without a terminal, gh prints the code, asks no questions, and skips its own SSH key upload.
