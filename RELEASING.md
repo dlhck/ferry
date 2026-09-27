@@ -3,13 +3,13 @@
 A GitHub release starts the release. The owner publishes a release from a tag `vX.Y.Z`. Then `.github/workflows/release.yml` does these steps:
 
 1. It reads the version from the tag. It refuses a tag that is not `vX.Y.Z` or `vX.Y.Z-<pre-release>`.
-2. It compiles `ferry-darwin-arm64`, `ferry-darwin-x64`, `ferry-linux-arm64` and `ferry-linux-x64` with `bun build --compile`.
+2. It compiles `ferry-darwin-arm64`, `ferry-darwin-x64`, `ferry-linux-arm64` and `ferry-linux-x64` with `bun build --compile`. The build sets the version from the tag with `--define`, so `ferry --version` prints it. The two darwin binaries compile on macOS runners, `macos-latest` for arm64 and `macos-15-intel` for x64. Each gets an ad-hoc signature with `codesign --force --sign -`, and then passes `codesign -v`, `ferry --help`, and `ferry --version`. macOS kills an arm64 executable that has no valid signature, and a darwin binary compiled on Linux does not have a valid signature.
 3. It attaches the four binaries to the release.
-4. It publishes the npm packages with provenance. It publishes the four platform packages first, then `@dlhck/ferry`.
+4. It publishes the npm packages with provenance through trusted publishing (OIDC). There is no npm token. It publishes the four platform packages first, then `@dlhck/ferry`.
 
 A version with a pre-release part, for example `1.2.0-rc.1`, goes to the npm dist-tag `next`. All other versions go to `latest`.
 
-The workflow runs only in `dlhck/ferry`. A release event never comes from a pull request. On pull requests, `.github/workflows/npm-pack.yml` stages the packages, runs `npm publish --dry-run` for each package, and installs the packed tarballs to run `ferry --help`. That workflow has no npm token and no `id-token` permission.
+The workflow runs only in `dlhck/ferry`. A release event never comes from a pull request. On pull requests, `.github/workflows/npm-pack.yml` stages the packages, runs `npm publish --dry-run` for each package, and installs the packed tarballs to run `ferry --help` on Linux. It also compiles and signs the two darwin binaries on the same macOS runners as the release and runs `ferry --help` and `ferry --version`. That workflow has no npm token and no `id-token` permission.
 
 ## npm packages
 
@@ -36,28 +36,50 @@ Use the platform package of your machine in place of `ferry-darwin-arm64`. Use `
 
 ## One-time setup
 
-npm trusted publishing (OIDC) cannot create a package. The package must exist on npm before you can add a trusted publisher to it ([npm docs](https://docs.npmjs.com/trusted-publishers), [npm/cli#8544](https://github.com/npm/cli/issues/8544)). Thus the first release publishes with a short-lived granular token. After that release, trusted publishing replaces the token.
+The release workflow publishes only through trusted publishing (OIDC). Trusted publishing cannot create a package. The package must exist on npm before you can add a trusted publisher to it ([npm docs](https://docs.npmjs.com/trusted-publishers), [npm/cli#8544](https://github.com/npm/cli/issues/8544)). A granular token with "Bypass two-factor authentication" does not work either: `npm publish` fails with `EOTP`. Thus you publish the first version of each new package by hand with two-factor authentication. After that, CI publishes all releases.
 
 ### Before the first release
 
 1. Make the `dlhck/ferry` repository public. npm provenance needs a public source repository.
-2. On npmjs.com, enable two-factor authentication on the `dlhck` account if it is not on. `npm trust` needs it.
-3. On npmjs.com, open **Access Tokens**, then **Generate New Token**, then **Granular Access Token**. Set these values:
-   - **Expiration:** 7 days.
-   - **Packages and scopes:** **Read and write**, **Only select packages and scopes**, then select the scope `@dlhck`. A scope lets the token create the new packages.
-   - **Bypass two-factor authentication:** on. The workflow cannot type a one-time password.
-4. Create the GitHub environment `npm` and store the token in it:
+2. On npmjs.com, enable two-factor authentication on the `dlhck` account if it is not on. The manual publish and `npm trust` need it.
+3. Create the GitHub environment `npm`:
 
    ```sh
    gh api --method PUT repos/dlhck/ferry/environments/npm
-   gh secret set NPM_TOKEN --env npm --repo dlhck/ferry
    ```
 
    Optional: in **Settings > Environments > npm**, set **Deployment branches and tags** to **Selected branches and tags** and add the tag rule `v*`.
 
-### After the first release
+### Publish a new package for the first time
 
-1. Add a trusted publisher to each of the five packages. `npm trust` needs npm 11.15.0 or later and asks for a one-time password:
+Do these steps on a Mac, from the tag of the release, for each package that is not on npm yet. Use npm 11.15.0 or later.
+
+1. Compile the four binaries with the release version. Give the two darwin binaries an ad-hoc signature:
+
+   ```sh
+   VERSION=1.2.0
+   for target in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+     bun build --compile --target="bun-$target" --define "FERRY_VERSION=\"$VERSION\"" src/cli.ts --outfile "dist/ferry-$target"
+   done
+   for target in darwin-arm64 darwin-x64; do
+     codesign --force --sign - "dist/ferry-$target"
+     codesign -v "dist/ferry-$target"
+   done
+   node npm/stage.mjs "$VERSION" dist out
+   ```
+
+2. Log in and publish the platform packages first, then `@dlhck/ferry`. npm asks for a one-time password. A local publish cannot add provenance.
+
+   ```sh
+   npm login
+   for dir in ./out/ferry-darwin-arm64 ./out/ferry-darwin-x64 ./out/ferry-linux-arm64 ./out/ferry-linux-x64 ./out/ferry; do
+     npm publish "$dir" --access public
+   done
+   ```
+
+   For a pre-release version, add `--tag next`.
+
+3. Add a trusted publisher to each package. `npm trust` asks for a one-time password:
 
    ```sh
    for name in ferry ferry-darwin-arm64 ferry-darwin-x64 ferry-linux-arm64 ferry-linux-x64; do
@@ -66,16 +88,18 @@ npm trusted publishing (OIDC) cannot create a package. The package must exist on
    ```
 
    You can also do this on npmjs.com. Open **Settings** of each package, then **Trusted Publisher**, then **GitHub Actions**. Set **Organization or user** to `dlhck`, **Repository** to `ferry`, **Workflow filename** to `release.yml`, and **Environment name** to `npm`.
-2. Remove the token:
+
+4. Delete the old token secret if it exists, and delete the token on npmjs.com in **Access Tokens**:
 
    ```sh
    gh secret delete NPM_TOKEN --env npm --repo dlhck/ferry
    ```
 
-   Then delete the token on npmjs.com in **Access Tokens**.
-3. Optional: in **Settings** of each package, set **Publishing access** to **Require two-factor authentication and disallow tokens**. Trusted publishing continues to work with this setting.
+5. Optional: in **Settings** of each package, set **Publishing access** to **Require two-factor authentication and disallow tokens**. Trusted publishing continues to work with this setting.
 
-When `NPM_TOKEN` is not set, npm uses trusted publishing. Trusted publishing needs npm 11.5.1 or later. The workflow uses Node 24 and prints the npm version before it publishes.
+If the release workflow of that version runs again, the publish step skips the packages that are already on npm. Later releases publish from CI.
+
+Trusted publishing needs npm 11.5.1 or later. The workflow uses Node 24 and stops before it publishes if its npm is older. The workflow does not give `setup-node` a `registry-url`, because then `setup-node` writes an `.npmrc` that reads a token from `NODE_AUTH_TOKEN`.
 
 ## Publish a release
 
