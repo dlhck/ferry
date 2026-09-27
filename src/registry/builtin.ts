@@ -114,19 +114,10 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
 ];
 
 /**
- * Print the newest Chromium revision in the Playwright browser cache. The
- * cache is in ~/Library/Caches on macOS and in ~/.cache on Linux.
- */
-const PLAYWRIGHT_CHROMIUM_REVISION = [
-  'd="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/Library/Caches/ms-playwright}"',
-  '[ -d "$d" ] || d="$HOME/.cache/ms-playwright"',
-  "ls \"$d\" | sed -n 's/^chromium-\\([0-9][0-9]*\\)$/\\1/p' | sort -n | tail -n 1 | grep .",
-].join("; ");
-
-/**
- * The vendor agent CLIs first, then the other tools. `ferry install`,
- * `ferry update`, and `ferry tools` read this one list through the registry.
- * The recipes of the tools after cursor come in a later change.
+ * gh and the vendor agent CLIs. `ferry auth gh` and the GitHub SSH setup need
+ * gh. The operator defines every other tool in a `[tools.<id>]` table of the
+ * config. `ferry install`, `ferry update`, and `ferry tools` read this list
+ * through the registry.
  */
 export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
   {
@@ -287,83 +278,5 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
       loginRequired: "^(\\S+): requires_authentication$",
       login: "cursor-agent mcp login {name}",
     },
-  },
-  {
-    id: "node",
-    kind: "tool",
-    name: "Node.js (nvm)",
-    binary: "node",
-    // Ferry loads nvm first, so this is the nvm default Node.
-    localVersion: "node --version",
-    boxVersion: "node --version",
-    // nvm on the box, with the operator version as the nvm default. The
-    // recipe points ~/.nvm/current at that version.
-    pathDirs: [".nvm/current/bin"],
-  },
-  {
-    id: "npm",
-    kind: "tool",
-    name: "npm",
-    binary: "npm",
-    localVersion: "npm --version",
-    boxVersion: "npm --version",
-    // npm comes with Node, so it adds no directory of its own.
-    dependsOn: ["node"],
-  },
-  {
-    id: "pnpm",
-    kind: "tool",
-    name: "pnpm",
-    binary: "pnpm",
-    localVersion: "pnpm --version",
-    boxVersion: "pnpm --version",
-    // npm install -g --prefix ~/.local, as the Paseo integration does.
-    pathDirs: [".local/bin"],
-    dependsOn: ["node"],
-  },
-  {
-    id: "bun",
-    kind: "tool",
-    name: "Bun",
-    binary: "bun",
-    localVersion: "bun --version",
-    boxVersion: "bun --version",
-    pathDirs: [".bun/bin"],
-  },
-  {
-    id: "docker",
-    kind: "tool",
-    name: "Docker",
-    binary: "docker",
-    // The client version. `docker version` also needs a running daemon.
-    localVersion: "docker --version",
-    boxVersion: "docker --version",
-  },
-  {
-    id: "vercel",
-    kind: "tool",
-    name: "Vercel CLI",
-    binary: "vercel",
-    localVersion: "vercel --version",
-    boxVersion: "vercel --version",
-    pathDirs: [".local/bin"],
-    dependsOn: ["node"],
-  },
-  {
-    id: "infisical",
-    kind: "tool",
-    name: "Infisical CLI",
-    binary: "infisical",
-    localVersion: "infisical --version",
-    boxVersion: "infisical --version",
-  },
-  {
-    id: "playwright",
-    kind: "tool",
-    name: "Playwright browsers (Chromium revision)",
-    // The browsers are not on PATH. The version is the Chromium revision in the cache.
-    localVersion: PLAYWRIGHT_CHROMIUM_REVISION,
-    boxVersion: PLAYWRIGHT_CHROMIUM_REVISION,
-    dependsOn: ["node"],
   },
 ];

@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { HostAdapter, HostCommand, HostCommandResult } from "../src/link.ts";
+import type { PartialOperatorConfig } from "../src/config.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
+import { loadRegistry } from "../src/registry/load.ts";
 import type { ToolDescriptor } from "../src/registry/types.ts";
-import { PROJECT_TOOLS, runToolsCommand } from "../src/tools/command.ts";
+import { runToolsCommand } from "../src/tools/command.ts";
 import { parseVersion, readLocalVersion } from "../src/tools/version.ts";
 
 /**
@@ -60,9 +62,9 @@ describe("readLocalVersion", () => {
   });
 
   test("reads the version from standard error when standard output has none", async () => {
-    const pgsync: HostAdapter = { run: async () => ({ exitCode: 0, stdout: "", stderr: "0.8.0\n", timedOut: false }) };
+    const stderr: HostAdapter = { run: async () => ({ exitCode: 0, stdout: "", stderr: "0.8.0\n", timedOut: false }) };
 
-    expect(await readLocalVersion({ localVersion: "pgsync --version" }, pgsync)).toBe("0.8.0");
+    expect(await readLocalVersion({ localVersion: "tool --version" }, stderr)).toBe("0.8.0");
   });
 
   test("returns null when the command prints no version", async () => {
@@ -86,10 +88,10 @@ describe("readLocalVersion", () => {
   });
 
   test("loads nvm first, so node is the nvm default Node, and runs in the home directory", async () => {
-    const node = BUILTIN_TOOLS.find((tool) => tool.id === "node");
+    const node: ToolDescriptor = { id: "node", kind: "tool", localVersion: "node --version" };
     const host = fakeHost({ "node --version": "v24.16.0\n" });
 
-    expect(node && (await readLocalVersion(node, host))).toBe("24.16.0");
+    expect(await readLocalVersion(node, host)).toBe("24.16.0");
     expect(host.scripts).toEqual([
       'nvm_sh="${NVM_DIR:-$HOME/.nvm}/nvm.sh"; [ -s "$nvm_sh" ] && . "$nvm_sh" >/dev/null 2>&1; cd "$HOME" || exit 1; node --version',
     ]);
@@ -101,72 +103,58 @@ describe("ferry tools", () => {
     "gh --version": "gh version 2.92.0 (2026-04-28)\n",
     "claude --version": "2.1.281 (Claude Code)\n",
     "node --version": "v24.16.0\n",
-    "bun --version": "1.4.2\n",
-    "pgsync --version": "0.8.0\n",
   };
 
-  test("lists every registry tool with kind, install mode, policy, and the operator version, then the project tools", async () => {
+  const CONFIG: PartialOperatorConfig = {
+    tools: {
+      claude: "operator",
+      node: { local: "node --version", install: "nvm install {version}" },
+      pnpm: { version: "10.2.0", local: "pnpm --version", install: "npm install -g pnpm@{version}", depends: ["node"] },
+    },
+  };
+
+  function toolsOf(config: PartialOperatorConfig): readonly ToolDescriptor[] {
+    const registry = loadRegistry(config);
+    if (!registry.ok) throw new Error(JSON.stringify(registry.problems));
+    return registry.tools;
+  }
+
+  test("lists the builtin tools and the config tools with kind, install mode, policy, and the operator version", async () => {
     const lines: string[] = [];
 
     await runToolsCommand({
-      readConfig: () => ({ tools: { bun: "1.4.2", claude: "operator" } }),
-      tools: BUILTIN_TOOLS,
+      readConfig: () => CONFIG,
+      tools: toolsOf(CONFIG),
       local: fakeHost(OPERATOR),
       writeLine: (line) => lines.push(line),
     });
 
     expect(lines).toEqual([
       "Tools",
-      "  TOOL        KIND   INSTALL  POLICY              OPERATOR  VERSION  NAME",
-      "  gh          tool   mirror   operator (default)  yes       2.92.0   GitHub CLI",
-      "  claude      agent  always   operator            yes       2.1.281  Claude Code",
-      "  codex       agent  always   latest (default)    no        -        Codex",
-      "  pi          agent  always   latest (default)    no        -        Pi",
-      "  cursor      agent  always   latest (default)    no        -        Cursor Agent",
-      "  node        tool   mirror   operator (default)  yes       24.16.0  Node.js (nvm)",
-      "  npm         tool   mirror   operator (default)  no        -        npm",
-      "  pnpm        tool   mirror   operator (default)  no        -        pnpm",
-      "  bun         tool   mirror   1.4.2               yes       1.4.2    Bun",
-      "  docker      tool   mirror   operator (default)  no        -        Docker",
-      "  vercel      tool   mirror   operator (default)  no        -        Vercel CLI",
-      "  infisical   tool   mirror   operator (default)  no        -        Infisical CLI",
-      "  playwright  tool   mirror   operator (default)  no        -        Playwright browsers (Chromium revision)",
-      "",
-      "Needed by projects, no Ferry recipe",
-      "  yarn    not on the operator machine",
-      "  uv      not on the operator machine",
-      "  go      not on the operator machine",
-      "  rust    not on the operator machine",
-      "  java    not on the operator machine",
-      "  pgsync  on the operator machine, 0.8.0",
+      "  TOOL    KIND   INSTALL  POLICY              OPERATOR  VERSION  NAME",
+      "  gh      tool   mirror   operator (default)  yes       2.92.0   GitHub CLI",
+      "  claude  agent  always   operator            yes       2.1.281  Claude Code",
+      "  codex   agent  always   latest (default)    no        -        Codex",
+      "  pi      agent  always   latest (default)    no        -        Pi",
+      "  cursor  agent  always   latest (default)    no        -        Cursor Agent",
+      "  node    tool   mirror   operator (default)  yes       24.16.0  node",
+      "  pnpm    tool   mirror   10.2.0              no        -        pnpm",
       "",
       "ferry tools reads this machine only. It does not connect to the box.",
     ]);
   });
 
-  test("runs without a config and without a project tool list", async () => {
+  test("runs without a config and lists only the builtin tools", async () => {
     const lines: string[] = [];
 
     await runToolsCommand({
       readConfig: () => null,
-      tools: [{ id: "aider" }],
-      projectTools: [],
+      tools: BUILTIN_TOOLS,
       local: fakeHost({}),
       writeLine: (line) => lines.push(line),
     });
 
-    expect(lines).toEqual([
-      "Tools",
-      "  TOOL   KIND   INSTALL  POLICY            OPERATOR  VERSION  NAME",
-      "  aider  agent  always   latest (default)  no        -        aider",
-      "",
-      "ferry tools reads this machine only. It does not connect to the box.",
-    ]);
-  });
-
-  test("the project tools are the ones from the #106 inventory that Ferry has no recipe for", () => {
-    expect(PROJECT_TOOLS.map((tool) => tool.id)).toEqual(["yarn", "uv", "go", "rust", "java", "pgsync"]);
-    const ids = new Set(BUILTIN_TOOLS.map((tool) => tool.id));
-    for (const tool of PROJECT_TOOLS) expect(ids.has(tool.id)).toBe(false);
+    expect(lines.slice(1, -2).map((line) => line.trim().split(/\s+/)[0])).toEqual(["TOOL", "gh", "claude", "codex", "pi", "cursor"]);
+    expect(lines.join("\n")).not.toContain("project");
   });
 });

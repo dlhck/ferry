@@ -146,12 +146,12 @@ describe("operator config", () => {
     });
   });
 
-  test("reads the [tools] policies", () => {
-    const home = homeWithConfig([...BASE, "", "[tools]", 'node = "operator"', 'bun = "1.4.2"', 'claude = "latest"', 'cursor = "2026.09.15-d2fe57e"']);
+  test("reads the [tools] policies of the builtin tools", () => {
+    const home = homeWithConfig([...BASE, "", "[tools]", 'gh = "operator"', 'codex = "1.4.2"', 'claude = "latest"', 'cursor = "2026.09.15-d2fe57e"']);
 
     expect(readConfig(home)?.tools).toEqual({
-      node: "operator",
-      bun: "1.4.2",
+      gh: "operator",
+      codex: "1.4.2",
       claude: "latest",
       cursor: "2026.09.15-d2fe57e",
     });
@@ -160,22 +160,128 @@ describe("operator config", () => {
 
   for (const value of ['"lts"', '"^1.4.0"', '"24"', '"v24.16.0"', '"1.4.2; rm -rf ~"', '""', "true"]) {
     test(`refuses the tool policy ${value}`, () => {
-      const home = homeWithConfig([...BASE, "", "[tools]", `bun = ${value}`]);
+      const home = homeWithConfig([...BASE, "", "[tools]", `gh = ${value}`]);
 
-      expect(() => readConfig(home)).toThrow("invalid policy for bun in [tools]");
+      expect(() => readConfig(home)).toThrow("invalid policy for gh in [tools]");
       expect(() => readConfig(home)).toThrow('Use "operator", "latest", or an exact version such as 1.4.2.');
     });
   }
 
-  test("refuses an unknown tool and names the known tools", () => {
-    const home = homeWithConfig([...BASE, "", "[tools]", 'yarn = "operator"']);
+  test("refuses a policy for a tool that is not built in, and names the builtin tools", () => {
+    const home = homeWithConfig([...BASE, "", "[tools]", 'pnpm = "operator"']);
 
-    expect(() => readConfig(home)).toThrow("unknown tool yarn in [tools]");
-    expect(() => readConfig(home)).toThrow("Known tools: gh, claude, codex, pi, cursor, node, npm, pnpm, bun");
+    expect(() => readConfig(home)).toThrow("unknown tool pnpm in [tools]");
+    expect(() => readConfig(home)).toThrow("Known tools: gh, claude, codex, pi, cursor.");
+    expect(() => readConfig(home)).toThrow("To define a tool, add a [tools.pnpm] table.");
   });
 
-  test("writing the config keeps the [tools] table", () => {
+  test("reads a [tools.<id>] table that defines a tool", () => {
+    const home = homeWithConfig([
+      ...BASE,
+      "",
+      "[tools]",
+      'gh = "latest"',
+      "",
+      "[tools.pnpm]",
+      'version = "10.2.0"',
+      'local = "pnpm --version"',
+      "box = 'pnpm --version'",
+      `install = 'npm install -g --prefix "$HOME/.local" pnpm@{version}'`,
+      'update = "pnpm self-update {version}"',
+      'path = [".local/bin"]',
+      'depends = ["node"]',
+      "",
+      "[tools.node]",
+      'local = "node --version"',
+      'install = "nvm install {version}"',
+    ]);
+
+    expect(readConfig(home)?.tools).toEqual({
+      gh: "latest",
+      pnpm: {
+        version: "10.2.0",
+        local: "pnpm --version",
+        box: "pnpm --version",
+        install: 'npm install -g --prefix "$HOME/.local" pnpm@{version}',
+        update: "pnpm self-update {version}",
+        path: [".local/bin"],
+        depends: ["node"],
+      },
+      node: { local: "node --version", install: "nvm install {version}" },
+    });
+  });
+
+  test("refuses an unknown key in a tool table and names the tool and the key", () => {
+    const home = homeWithConfig([...BASE, "", "[tools.pnpm]", 'local = "pnpm --version"', 'install = "x"', 'kind = "agent"']);
+
+    expect(() => readConfig(home)).toThrow("unknown key kind in [tools.pnpm]");
+  });
+
+  for (const [line, message] of [
+    ["local = 1", "invalid value for local in [tools.pnpm]"],
+    ['install = [".local/bin"]', "invalid value for install in [tools.pnpm]"],
+    ['path = ".local/bin"', "invalid value for path in [tools.pnpm]"],
+    ["depends = [1]", "invalid value for depends in [tools.pnpm]"],
+    ['depends = [""]', "invalid value for depends in [tools.pnpm]"],
+    ['version = "lts"', "invalid policy for version in [tools.pnpm]"],
+  ] as const) {
+    test(`refuses the tool table line ${line}`, () => {
+      const home = homeWithConfig([...BASE, "", "[tools.pnpm]", 'local = "pnpm --version"', 'install = "x"', line]);
+
+      expect(() => readConfig(home)).toThrow(message);
+    });
+  }
+
+  for (const [line, message] of [
+    ['install = "npm i -g pnpm@{tag}"', "unknown placeholder {tag} in install of [tools.pnpm]"],
+    ['update = "pnpm self-update {Version}"', "unknown placeholder {Version} in update of [tools.pnpm]"],
+    ['local = "pnpm --version {version}"', "unknown placeholder {version} in local of [tools.pnpm]"],
+  ] as const) {
+    test(`refuses the placeholder in ${line}`, () => {
+      const home = homeWithConfig([...BASE, "", "[tools.pnpm]", 'local = "pnpm --version"', 'install = "x"', line]);
+
+      expect(() => readConfig(home)).toThrow(message);
+      expect(() => readConfig(home)).toThrow("{version} in install and update is the only placeholder");
+    });
+  }
+
+  test("a shell ${...} expansion is not a placeholder", () => {
+    const home = homeWithConfig([...BASE, "", "[tools.node]", 'local = "node --version"', 'install = ". \\"${NVM_DIR}/nvm.sh\\" && nvm install {version}"']);
+
+    expect(readConfig(home)?.tools?.node).toMatchObject({ install: '. "${NVM_DIR}/nvm.sh" && nvm install {version}' });
+  });
+
+  test("refuses a tool table without a local version command or an install command", () => {
+    const withoutInstall = homeWithConfig([...BASE, "", "[tools.pnpm]", 'local = "pnpm --version"']);
+    const withoutLocal = homeWithConfig([...BASE, "", "[tools.pnpm]", 'install = "x"']);
+
+    expect(() => readConfig(withoutInstall)).toThrow("missing install in [tools.pnpm]");
+    expect(() => readConfig(withoutLocal)).toThrow("missing local in [tools.pnpm]");
+  });
+
+  test("refuses a tool that the config names twice", () => {
+    const twice = homeWithConfig([...BASE, "", "[tools.pnpm]", 'local = "x"', 'install = "x"', "", "[tools.pnpm]"]);
+    const repeated = homeWithConfig([...BASE, "", "[tools]", 'gh = "latest"', 'gh = "operator"']);
+
+    expect(() => readConfig(twice)).toThrow("duplicate tool pnpm");
+    expect(() => readConfig(repeated)).toThrow("duplicate tool gh");
+  });
+
+  test("writing the config keeps the [tools] policies and the tool tables", () => {
     const home = homeWithConfig(BASE);
+    const tools = {
+      gh: "operator",
+      claude: "latest",
+      pnpm: {
+        version: "operator",
+        local: "pnpm --version",
+        box: "pnpm --version",
+        install: 'npm install -g --prefix "$HOME/.local" pnpm@{version}',
+        path: [".local/bin"],
+        depends: ["node"],
+      },
+      node: { local: "node --version", install: "nvm install {version}" },
+    };
 
     writeConfig({
       version: 1,
@@ -183,11 +289,11 @@ describe("operator config", () => {
       snapshotUrl: "snapshot.git",
       host: { tailscale: "box", sshUser: "ferry" },
       integrations: { paseo: true },
-      tools: { node: "operator", bun: "1.4.2", claude: "latest" },
+      tools,
     }, home);
 
-    expect(readConfig(home)?.tools).toEqual({ node: "operator", bun: "1.4.2", claude: "latest" });
-    expect(readFileSync(configPath(home), "utf8")).toContain('[tools]\nnode = "operator"\nbun = "1.4.2"\nclaude = "latest"\n');
+    expect(readConfig(home)?.tools).toEqual(tools);
+    expect(readFileSync(configPath(home), "utf8")).toContain('[tools]\ngh = "operator"\nclaude = "latest"\n\n[tools.pnpm]\nversion = "operator"\n');
   });
 
   test("refuses an unknown key and names it", () => {

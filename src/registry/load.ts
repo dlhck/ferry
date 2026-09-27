@@ -1,29 +1,27 @@
 /**
  * The registry loader merges operator entries into the builtin set.
  *
- * Entries are data. They arrive as the parsed `[[harness]]` and `[[tool]]`
- * tables of the operator config at `~/.ferry/config.toml`, so this function
- * never reads a file and never loads code. An entry may add a harness or a
- * tool. No entry may reuse a registered id, name a path outside the home, name
- * a path the deny set in Manifest already covers, take a path another harness
- * already owns, or root skills anywhere but a skills directory.
+ * Entries are data. They arrive as the parsed `[[harness]]` and
+ * `[tools.<id>]` tables of the operator config at `~/.ferry/config.toml`, so
+ * this function never reads a file and never loads code. An entry may add a
+ * harness or a tool. No entry may reuse a registered id or name a path outside
+ * the home. No harness may name a path the deny set in Manifest already
+ * covers, take a path another harness already owns, or root skills anywhere
+ * but a skills directory. No tool may depend on an unknown tool or on itself
+ * through a cycle.
  */
 
 import { isAbsolute } from "node:path";
+import { quoteShell } from "../box-settings.ts";
+import type { ToolDefinition, ToolsConfig } from "../config.ts";
 import { deniedSegment } from "../manifest.ts";
 import { BUILTIN_HARNESSES, BUILTIN_TOOLS } from "./builtin.ts";
-import type {
-  AuthCompletion,
-  AuthFallback,
-  HarnessDescriptor,
-  ToolAuth,
-  ToolDescriptor,
-} from "./types.ts";
+import type { HarnessDescriptor, ToolDescriptor } from "./types.ts";
 
-/** Parsed operator config. The keys are the TOML array-of-table names. */
+/** Parsed operator config: the `[[harness]]` entries and the `[tools]` table. */
 export type RegistryConfig = {
   readonly harness?: readonly unknown[];
-  readonly tool?: readonly unknown[];
+  readonly tools?: ToolsConfig;
 };
 
 export type Registry = {
@@ -39,7 +37,9 @@ export type RegistryProblem = {
     | "unsafe-path"
     | "denied-path"
     | "invalid-skill-root"
-    | "path-collision";
+    | "path-collision"
+    | "unknown-dependency"
+    | "dependency-cycle";
   readonly reason: string;
 };
 
@@ -68,15 +68,27 @@ export function loadRegistry(config: RegistryConfig = {}): RegistryResult {
     harnesses.push(harness);
   }
 
-  for (const [index, entry] of (config.tool ?? []).entries()) {
-    const tool = readTool(entry, `tool ${index + 1}`, problems);
-    if (!tool) continue;
-    if (tools.some((known) => known.id === tool.id)) {
-      problems.push({ code: "duplicate-id", reason: `tool ${tool.id} is already registered` });
+  for (const [id, entry] of Object.entries(config.tools ?? {})) {
+    // A string is the policy of a builtin tool. The config parser checked the id.
+    if (typeof entry === "string") continue;
+    if (tools.some((known) => known.id === id)) {
+      problems.push({
+        code: "duplicate-id",
+        reason: `tool ${id} is built in. Set its policy with ${id} = "<policy>" in [tools], or pick another id.`,
+      });
       continue;
     }
-    tools.push(tool);
+    const unsafe = (entry.path ?? []).find((dir) => {
+      const plain = plainPath(dir);
+      return isAbsolute(dir) || plain === "" || plain.split("/").includes("..");
+    });
+    if (unsafe !== undefined) {
+      problems.push({ code: "unsafe-path", reason: `tool ${id} path ${unsafe} must be a directory inside the home` });
+      continue;
+    }
+    tools.push(configTool(id, entry));
   }
+  problems.push(...dependencyProblems(tools));
 
   if (problems.length > 0) return { ok: false, problems };
   return { ok: true, harnesses, tools };
@@ -193,152 +205,6 @@ function nests(one: string, other: string): boolean {
   return one === other || one.startsWith(`${other}/`) || other.startsWith(`${one}/`);
 }
 
-function readTool(
-  value: unknown,
-  label: string,
-  problems: RegistryProblem[],
-): ToolDescriptor | null {
-  const entry = table(value, label, problems);
-  if (!entry) return null;
-
-  const id = text(entry, "id", label, problems);
-  if (!id) {
-    problems.push({ code: "invalid-entry", reason: `${label} needs an id` });
-    return null;
-  }
-  if (entry.install === undefined && entry.auth === undefined) {
-    problems.push({
-      code: "invalid-entry",
-      reason: `${label} needs an install command, a login recipe, or both`,
-    });
-    return null;
-  }
-
-  let install: ToolDescriptor["install"];
-  if (entry.install !== undefined) {
-    const installEntry = table(entry.install, `${label} install`, problems);
-    const command = installEntry && text(installEntry, "command", `${label} install`, problems);
-    if (!command) {
-      problems.push({ code: "invalid-entry", reason: `${label} install needs a command` });
-      return null;
-    }
-    install = { command };
-  }
-
-  let auth: ToolAuth | undefined;
-  if (entry.auth !== undefined) {
-    auth = readAuth(entry.auth, `${label} auth`, problems) ?? undefined;
-    if (!auth) return null;
-  }
-
-  return { id, ...(install ? { install } : {}), ...(auth ? { auth } : {}) };
-}
-
-function readAuth(value: unknown, label: string, problems: RegistryProblem[]): ToolAuth | null {
-  const entry = table(value, label, problems);
-  if (!entry) return null;
-
-  const probe = text(entry, "probe", label, problems);
-  const login = text(entry, "login", label, problems);
-  const completion = readCompletion(entry.completion, `${label} completion`, problems);
-  if (!completion) return null;
-
-  // Ferry can only start a login it has both commands for.
-  if (completion.kind !== "manual" && (!probe || !login)) {
-    problems.push({ code: "invalid-entry", reason: `${label} needs a probe and a login` });
-    return null;
-  }
-
-  let fallback: AuthFallback | undefined;
-  if (entry.fallback !== undefined) {
-    fallback = readFallback(entry.fallback, `${label} fallback`, problems) ?? undefined;
-    if (!fallback) return null;
-  }
-
-  return {
-    ...(probe ? { probe } : {}),
-    ...(login ? { login } : {}),
-    completion,
-    ...(fallback ? { fallback } : {}),
-  };
-}
-
-function readCompletion(
-  value: unknown,
-  label: string,
-  problems: RegistryProblem[],
-): AuthCompletion | null {
-  const entry = table(value, label, problems);
-  if (!entry) return null;
-
-  const named = problems.length;
-  const kind = text(entry, "kind", label, problems);
-  if (kind === "device-url") {
-    const url = text(entry, "url", label, problems);
-    const codePattern = text(entry, "codePattern", label, problems);
-    if (url && !isHttpsUrl(url)) {
-      problems.push({ code: "invalid-entry", reason: `${label} url ${url} is not an https URL` });
-      return null;
-    }
-    // A pattern that cannot compile would throw while a login is already running.
-    if (codePattern && !compiles(codePattern)) {
-      problems.push({
-        code: "invalid-entry",
-        reason: `${label} codePattern is not a regular expression`,
-      });
-      return null;
-    }
-    if (url) return { kind, url, ...(codePattern ? { codePattern } : {}) };
-  }
-  if (kind === "printed-url") {
-    const allowedHosts = hostList(entry, "allowedHosts", label, problems);
-    if (allowedHosts && allowedHosts.length > 0) return { kind, allowedHosts };
-  }
-  if (kind === "manual") {
-    const command = text(entry, "command", label, problems);
-    const instruction = text(entry, "instruction", label, problems);
-    if (command && instruction) return { kind, command, instruction };
-  }
-
-  // A field problem already says what is wrong. Only an unrecognised shape needs this.
-  if (problems.length === named) {
-    problems.push({
-      code: "invalid-entry",
-      reason: `${label} must be a complete device-url, printed-url, or manual completion`,
-    });
-  }
-  return null;
-}
-
-function readFallback(
-  value: unknown,
-  label: string,
-  problems: RegistryProblem[],
-): AuthFallback | null {
-  const entry = table(value, label, problems);
-  if (!entry) return null;
-
-  const named = problems.length;
-  const login = text(entry, "login", label, problems);
-  const allowedHosts = hostList(entry, "allowedHosts", label, problems);
-  const forward = table(entry.forward, `${label} forward`, problems);
-  const localPort = forward && count(forward, "localPort", `${label} forward`, problems);
-  const remotePort = forward && count(forward, "remotePort", `${label} forward`, problems);
-  const remoteHost = forward && text(forward, "remoteHost", `${label} forward`, problems);
-  const timeoutMs = forward && count(forward, "timeoutMs", `${label} forward`, problems);
-
-  if (!login || !allowedHosts?.length || !localPort || !remotePort || !remoteHost || !timeoutMs) {
-    if (problems.length === named) {
-      problems.push({
-        code: "invalid-entry",
-        reason: `${label} needs a login, allowed hosts, and a complete forward`,
-      });
-    }
-    return null;
-  }
-  return { login, allowedHosts, forward: { localPort, remotePort, remoteHost, timeoutMs } };
-}
-
 function table(
   value: unknown,
   label: string,
@@ -367,65 +233,44 @@ function text(
   return value;
 }
 
-/** An allowed host names a domain. A bare label such as `com` would open a whole TLD. */
-function hostList(
-  entry: Record<string, unknown>,
-  key: string,
-  label: string,
-  problems: RegistryProblem[],
-): readonly string[] | undefined {
-  const hosts = textList(entry, key, label, problems);
-  if (!hosts) return undefined;
-  if (hosts.some((host) => !host.includes("."))) {
-    problems.push({ code: "invalid-entry", reason: `${label} ${key} must name domains` });
-    return undefined;
-  }
-  return hosts;
+/** A `[tools.<id>]` table as a tool of kind `tool`. */
+function configTool(id: string, definition: ToolDefinition): ToolDescriptor {
+  const fill = (command: string) => (version: string) => command.replaceAll("{version}", quoteShell(version));
+  return {
+    id,
+    kind: "tool",
+    localVersion: definition.local,
+    ...(definition.box ? { boxVersion: definition.box } : {}),
+    recipe: { install: fill(definition.install), update: fill(definition.update ?? definition.install) },
+    ...(definition.path ? { pathDirs: definition.path.map(plainPath) } : {}),
+    ...(definition.depends ? { dependsOn: definition.depends } : {}),
+  };
 }
 
-function isHttpsUrl(value: string): boolean {
-  try {
-    return new URL(value).protocol === "https:";
-  } catch {
-    return false;
+/** Each dependency must name a known tool, and no tool may depend on itself through others. */
+function dependencyProblems(tools: readonly ToolDescriptor[]): RegistryProblem[] {
+  const problems: RegistryProblem[] = [];
+  const byId = new Map(tools.map((tool) => [tool.id, tool]));
+  for (const tool of tools) {
+    for (const dependency of tool.dependsOn ?? []) {
+      if (!byId.has(dependency)) {
+        problems.push({ code: "unknown-dependency", reason: `tool ${tool.id} depends on ${dependency}, which is not a known tool` });
+      }
+    }
   }
-}
 
-function compiles(pattern: string): boolean {
-  try {
-    new RegExp(pattern);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function textList(
-  entry: Record<string, unknown>,
-  key: string,
-  label: string,
-  problems: RegistryProblem[],
-): readonly string[] | undefined {
-  const value = entry[key];
-  if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item === "")) {
-    problems.push({ code: "invalid-entry", reason: `${label} ${key} is not a list of strings` });
-    return undefined;
-  }
-  return value as readonly string[];
-}
-
-function count(
-  entry: Record<string, unknown>,
-  key: string,
-  label: string,
-  problems: RegistryProblem[],
-): number | undefined {
-  const value = entry[key];
-  if (value === undefined) return undefined;
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    problems.push({ code: "invalid-entry", reason: `${label} ${key} is not a positive number` });
-    return undefined;
-  }
-  return value;
+  const done = new Set<string>();
+  const visit = (id: string, trail: readonly string[]): void => {
+    const start = trail.indexOf(id);
+    if (start !== -1) {
+      const cycle = [...trail.slice(start), id].join(" -> ");
+      problems.push({ code: "dependency-cycle", reason: `tools depend on each other in a cycle: ${cycle}` });
+      return;
+    }
+    if (done.has(id)) return;
+    for (const dependency of byId.get(id)?.dependsOn ?? []) visit(dependency, [...trail, id]);
+    done.add(id);
+  };
+  for (const tool of tools) visit(tool.id, []);
+  return problems;
 }
