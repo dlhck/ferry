@@ -1,0 +1,27 @@
+{
+  "name": "@dlhck/ferry",
+  "version": "0.0.0",
+  "description": "Keep a remote Linux agent box in the same shape as your machine: skills, AGENTS.md, and Claude settings, without copying credentials.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dlhck/ferry.git"
+  },
+  "homepage": "https://github.com/dlhck/ferry#readme",
+  "bugs": "https://github.com/dlhck/ferry/issues",
+  "bin": {
+    "ferry": "bin/ferry.js"
+  },
+  "files": [
+    "bin/ferry.js"
+  ],
+  "optionalDependencies": {
+    "@dlhck/ferry-darwin-arm64": "0.0.0",
+    "@dlhck/ferry-darwin-x64": "0.0.0",
+    "@dlhck/ferry-linux-arm64": "0.0.0",
+    "@dlhck/ferry-linux-x64": "0.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
