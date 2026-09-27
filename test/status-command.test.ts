@@ -223,8 +223,8 @@ describe("ferry status command", () => {
     expect(stack.output[0]).toContain("Managed links: UNHEALTHY (1)");
     expect(stack.output[0]).toContain("codex: LOGIN REQUIRED");
     expect(stack.output[0]).toContain("pi: MANUAL LOGIN REQUIRED. SSH to the box");
-    expect(stack.output[0]).toContain(
-      "MCP logins:\n  codex/linear: LOGIN REQUIRED, run ferry auth codex --mcp linear\n\nDeny list:",
+    expect(stack.output[0]).toEndWith(
+      "MCP logins:\n  codex/linear: LOGIN REQUIRED, run ferry auth codex --mcp linear",
     );
     expect(stack.output[0]).toContain("dotenv: refuse environment file");
     expect(stack.mutations).toEqual([]);
@@ -258,7 +258,7 @@ describe("ferry status command", () => {
 
       const output = lines.join("\n");
       expect(output).toContain("Host: ONLINE");
-      expect(output).toContain('"schemaVersion":1');
+      expect(output).toContain('"schemaVersion":2');
       expect(terminal.table().join("\n")).toContain("Connecting to the box");
       expect(output).not.toMatch(/paseo/i);
       expect(terminal.writes.join("")).not.toMatch(/paseo/i);
@@ -290,7 +290,7 @@ describe("ferry status command", () => {
     expect(text.reads).toContain(
       "link.run:git -C '/box/home/.ferry/store' status --porcelain=v1 -z --untracked-files=all 2>/dev/null || true",
     );
-    expect(JSON.parse(json.output[0]!).boxCheckout).toEqual({
+    expect(JSON.parse(json.output[0]!).boxes[0].boxCheckout).toEqual({
       dirty: true,
       changes: ["skills/scratch/SKILL.md", "skills/tdd/SKILL.md"],
       error: null,
@@ -318,9 +318,9 @@ describe("ferry status command", () => {
     expect(different.output[0]).toContain(
       "Box git identity: DIFFERENT from operator (Box Agent <box@example.com>, operator: Operator <operator@example.com>)",
     );
-    expect(JSON.parse(json.output[0]!).gitIdentity).toEqual({
+    expect(JSON.parse(json.output[0]!).operator.gitIdentity).toEqual({ name: "Operator", email: "operator@example.com" });
+    expect(JSON.parse(json.output[0]!).boxes[0].gitIdentity).toEqual({
       box: { name: null, email: null },
-      operator: { name: "Operator", email: "operator@example.com" },
       boxConfigured: false,
       matchesOperator: false,
       error: null,
@@ -345,12 +345,12 @@ describe("ferry status command", () => {
     );
     expect(password.output[0]).toContain("Box sudo: PASSWORD REQUIRED");
     expect(password.output[0]).not.toContain("WARNING");
-    expect(JSON.parse(passwordlessJson.output[0]!).boxSudo).toEqual({
+    expect(JSON.parse(passwordlessJson.output[0]!).boxes[0].boxSudo).toEqual({
       passwordless: true,
       watchUpdateBlocked: false,
       error: null,
     });
-    expect(JSON.parse(passwordJson.output[0]!).boxSudo).toEqual({
+    expect(JSON.parse(passwordJson.output[0]!).boxes[0].boxSudo).toEqual({
       passwordless: false,
       watchUpdateBlocked: false,
       error: null,
@@ -375,7 +375,7 @@ describe("ferry status command", () => {
     expect(watchOff.output[0]).toContain("Box sudo: PASSWORD REQUIRED");
     expect(watchOff.output[0]).not.toContain("WARNING");
     expect(passwordless.output[0]).not.toContain("WARNING");
-    expect(JSON.parse(json.output[0]!).boxSudo).toEqual({
+    expect(JSON.parse(json.output[0]!).boxes[0].boxSudo).toEqual({
       passwordless: false,
       watchUpdateBlocked: true,
       error: null,
@@ -392,7 +392,7 @@ describe("ferry status command", () => {
 
       expect(text.output[0]).toContain("Box sudo: PASSWORD REQUIRED");
       expect(text.output[0]).not.toContain("WARNING");
-      expect(JSON.parse(json.output[0]!).boxSudo.watchUpdateBlocked).toBe(false);
+      expect(JSON.parse(json.output[0]!).boxes[0].boxSudo.watchUpdateBlocked).toBe(false);
     });
   }
 
@@ -429,7 +429,7 @@ describe("ferry status command", () => {
     expect(stack.output[0]).toContain("Box git identity: unavailable");
     expect(stack.output[0]).toContain("Box sudo: unavailable");
     expect(stack.output[0]).not.toContain("WARNING");
-    expect(JSON.parse(json.output[0]!).boxSudo).toEqual({
+    expect(JSON.parse(json.output[0]!).boxes[0].boxSudo).toEqual({
       passwordless: null,
       watchUpdateBlocked: false,
       error: null,
@@ -450,6 +450,8 @@ describe("ferry status progress", () => {
     await runStatusCommand({ json: false }, { ...stack.dependencies, progress });
 
     expect(progress.events).toEqual([
+      "start:Comparing the store tips",
+      "done",
       "start:Connecting to the box",
       "done",
       "start:Reading the box store tip",
@@ -459,8 +461,6 @@ describe("ferry status progress", () => {
       "start:Reading the box git identity",
       "done",
       "start:Checking sudo on the box",
-      "done",
-      "start:Comparing the store tips",
       "done",
       "start:Checking managed links on the box",
       "done",
@@ -478,14 +478,14 @@ describe("ferry status progress", () => {
     await runStatusCommand({ json: false }, { ...stack.dependencies, progress });
 
     expect(progress.events).toEqual([
+      "start:Comparing the store tips",
+      "done",
       "start:Connecting to the box",
       "fail",
       "skip:Reading the box store tip",
       "skip:Reading the box checkout changes",
       "skip:Reading the box git identity",
       "skip:Checking sudo on the box",
-      "start:Comparing the store tips",
-      "done",
       "skip:Checking managed links on the box",
       "skip:Checking logins on the box",
       "skip:Checking MCP logins on the box",
@@ -506,17 +506,18 @@ describe("ferry status progress", () => {
 
     expect(terminal.table()).toEqual([
       "Step                               Result     Detail                  Time",
+      "Comparing the store tips           ✔ done                             0.1s",
       "Connecting to the box              ✖ failed   network/host-offline    0.1s",
       "Reading the box store tip          – skipped  host offline",
       "Reading the box checkout changes   – skipped  host offline",
       "Reading the box git identity       – skipped  host offline",
       "Checking sudo on the box           – skipped  host offline",
-      "Comparing the store tips           ✔ done                             0.1s",
       "Checking managed links on the box  – skipped  host offline",
       "Checking logins on the box         – skipped  host offline",
       "Checking MCP logins on the box     – skipped  host offline",
     ]);
-    expect(lines[0]).toStartWith("Host: OFFLINE");
+    expect(lines[0]).toStartWith("Store tips:");
+    expect(lines[0]).toContain("Box default (ferry@box)\nHost: OFFLINE");
   });
 
   test("progress does not change the JSON output", async () => {
@@ -571,8 +572,6 @@ describe("ferry status progress", () => {
           "    Service: ferry-paseo.service active, enabled",
           "    Daemon: running, reachable",
           "    WARNING: The Paseo relay is on. Ferry keeps it off on the box.",
-          "",
-          "Deny list:",
         ].join("\n"),
       );
     });
@@ -582,10 +581,10 @@ describe("ferry status progress", () => {
 
       const report = await runStatusCommand({ json: true }, dependencies);
 
-      expect(JSON.parse(stack.output[0]!).integrations).toEqual({
+      expect(JSON.parse(stack.output[0]!).boxes[0].integrations).toEqual({
         paseo: { name: "Paseo", lines: health.lines, warnings: health.warnings, state: health.json },
       });
-      expect(report.integrations?.paseo?.state).toEqual(health.json);
+      expect(report.boxes[0]!.integrations?.paseo?.state).toEqual(health.json);
     });
 
     test("checks the integration as a progress step", async () => {
@@ -606,7 +605,7 @@ describe("ferry status progress", () => {
 
       expect(calls).toEqual([]);
       expect(progress.events).toContain("skip:Checking Paseo on the box");
-      expect(report.integrations?.paseo).toEqual({
+      expect(report.boxes[0]!.integrations?.paseo).toEqual({
         name: "Paseo",
         lines: ["unavailable while host is offline"],
         warnings: [],
@@ -621,7 +620,180 @@ describe("ferry status progress", () => {
 
     const report = await runStatusCommand({ json: true }, stack.dependencies);
 
-    expect("integrations" in report).toBe(false);
+    expect("integrations" in report.boxes[0]!).toBe(false);
     expect(stack.output[0]).not.toContain("integrations");
+  });
+});
+
+describe("ferry status with more than one box", () => {
+  const health: IntegrationHealth = {
+    lines: ["Daemon: running, reachable"],
+    warnings: [],
+    json: { localDaemon: "running" },
+  };
+
+  /** Box `a` is online with Paseo on. Box `b` is offline with Paseo off. */
+  function twoBoxes() {
+    const online = fakeStack(true);
+    const offline = fakeStack(false);
+    const readConfig = online.dependencies.readConfig!;
+    const healthLinks: unknown[] = [];
+    const linkOptions: unknown[] = [];
+    const paseo: Integration = {
+      ...createPaseo({ platform: "win32" }),
+      async health(link) {
+        healthLinks.push(link);
+        return health;
+      },
+    };
+    const onlineLink = online.dependencies.createLink!({ host: "unused", user: "unused" });
+    const offlineLink = offline.dependencies.createLink!({ host: "unused", user: "unused" });
+    const dependencies: Partial<StatusCommandDependencies> = {
+      ...online.dependencies,
+      readConfig: () => ({
+        ...readConfig(),
+        host: undefined,
+        integrations: { paseo: true },
+        boxes: [
+          { name: "a", host: { transport: "ssh" as const, destination: "dev@box-a.example" } },
+          {
+            name: "b",
+            host: { tailscale: "box-b", sshUser: "dev" },
+            integrations: { paseo: false },
+          },
+        ],
+      }),
+      createLink: (options) => {
+        linkOptions.push(options);
+        return "destination" in options ? onlineLink : offlineLink;
+      },
+      integrations: [paseo],
+    };
+    return { output: online.output, mutations: [...online.mutations, ...offline.mutations], healthLinks, linkOptions, onlineLink, dependencies };
+  }
+
+  test("prints the shared block, then one block per box with its header", async () => {
+    const stack = twoBoxes();
+
+    await runStatusCommand({ json: false }, stack.dependencies);
+
+    const text = stack.output[0]!;
+    expect(text).toStartWith(
+      [
+        "Store tips:",
+        "  Local: same-tip",
+        "  Git remote: same-tip",
+        "  Local = remote: yes",
+        "",
+        "Deny list:",
+        "  dotenv: refuse environment file",
+        "",
+        "Box a (dev@box-a.example)",
+        "Host: ONLINE",
+        "Address: 100.64.0.8",
+        "",
+        "Store tips:",
+        "  Box: same-tip",
+        "  Remote = box: yes",
+        "  All agree: yes",
+      ].join("\n"),
+    );
+    expect(text.indexOf("Box a (dev@box-a.example)")).toBeLessThan(text.indexOf("Box b (dev@box-b)"));
+    expect(text).toContain("Box b (dev@box-b)\nHost: OFFLINE\nAddress: unavailable");
+    expect(text).toEndWith("Errors:\n  network/host-offline: Tailscale host box is offline");
+    expect(stack.linkOptions).toEqual([{ destination: "dev@box-a.example" }, { host: "box-b", user: "dev" }]);
+    expect(stack.mutations).toEqual([]);
+  });
+
+  test("shows Paseo only for the box that has the integration on", async () => {
+    const stack = twoBoxes();
+
+    await runStatusCommand({ json: false }, stack.dependencies);
+
+    const [a, b] = stack.output[0]!.split(/\n\nBox b /);
+    expect(a).toContain("Integrations:\n  Paseo:\n    Daemon: running, reachable");
+    expect(b).not.toMatch(/paseo/i);
+    expect(stack.healthLinks).toEqual([stack.onlineLink]);
+  });
+
+  test("prints JSON v2 with one entry per box, in config order, and the offline box has its own errors", async () => {
+    const stack = twoBoxes();
+
+    const report = await runStatusCommand({ json: true }, stack.dependencies);
+
+    const json = JSON.parse(stack.output[0]!);
+    expect(json).toEqual(report);
+    expect(json.schemaVersion).toBe(2);
+    expect(json.store).toEqual({ local: "same-tip", remote: "same-tip", localMatchesRemote: true, error: null });
+    expect(json.errors).toEqual([]);
+    expect(json.boxes.map((box: { name: string; host: string }) => [box.name, box.host])).toEqual([
+      ["a", "dev@box-a.example"],
+      ["b", "dev@box-b"],
+    ]);
+    expect(json.boxes[0].link.online).toBe(true);
+    expect(json.boxes[0].integrations.paseo.state).toEqual(health.json);
+    expect(json.boxes[1].link.online).toBe(false);
+    expect(json.boxes[1].errors).toEqual([
+      { code: "host-offline", origin: "network", message: "Tailscale host box is offline" },
+    ]);
+    expect("integrations" in json.boxes[1]).toBe(false);
+  });
+
+  test("a selection inspects only the named boxes", async () => {
+    const stack = twoBoxes();
+
+    const report = await runStatusCommand({ json: true, selection: ["b"] }, stack.dependencies);
+
+    expect(report.boxes.map((box) => box.name)).toEqual(["b"]);
+    expect(stack.linkOptions).toEqual([{ host: "box-b", user: "dev" }]);
+  });
+
+  test("refuses an unknown box in the selection", async () => {
+    const stack = twoBoxes();
+
+    expect(runStatusCommand({ json: true, selection: ["c"] }, stack.dependencies)).rejects.toThrow(
+      "unknown box c. Known boxes: a, b.",
+    );
+  });
+
+  test("names each box step in the summary table", async () => {
+    const stack = twoBoxes();
+    const terminal = fakeTerminal(100);
+
+    await runStatusCommand({ json: false }, { ...stack.dependencies, progress: terminal.progress });
+    terminal.progress.finish();
+
+    const steps = terminal.table().slice(1).map((row) => row.split(/\s{2,}/)[0]);
+    expect(steps).toEqual([
+      "Comparing the store tips",
+      "[a] Connecting to the box",
+      "[a] Reading the box store tip",
+      "[a] Reading the box checkout changes",
+      "[a] Reading the box git identity",
+      "[a] Checking sudo on the box",
+      "[a] Checking managed links on the box",
+      "[a] Checking logins on the box",
+      "[a] Checking MCP logins on the box",
+      "[a] Checking Paseo on the box",
+      "[b] Connecting to the box",
+      "[b] Reading the box store tip",
+      "[b] Reading the box checkout changes",
+      "[b] Reading the box git identity",
+      "[b] Checking sudo on the box",
+      "[b] Checking managed links on the box",
+      "[b] Checking logins on the box",
+      "[b] Checking MCP logins on the box",
+    ]);
+  });
+});
+
+describe("ferry status with one box", () => {
+  test("adds only the box header to the text of one box", async () => {
+    const stack = fakeStack();
+
+    await runStatusCommand({ json: false }, stack.dependencies);
+
+    expect(stack.output[0]).toContain("\n\nBox default (ferry@box)\nHost: ONLINE\nAddress: 100.64.0.8\n");
+    expect(stack.output[0]!.match(/^Box \S+ \(/gm)).toHaveLength(1);
   });
 });
