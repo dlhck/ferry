@@ -9,6 +9,7 @@ import {
   runStatusCommand,
   type StatusCommandDependencies,
 } from "../src/status-command.ts";
+import { recordProgress } from "./fake-progress.ts";
 
 const registry: Registry = {
   harnesses: [
@@ -389,5 +390,59 @@ describe("ferry status command", () => {
     expect(stack.reads).not.toContain("auth.status");
     expect(stack.reads.filter((call) => call.startsWith("link.run:"))).toHaveLength(1);
     expect(stack.mutations).toEqual([]);
+  });
+});
+
+describe("ferry status progress", () => {
+  test("shows each inspection as a step, in order", async () => {
+    const stack = fakeStack();
+    const progress = recordProgress();
+
+    await runStatusCommand({ json: false }, { ...stack.dependencies, progress });
+
+    expect(progress.events).toEqual([
+      "start:Connecting to the box",
+      "done",
+      "start:Reading the box store tip",
+      "done",
+      "start:Reading the box checkout changes",
+      "done",
+      "start:Reading the box git identity",
+      "done",
+      "start:Checking sudo on the box",
+      "done",
+      "start:Comparing the store tips",
+      "done",
+      "start:Checking managed links on the box",
+      "done",
+      "start:Checking logins on the box",
+      "done",
+      "start:Checking MCP logins on the box",
+      "done",
+    ]);
+  });
+
+  test("marks a failed probe and skips the box steps when the host is offline", async () => {
+    const stack = fakeStack(false);
+    const progress = recordProgress();
+
+    await runStatusCommand({ json: false }, { ...stack.dependencies, progress });
+
+    expect(progress.events).toEqual([
+      "start:Connecting to the box",
+      "fail",
+      "start:Comparing the store tips",
+      "done",
+    ]);
+  });
+
+  test("progress does not change the JSON output", async () => {
+    const plain = fakeStack();
+    const tracked = fakeStack();
+
+    await runStatusCommand({ json: true }, plain.dependencies);
+    await runStatusCommand({ json: true }, { ...tracked.dependencies, progress: recordProgress() });
+
+    expect(tracked.output).toEqual(plain.output);
   });
 });

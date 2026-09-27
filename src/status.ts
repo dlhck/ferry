@@ -3,6 +3,7 @@ import type { AuthProviderStatus, AuthStatusReport, McpLoginStatus } from "./aut
 import { parseGitIdentity, type GitIdentity } from "./git-identity.ts";
 import type { LinkError, LinkResult } from "./link.ts";
 import type { DenyRuleDescription } from "./manifest.ts";
+import { noProgress, step, type Progress } from "./progress.ts";
 import type { TipReport } from "./store.ts";
 import { changedPaths } from "./sync.ts";
 
@@ -43,6 +44,7 @@ export type StatusDependencies = {
   readonly manifest: {
     denyRules(): readonly DenyRuleDescription[];
   };
+  readonly progress?: Progress;
 };
 
 export type StatusReport = {
@@ -97,6 +99,7 @@ export type StatusReport = {
 
 /** Compose one read-only report from module-owned inspection methods. */
 export async function composeStatus(dependencies: StatusDependencies): Promise<StatusReport> {
+  const progress = dependencies.progress ?? noProgress;
   const errors: StatusError[] = [];
   let denyList: readonly DenyRuleDescription[] = [];
   try {
@@ -109,7 +112,7 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
   let address: string | null = null;
   let linkError: LinkError | StatusDependencyError | null = null;
   try {
-    const result = await dependencies.link.probe();
+    const result = await inspect(progress, "Connecting to the box", () => dependencies.link.probe());
     if (result.ok) {
       online = true;
       address = result.address;
@@ -124,7 +127,7 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
   let boxTip: string | null = null;
   if (online) {
     try {
-      const result = await dependencies.link.readBoxTip();
+      const result = await inspect(progress, "Reading the box store tip", () => dependencies.link.readBoxTip());
       if (result.ok) boxTip = result.stdout.trim() || null;
       else errors.push(result.error);
     } catch (cause) {
@@ -137,7 +140,9 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
   let dirty: boolean | null = null;
   if (online) {
     try {
-      const result = await dependencies.link.readBoxChanges();
+      const result = await inspect(progress, "Reading the box checkout changes", () =>
+        dependencies.link.readBoxChanges(),
+      );
       if (result.ok) {
         changes = changedPaths(result.stdout);
         dirty = changes.length > 0;
@@ -154,7 +159,9 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
   let boxIdentity: GitIdentity | null = null;
   if (online) {
     try {
-      const result = await dependencies.link.readBoxGitIdentity();
+      const result = await inspect(progress, "Reading the box git identity", () =>
+        dependencies.link.readBoxGitIdentity(),
+      );
       if (result.ok) boxIdentity = parseGitIdentity(result.stdout);
       else gitIdentityError = result.error;
     } catch (cause) {
@@ -167,7 +174,7 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
   let passwordless: boolean | null = null;
   if (online) {
     try {
-      const result = await dependencies.link.readBoxSudo();
+      const result = await inspect(progress, "Checking sudo on the box", () => dependencies.link.readBoxSudo());
       if (result.ok) passwordless = parseSudoCheck(result.stdout);
       else boxSudoError = result.error;
     } catch (cause) {
@@ -195,7 +202,7 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
   let storeError: StatusDependencyError | null = null;
   let store = emptyTips(boxTip);
   try {
-    store = await dependencies.store.inspectTips(boxTip);
+    store = await inspect(progress, "Comparing the store tips", () => dependencies.store.inspectTips(boxTip));
   } catch (cause) {
     storeError = dependencyError("git-remote", cause);
     errors.push(storeError);
@@ -206,7 +213,7 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
   let allHealthy: boolean | null = null;
   if (online) {
     try {
-      const applyPlan = await dependencies.apply.plan();
+      const applyPlan = await inspect(progress, "Checking managed links on the box", () => dependencies.apply.plan());
       unhealthy = applyPlan.actions;
       allHealthy = unhealthy.length === 0;
     } catch (cause) {
@@ -219,7 +226,7 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
   let providers: readonly AuthProviderStatus[] = [];
   if (online) {
     try {
-      providers = (await dependencies.auth.status()).providers;
+      providers = (await inspect(progress, "Checking logins on the box", () => dependencies.auth.status())).providers;
       for (const provider of providers) {
         if (provider.status === "unavailable") errors.push(provider.error);
       }
@@ -236,7 +243,9 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
   const mcpLoginRequired: string[] = [];
   if (online) {
     try {
-      for (const status of await dependencies.auth.mcpStatus()) {
+      for (const status of await inspect(progress, "Checking MCP logins on the box", () =>
+        dependencies.auth.mcpStatus(),
+      )) {
         if ("error" in status) errors.push(status.error);
         else mcpLoginRequired.push(...status.loginRequired.map((server) => `${status.tool}/${server}`));
       }
@@ -274,6 +283,13 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     denyList,
     errors,
   };
+}
+
+/** Run one inspection as a progress step. A failed Link result is a failed step. */
+function inspect<T>(progress: Progress, name: string, work: () => T | Promise<T>): Promise<T> {
+  return step(progress, name, work, (result) =>
+    typeof result === "object" && result !== null && "ok" in result && result.ok === false,
+  );
 }
 
 function parseSudoCheck(stdout: string): boolean {
