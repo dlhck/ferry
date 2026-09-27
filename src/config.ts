@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { LinkOptions } from "./link.ts";
+import { BUILTIN_TOOLS } from "./registry/builtin.ts";
+import type { ToolPolicy } from "./registry/types.ts";
 
 export const CONFIG_RELATIVE_PATH = ".ferry/config.toml";
 
@@ -15,7 +17,11 @@ export type OperatorConfig = {
   readonly harness?: readonly unknown[];
   readonly update?: UpdateConfig;
   readonly integrations?: IntegrationsConfig;
+  readonly tools?: ToolsConfig;
 };
+
+/** The version policy of each tool, by tool id. A tool that is not here uses the default of its kind. */
+export type ToolsConfig = { readonly [id: string]: ToolPolicy };
 
 /** Each key turns on one integration. A missing key means that the integration is off. */
 export type IntegrationsConfig = { readonly paseo?: boolean };
@@ -47,6 +53,7 @@ export type PartialOperatorConfig = {
   readonly harness?: readonly unknown[];
   readonly update?: UpdateConfig;
   readonly integrations?: IntegrationsConfig;
+  readonly tools?: ToolsConfig;
 };
 
 /** TOML key to parsed property for each `[[harness]]` entry. */
@@ -63,7 +70,11 @@ const SECTION_KEYS: Record<string, readonly string[]> = {
   "[[harness]]": Object.keys(HARNESS_KEYS),
   "[update]": ["watch"],
   "[integrations]": ["paseo"],
+  "[tools]": BUILTIN_TOOLS.map((tool) => tool.id),
 };
+
+/** An exact version, such as 1.4.2 or 2026.09.15-d2fe57e. It goes into box commands, so the characters stay few. */
+const EXACT_VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 
 export class ConfigError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -93,6 +104,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     harness: Record<string, string>[];
     update?: { watch?: boolean };
     integrations?: { paseo?: boolean };
+    tools?: Record<string, ToolPolicy>;
   } = { host: {}, harness: [] };
   let section = "";
   let harness: Record<string, string> | null = null;
@@ -105,7 +117,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       harness = null;
       continue;
     }
-    if (line === "[update]" || line === "[integrations]") {
+    if (line === "[update]" || line === "[integrations]" || line === "[tools]") {
       section = line;
       harness = null;
       continue;
@@ -120,6 +132,11 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     const match = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(line);
     if (!match) throw new ConfigError(`unsupported line ${line} in ${path}`);
     const [, key = "", encoded] = match;
+    if (section === "[tools]" && !SECTION_KEYS[section]?.includes(key)) {
+      throw new ConfigError(
+        `unknown tool ${key} in [tools] of ${path}. Known tools: ${SECTION_KEYS["[tools]"]?.join(", ")}`,
+      );
+    }
     if (!SECTION_KEYS[section]?.includes(key)) {
       throw new ConfigError(`unknown key ${key} in ${section || "the top level"} of ${path}`);
     }
@@ -134,6 +151,17 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       }
       if (section === "[update]") config.update = { watch: encoded === "true" };
       else config.integrations = { paseo: encoded === "true" };
+      continue;
+    }
+
+    if (section === "[tools]") {
+      const policy = /^"[^"]*"$/.test(encoded ?? "") ? parseString(encoded ?? "", path) : "";
+      if (policy !== "operator" && policy !== "latest" && !EXACT_VERSION.test(policy)) {
+        throw new ConfigError(
+          `invalid policy for ${key} in [tools] of ${path}. Use "operator", "latest", or an exact version such as 1.4.2.`,
+        );
+      }
+      config.tools = { ...config.tools, [key]: policy };
       continue;
     }
 
@@ -190,6 +218,13 @@ export function writeConfig(config: OperatorConfig, home = homedir()): void {
         : []),
       ...(config.integrations?.paseo !== undefined
         ? ["[integrations]", `paseo = ${config.integrations.paseo}`, ""]
+        : []),
+      ...(config.tools && Object.keys(config.tools).length > 0
+        ? [
+            "[tools]",
+            ...Object.entries(config.tools).map(([id, policy]) => `${id} = ${JSON.stringify(policy)}`),
+            "",
+          ]
         : []),
     ].join("\n"),
     { mode: 0o600 },

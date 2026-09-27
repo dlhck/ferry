@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { configPath, readConfig, setIntegration, writeConfig } from "../src/config.ts";
@@ -144,6 +144,50 @@ describe("operator config", () => {
       update: { watch: true },
       integrations: { paseo: true },
     });
+  });
+
+  test("reads the [tools] policies", () => {
+    const home = homeWithConfig([...BASE, "", "[tools]", 'node = "operator"', 'bun = "1.4.2"', 'claude = "latest"', 'cursor = "2026.09.15-d2fe57e"']);
+
+    expect(readConfig(home)?.tools).toEqual({
+      node: "operator",
+      bun: "1.4.2",
+      claude: "latest",
+      cursor: "2026.09.15-d2fe57e",
+    });
+    expect(readConfig(homeWithConfig(BASE))?.tools).toBeUndefined();
+  });
+
+  for (const value of ['"lts"', '"^1.4.0"', '"24"', '"v24.16.0"', '"1.4.2; rm -rf ~"', '""', "true"]) {
+    test(`refuses the tool policy ${value}`, () => {
+      const home = homeWithConfig([...BASE, "", "[tools]", `bun = ${value}`]);
+
+      expect(() => readConfig(home)).toThrow("invalid policy for bun in [tools]");
+      expect(() => readConfig(home)).toThrow('Use "operator", "latest", or an exact version such as 1.4.2.');
+    });
+  }
+
+  test("refuses an unknown tool and names the known tools", () => {
+    const home = homeWithConfig([...BASE, "", "[tools]", 'yarn = "operator"']);
+
+    expect(() => readConfig(home)).toThrow("unknown tool yarn in [tools]");
+    expect(() => readConfig(home)).toThrow("Known tools: gh, claude, codex, pi, cursor, node, npm, pnpm, bun");
+  });
+
+  test("writing the config keeps the [tools] table", () => {
+    const home = homeWithConfig(BASE);
+
+    writeConfig({
+      version: 1,
+      publisher: "operator",
+      snapshotUrl: "snapshot.git",
+      host: { tailscale: "box", sshUser: "ferry" },
+      integrations: { paseo: true },
+      tools: { node: "operator", bun: "1.4.2", claude: "latest" },
+    }, home);
+
+    expect(readConfig(home)?.tools).toEqual({ node: "operator", bun: "1.4.2", claude: "latest" });
+    expect(readFileSync(configPath(home), "utf8")).toContain('[tools]\nnode = "operator"\nbun = "1.4.2"\nclaude = "latest"\n');
   });
 
   test("refuses an unknown key and names it", () => {

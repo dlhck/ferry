@@ -1,5 +1,5 @@
 /**
- * The harnesses and vendor CLIs ferry knows out of the box.
+ * The harnesses and tools ferry knows out of the box.
  *
  * This file is the only place the official set is written down. Modules read
  * it through the registry they are given, so an operator entry and a builtin
@@ -113,9 +113,32 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
   },
 ];
 
+/**
+ * Print the newest Chromium revision in the Playwright browser cache. The
+ * cache is in ~/Library/Caches on macOS and in ~/.cache on Linux.
+ */
+const PLAYWRIGHT_CHROMIUM_REVISION = [
+  'd="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/Library/Caches/ms-playwright}"',
+  '[ -d "$d" ] || d="$HOME/.cache/ms-playwright"',
+  "ls \"$d\" | sed -n 's/^chromium-\\([0-9][0-9]*\\)$/\\1/p' | sort -n | tail -n 1 | grep .",
+].join("; ");
+
+/**
+ * The vendor agent CLIs first, then the other tools. `ferry install`,
+ * `ferry update`, and `ferry tools` read this one list through the registry.
+ * The recipes of the tools after cursor come in a later change.
+ */
 export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
   {
     id: "gh",
+    kind: "tool",
+    name: "GitHub CLI",
+    binary: "gh",
+    localVersion: "gh --version",
+    boxVersion: "gh --version",
+    // An exact version needs `sudo apt install gh=<version>`. The recipe must
+    // first check that the GitHub apt repository has that version, and else
+    // install the latest version with a warning.
     install: {
       command:
         "(type -p wget >/dev/null || (sudo apt update && sudo apt install wget -y)) \\\n" +
@@ -148,6 +171,12 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
   },
   {
     id: "claude",
+    kind: "agent",
+    name: "Claude Code",
+    binary: "claude",
+    localVersion: "claude --version",
+    boxVersion: "claude --version",
+    pathDirs: [".local/bin"],
     install: { command: "curl -fsSL https://claude.ai/install.sh | bash" },
     update: { command: "claude update", binary: "claude" },
     auth: {
@@ -174,6 +203,12 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
   },
   {
     id: "codex",
+    kind: "agent",
+    name: "Codex",
+    binary: "codex",
+    localVersion: "codex --version",
+    boxVersion: "codex --version",
+    pathDirs: [".local/bin"],
     install: { command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh" },
     update: { command: "codex update", binary: "codex" },
     auth: {
@@ -211,6 +246,12 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
   },
   {
     id: "pi",
+    kind: "agent",
+    name: "Pi",
+    binary: "pi",
+    localVersion: "pi --version",
+    boxVersion: "pi --version",
+    pathDirs: [".pi/agent/bin"],
     install: {
       command: `${nodeBootstrap(22, 19)} \\\n&& curl -fsSL https://pi.dev/install.sh | sh`,
     },
@@ -227,6 +268,12 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
   },
   {
     id: "cursor",
+    kind: "agent",
+    name: "Cursor Agent",
+    binary: "cursor-agent",
+    localVersion: "cursor-agent --version",
+    boxVersion: "cursor-agent --version",
+    pathDirs: [".local/bin"],
     install: { command: "curl https://cursor.com/install -fsS | bash" },
     update: { command: "cursor-agent update", binary: "cursor-agent" },
     auth: {
@@ -240,5 +287,83 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
       loginRequired: "^(\\S+): requires_authentication$",
       login: "cursor-agent mcp login {name}",
     },
+  },
+  {
+    id: "node",
+    kind: "tool",
+    name: "Node.js (nvm)",
+    binary: "node",
+    // Ferry loads nvm first, so this is the nvm default Node.
+    localVersion: "node --version",
+    boxVersion: "node --version",
+    // nvm on the box, with the operator version as the nvm default. The
+    // recipe points ~/.nvm/current at that version.
+    pathDirs: [".nvm/current/bin"],
+  },
+  {
+    id: "npm",
+    kind: "tool",
+    name: "npm",
+    binary: "npm",
+    localVersion: "npm --version",
+    boxVersion: "npm --version",
+    // npm comes with Node, so it adds no directory of its own.
+    dependsOn: ["node"],
+  },
+  {
+    id: "pnpm",
+    kind: "tool",
+    name: "pnpm",
+    binary: "pnpm",
+    localVersion: "pnpm --version",
+    boxVersion: "pnpm --version",
+    // npm install -g --prefix ~/.local, as the Paseo integration does.
+    pathDirs: [".local/bin"],
+    dependsOn: ["node"],
+  },
+  {
+    id: "bun",
+    kind: "tool",
+    name: "Bun",
+    binary: "bun",
+    localVersion: "bun --version",
+    boxVersion: "bun --version",
+    pathDirs: [".bun/bin"],
+  },
+  {
+    id: "docker",
+    kind: "tool",
+    name: "Docker",
+    binary: "docker",
+    // The client version. `docker version` also needs a running daemon.
+    localVersion: "docker --version",
+    boxVersion: "docker --version",
+  },
+  {
+    id: "vercel",
+    kind: "tool",
+    name: "Vercel CLI",
+    binary: "vercel",
+    localVersion: "vercel --version",
+    boxVersion: "vercel --version",
+    pathDirs: [".local/bin"],
+    dependsOn: ["node"],
+  },
+  {
+    id: "infisical",
+    kind: "tool",
+    name: "Infisical CLI",
+    binary: "infisical",
+    localVersion: "infisical --version",
+    boxVersion: "infisical --version",
+  },
+  {
+    id: "playwright",
+    kind: "tool",
+    name: "Playwright browsers (Chromium revision)",
+    // The browsers are not on PATH. The version is the Chromium revision in the cache.
+    localVersion: PLAYWRIGHT_CHROMIUM_REVISION,
+    boxVersion: PLAYWRIGHT_CHROMIUM_REVISION,
+    dependsOn: ["node"],
   },
 ];
