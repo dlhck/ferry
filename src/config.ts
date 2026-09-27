@@ -20,6 +20,29 @@ export type OperatorConfig = {
   readonly tools?: ToolsConfig;
 };
 
+/** A complete config with `[box.<name>]` tables instead of `[host]`. */
+export type BoxesOperatorConfig = Omit<OperatorConfig, "host"> & {
+  readonly defaultBox?: string;
+  readonly boxes: readonly BoxConfig[];
+};
+
+/** A `[box.<name>]` table, with its `[box.<name>.integrations]` and `[box.<name>.tools]` overrides. */
+export type BoxConfig = {
+  readonly name: string;
+  readonly host: OperatorHostConfig;
+  readonly integrations?: IntegrationsConfig;
+  /** Policies by tool id. A policy replaces the `[tools]` policy or the `version` of a `[tools.<id>]` table. */
+  readonly tools?: { readonly [id: string]: ToolPolicy };
+};
+
+/** A box name goes into flags, lock file names, JSON, and output prefixes, so the characters stay few. */
+const BOX_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+/** True for a name that a `[box.<name>]` table can use. The name `all` is reserved. */
+export function isBoxName(name: string): boolean {
+  return BOX_NAME.test(name) && name !== "all";
+}
+
 /**
  * The `[tools]` table, by tool id. A string sets the policy of a builtin tool.
  * A `[tools.<id>]` table defines a tool. A tool without a policy uses the
@@ -71,6 +94,10 @@ export type PartialOperatorConfig = {
   readonly version?: 1;
   readonly publisher?: string;
   readonly snapshotUrl?: string;
+  /** The box of a single-target command without `--box`. Only a config with `[box.<name>]` tables has it. */
+  readonly defaultBox?: string;
+  /** The `[box.<name>]` tables in config order. A config with boxes has no `host`. */
+  readonly boxes?: readonly BoxConfig[];
   readonly host?: {
     readonly transport?: "tailscale" | "ssh";
     readonly tailscale?: string;
@@ -92,7 +119,7 @@ const HARNESS_KEYS = {
 } as const;
 
 const SECTION_KEYS: Record<string, readonly string[]> = {
-  "": ["version", "publisher", "snapshot_url"],
+  "": ["version", "publisher", "snapshot_url", "default_box"],
   "[host]": ["transport", "tailscale", "ssh_user", "destination"],
   "[[harness]]": Object.keys(HARNESS_KEYS),
   "[update]": ["watch"],
@@ -125,6 +152,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     version?: 1;
     publisher?: string;
     snapshotUrl?: string;
+    defaultBox?: string;
     host: {
       transport?: "tailscale" | "ssh";
       tailscale?: string;
@@ -140,6 +168,10 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
   let harness: Record<string, string> | null = null;
   let tool: Record<string, unknown> | null = null;
   const definitions: [string, Record<string, unknown>][] = [];
+  const boxes: ParsedBox[] = [];
+  const boxTables = new Set<string>();
+  let box: { entry: ParsedBox; part: BoxPart } | null = null;
+  let hasHost = false;
 
   for (const sourceLine of readFileSync(path, "utf8").split(/\r?\n/)) {
     const line = sourceLine.trim();
@@ -148,19 +180,47 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       section = "[host]";
       harness = null;
       tool = null;
+      box = null;
+      hasHost = true;
       continue;
     }
     if (line === "[update]" || line === "[integrations]" || line === "[tools]") {
       section = line;
       harness = null;
       tool = null;
+      box = null;
       continue;
     }
     if (line === "[[harness]]") {
       section = "[[harness]]";
       harness = {};
       tool = null;
+      box = null;
       config.harness.push(harness);
+      continue;
+    }
+    const boxHeader = /^\[box\.([^.\]]*)(?:\.([^\]]*))?\]$/.exec(line);
+    if (boxHeader) {
+      const [, name = "", part] = boxHeader;
+      if (!isBoxName(name)) {
+        throw new ConfigError(
+          `invalid box name ${name} in ${path}. Use 1 to 32 characters from a-z, 0-9, and -, with no - at the start. The name all is reserved.`,
+        );
+      }
+      if (part !== undefined && part !== "integrations" && part !== "tools") {
+        throw new ConfigError(`unknown table ${line} in ${path}. A box has [box.${name}], [box.${name}.integrations], and [box.${name}.tools].`);
+      }
+      if (boxTables.has(line)) throw new ConfigError(`duplicate table ${line} in ${path}`);
+      boxTables.add(line);
+      let entry = boxes.find((known) => known.name === name);
+      if (!entry) {
+        entry = { name, host: {} };
+        boxes.push(entry);
+      }
+      section = line;
+      harness = null;
+      tool = null;
+      box = { entry, part: part ?? "host" };
       continue;
     }
     const toolHeader = /^\[tools\.([A-Za-z0-9_-]+)\]$/.exec(line);
@@ -169,6 +229,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       if (config.tools?.[id] !== undefined) throw new ConfigError(`duplicate tool ${id} in [tools] of ${path}`);
       section = line;
       harness = null;
+      box = null;
       tool = {};
       config.tools = { ...config.tools, [id]: tool };
       definitions.push([section, tool]);
@@ -180,6 +241,10 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     const [, key = "", encoded = ""] = match;
     if (tool) {
       readToolKey(tool, key, encoded, section, path);
+      continue;
+    }
+    if (box) {
+      readBoxKey(box.entry, box.part, key, encoded, section, path);
       continue;
     }
     if (section === "[tools]" && !SECTION_KEYS[section]?.includes(key)) {
@@ -214,6 +279,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     const value = parseString(encoded, path);
     if (section === "" && key === "publisher") config.publisher = value;
     else if (section === "" && key === "snapshot_url") config.snapshotUrl = value;
+    else if (section === "" && key === "default_box") config.defaultBox = value;
     else if (section === "[host]" && key === "transport") {
       if (value !== "tailscale" && value !== "ssh") {
         throw new ConfigError(`unsupported host transport in ${path}`);
@@ -233,8 +299,75 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     }
   }
 
+  if (hasHost && boxes.length > 0) {
+    throw new ConfigError(`${path} has both [host] and [box.${boxes[0]?.name}]. Move [host] to a [box.<name>] table.`);
+  }
+  const names = boxes.map((entry) => entry.name);
+  if (config.defaultBox !== undefined && boxes.length === 0) {
+    throw new ConfigError(`default_box in ${path} needs [box.<name>] tables. A [host] config has one box only.`);
+  }
+  if (config.defaultBox !== undefined && !names.includes(config.defaultBox)) {
+    throw new ConfigError(`default_box ${config.defaultBox} in ${path} names no box. Known boxes: ${names.join(", ")}.`);
+  }
+  const toolIds = [...new Set([...BUILTIN_TOOLS.map((known) => known.id), ...Object.keys(config.tools ?? {})])];
+  const completeBoxes = boxes.map((entry): BoxConfig => {
+    const host = completeHostConfig(entry.host);
+    if (!host) {
+      throw new ConfigError(
+        `box ${entry.name} in ${path} is not complete. [box.${entry.name}] needs transport = "ssh" with destination, or tailscale and ssh_user.`,
+      );
+    }
+    const unknown = Object.keys(entry.tools ?? {}).find((id) => !toolIds.includes(id));
+    if (unknown !== undefined) {
+      throw new ConfigError(`unknown tool ${unknown} in [box.${entry.name}.tools] of ${path}. Known tools: ${toolIds.join(", ")}.`);
+    }
+    return {
+      name: entry.name,
+      host,
+      ...(entry.integrations ? { integrations: entry.integrations } : {}),
+      ...(entry.tools ? { tools: entry.tools } : {}),
+    };
+  });
+
   if (config.harness.length === 0) delete (config as { harness?: unknown }).harness;
+  if (completeBoxes.length > 0) {
+    delete (config as { host?: unknown }).host;
+    return { ...config, boxes: completeBoxes } as PartialOperatorConfig;
+  }
   return config as PartialOperatorConfig;
+}
+
+type BoxPart = "host" | "integrations" | "tools";
+
+type ParsedBox = {
+  name: string;
+  host: { transport?: "tailscale" | "ssh"; tailscale?: string; sshUser?: string; destination?: string };
+  integrations?: Record<string, boolean>;
+  tools?: Record<string, ToolPolicy>;
+};
+
+/** Read one key of a `[box.<name>]`, `[box.<name>.integrations]`, or `[box.<name>.tools]` table. */
+function readBoxKey(entry: ParsedBox, part: BoxPart, key: string, encoded: string, section: string, path: string): void {
+  if (part === "tools") {
+    if (entry.tools?.[key] !== undefined) throw new ConfigError(`duplicate tool ${key} in ${section} of ${path}`);
+    entry.tools = { ...entry.tools, [key]: parsePolicy(encoded, `${key} in ${section}`, path) };
+    return;
+  }
+  if (!SECTION_KEYS[part === "host" ? "[host]" : "[integrations]"]?.includes(key)) {
+    throw new ConfigError(`unknown key ${key} in ${section} of ${path}`);
+  }
+  if (part === "integrations") {
+    if (encoded !== "true" && encoded !== "false") throw new ConfigError(`invalid boolean for ${key} in ${section} of ${path}`);
+    entry.integrations = { ...entry.integrations, [key]: encoded === "true" };
+    return;
+  }
+  const value = parseString(encoded, path);
+  if (key === "transport") {
+    if (value !== "tailscale" && value !== "ssh") throw new ConfigError(`unsupported transport in ${section} of ${path}`);
+    entry.host.transport = value;
+  } else if (key === "ssh_user") entry.host.sshUser = value;
+  else if (key === "tailscale") entry.host.tailscale = value;
+  else entry.host.destination = value;
 }
 
 /** Read one key of a `[tools.<id>]` table. Each error names the table and the key. */
@@ -278,7 +411,7 @@ function parsePolicy(encoded: string, label: string, path: string): ToolPolicy {
   return policy;
 }
 
-export function writeConfig(config: OperatorConfig, home = homedir()): void {
+export function writeConfig(config: OperatorConfig | BoxesOperatorConfig, home = homedir()): void {
   const path = configPath(home);
   const temporaryPath = `${path}.tmp`;
   mkdirSync(dirname(path), { recursive: true });
@@ -288,18 +421,9 @@ export function writeConfig(config: OperatorConfig, home = homedir()): void {
       `version = ${config.version}`,
       `publisher = ${JSON.stringify(config.publisher)}`,
       `snapshot_url = ${JSON.stringify(config.snapshotUrl)}`,
+      ...("boxes" in config && config.defaultBox !== undefined ? [`default_box = ${JSON.stringify(config.defaultBox)}`] : []),
       "",
-      "[host]",
-      ...(config.host.transport === "ssh"
-        ? [
-            'transport = "ssh"',
-            `destination = ${JSON.stringify(config.host.destination)}`,
-          ]
-        : [
-            `tailscale = ${JSON.stringify(config.host.tailscale)}`,
-            `ssh_user = ${JSON.stringify(config.host.sshUser)}`,
-          ]),
-      "",
+      ...("host" in config ? ["[host]", ...hostLines(config.host), ""] : []),
       ...(config.harness ?? []).flatMap((entry) => [
         "[[harness]]",
         ...Object.entries(HARNESS_KEYS).flatMap(([key, property]) => {
@@ -315,10 +439,33 @@ export function writeConfig(config: OperatorConfig, home = homedir()): void {
         ? ["[integrations]", `paseo = ${config.integrations.paseo}`, ""]
         : []),
       ...toolLines(config.tools ?? {}),
+      ...("boxes" in config ? config.boxes.flatMap(boxLines) : []),
     ].join("\n"),
     { mode: 0o600 },
   );
   renameSync(temporaryPath, path);
+}
+
+function hostLines(host: OperatorHostConfig): string[] {
+  return host.transport === "ssh"
+    ? ['transport = "ssh"', `destination = ${JSON.stringify(host.destination)}`]
+    : [`tailscale = ${JSON.stringify(host.tailscale)}`, `ssh_user = ${JSON.stringify(host.sshUser)}`];
+}
+
+/** One `[box.<name>]` table, then its overrides. An override table without keys is not written. */
+function boxLines(box: BoxConfig): string[] {
+  const tools = Object.entries(box.tools ?? {});
+  return [
+    `[box.${box.name}]`,
+    ...hostLines(box.host),
+    "",
+    ...(box.integrations?.paseo !== undefined
+      ? [`[box.${box.name}.integrations]`, `paseo = ${box.integrations.paseo}`, ""]
+      : []),
+    ...(tools.length > 0
+      ? [`[box.${box.name}.tools]`, ...tools.map(([id, policy]) => `${id} = ${JSON.stringify(policy)}`), ""]
+      : []),
+  ];
 }
 
 /** The `[tools]` policies first, then one `[tools.<id>]` table for each defined tool. */
@@ -342,16 +489,18 @@ function toolLines(tools: ToolsConfig): string[] {
 export function setIntegration(id: keyof IntegrationsConfig, enabled: boolean, home = homedir()): void {
   const config = readConfig(home);
   const host = completeHostConfig(config?.host);
-  if (config?.version !== 1 || config.publisher === undefined || config.snapshotUrl === undefined || host === null) {
+  const target = config?.boxes ? { boxes: config.boxes } : host ? { host } : null;
+  if (config?.version !== 1 || config.publisher === undefined || config.snapshotUrl === undefined || target === null) {
     throw new ConfigError(`Ferry config at ${configPath(home)} is not complete. Run ferry init.`);
   }
+  const { host: _host, boxes: _boxes, ...rest } = config;
   writeConfig(
     {
-      ...config,
+      ...rest,
       version: 1,
       publisher: config.publisher,
       snapshotUrl: config.snapshotUrl,
-      host,
+      ...target,
       integrations: { ...config.integrations, [id]: enabled },
     },
     home,

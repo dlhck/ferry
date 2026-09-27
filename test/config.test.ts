@@ -315,6 +315,217 @@ describe("operator config", () => {
   });
 });
 
+const TOP = ["version = 1", 'publisher = "operator"', 'snapshot_url = "snapshot.git"'];
+
+const BOX_A = ["[box.a]", 'transport = "ssh"', 'destination = "dev@box-a.example"'];
+const BOX_B = ["[box.b]", 'tailscale = "box-b"', 'ssh_user = "dev"'];
+
+describe("box tables", () => {
+  test("reads a [host] config as it is, with no boxes", () => {
+    const config = readConfig(homeWithConfig(BASE));
+
+    expect(config?.host).toEqual({ tailscale: "box", sshUser: "ferry" });
+    expect(config?.boxes).toBeUndefined();
+  });
+
+  test("reads one box", () => {
+    const config = readConfig(homeWithConfig([...TOP, "", ...BOX_A]));
+
+    expect(config?.boxes).toEqual([{ name: "a", host: { transport: "ssh", destination: "dev@box-a.example" } }]);
+    expect(config?.host).toBeUndefined();
+  });
+
+  test("reads several boxes in config order with their overrides", () => {
+    const home = homeWithConfig([
+      ...TOP,
+      "",
+      "[integrations]",
+      "paseo = true",
+      "",
+      "[tools]",
+      'codex = "operator"',
+      "",
+      "[box.b.tools]",
+      'codex = "latest"',
+      'pnpm = "10.2.0"',
+      "",
+      ...BOX_B,
+      "",
+      "[box.b.integrations]",
+      "paseo = false",
+      "",
+      ...BOX_A,
+      "",
+      "[tools.pnpm]",
+      'local = "pnpm --version"',
+      'install = "x"',
+    ]);
+
+    expect(readConfig(home)?.boxes).toEqual([
+      {
+        name: "b",
+        host: { tailscale: "box-b", sshUser: "dev" },
+        integrations: { paseo: false },
+        tools: { codex: "latest", pnpm: "10.2.0" },
+      },
+      { name: "a", host: { transport: "ssh", destination: "dev@box-a.example" } },
+    ]);
+  });
+
+  test("writing the config keeps several boxes and their overrides", () => {
+    const home = homeWithConfig(BASE);
+    const boxes = [
+      { name: "b", host: { tailscale: "box-b", sshUser: "dev" }, integrations: { paseo: false }, tools: { codex: "latest" } },
+      { name: "1", host: { transport: "ssh" as const, destination: "dev@box-a.example" } },
+    ];
+
+    writeConfig({
+      version: 1,
+      publisher: "operator",
+      snapshotUrl: "snapshot.git",
+      boxes,
+      integrations: { paseo: true },
+      tools: { codex: "operator" },
+    }, home);
+
+    const text = readFileSync(configPath(home), "utf8");
+    expect(text).not.toContain("[host]");
+    expect(text).toContain(
+      '[box.b]\ntailscale = "box-b"\nssh_user = "dev"\n\n[box.b.integrations]\npaseo = false\n\n[box.b.tools]\ncodex = "latest"\n\n' +
+        '[box.1]\ntransport = "ssh"\ndestination = "dev@box-a.example"\n',
+    );
+    expect(readConfig(home)).toEqual({
+      version: 1,
+      publisher: "operator",
+      snapshotUrl: "snapshot.git",
+      boxes,
+      integrations: { paseo: true },
+      tools: { codex: "operator" },
+    });
+  });
+
+  test("writing a [host] config keeps [host] and writes the same text as before", () => {
+    const home = homeWithConfig(BASE);
+
+    writeConfig({
+      version: 1,
+      publisher: "operator",
+      snapshotUrl: "snapshot.git",
+      host: { transport: "ssh", destination: "dev@box-a.example" },
+      integrations: { paseo: true },
+    }, home);
+
+    expect(readFileSync(configPath(home), "utf8")).toBe(
+      'version = 1\npublisher = "operator"\nsnapshot_url = "snapshot.git"\n\n[host]\ntransport = "ssh"\ndestination = "dev@box-a.example"\n\n[integrations]\npaseo = true\n',
+    );
+  });
+
+  test("refuses a config with [host] and a box table", () => {
+    const home = homeWithConfig([...BASE, "", ...BOX_A]);
+
+    expect(() => readConfig(home)).toThrow("has both [host] and [box.a]");
+    expect(() => readConfig(home)).toThrow("Move [host] to a [box.<name>] table");
+  });
+
+  for (const name of ["A", "-a", "a_b", '"a"', "", "a".repeat(33), "all"]) {
+    test(`refuses the box name ${JSON.stringify(name)}`, () => {
+      const home = homeWithConfig([...TOP, "", `[box.${name}]`, 'transport = "ssh"', 'destination = "x"']);
+
+      expect(() => readConfig(home)).toThrow("invalid box name");
+    });
+  }
+
+  test("accepts a box name of 32 characters", () => {
+    const name = `a${"-".repeat(30)}9`;
+    const home = homeWithConfig([...TOP, "", `[box.${name}]`, 'transport = "ssh"', 'destination = "x"']);
+
+    expect(readConfig(home)?.boxes?.[0]?.name).toBe(name);
+  });
+
+  test("refuses an unknown box table", () => {
+    const home = homeWithConfig([...TOP, "", ...BOX_A, "", "[box.a.harness]"]);
+    const host = homeWithConfig([...TOP, "", ...BOX_A, "", "[box.a.host]"]);
+
+    expect(() => readConfig(home)).toThrow("unknown table [box.a.harness]");
+    expect(() => readConfig(host)).toThrow("unknown table [box.a.host]");
+  });
+
+  test("refuses a box table that the config names twice", () => {
+    const twice = homeWithConfig([...TOP, "", ...BOX_A, "", ...BOX_A]);
+    const tools = homeWithConfig([...TOP, "", ...BOX_A, "", "[box.a.tools]", "", "[box.a.tools]"]);
+    const key = homeWithConfig([...TOP, "", ...BOX_A, "", "[box.a.tools]", 'gh = "latest"', 'gh = "operator"']);
+
+    expect(() => readConfig(twice)).toThrow("duplicate table [box.a]");
+    expect(() => readConfig(tools)).toThrow("duplicate table [box.a.tools]");
+    expect(() => readConfig(key)).toThrow("duplicate tool gh in [box.a.tools]");
+  });
+
+  for (const [lines, message] of [
+    [[...BOX_A, 'snapshot_url = "x"'], "unknown key snapshot_url in [box.a]"],
+    [[...BOX_A, 'transport = "mosh"'], "unsupported transport in [box.a]"],
+    [[...BOX_A, "", "[box.a.integrations]", "zed = true"], "unknown key zed in [box.a.integrations]"],
+    [[...BOX_A, "", "[box.a.integrations]", 'paseo = "yes"'], "invalid boolean for paseo in [box.a.integrations]"],
+    [[...BOX_A, "", "[box.a.tools]", 'gh = "lts"'], "invalid policy for gh in [box.a.tools]"],
+    [[...BOX_A, "", "[box.a.tools]", "gh = { version = \"1.0.0\" }"], "invalid policy for gh in [box.a.tools]"],
+    [[...BOX_A, "", "[box.a.tools]", 'pnpm = "latest"'], "unknown tool pnpm in [box.a.tools]"],
+  ] as const) {
+    test(`refuses the box line ${lines.at(-1)}`, () => {
+      expect(() => readConfig(homeWithConfig([...TOP, "", ...lines]))).toThrow(message);
+    });
+  }
+
+  test("names the known tools for an unknown tool in a box", () => {
+    const home = homeWithConfig([...TOP, "", ...BOX_A, "", "[box.a.tools]", 'pnpm = "latest"']);
+
+    expect(() => readConfig(home)).toThrow("Known tools: gh, claude, codex, pi, cursor.");
+  });
+
+  test("refuses a box without complete transport values", () => {
+    const partial = homeWithConfig([...TOP, "", "[box.a]", 'tailscale = "box-a"']);
+    const overridesOnly = homeWithConfig([...TOP, "", "[box.a.integrations]", "paseo = true"]);
+
+    expect(() => readConfig(partial)).toThrow("box a in");
+    expect(() => readConfig(partial)).toThrow('[box.a] needs transport = "ssh" with destination, or tailscale and ssh_user.');
+    expect(() => readConfig(overridesOnly)).toThrow("[box.a] needs");
+  });
+
+  test("reads default_box when it names a box", () => {
+    const home = homeWithConfig([...TOP, 'default_box = "b"', "", ...BOX_A, "", ...BOX_B]);
+
+    expect(readConfig(home)?.defaultBox).toBe("b");
+    expect(readConfig(homeWithConfig([...TOP, "", ...BOX_A]))?.defaultBox).toBeUndefined();
+  });
+
+  test("refuses default_box that names no box, and names the known boxes", () => {
+    const home = homeWithConfig([...TOP, 'default_box = "c"', "", ...BOX_A, "", ...BOX_B]);
+
+    expect(() => readConfig(home)).toThrow("default_box c in");
+    expect(() => readConfig(home)).toThrow("names no box. Known boxes: a, b.");
+  });
+
+  test("refuses default_box in a [host] config", () => {
+    const home = homeWithConfig([...TOP, 'default_box = "default"', "", ...BASE.slice(4)]);
+
+    expect(() => readConfig(home)).toThrow("default_box in");
+    expect(() => readConfig(home)).toThrow("needs [box.<name>] tables");
+  });
+
+  test("writing the config keeps default_box", () => {
+    const home = homeWithConfig(BASE);
+    const boxes = [
+      { name: "a", host: { transport: "ssh" as const, destination: "dev@box-a.example" } },
+      { name: "b", host: { tailscale: "box-b", sshUser: "dev" } },
+    ];
+
+    writeConfig({ version: 1, publisher: "operator", snapshotUrl: "snapshot.git", defaultBox: "b", boxes }, home);
+
+    expect(readFileSync(configPath(home), "utf8")).toStartWith(
+      'version = 1\npublisher = "operator"\nsnapshot_url = "snapshot.git"\ndefault_box = "b"\n\n',
+    );
+    expect(readConfig(home)).toEqual({ version: 1, publisher: "operator", snapshotUrl: "snapshot.git", defaultBox: "b", boxes });
+  });
+});
+
 describe("setIntegration", () => {
   test("sets one integration key and keeps the other sections", () => {
     const home = homeWithConfig([...BASE, "", "[[harness]]", 'id = "zed"', 'skill_root = ".zed/skills"', "", "[update]", "watch = true"]);
@@ -332,6 +543,14 @@ describe("setIntegration", () => {
 
     setIntegration("paseo", false, home);
     expect(readConfig(home)?.integrations).toEqual({ paseo: false });
+  });
+
+  test("keeps the box tables and default_box", () => {
+    const home = homeWithConfig([...TOP, 'default_box = "a"', "", ...BOX_A, "", "[box.a.integrations]", "paseo = false", "", ...BOX_B]);
+    const before = readConfig(home);
+
+    setIntegration("paseo", true, home);
+    expect(readConfig(home)).toEqual({ ...before, integrations: { paseo: true } });
   });
 
   test("refuses an incomplete config", () => {
