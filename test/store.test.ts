@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import type { Seed } from "../src/manifest.ts";
+import { readSeed, type Seed } from "../src/manifest.ts";
 import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 import {
   StoreRefusal,
@@ -41,6 +41,8 @@ function seed(body = "Use small commits.\n"): Seed {
       },
     ],
     instructions: { bytes: Buffer.from("Keep changes surgical.\n") },
+    roots: [],
+    settings: [],
     identity: `seed-${body}`,
     leftovers: [],
   };
@@ -61,6 +63,8 @@ const expectedMetadata = {
       name: "Claude",
       skillRoot: ".claude/skills",
       instructionFile: ".claude/CLAUDE.md",
+      extraRoots: [".claude/agents", ".claude/commands"],
+      settings: { file: ".claude/settings.json", keys: ["enabledPlugins", "extraKnownMarketplaces"] },
     },
     {
       id: "codex",
@@ -291,6 +295,45 @@ describe("store publish", () => {
   });
 });
 
+describe("store layout of Claude subagents and commands", () => {
+  test("publishes each root under roots/ and drops a file removed from the seed", async () => {
+    const git = new FakeGit();
+    const home = makeHome();
+    const value: Seed = {
+      ...seed(),
+      roots: [
+        {
+          path: ".claude/agents",
+          files: [
+            { path: "reviewer.md", bytes: Buffer.from("review agent") },
+            { path: "old.md", bytes: Buffer.from("old agent") },
+          ],
+        },
+        { path: ".claude/commands", files: [] },
+      ],
+    };
+    const store = await openStore("snapshot.git", value, { git, home, harnesses: BUILTIN_HARNESSES });
+    await store.publish(value);
+
+    expect(Buffer.from(git.remoteFiles.get("roots/.claude/agents/reviewer.md") ?? []).toString()).toBe(
+      "review agent",
+    );
+    // Git tracks no empty directory, but the local checkout keeps it for a linked root.
+    expect(readdirSync(join(home, ".ferry", "store", "roots", ".claude", "commands"))).toEqual([]);
+
+    const trimmed: Seed = {
+      ...value,
+      roots: [{ path: ".claude/agents", files: [{ path: "reviewer.md", bytes: Buffer.from("review agent") }] }],
+    };
+    await store.publish(trimmed);
+
+    expect([...git.remoteFiles.keys()].filter((path) => path.startsWith("roots/"))).toEqual([
+      "roots/.claude/agents/reviewer.md",
+    ]);
+    expect(git.invocations.find((invocation) => invocation.args[0] === "add")?.args).toContain("roots");
+  });
+});
+
 function ok(): GitResult {
   return { status: 0, stdout: new Uint8Array(), stderr: new Uint8Array() };
 }
@@ -322,10 +365,11 @@ function readManagedFiles(root: string): Map<string, Uint8Array> {
       files.set(path, readFileSync(join(root, path)));
     } catch {}
   }
-  const skills = join(root, "skills");
-  try {
-    walk(skills, root, files);
-  } catch {}
+  for (const directory of ["skills", "roots", "settings"]) {
+    try {
+      walk(join(root, directory), root, files);
+    } catch {}
+  }
   return files;
 }
 
@@ -345,3 +389,49 @@ function sameFiles(a: Map<string, Uint8Array>, b: Map<string, Uint8Array>): bool
   }
   return true;
 }
+
+describe("store layout of carried settings keys", () => {
+  test("env, apiKeyHelper, permissions, and hooks never enter a commit", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-store-home-"));
+    homes.push(home);
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(
+      join(home, ".claude", "settings.json"),
+      JSON.stringify({
+        env: { API_TOKEN: "env-secret-value" },
+        apiKeyHelper: "/usr/local/bin/print-key",
+        permissions: { allow: ["Bash(git status)"] },
+        hooks: { Stop: [{ hooks: [{ type: "command", command: "notify" }] }] },
+        enabledPlugins: { "review@team": true },
+        extraKnownMarketplaces: {
+          team: { source: { source: "github", repo: "example/claude-plugins" } },
+        },
+      }),
+    );
+    const value = readSeed(home, BUILTIN_HARNESSES);
+    if (!value.ok) throw new Error("expected a seed");
+    const git = new FakeGit();
+    const store = await openStore("snapshot.git", value, { git, home, harnesses: BUILTIN_HARNESSES });
+
+    await store.publish(value);
+
+    expect(JSON.parse(Buffer.from(git.remoteFiles.get("settings/claude.json") ?? []).toString())).toEqual({
+      enabledPlugins: { "review@team": true },
+      extraKnownMarketplaces: {
+        team: { source: { source: "github", repo: "example/claude-plugins" } },
+      },
+    });
+    expect([...git.remoteFiles.keys()].some((path) => path.endsWith("settings.json"))).toBe(false);
+    for (const [path, bytes] of git.remoteFiles) {
+      if (path === "ferry.json") continue;
+      const text = Buffer.from(bytes).toString();
+      for (const key of ["env", "apiKeyHelper", "permissions", "hooks", "env-secret-value"]) {
+        expect(text).not.toContain(`"${key}"`);
+      }
+      expect(text).not.toContain("env-secret-value");
+    }
+    expect(git.invocations.find((invocation) => invocation.args[0] === "add")?.args).toContain(
+      "settings",
+    );
+  });
+});

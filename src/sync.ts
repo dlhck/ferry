@@ -22,6 +22,7 @@ import {
 import type { HarnessDescriptor } from "./registry/types.ts";
 import { openStore as openSnapshotStore, type PublishResult } from "./store.ts";
 import { adoptPublishedSkills } from "./adopt.ts";
+import { installBoxPlugins, mergeBoxSettings } from "./box-settings.ts";
 
 export type SyncInput = {
   readonly home?: string;
@@ -192,6 +193,25 @@ export async function runSync(
       );
     }
 
+    // Claude rewrites a marketplace entry when it adds one, so the merge runs last.
+    try {
+      const warnings = await installBoxPlugins({ settings: seed.settings, link });
+      for (const warning of warnings) (dependencies.writeLine ?? console.log)(`Box plugins: ${warning}`);
+      await mergeBoxSettings({
+        remoteHome: required(plan.remoteHome),
+        harnesses: registry.harnesses,
+        settings: seed.settings,
+        link,
+      });
+    } catch (cause) {
+      throw new SyncError(
+        "apply-failure",
+        "box",
+        `could not apply the carried settings keys on ${plan.box}: ${messageOf(cause)}`,
+        { cause },
+      );
+    }
+
     try {
       (dependencies.adopt ?? adoptPublishedSkills)(home, store.path, registry.harnesses, seed);
     } catch (cause) {
@@ -271,6 +291,8 @@ function printPlan(plan: SyncPlan): void {
       `Update: ${remoteCheckout} with git clone, or fetch and reset --hard to the pushed commit (box changes are discarded)`,
       "SSH agent forwarding is limited to the box git update.",
       `Apply: ${remoteCheckout} -> ${remoteHome} (force: ${plan.force ? "yes" : "no"})`,
+      "Plugins: claude plugin marketplace add and install for the carried Claude declarations",
+      "Settings: carried keys replace their box values; other box keys are kept",
     ].join("\n"),
   );
 }

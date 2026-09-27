@@ -2,7 +2,8 @@
  * Store owns the private snapshot checkout and its tracked layout.
  *
  * Git execution sits behind GitRunner. Callers provide a Seed, not paths to
- * stage, so only skills, AGENTS.md, and ferry.json enter snapshot commits.
+ * stage, so only skills, extra roots, carried settings keys, AGENTS.md, and
+ * ferry.json enter snapshot commits.
  */
 
 import {
@@ -140,7 +141,11 @@ export class Store {
     const identity = await this.readIdentity();
     writeSeed(this.path, seed, this.metadata);
 
-    await checked(this.git, ["add", "-A", "--", "skills", "AGENTS.md", METADATA_FILE], this.path);
+    await checked(
+      this.git,
+      ["add", "-A", "--", "skills", "roots", "settings", "AGENTS.md", METADATA_FILE],
+      this.path,
+    );
     const diff = await this.git.run({ args: ["diff", "--cached", "--quiet", "--"], cwd: this.path });
     if (diff.status === 0) return { published: false, tip: await this.localTip() };
     if (diff.status !== 1) throw commandError(["diff", "--cached", "--quiet", "--"], diff);
@@ -279,6 +284,8 @@ function storeMetadata(harnesses: readonly HarnessDescriptor[]): string {
     ...(harness.skillRoot ? { skillRoot: harness.skillRoot } : {}),
     ...(harness.ownSkills === false ? { ownSkills: false } : {}),
     ...(harness.instructionFile ? { instructionFile: harness.instructionFile } : {}),
+    ...(harness.extraRoots ? { extraRoots: harness.extraRoots } : {}),
+    ...(harness.settings ? { settings: harness.settings } : {}),
   }));
   return `${JSON.stringify({ schemaVersion: SCHEMA_VERSION, managedHarnesses }, null, 2)}\n`;
 }
@@ -329,6 +336,24 @@ function writeSeed(root: string, seed: Seed, metadata: string): void {
     }
   }
 
+  // Each seed root gets a directory, empty or not, so a local link into it never dangles.
+  const roots = join(root, "roots");
+  rmSync(roots, { recursive: true, force: true });
+  mkdirSync(roots, { recursive: true });
+  for (const extra of seed.roots) {
+    mkdirSync(join(roots, extra.path), { recursive: true });
+    for (const file of extra.files) {
+      const target = join(roots, extra.path, file.path);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, file.bytes);
+    }
+  }
+
+  const settings = join(root, "settings");
+  rmSync(settings, { recursive: true, force: true });
+  mkdirSync(settings, { recursive: true });
+  for (const entry of seed.settings) writeFileSync(join(settings, `${entry.harness}.json`), entry.bytes);
+
   writeFileSync(join(root, "AGENTS.md"), seed.instructions?.bytes ?? new Uint8Array());
   writeFileSync(join(root, METADATA_FILE), metadata);
 }
@@ -340,6 +365,10 @@ function seedFiles(seed: Seed, metadata: string): Map<string, Uint8Array> {
   for (const skill of seed.skills) {
     for (const file of skill.files) files.set(`skills/${skill.name}/${file.path}`, file.bytes);
   }
+  for (const root of seed.roots) {
+    for (const file of root.files) files.set(`roots/${root.path}/${file.path}`, file.bytes);
+  }
+  for (const entry of seed.settings) files.set(`settings/${entry.harness}.json`, entry.bytes);
   return files;
 }
 

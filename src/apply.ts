@@ -8,6 +8,7 @@ import {
   readlinkSync,
   renameSync,
   rmdirSync,
+  statSync,
   symlinkSync,
   unlinkSync,
 } from "node:fs";
@@ -207,6 +208,13 @@ function inspectionRequest(
           }]
         : [],
     ),
+    rootTargets: harnesses.flatMap((harness) =>
+      (harness.extraRoots ?? []).map((root) => ({
+        source: joinPath(checkout, "roots", root),
+        path: joinPath(targetHome, root),
+        backupPath: joinPath(backupDirectory(joinPath, targetHome, timestamp, harness.id), root),
+      })),
+    ),
   };
 }
 
@@ -282,6 +290,23 @@ function planInspection(
           backupDirectory(joinPath, targetHome, timestamp, harness.id),
           nameOf(harness.instructionFile),
         ),
+        inspection,
+        actions,
+      );
+    }
+  }
+
+  // An extra root links whole. A root the checkout lacks stays as it is.
+  for (const harness of harnesses) {
+    for (const root of harness.extraRoots ?? []) {
+      const source = joinPath(checkout, "roots", root);
+      if (!inspection.rootSources.has(source)) continue;
+      planLink(
+        harness.name,
+        joinPath(targetHome, root),
+        source,
+        force,
+        joinPath(backupDirectory(joinPath, targetHome, timestamp, harness.id), root),
         inspection,
         actions,
       );
@@ -375,9 +400,17 @@ function inspectLocalTarget(request: TargetInspectionRequest): TargetInspection 
       paths.set(target.backupPath, inspectLocalPath(target.backupPath));
     }
   }
+  const rootSources = new Set<string>();
+  for (const target of request.rootTargets) {
+    if (!isDirectory(target.source)) continue;
+    rootSources.add(target.source);
+    paths.set(target.path, inspectLocalPath(target.path));
+    paths.set(target.backupPath, inspectLocalPath(target.backupPath));
+  }
   return {
     skillNames,
     instructionExists: existsSync(request.instructions),
+    rootSources,
     paths,
     roots,
   };
@@ -481,6 +514,14 @@ function resolvedLink(path: string): string {
 
 function currentTimestamp(): string {
   return new Date().toISOString().replaceAll(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function isMissing(error: unknown): boolean {

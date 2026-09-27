@@ -30,6 +30,8 @@ const seed: Seed = {
   ok: true,
   skills: [],
   instructions: null,
+  roots: [],
+  settings: [],
   identity: "seed-identity",
   leftovers: [],
 };
@@ -272,6 +274,55 @@ describe("runSync", () => {
       },
       applyPlan: { actions: [] },
     });
+  });
+
+  test("installs the declared Claude plugins, then merges the carried settings keys on the box", async () => {
+    const events: string[] = [];
+    const commands: Array<{ command: string; options: unknown }> = [];
+    const carried = { enabledPlugins: { "review@team": true } };
+    const link = {
+      run: async (command: string, options?: unknown) => {
+        commands.push({ command, options });
+        let stdout = "";
+        if (command.startsWith("printf")) stdout = "/srv/ferry\n";
+        else if (command.includes("claude plugin install")) events.push("install-plugins");
+        else if (command.includes("settings.json") && command.includes("mv ")) events.push("write-settings");
+        else if (command.includes("settings.json")) {
+          events.push("read-settings");
+          stdout = "M";
+        }
+        return { ok: true as const, address: "box", stdout, stderr: "" };
+      },
+    };
+
+    await runSync(
+      { home: "/operator" },
+      {
+        readConfig: () => config,
+        publisher: () => "operator-machine",
+        readSeed: () => ({
+          ...seed,
+          settings: [{ harness: "claude", bytes: Buffer.from(JSON.stringify(carried)) }],
+        }),
+        createLink: () => link,
+        writePlan: () => {},
+        acquireLock: () => () => events.push("unlock"),
+        openStore: async () => ({
+          path: "/operator/.ferry/store",
+          publish: async () => ({ published: true, tip: "abc123" }),
+        }),
+        apply: async (input) => {
+          events.push("apply");
+          return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] };
+        },
+        adopt: () => events.push("adopt"),
+      },
+    );
+
+    expect(events).toEqual(["apply", "install-plugins", "read-settings", "write-settings", "adopt", "unlock"]);
+    const write = commands.find((call) => call.command.includes("mv "));
+    expect(write?.command).toContain("/srv/ferry/.claude/settings.json");
+    expect(write?.command).toContain('"review@team": true');
   });
 
   test("uses a direct SSH destination for Link, plans, and locking", async () => {

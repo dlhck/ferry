@@ -30,7 +30,7 @@ Ferry is a small CLI I run on the operator machine (macOS or Linux). It is MIT l
 
 `ferry status` reports link reachability, whether the store tip matches the box clone, whether harness paths are the expected symlinks, which CLIs still need a login, and the resolved address or destination plus the usual Paseo daemon port. It writes nothing. `--json` exists for scripts.
 
-The portable set is user-global skills and one `AGENTS.md`. The forbidden set is credentials, host tokens, session history, caches, databases, MCP tokens, and settings files. Project-local skill directories stay in the project git repo.
+The portable set is user-global skills, one `AGENTS.md`, the Claude subagents and commands (`~/.claude/agents`, `~/.claude/commands`), and the Claude plugin declarations (the `enabledPlugins` and `extraKnownMarketplaces` keys of `~/.claude/settings.json`). The forbidden set is credentials, host tokens, session history, caches, databases, MCP tokens, and whole settings files. Project-local skill directories stay in the project git repo.
 
 First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link and apply. I add the Paseo host myself.
 
@@ -232,11 +232,11 @@ First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link
 
 - Seven modules sit behind those commands. A registry of descriptors feeds them.
 
-- **Registry.** Data, not behaviour. A harness descriptor names an id, a printed name, a skill root, and an instruction file. A tool descriptor names an id, an install command, and a login recipe: probe, login, one completion (device URL, printed URL, or manual guidance), and an optional callback fallback with a port forward. One builtin file holds the official five harnesses (shared agents root, Claude, Codex, Pi, Cursor Agent) and the official five tools (`gh`, Claude, Codex, Pi, Cursor Agent), so each is written down once. Manifest, Apply, Store, Install, and AuthStart take descriptors as input.
+- **Registry.** Data, not behaviour. A harness descriptor names an id, a printed name, a skill root, and an instruction file. A builtin descriptor can also name extra roots that ferry links whole, and one settings file with the keys ferry carries from it. A tool descriptor names an id, an install command, and a login recipe: probe, login, one completion (device URL, printed URL, or manual guidance), and an optional callback fallback with a port forward. One builtin file holds the official five harnesses (shared agents root, Claude, Codex, Pi, Cursor Agent) and the official five tools (`gh`, Claude, Codex, Pi, Cursor Agent), so each is written down once. Manifest, Apply, Store, Install, and AuthStart take descriptors as input.
 
 - **Registry loading.** A loader merges `[[harness]]` and `[[tool]]` entries from the operator config into the builtin set. It is a pure function over parsed config data. It refuses a duplicate id, an absolute path, a path that climbs out of the home, any path the Manifest deny set covers, a skill root that does not end in a skills directory, and a path another harness already owns. Descriptors are data. Ferry loads no plugin code from an entry.
 
-- **Manifest.** Deep module. Interface: given a source home and the harness descriptors, return a seed (skill names and bodies, plus the one instruction file) or refuse with named clashes and forbidden hits. Implementation owns the union-and-refuse-on-byte-clash rule and the deny set (vendor auth files, host tokens, session history, caches, sqlite, daemon keys, MCP tokens, settings, secret-looking files inside a skill). The deny set is hardcoded here. A registry entry can add a path to scan; it cannot disable or widen a deny rule. Callers never pass a raw rsync set. Tests drive snapshot and refuse.
+- **Manifest.** Deep module. Interface: given a source home and the harness descriptors, return a seed (skill names and bodies, the files of each extra root, the carried settings keys, plus the one instruction file) or refuse with named clashes and forbidden hits. Implementation owns the union-and-refuse-on-byte-clash rule and the deny set (vendor auth files, host tokens, session history, caches, sqlite, daemon keys, MCP tokens, settings, secret-looking files inside a skill). The deny set is hardcoded here. A registry entry can add a path to scan; it cannot disable or widen a deny rule. Callers never pass a raw rsync set. Tests drive snapshot and refuse.
 
 - **Store.** Deep module. Interface: clone or open the snapshot remote, publish a commit of the working tree, fetch the current tip, report whether local and remote and box tips match. Implementation owns git clone, commit, push, pull, and snapshot identity. Commits use the operator git identity. Missing identity is an error. Never force-push. Schema metadata in the store names schema version 2 and the full descriptor of every managed harness. A checkout whose ferry.json cannot be read, or which records another schema version, is refused instead of rewritten. Git command runner is an injected adapter. Tests use an in-memory fake.
 
@@ -262,7 +262,7 @@ First-box done is `init`, `install`, `sync`, `auth`, then `status` green on link
 
 - Secrets. No age vault, no 1Password. Token values stay out of ferry output.
 
-- MCP and settings are not in the snapshot.
+- MCP is not in the snapshot. Of the settings files, only an explicit key list of a builtin harness is in the snapshot. For Claude, the list is `enabledPlugins` and `extraKnownMarketplaces`. The box merges these keys into its settings file, keeps its other keys, and installs the declared plugins with the `claude` CLI.
 
 - Concurrency. One sync at a time per host.
 
@@ -296,7 +296,7 @@ Prior art: none in this repository. The first tests are these interface tests.
 
 - Copy or proxy of Claude, Codex, `gh`, Cursor Agent, or Pi sessions from the operator machine onto the box.
 - 1Password, `op run`, age vaults, or any secret manager.
-- MCP declarations, Linear OAuth as a ferry verb, and settings sync.
+- MCP declarations, Linear OAuth as a ferry verb, and settings sync beyond the carried key list.
 - agentsync-style projection of one config format into every harness.
 - skillshare, chezmoi, or other tools as a required runtime.
 - Herdr remote attach, SSH_AUTH_SOCK repair, or tmux-style sessions.
@@ -315,7 +315,7 @@ Prior art: none in this repository. The first tests are these interface tests.
 
 `dlhck/ferry` holds the CLI. The portable snapshot is a second private repository. Init makes that split explicit.
 
-Locked operator paths, for implementers: store clone at `~/.ferry/store`, config at `~/.ferry/config.toml`, store contents `skills/`, `AGENTS.md`, and `ferry.json`. Managed symlink targets are the shared agents skill root, Claude skills, Codex skills, Pi skills, Cursor Agent skills, and the home instruction files those tools already follow.
+Locked operator paths, for implementers: store clone at `~/.ferry/store`, config at `~/.ferry/config.toml`, store contents `skills/`, `roots/` (extra roots such as `roots/.claude/agents`), `settings/` (carried settings keys, such as `settings/claude.json`), `AGENTS.md`, and `ferry.json`. Managed symlink targets are the shared agents skill root, Claude skills, Codex skills, Pi skills, Cursor Agent skills, and the home instruction files those tools already follow.
 
 v1 success is narrow. Init on the operator machine, install of the allowlist, one sync that leaves the box on the same clone, status that shows a match, and one auth per provider ferry can start. After that, daily work is edit through the symlink and sync.
 

@@ -2,9 +2,10 @@
  * Manifest decides what leaves the operator machine.
  *
  * Callers hand it a source home and the harness registry and get back a seed
- * (skill bodies plus the one instruction file) or a refusal that names every
- * clash and every forbidden hit. Callers pass harnesses, never a path set: the
- * union rule and the deny set live here, out of reach of any registry entry.
+ * (skill bodies, extra root files, and the one instruction file) or a refusal
+ * that names every clash and every forbidden hit. Callers pass harnesses, never
+ * a path set: the union rule and the deny set live here, out of reach of any
+ * registry entry.
  */
 
 import { createHash } from "node:crypto";
@@ -52,10 +53,19 @@ const DENY_RULES = {
     reason: "AWS access key ID in file content",
     verdict: "refuse",
   },
+  "settings-credential": {
+    code: "settings-credential",
+    reason: "request headers in a carried settings key",
+    verdict: "refuse",
+  },
   history: { code: "history", reason: "session history", verdict: "skip" },
   database: { code: "database", reason: "sqlite or other database file", verdict: "skip" },
   cache: { code: "cache", reason: "cache or build output", verdict: "skip" },
-  settings: { code: "settings", reason: "harness settings, out of the v1 snapshot", verdict: "skip" },
+  settings: {
+    code: "settings",
+    reason: "whole harness settings file; only listed keys are carried",
+    verdict: "skip",
+  },
 } as const satisfies Record<string, DenyRule>;
 
 /** Return Manifest's deny rules without scanning or writing the source home. */
@@ -73,6 +83,7 @@ const NOTES = {
   "broken-link": { code: "broken-link", reason: "broken symlink" },
   "not-a-file": { code: "not-a-file", reason: "not a regular file" },
   "ferry-backup": { code: "ferry-backup", reason: "Ferry backup directory" },
+  "invalid-settings": { code: "invalid-settings", reason: "settings file that is not a JSON object" },
 } as const satisfies Record<string, Note>;
 
 const FERRY_BACKUP_NAME = /\.ferry-backup-\d{8}T\d{6}Z$/;
@@ -114,6 +125,12 @@ export type SeedSkill = { readonly name: string; readonly files: readonly SeedFi
 
 export type Instructions = { readonly bytes: Uint8Array };
 
+/** One extra root, such as `.claude/agents`. `path` is relative to the home. */
+export type SeedRoot = { readonly path: string; readonly files: readonly SeedFile[] };
+
+/** The carried keys of one harness settings file, as JSON. `harness` is the harness id. */
+export type SeedSettings = { readonly harness: string; readonly bytes: Uint8Array };
+
 /** Something ferry found and did not import. Init prints these. */
 export type Leftover = Note & { readonly path: string };
 
@@ -121,6 +138,10 @@ export type Seed = {
   readonly ok: true;
   readonly skills: readonly SeedSkill[];
   readonly instructions: Instructions | null;
+  /** The extra roots of the harnesses that exist in the home, empty ones too. */
+  readonly roots: readonly SeedRoot[];
+  /** The carried settings keys of each harness whose settings file exists. */
+  readonly settings: readonly SeedSettings[];
   /** Content hash of the whole seed. Changes when any skill or byte changes. */
   readonly identity: string;
   readonly leftovers: readonly Leftover[];
@@ -140,8 +161,9 @@ export type Refusal = {
 /**
  * Read the seed for `home`.
  *
- * Only the skill roots of `harnesses` and the home instruction file are read.
- * Project skill directories sit outside those roots, so they are never seen.
+ * Only the skill roots and extra roots of `harnesses` and the home instruction
+ * file are read. Project skill directories sit outside those roots, so they
+ * are never seen.
  */
 export function readSeed(home: string, harnesses: readonly HarnessDescriptor[]): Seed | Refusal {
   const clashes: Clash[] = [];
@@ -173,6 +195,32 @@ export function readSeed(home: string, harnesses: readonly HarnessDescriptor[]):
     skills.push({ name, files: [...variants.values()][0] ?? [] });
   }
 
+  const roots: SeedRoot[] = [];
+  for (const path of harnesses.flatMap((harness) => harness.extraRoots ?? [])) {
+    const root = join(home, path);
+    let stat;
+    try {
+      stat = statSync(root);
+    } catch {
+      continue;
+    }
+    if (!stat.isDirectory()) {
+      leftovers.push(note(root, NOTES["not-a-directory"]));
+      continue;
+    }
+    const scan = scanSkill(root);
+    forbidden.push(...scan.forbidden);
+    leftovers.push(...scan.leftovers);
+    roots.push({ path, files: scan.files });
+  }
+
+  const settings: SeedSettings[] = [];
+  for (const harness of harnesses) {
+    if (!harness.settings) continue;
+    const carried = readSettings(join(home, harness.settings.file), harness.settings.keys, forbidden);
+    if (carried) settings.push({ harness: harness.id, bytes: carried });
+  }
+
   const instructions = readInstructions(home, leftovers);
   if (instructions) forbidden.push(...tokenHits(join(home, INSTRUCTION_FILE), instructions.bytes));
 
@@ -183,7 +231,9 @@ export function readSeed(home: string, harnesses: readonly HarnessDescriptor[]):
     ok: true,
     skills,
     instructions,
-    identity: identify(skills, instructions, harnesses),
+    roots,
+    settings,
+    identity: identify(skills, instructions, roots, settings, harnesses),
     leftovers,
   };
 }
@@ -344,6 +394,56 @@ function denyRuleFor(entryName: string, isDirectory: boolean): DenyRule | null {
   return null;
 }
 
+/**
+ * Read only `keys` from a JSON settings file. The file itself never leaves the
+ * machine. `null` means the file is missing or refused.
+ */
+function readSettings(
+  path: string,
+  keys: readonly string[],
+  forbidden: ForbiddenHit[],
+): Uint8Array | null {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    forbidden.push(note(path, NOTES["invalid-settings"]));
+    return null;
+  }
+
+  const carried: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (Object.hasOwn(parsed, key)) carried[key] = (parsed as Record<string, unknown>)[key];
+  }
+  const bytes = Buffer.from(`${JSON.stringify(carried, null, 2)}\n`);
+  // A marketplace or hook can send request headers, and a header can hold a credential.
+  if (hasKey(carried, "headers")) {
+    forbidden.push(note(path, DENY_RULES["settings-credential"]));
+    return null;
+  }
+  const tokens = tokenHits(path, bytes);
+  if (tokens.length > 0) {
+    forbidden.push(...tokens);
+    return null;
+  }
+  return bytes;
+}
+
+function hasKey(value: unknown, key: string): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  if (!Array.isArray(value) && Object.hasOwn(value, key)) return true;
+  return Object.values(value).some((child) => hasKey(child, key));
+}
+
 function readInstructions(home: string, leftovers: Leftover[]): Instructions | null {
   const path = join(home, INSTRUCTION_FILE);
   let stat;
@@ -373,15 +473,19 @@ function contentKey(files: readonly SeedFile[]): string {
 function identify(
   skills: readonly SeedSkill[],
   instructions: Instructions | null,
+  roots: readonly SeedRoot[],
+  settings: readonly SeedSettings[],
   harnesses: readonly HarnessDescriptor[],
 ): string {
   const hash = createHash("sha256");
   for (const harness of harnesses) {
     hash.update(
-      `harness:${harness.id}:${harness.skillRoot ?? "none"}:${harness.instructionFile ?? "none"}\n`,
+      `harness:${harness.id}:${harness.skillRoot ?? "none"}:${harness.instructionFile ?? "none"}:${(harness.extraRoots ?? []).join(",")}\n`,
     );
   }
   for (const skill of skills) hash.update(`skill:${skill.name}:${contentKey(skill.files)}\n`);
+  for (const root of roots) hash.update(`root:${root.path}:${contentKey(root.files)}\n`);
+  for (const entry of settings) hash.update(`settings:${entry.harness}:${digest(entry.bytes)}\n`);
   hash.update(`instructions:${instructions ? digest(instructions.bytes) : "none"}\n`);
   return hash.digest("hex");
 }

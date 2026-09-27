@@ -191,6 +191,20 @@ describe("the instruction file", () => {
   });
 });
 
+// Build each token at run time so this file holds no string a secret scanner flags.
+const tokens: [string, string][] = [
+  ["github-token", "gh" + "p_" + "a1B2".repeat(9)],
+  ["github-token", "gh" + "o_" + "a1B2".repeat(9)],
+  ["github-token", "gh" + "u_" + "a1B2".repeat(9)],
+  ["github-token", "gh" + "s_" + "a1B2".repeat(9)],
+  ["github-token", "github" + "_pat_" + "a1B2c3_".repeat(12)],
+  ["anthropic-key", "sk-" + "ant-" + "api03-" + "a1B2-c3D4_".repeat(9)],
+  ["openai-key", "sk-" + "proj-" + "a1B2-c3D4_".repeat(9)],
+  ["slack-token", "xo" + "xb-" + "1234567890-1234567890-" + "a1B2".repeat(6)],
+  ["slack-token", "xo" + "xp-" + "1234567890-1234567890-" + "a1B2".repeat(6)],
+  ["aws-access-key", "AK" + "IA" + "Q2W3E4R5T6Y7U8I9"],
+];
+
 describe("the deny set", () => {
   test("exports its human-readable rules for read-only reporting", () => {
     expect(denyRules()).toEqual([
@@ -224,12 +238,17 @@ describe("the deny set", () => {
         description: "AWS access key ID in file content",
         behavior: "refuse",
       },
+      {
+        code: "settings-credential",
+        description: "request headers in a carried settings key",
+        behavior: "refuse",
+      },
       { code: "history", description: "session history", behavior: "skip" },
       { code: "database", description: "sqlite or other database file", behavior: "skip" },
       { code: "cache", description: "cache or build output", behavior: "skip" },
       {
         code: "settings",
-        description: "harness settings, out of the v1 snapshot",
+        description: "whole harness settings file; only listed keys are carried",
         behavior: "skip",
       },
     ]);
@@ -307,20 +326,6 @@ describe("the deny set", () => {
 
     expect(refusalOf(home).forbidden[0]?.code).toBe("private-key");
   });
-
-  // Build each token at run time so this file holds no string a secret scanner flags.
-  const tokens: [string, string][] = [
-    ["github-token", "gh" + "p_" + "a1B2".repeat(9)],
-    ["github-token", "gh" + "o_" + "a1B2".repeat(9)],
-    ["github-token", "gh" + "u_" + "a1B2".repeat(9)],
-    ["github-token", "gh" + "s_" + "a1B2".repeat(9)],
-    ["github-token", "github" + "_pat_" + "a1B2c3_".repeat(12)],
-    ["anthropic-key", "sk-" + "ant-" + "api03-" + "a1B2-c3D4_".repeat(9)],
-    ["openai-key", "sk-" + "proj-" + "a1B2-c3D4_".repeat(9)],
-    ["slack-token", "xo" + "xb-" + "1234567890-1234567890-" + "a1B2".repeat(6)],
-    ["slack-token", "xo" + "xp-" + "1234567890-1234567890-" + "a1B2".repeat(6)],
-    ["aws-access-key", "AK" + "IA" + "Q2W3E4R5T6Y7U8I9"],
-  ];
 
   test.each(tokens)("a skill file that holds a %s refuses the whole seed", (code, token) => {
     const home = makeHome();
@@ -525,5 +530,232 @@ describe("an empty home", () => {
         reason: expect.any(String),
       },
     ]);
+  });
+});
+
+describe("Claude subagents and commands", () => {
+  function rootOf(seed: Seed, path: string) {
+    return seed.roots.find((root) => root.path === path);
+  }
+
+  function filesOf(seed: Seed, path: string): Record<string, string> {
+    const root = rootOf(seed, path);
+    if (!root) throw new Error(`no ${path} root in the seed`);
+    return Object.fromEntries(
+      root.files.map((file) => [file.path, Buffer.from(file.bytes).toString()]),
+    );
+  }
+
+  test("agents and commands reach the seed with their nested files", () => {
+    const home = makeHome();
+    write(home, ".claude/agents/reviewer.md", "review agent");
+    write(home, ".claude/commands/ship.md", "ship command");
+    write(home, ".claude/commands/git/pr.md", "namespaced command");
+
+    const seed = seedOf(home);
+
+    expect(seed.roots.map((root) => root.path)).toEqual([".claude/agents", ".claude/commands"]);
+    expect(filesOf(seed, ".claude/agents")).toEqual({ "reviewer.md": "review agent" });
+    expect(filesOf(seed, ".claude/commands")).toEqual({
+      "git/pr.md": "namespaced command",
+      "ship.md": "ship command",
+    });
+  });
+
+  test("a missing root yields no root entry", () => {
+    const home = makeHome();
+    write(home, ".claude/agents/reviewer.md", "review agent");
+
+    expect(seedOf(home).roots.map((root) => root.path)).toEqual([".claude/agents"]);
+  });
+
+  test("an empty root is kept, so a linked root keeps its store directory", () => {
+    const home = makeHome();
+    mkdirSync(join(home, ".claude", "commands"), { recursive: true });
+
+    expect(seedOf(home).roots).toEqual([{ path: ".claude/commands", files: [] }]);
+  });
+
+  test("the name deny rules apply inside a root", () => {
+    const home = makeHome();
+    write(home, ".claude/agents/reviewer.md", "review agent");
+    write(home, ".claude/agents/settings.json", "{}");
+    write(home, ".claude/commands/.env", "SECRET=1");
+
+    const refusal = refusalOf(home);
+
+    expect(refusal.forbidden).toEqual([
+      { path: join(home, ".claude", "commands", ".env"), code: "dotenv", reason: expect.any(String) },
+    ]);
+  });
+
+  test("a denied settings file inside a root is skipped, not carried", () => {
+    const home = makeHome();
+    write(home, ".claude/agents/reviewer.md", "review agent");
+    write(home, ".claude/agents/settings.json", "{}");
+
+    const seed = seedOf(home);
+
+    expect(filesOf(seed, ".claude/agents")).toEqual({ "reviewer.md": "review agent" });
+    expect(seed.leftovers).toContainEqual({
+      path: join(home, ".claude", "agents", "settings.json"),
+      code: "settings",
+      reason: expect.any(String),
+    });
+  });
+
+  test.each(tokens)("an agent file that holds a %s refuses the whole seed", (code, token) => {
+    const home = makeHome();
+    write(home, ".claude/agents/reviewer.md", `Use ${token} to call the API.`);
+
+    expect(refusalOf(home).forbidden).toEqual([
+      { path: join(home, ".claude", "agents", "reviewer.md"), code, reason: expect.any(String) },
+    ]);
+  });
+
+  test("a symlink out of a root refuses", () => {
+    const home = makeHome();
+    write(home, "outside.md", "outside");
+    mkdirSync(join(home, ".claude", "commands"), { recursive: true });
+    symlinkSync(join(home, "outside.md"), join(home, ".claude", "commands", "outside.md"));
+
+    expect(refusalOf(home).forbidden.map((hit) => hit.code)).toEqual(["symlink-escape"]);
+  });
+
+  test("editing an agent changes the identity", () => {
+    const home = makeHome();
+    write(home, ".claude/agents/reviewer.md", "review agent");
+    const before = seedOf(home).identity;
+    write(home, ".claude/agents/reviewer.md", "stricter review agent");
+
+    expect(seedOf(home).identity).not.toBe(before);
+  });
+});
+
+describe("carried Claude settings keys", () => {
+  const settings = {
+    env: { API_TOKEN: "env-secret-value" },
+    apiKeyHelper: "/usr/local/bin/print-key",
+    permissions: { allow: ["Bash(git status)"] },
+    hooks: { Stop: [{ hooks: [{ type: "command", command: "notify" }] }] },
+    model: "opus",
+    enabledPlugins: { "review@team": true, "old@team": false },
+    extraKnownMarketplaces: {
+      team: { source: { source: "github", repo: "example/claude-plugins" } },
+    },
+  };
+
+  function carried(seed: Seed): unknown {
+    const entry = seed.settings.find((candidate) => candidate.harness === "claude");
+    if (!entry) throw new Error("no carried Claude settings in the seed");
+    return JSON.parse(Buffer.from(entry.bytes).toString());
+  }
+
+  test("only enabledPlugins and extraKnownMarketplaces leave the settings file", () => {
+    const home = makeHome();
+    write(home, ".claude/settings.json", JSON.stringify(settings));
+
+    const seed = seedOf(home);
+
+    expect(carried(seed)).toEqual({
+      enabledPlugins: settings.enabledPlugins,
+      extraKnownMarketplaces: settings.extraKnownMarketplaces,
+    });
+    const text = Buffer.from(seed.settings[0]?.bytes ?? []).toString();
+    for (const secret of ["env-secret-value", "print-key", "Bash(git status)", "notify", "opus"]) {
+      expect(text).not.toContain(secret);
+    }
+  });
+
+  test("a home without a settings file carries no settings", () => {
+    expect(seedOf(makeHome()).settings).toEqual([]);
+  });
+
+  test("a settings file without carried keys carries an empty object", () => {
+    const home = makeHome();
+    write(home, ".claude/settings.json", JSON.stringify({ model: "opus" }));
+
+    expect(carried(seedOf(home))).toEqual({});
+  });
+
+  test("a settings file that is not a JSON object refuses the seed", () => {
+    const home = makeHome();
+    write(home, ".claude/settings.json", "{ not json");
+
+    expect(refusalOf(home).forbidden).toEqual([
+      {
+        path: join(home, ".claude", "settings.json"),
+        code: "invalid-settings",
+        reason: expect.any(String),
+      },
+    ]);
+  });
+
+  test.each(tokens)("a carried key that holds a %s refuses the seed", (code, token) => {
+    const home = makeHome();
+    write(
+      home,
+      ".claude/settings.json",
+      JSON.stringify({
+        extraKnownMarketplaces: {
+          team: { source: { source: "git", url: `https://${token}@git.example.com/plugins.git` } },
+        },
+      }),
+    );
+
+    expect(refusalOf(home).forbidden).toEqual([
+      { path: join(home, ".claude", "settings.json"), code, reason: expect.any(String) },
+    ]);
+  });
+
+  test("a token in a key that is not carried does not refuse the seed", () => {
+    const home = makeHome();
+    const token = tokens[0]![1];
+    write(home, ".claude/settings.json", JSON.stringify({ env: { GH_TOKEN: token } }));
+
+    expect(carried(seedOf(home))).toEqual({});
+  });
+
+  test("request headers in a carried key refuse the seed", () => {
+    const home = makeHome();
+    write(
+      home,
+      ".claude/settings.json",
+      JSON.stringify({
+        extraKnownMarketplaces: {
+          team: {
+            source: {
+              source: "url",
+              url: "https://plugins.example.com/marketplace.json",
+              headers: { Authorization: "Bearer internal" },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(refusalOf(home).forbidden).toEqual([
+      {
+        path: join(home, ".claude", "settings.json"),
+        code: "settings-credential",
+        reason: expect.any(String),
+      },
+    ]);
+  });
+
+  test("a change to a carried key changes the identity, a change to another key does not", () => {
+    const home = makeHome();
+    write(home, ".claude/settings.json", JSON.stringify(settings));
+    const before = seedOf(home).identity;
+
+    write(home, ".claude/settings.json", JSON.stringify({ ...settings, model: "sonnet" }));
+    expect(seedOf(home).identity).toBe(before);
+
+    write(
+      home,
+      ".claude/settings.json",
+      JSON.stringify({ ...settings, enabledPlugins: { "review@team": false } }),
+    );
+    expect(seedOf(home).identity).not.toBe(before);
   });
 });

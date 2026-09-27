@@ -21,6 +21,8 @@ export type InspectedEntry = {
 export type TargetInspection = {
   readonly skillNames: readonly string[];
   readonly instructionExists: boolean;
+  /** The extra root sources that are directories in the store checkout. */
+  readonly rootSources: ReadonlySet<string>;
   readonly paths: ReadonlyMap<string, InspectedPath>;
   readonly roots: ReadonlyMap<string, readonly InspectedEntry[]>;
 };
@@ -33,6 +35,11 @@ export type TargetInspectionRequest = {
     readonly backupDirectory: string;
   }[];
   readonly instructionTargets: readonly {
+    readonly path: string;
+    readonly backupPath: string;
+  }[];
+  readonly rootTargets: readonly {
+    readonly source: string;
     readonly path: string;
     readonly backupPath: string;
   }[];
@@ -145,6 +152,11 @@ case "$mode" in
       printf '\n'
     done
     ;;
+  exists)
+    for exists_path do
+      printf 'X\t%s\n' "$(printf '%s' "$exists_path" | hex)"
+    done
+    ;;
   direct)
     while [ "$#" -gt 0 ]; do
       direct_path=$1
@@ -185,6 +197,15 @@ while [ "$root_index" -lt "$root_count" ]; do
   find "$store_skills"/. ! -name . -prune -type d \
     -exec sh -c "$worker" sh candidates "$target_root" "$backup_dir" {} + || exit 1
   root_index=$((root_index + 1))
+done
+source_count=$1
+shift
+while [ "$source_count" -gt 0 ]; do
+  if [ -d "$1" ]; then
+    sh -c "$worker" sh exists "$1" || exit 1
+  fi
+  shift
+  source_count=$((source_count - 1))
 done
 direct_count=$1
 shift
@@ -244,8 +265,13 @@ function inspectionCommand(request: TargetInspectionRequest): string {
     request.instructions,
     String(request.targetRoots.length),
     ...request.targetRoots.flatMap((root) => [root.root, root.backupDirectory]),
-    String(request.instructionTargets.length),
-    ...request.instructionTargets.flatMap((target) => [target.path, target.backupPath]),
+    String(request.rootTargets.length),
+    ...request.rootTargets.map((target) => target.source),
+    String(request.instructionTargets.length + request.rootTargets.length),
+    ...[...request.instructionTargets, ...request.rootTargets].flatMap((target) => [
+      target.path,
+      target.backupPath,
+    ]),
   ];
   return shellCommand(INSPECTION_SCRIPT, arguments_);
 }
@@ -280,6 +306,7 @@ function quoteShell(value: string): string {
 function parseInspection(stdout: string): TargetInspection {
   const skillNames: string[] = [];
   let instructionExists = false;
+  const rootSources = new Set<string>();
   const paths = new Map<string, InspectedPath>();
   const roots = new Map<string, InspectedEntry[]>();
 
@@ -292,6 +319,9 @@ function parseInspection(stdout: string): TargetInspection {
         break;
       case "I":
         instructionExists = fields[1] === "1";
+        break;
+      case "X":
+        rootSources.add(fromHex(required(fields[1])));
         break;
       case "P": {
         const path = fromHex(required(fields[1]));
@@ -316,7 +346,7 @@ function parseInspection(stdout: string): TargetInspection {
 
   skillNames.sort(compare);
   for (const entries of roots.values()) entries.sort((a, b) => compare(a.name, b.name));
-  return { skillNames, instructionExists, paths, roots };
+  return { skillNames, instructionExists, rootSources, paths, roots };
 }
 
 function parsePath(path: string, kind: string, linkHex: string): InspectedPath {
