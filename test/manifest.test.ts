@@ -211,6 +211,19 @@ describe("the deny set", () => {
         description: "symlink that leaves the skill directory",
         behavior: "refuse",
       },
+      { code: "github-token", description: "GitHub token in file content", behavior: "refuse" },
+      {
+        code: "anthropic-key",
+        description: "Anthropic API key in file content",
+        behavior: "refuse",
+      },
+      { code: "openai-key", description: "OpenAI API key in file content", behavior: "refuse" },
+      { code: "slack-token", description: "Slack token in file content", behavior: "refuse" },
+      {
+        code: "aws-access-key",
+        description: "AWS access key ID in file content",
+        behavior: "refuse",
+      },
       { code: "history", description: "session history", behavior: "skip" },
       { code: "database", description: "sqlite or other database file", behavior: "skip" },
       { code: "cache", description: "cache or build output", behavior: "skip" },
@@ -293,6 +306,68 @@ describe("the deny set", () => {
     });
 
     expect(refusalOf(home).forbidden[0]?.code).toBe("private-key");
+  });
+
+  // Build each token at run time so this file holds no string a secret scanner flags.
+  const tokens: [string, string][] = [
+    ["github-token", "gh" + "p_" + "a1B2".repeat(9)],
+    ["github-token", "gh" + "o_" + "a1B2".repeat(9)],
+    ["github-token", "gh" + "u_" + "a1B2".repeat(9)],
+    ["github-token", "gh" + "s_" + "a1B2".repeat(9)],
+    ["github-token", "github" + "_pat_" + "a1B2c3_".repeat(12)],
+    ["anthropic-key", "sk-" + "ant-" + "api03-" + "a1B2-c3D4_".repeat(9)],
+    ["openai-key", "sk-" + "proj-" + "a1B2-c3D4_".repeat(9)],
+    ["slack-token", "xo" + "xb-" + "1234567890-1234567890-" + "a1B2".repeat(6)],
+    ["slack-token", "xo" + "xp-" + "1234567890-1234567890-" + "a1B2".repeat(6)],
+    ["aws-access-key", "AK" + "IA" + "Q2W3E4R5T6Y7U8I9"],
+  ];
+
+  test.each(tokens)("a skill file that holds a %s refuses the whole seed", (code, token) => {
+    const home = makeHome();
+    writeSkill(home, ".claude/skills", "unslop", {
+      "SKILL.md": "body",
+      "notes.md": `Use this key:\n${token}\n`,
+    });
+    writeSkill(home, ".codex/skills", "clean", { "SKILL.md": "clean" });
+
+    const refusal = refusalOf(home);
+
+    expect(refusal.forbidden).toEqual([
+      {
+        path: join(home, ".claude", "skills", "unslop", "notes.md"),
+        code,
+        reason: expect.stringContaining("in file content"),
+      },
+    ]);
+    expect(JSON.stringify(refusal)).not.toContain(token);
+  });
+
+  test.each(tokens)("an AGENTS.md that holds a %s refuses the whole seed", (code, token) => {
+    const home = makeHome();
+    write(home, "AGENTS.md", `export TOKEN="${token}"\n`);
+    writeSkill(home, ".claude/skills", "unslop", { "SKILL.md": "body" });
+
+    const refusal = refusalOf(home);
+
+    expect(refusal.forbidden).toEqual([
+      { path: join(home, "AGENTS.md"), code, reason: expect.stringContaining("in file content") },
+    ]);
+    expect(JSON.stringify(refusal)).not.toContain(token);
+  });
+
+  test("token prefixes in plain prose do not refuse", () => {
+    const home = makeHome();
+    write(
+      home,
+      "AGENTS.md",
+      "GitHub tokens start with gh" + "p_ or github" + "_pat_. Anthropic keys start with sk-" +
+        "ant-, Slack bot tokens with xo" + "xb-, and AWS key IDs with AK" + "IA.\n",
+    );
+    writeSkill(home, ".claude/skills", "unslop", {
+      "SKILL.md": "Set sk-" + "proj-... in your shell, never here. Example: gh" + "p_xxxx.\n",
+    });
+
+    expect(names(seedOf(home))).toEqual(["unslop"]);
   });
 
   test("a symlink out of the skill directory refuses", () => {
