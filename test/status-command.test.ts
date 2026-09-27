@@ -227,6 +227,17 @@ describe("ferry status command", () => {
     expect(stack.reads.some((call) => /\bgit pull\b/.test(call))).toBe(false);
   });
 
+  test("prints nothing about Paseo when no integration is enabled", async () => {
+    const human = fakeStack();
+    const json = fakeStack();
+
+    await runStatusCommand({ json: false }, human.dependencies);
+    await runStatusCommand({ json: true }, json.dependencies);
+
+    expect(human.output.join("\n")).not.toMatch(/paseo/i);
+    expect(json.output.join("\n")).not.toMatch(/paseo/i);
+  });
+
   test("prints the exact report as JSON without human text", async () => {
     const stack = fakeStack();
 

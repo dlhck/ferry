@@ -219,6 +219,23 @@ describe("runSync", () => {
     }
   });
 
+  test("dry-run prints nothing about Paseo when no integration is enabled", async () => {
+    const output: string[] = [];
+    const log = console.log;
+    console.log = (line: string) => output.push(line);
+    try {
+      await runSync(
+        { home: "/operator", dryRun: true },
+        { readConfig: () => config, publisher: () => "operator-machine", readSeed: () => seed },
+      );
+    } finally {
+      console.log = log;
+    }
+
+    expect(output.join("\n")).toContain("Deny list:");
+    expect(output.join("\n")).not.toMatch(/paseo/i);
+  });
+
   test("dry-run lists the carried settings keys that differ from the store, offline", async () => {
     const home = realpathSync(mkdtempSync(join(tmpdir(), "ferry-sync-home-")));
     try {
