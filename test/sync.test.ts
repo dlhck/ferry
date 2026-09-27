@@ -1,11 +1,21 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplyError } from "../src/apply.ts";
 import type { OperatorConfig } from "../src/config.ts";
 import type { Seed } from "../src/manifest.ts";
 import { loadRegistry, type RegistryConfig } from "../src/registry/load.ts";
+import type { LinkResult } from "../src/link.ts";
 import type { HarnessDescriptor } from "../src/registry/types.ts";
 import { remoteUpdateCommand, runSync, type SyncDependencies } from "../src/sync.ts";
 
@@ -25,9 +35,9 @@ const seed: Seed = {
 };
 
 describe("remoteUpdateCommand", () => {
-  test("clones when the box checkout is missing and pulls when it exists", () => {
-    expect(remoteUpdateCommand("/srv/ferry/.ferry/store", "git@example.test:operator/ferry-store.git")).toBe(
-      "if [ -d '/srv/ferry/.ferry/store/.git' ]; then git -C '/srv/ferry/.ferry/store' pull --ff-only; else mkdir -p '/srv/ferry/.ferry' && git clone 'git@example.test:operator/ferry-store.git' '/srv/ferry/.ferry/store'; fi",
+  test("clones when the box checkout is missing and resets it to the pushed commit when it exists", () => {
+    expect(remoteUpdateCommand("/srv/ferry/.ferry/store", "git@example.test:operator/ferry-store.git", "abc123")).toBe(
+      "if [ -d '/srv/ferry/.ferry/store/.git' ]; then git -C '/srv/ferry/.ferry/store' status --porcelain=v1 -z --untracked-files=all && git -C '/srv/ferry/.ferry/store' fetch --quiet && git -C '/srv/ferry/.ferry/store' reset --quiet --hard 'abc123' && git -C '/srv/ferry/.ferry/store' clean --quiet --force -d; else mkdir -p '/srv/ferry/.ferry' && git clone 'git@example.test:operator/ferry-store.git' '/srv/ferry/.ferry/store'; fi",
     );
   });
 });
@@ -162,7 +172,7 @@ describe("runSync", () => {
     });
   });
 
-  test("plans, publishes, fast-forwards the box, and applies the snapshot", async () => {
+  test("plans, publishes, resets the box, and applies the snapshot", async () => {
     const events: string[] = [];
     const linkCalls: Array<{ command: string; options: unknown }> = [];
     let applyInput: Record<string, unknown> | undefined;
@@ -241,7 +251,7 @@ describe("runSync", () => {
       { command: `printf '%s\\n' "$HOME"`, options: undefined },
       {
         command:
-          "if [ -d '/srv/ferry/.ferry/store/.git' ]; then git -C '/srv/ferry/.ferry/store' pull --ff-only; else mkdir -p '/srv/ferry/.ferry' && git clone 'git@example.test:operator/ferry-store.git' '/srv/ferry/.ferry/store'; fi",
+          "if [ -d '/srv/ferry/.ferry/store/.git' ]; then git -C '/srv/ferry/.ferry/store' status --porcelain=v1 -z --untracked-files=all && git -C '/srv/ferry/.ferry/store' fetch --quiet && git -C '/srv/ferry/.ferry/store' reset --quiet --hard 'abc123' && git -C '/srv/ferry/.ferry/store' clean --quiet --force -d; else mkdir -p '/srv/ferry/.ferry' && git clone 'git@example.test:operator/ferry-store.git' '/srv/ferry/.ferry/store'; fi",
         options: { agentForwarding: "git" },
       },
     ]);
@@ -663,4 +673,112 @@ describe("runSync", () => {
     );
     expect(released).toBe(true);
   });
+
+  test("resets a dirty box checkout to the pushed commit and names each discarded file", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "ferry-sync-dirty-box-")));
+    const remote = join(root, "remote.git");
+    const operator = join(root, "operator");
+    const boxHome = join(root, "box");
+    const boxCheckout = join(boxHome, ".ferry", "store");
+    const outside = join(root, "outside.txt");
+    const lines: string[] = [];
+    try {
+      await sh(root, `git init --quiet --bare ${remote} && git clone --quiet ${remote} ${operator}`);
+      mkdirSync(join(operator, "skills", "tdd"), { recursive: true });
+      writeFileSync(join(operator, "skills", "tdd", "SKILL.md"), "operator v1\n");
+      writeFileSync(join(operator, "skills", "tdd", "notes.md"), "operator notes\n");
+      await sh(operator, "git add -A && git commit --quiet -m v1 && git push --quiet origin HEAD");
+      mkdirSync(join(boxHome, ".ferry"), { recursive: true });
+      await sh(root, `git clone --quiet ${remote} ${boxCheckout}`);
+
+      writeFileSync(join(boxCheckout, "skills", "tdd", "SKILL.md"), "box edit\n");
+      writeFileSync(join(boxCheckout, "skills", "tdd", "notes.md"), "box notes\n");
+      mkdirSync(join(boxCheckout, "skills", "scratch"), { recursive: true });
+      writeFileSync(join(boxCheckout, "skills", "scratch", "SKILL.md"), "box only\n");
+      writeFileSync(outside, "keep\n");
+
+      writeFileSync(join(operator, "skills", "tdd", "SKILL.md"), "operator v2\n");
+      await sh(operator, "git commit --quiet -am v2 && git push --quiet origin HEAD");
+      const tip = (await sh(operator, "git rev-parse HEAD")).trim();
+
+      const result = await runSync(
+        { home: "/operator" },
+        {
+          readConfig: () => ({ ...config, snapshotUrl: remote }),
+          publisher: () => "operator-machine",
+          readSeed: () => seed,
+          createLink: () => ({ run: (command) => shellLink(root, boxHome, command) }),
+          writePlan: () => {},
+          writeLine: (line) => lines.push(line),
+          acquireLock: () => () => {},
+          openStore: async () => ({
+            path: operator,
+            publish: async () => ({ published: true, tip }),
+          }),
+          apply: async (input) => ({
+            checkout: input.checkout,
+            targetHome: input.targetHome,
+            actions: [],
+            unmanaged: [],
+          }),
+          adopt: () => {},
+        },
+      );
+
+      expect((await sh(boxCheckout, "git rev-parse HEAD")).trim()).toBe(tip);
+      expect(await sh(boxCheckout, "git status --porcelain --untracked-files=all")).toBe("");
+      expect(readFileSync(join(boxCheckout, "skills", "tdd", "SKILL.md"), "utf8")).toBe("operator v2\n");
+      expect(existsSync(join(boxCheckout, "skills", "scratch"))).toBe(false);
+      expect(readFileSync(outside, "utf8")).toBe("keep\n");
+      expect(result.discarded).toEqual([
+        "skills/scratch/SKILL.md",
+        "skills/tdd/SKILL.md",
+        "skills/tdd/notes.md",
+      ]);
+      expect(lines).toEqual([
+        `Discarded box change: ${boxCheckout}/skills/scratch/SKILL.md`,
+        `Discarded box change: ${boxCheckout}/skills/tdd/SKILL.md`,
+        `Discarded box change: ${boxCheckout}/skills/tdd/notes.md`,
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
+
+const gitEnvironment = {
+  GIT_AUTHOR_NAME: "Ferry Test",
+  GIT_AUTHOR_EMAIL: "ferry@example.test",
+  GIT_COMMITTER_NAME: "Ferry Test",
+  GIT_COMMITTER_EMAIL: "ferry@example.test",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+};
+
+async function shellLink(cwd: string, home: string, command: string): Promise<LinkResult> {
+  const process = Bun.spawn(["sh", "-c", command], {
+    cwd,
+    env: { ...Bun.env, ...gitEnvironment, HOME: home },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    process.exited,
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+  ]);
+  if (exitCode !== 0) {
+    return {
+      ok: false,
+      error: { code: "command-failed", origin: "box", message: stderr.trim() || "command failed" },
+    };
+  }
+  return { ok: true, address: "test-box", stdout, stderr };
+}
+
+async function sh(cwd: string, command: string): Promise<string> {
+  const result = await shellLink(cwd, cwd, command);
+  if (!result.ok) throw new Error(`${command}: ${result.error.message}`);
+  return result.stdout;
+}

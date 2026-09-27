@@ -3,6 +3,7 @@ import type { AuthProviderStatus, AuthStatusReport } from "./auth-start.ts";
 import type { LinkError, LinkResult } from "./link.ts";
 import type { DenyRuleDescription } from "./manifest.ts";
 import type { TipReport } from "./store.ts";
+import { changedPaths } from "./sync.ts";
 
 const PASEO_DAEMON_PORT = 6767;
 
@@ -18,6 +19,7 @@ export type StatusDependencies = {
   readonly link: {
     probe(): Promise<LinkResult>;
     readBoxTip(): Promise<LinkResult>;
+    readBoxChanges(): Promise<LinkResult>;
   };
   readonly store: {
     inspectTips(boxTip: string | null): Promise<TipReport>;
@@ -41,6 +43,11 @@ export type StatusReport = {
     readonly error: LinkError | StatusDependencyError | null;
   };
   readonly store: TipReport & { readonly error: StatusDependencyError | null };
+  readonly boxCheckout: {
+    readonly dirty: boolean | null;
+    readonly changes: readonly string[];
+    readonly error: LinkError | StatusDependencyError | null;
+  };
   readonly managedPaths: {
     readonly allHealthy: boolean | null;
     readonly unhealthy: readonly ApplyAction[];
@@ -97,6 +104,24 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     }
   }
 
+  let boxCheckoutError: LinkError | StatusDependencyError | null = null;
+  let changes: readonly string[] = [];
+  let dirty: boolean | null = null;
+  if (online) {
+    try {
+      const result = await dependencies.link.readBoxChanges();
+      if (result.ok) {
+        changes = changedPaths(result.stdout);
+        dirty = changes.length > 0;
+      } else {
+        boxCheckoutError = result.error;
+      }
+    } catch (cause) {
+      boxCheckoutError = dependencyError("box", cause);
+    }
+    if (boxCheckoutError) errors.push(boxCheckoutError);
+  }
+
   let storeError: StatusDependencyError | null = null;
   let store = emptyTips(boxTip);
   try {
@@ -141,6 +166,7 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     schemaVersion: 1,
     link: { online, address, error: linkError },
     store: { ...store, error: storeError },
+    boxCheckout: { dirty, changes, error: boxCheckoutError },
     managedPaths: { allHealthy, unhealthy, error: managedPathsError },
     auth: { providers, loginRequired, error: authError },
     paseo: {

@@ -63,7 +63,7 @@ type FakeStack = {
   readonly dependencies: Partial<StatusCommandDependencies>;
 };
 
-function fakeStack(online = true): FakeStack {
+function fakeStack(online = true, boxChanges = ""): FakeStack {
   const output: string[] = [];
   const reads: string[] = [];
   const mutations: string[] = [];
@@ -84,7 +84,11 @@ function fakeStack(online = true): FakeStack {
       return {
         ok: true,
         address: "100.64.0.8",
-        stdout: command.startsWith("printf") ? "/box/home\n" : "same-tip\n",
+        stdout: command.startsWith("printf")
+          ? "/box/home\n"
+          : command.includes(" status ")
+            ? boxChanges
+            : "same-tip\n",
         stderr: "",
       };
     },
@@ -187,6 +191,7 @@ describe("ferry status command", () => {
     expect(stack.output).toHaveLength(1);
     expect(stack.output[0]).toContain("Host: ONLINE");
     expect(stack.output[0]).toContain("All agree: yes");
+    expect(stack.output[0]).toContain("Box checkout: CLEAN");
     expect(stack.output[0]).toContain("Managed links: UNHEALTHY (1)");
     expect(stack.output[0]).toContain("codex: LOGIN REQUIRED");
     expect(stack.output[0]).toContain("pi: MANUAL LOGIN REQUIRED. SSH to the box");
@@ -207,6 +212,29 @@ describe("ferry status command", () => {
     expect(JSON.parse(stack.output[0]!)).toEqual(report);
     expect(stack.output[0]).not.toContain("Host:");
     expect(stack.mutations).toEqual([]);
+  });
+
+  test("names each changed file in a dirty box checkout in text and JSON", async () => {
+    const changes = " M skills/tdd/SKILL.md\0?? skills/scratch/SKILL.md\0";
+    const text = fakeStack(true, changes);
+    const json = fakeStack(true, changes);
+
+    await runStatusCommand({ json: false }, text.dependencies);
+    await runStatusCommand({ json: true }, json.dependencies);
+
+    expect(text.output[0]).toContain(
+      "Box checkout: DIRTY (2), the next sync discards these changes\n  - skills/scratch/SKILL.md\n  - skills/tdd/SKILL.md",
+    );
+    expect(text.reads).toContain(
+      "link.run:git -C '/box/home/.ferry/store' status --porcelain=v1 -z --untracked-files=all 2>/dev/null || true",
+    );
+    expect(JSON.parse(json.output[0]!).boxCheckout).toEqual({
+      dirty: true,
+      changes: ["skills/scratch/SKILL.md", "skills/tdd/SKILL.md"],
+      error: null,
+    });
+    expect(text.mutations).toEqual([]);
+    expect(json.mutations).toEqual([]);
   });
 
   test("constructs Link from a direct SSH destination", async () => {
