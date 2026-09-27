@@ -35,6 +35,10 @@ Add `--dry-run` to inspect the SSH probe, snapshot publish, config write, and ma
 
 Run `ferry uninstall` to remove the local store and config, remove Ferry-managed symlinks, and restore the paths that existed before the first `ferry init`. The command refuses to write if a managed symlink was replaced with local content. Backups from older Ferry versions are restored when Ferry can identify one unambiguous backup for a managed path. The command asks for confirmation first. Add `--yes` to skip the prompt.
 
+### Progress
+
+`ferry init`, `sync`, `status`, `install`, `auth`, and `update` show the current step on stderr, for example `Publishing the snapshot` or `Installing Claude plugins (3/10)`. When stdout and stderr are both terminals, a spinner shows the step and ends it with a done or failed mark. In other cases, Ferry writes one plain line when a step starts or its count changes, with no control characters. `ferry watch` always writes plain lines, so its log stays readable. `ferry status --json` shows no progress, and its stdout is only the JSON report.
+
 ## Add skills
 
 After `ferry init`, use `ferry skills add` to install skills. The command runs `npx skills add` and passes your arguments through unchanged:
