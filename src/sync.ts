@@ -74,7 +74,11 @@ export type SyncPlan = {
   readonly remoteCheckout: string | null;
   readonly message: string | null;
   readonly force: boolean;
+  /** Carried settings keys whose local value differs from the local store checkout. */
+  readonly settingsChanges: readonly SettingsChange[];
 };
+
+export type SettingsChange = { readonly harness: string; readonly keys: readonly string[] };
 
 export type SyncResult = {
   readonly dryRun: boolean;
@@ -121,7 +125,7 @@ export async function runSync(
   const { config, registry, seed } = inspectSyncSource(home, dependencies);
 
   if (input.dryRun) {
-    const plan = makePlan(input, config, home, null);
+    const plan = makePlan(input, config, home, null, registry, seed);
     (dependencies.writePlan ?? printPlan)(plan);
     return { dryRun: true, published: false, plan };
   }
@@ -129,7 +133,7 @@ export async function runSync(
   const target = resolveLinkOptions(config.host);
   const link = dependencies.createLink?.(target) ?? new Link(target);
   const remoteHome = await resolveRemoteHome(link, config);
-  const plan = makePlan(input, config, home, remoteHome);
+  const plan = makePlan(input, config, home, remoteHome, registry, seed);
   (dependencies.writePlan ?? printPlan)(plan);
 
   const release = takeLock(dependencies, home, targetKey(config));
@@ -265,17 +269,47 @@ function makePlan(
   config: OperatorConfig,
   home: string,
   remoteHome: string | null,
+  registry: Registry,
+  seed: Seed,
 ): SyncPlan {
+  const localCheckout = join(home, ".ferry", "store");
   return {
     operator: config.publisher,
     gitRemote: config.snapshotUrl,
     box: targetLabel(config),
-    localCheckout: join(home, ".ferry", "store"),
+    localCheckout,
     remoteHome,
     remoteCheckout: remoteHome ? posix.join(remoteHome, ".ferry", "store") : null,
     message: input.message ?? null,
     force: input.force === true,
+    settingsChanges: settingsChanges(localCheckout, registry.harnesses, seed),
   };
+}
+
+/**
+ * Compare the carried settings keys of the seed with the last published ones
+ * in the local store checkout. It reads local files only, so a dry run stays
+ * offline. The box can differ from the store; sync replaces these keys there too.
+ */
+function settingsChanges(
+  localCheckout: string,
+  harnesses: readonly HarnessDescriptor[],
+  seed: Seed,
+): SettingsChange[] {
+  const changes: SettingsChange[] = [];
+  for (const entry of seed.settings) {
+    const keys = harnesses.find((harness) => harness.id === entry.harness)?.settings?.keys ?? [];
+    const local = JSON.parse(Buffer.from(entry.bytes).toString()) as Record<string, unknown>;
+    let stored: Record<string, unknown> = {};
+    try {
+      stored = JSON.parse(readFileSync(join(localCheckout, "settings", `${entry.harness}.json`), "utf8"));
+    } catch {
+      // No published settings yet: every carried key the operator has is a change.
+    }
+    const changed = keys.filter((key) => JSON.stringify(local[key]) !== JSON.stringify(stored[key]));
+    if (changed.length > 0) changes.push({ harness: entry.harness, keys: changed });
+  }
+  return changes;
 }
 
 function printPlan(plan: SyncPlan): void {
@@ -293,6 +327,10 @@ function printPlan(plan: SyncPlan): void {
       `Apply: ${remoteCheckout} -> ${remoteHome} (force: ${plan.force ? "yes" : "no"})`,
       "Plugins: claude plugin marketplace add and install for the carried Claude declarations",
       "Settings: carried keys replace their box values; other box keys are kept",
+      `Changed settings keys since the last publish: ${
+        plan.settingsChanges.map((change) => `${change.harness}: ${change.keys.join(", ")}`).join("; ") ||
+        "none"
+      }`,
     ].join("\n"),
   );
 }

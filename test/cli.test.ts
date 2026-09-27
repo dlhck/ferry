@@ -352,6 +352,7 @@ describe("ferry --help", () => {
         remoteCheckout: null,
         message: "chore: ship skills",
         force: true,
+        settingsChanges: [],
       },
     };
     const program = buildProgram({

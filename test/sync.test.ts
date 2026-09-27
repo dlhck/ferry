@@ -17,7 +17,7 @@ import type { Seed } from "../src/manifest.ts";
 import { loadRegistry, type RegistryConfig } from "../src/registry/load.ts";
 import type { LinkResult } from "../src/link.ts";
 import type { HarnessDescriptor } from "../src/registry/types.ts";
-import { remoteUpdateCommand, runSync, type SyncDependencies } from "../src/sync.ts";
+import { remoteUpdateCommand, runSync, type SyncDependencies, type SyncPlan } from "../src/sync.ts";
 
 const config: OperatorConfig = {
   version: 1,
@@ -172,6 +172,83 @@ describe("runSync", () => {
         message: "chore: ship skills",
       },
     });
+  });
+
+  test("dry-run lists the carried settings keys that differ from the store, offline", async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "ferry-sync-home-")));
+    try {
+      mkdirSync(join(home, ".ferry", "store", "settings"), { recursive: true });
+      writeFileSync(
+        join(home, ".ferry", "store", "settings", "claude.json"),
+        JSON.stringify({
+          enabledPlugins: { "review@team": true },
+          permissions: { allow: ["Bash(ls)"] },
+          extraKnownMarketplaces: { old: {} },
+        }),
+      );
+      const local = {
+        ...seed,
+        settings: [
+          {
+            harness: "claude",
+            bytes: Buffer.from(
+              JSON.stringify({
+                enabledPlugins: { "review@team": true },
+                permissions: { allow: ["Bash(git status)"] },
+                hooks: { Stop: [] },
+              }),
+            ),
+          },
+        ],
+      };
+      let remoteCalls = 0;
+      const printed: SyncPlan[] = [];
+
+      const result = await runSync(
+        { home, dryRun: true },
+        {
+          readConfig: () => config,
+          publisher: () => "operator-machine",
+          readSeed: () => local,
+          createLink: () => {
+            remoteCalls += 1;
+            throw new Error("Link must not be created");
+          },
+          openStore: async () => {
+            remoteCalls += 1;
+            throw new Error("Store must not be opened");
+          },
+          writePlan: (plan) => printed.push(plan),
+        },
+      );
+
+      expect(remoteCalls).toBe(0);
+      expect(result.plan.settingsChanges).toEqual([
+        { harness: "claude", keys: ["extraKnownMarketplaces", "permissions", "hooks"] },
+      ]);
+      expect(printed).toEqual([result.plan]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("dry-run lists every carried key present when the store has no settings yet", async () => {
+    const local = {
+      ...seed,
+      settings: [{ harness: "claude", bytes: Buffer.from(JSON.stringify({ permissions: {} })) }],
+    };
+
+    const result = await runSync(
+      { home: "/operator", dryRun: true },
+      {
+        readConfig: () => config,
+        publisher: () => "operator-machine",
+        readSeed: () => local,
+        writePlan: () => {},
+      },
+    );
+
+    expect(result.plan.settingsChanges).toEqual([{ harness: "claude", keys: ["permissions"] }]);
   });
 
   test("plans, publishes, resets the box, and applies the snapshot", async () => {
