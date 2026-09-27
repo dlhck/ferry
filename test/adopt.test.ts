@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { adoptPublishedSkills, AdoptionRefusal } from "../src/adopt.ts";
@@ -50,6 +59,28 @@ describe("local skill adoption", () => {
       adoptPublishedSkills(home, store, [{ id: "custom", name: "Custom", skillRoot: ".custom/skills" }], seed),
     ).toThrow(AdoptionRefusal);
     expect(lstatSync(path).isDirectory()).toBe(true);
+  });
+
+  test("removes leftover links to the Codex system skills and keeps a real directory", () => {
+    const { home, store, seed } = fixture();
+    const leftover = join(home, ".custom", "skills", ".system");
+    symlinkSync(join(store, "skills", ".system"), leftover);
+    const official = join(home, ".codex", "skills", ".system", "SKILL.md");
+    mkdirSync(join(official, ".."), { recursive: true });
+    writeFileSync(official, "codex system skill\n");
+
+    adoptPublishedSkills(
+      home,
+      store,
+      [
+        { id: "custom", name: "Custom", skillRoot: ".custom/skills" },
+        { id: "codex", name: "Codex", skillRoot: ".codex/skills", ownSkills: false },
+      ],
+      seed,
+    );
+
+    expect(lstatSync(leftover, { throwIfNoEntry: false })).toBeUndefined();
+    expect(readFileSync(official, "utf8")).toBe("codex system skill\n");
   });
 });
 

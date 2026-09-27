@@ -92,6 +92,12 @@ const NOTES = {
 } as const satisfies Record<string, Note>;
 
 const FERRY_BACKUP_NAME = /\.ferry-backup-\d{8}T\d{6}Z$/;
+/**
+ * Codex writes its bundled skills to this entry of its skill root and rewrites
+ * them when it updates. Each machine gets its own copy from Codex, so Ferry
+ * does not read, carry, or link this entry in any skill root.
+ */
+export const CODEX_SYSTEM_SKILLS = ".system";
 const CREDENTIAL_NAMES = new Set([
   "credentials.json",
   ".credentials.json",
@@ -275,6 +281,7 @@ function collectOccurrences(
     }
 
     for (const entry of entries.sort(byName)) {
+      if (entry.name === CODEX_SYSTEM_SKILLS) continue;
       const path = join(root, entry.name);
       let stat;
       try {

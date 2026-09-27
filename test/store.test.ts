@@ -296,6 +296,30 @@ describe("store publish", () => {
     expect(git.invocations.flatMap((invocation) => invocation.args)).not.toContain("--force");
     expect(git.invocations.flatMap((invocation) => invocation.args)).not.toContain("-f");
   });
+
+  test("a publish drops the Codex system skills an older snapshot carried", async () => {
+    const git = new FakeGit();
+    const home = makeHome();
+    const old: Seed = {
+      ...seed(),
+      skills: [...seed().skills, { name: ".system", files: [{ path: "SKILL.md", bytes: Buffer.from("old") }] }],
+    };
+    const store = await openStore("snapshot.git", old, { git, home, harnesses: BUILTIN_HARNESSES });
+    await store.publish(old);
+    expect(git.remoteFiles.has("skills/.system/SKILL.md")).toBe(true);
+    mkdirSync(join(home, ".codex", "skills", ".system"), { recursive: true });
+    writeFileSync(join(home, ".codex", "skills", ".system", "SKILL.md"), "new");
+    mkdirSync(join(home, ".agents", "skills", "tdd"), { recursive: true });
+    writeFileSync(join(home, ".agents", "skills", "tdd", "SKILL.md"), "Use small commits.\n");
+    const current = readSeed(home, BUILTIN_HARNESSES);
+    if (!current.ok) throw new Error("expected a seed");
+
+    await store.publish(current);
+
+    expect([...git.remoteFiles.keys()].filter((path) => path.startsWith("skills/"))).toEqual([
+      "skills/tdd/SKILL.md",
+    ]);
+  });
 });
 
 describe("store layout of Claude subagents and commands", () => {

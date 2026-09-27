@@ -84,7 +84,7 @@ sudo compares the full command path and all arguments. The rule allows only thes
 
 Ferry carries these items from the operator machine to the box:
 
-- The skills in every global harness skill root, such as `~/.agents/skills` and `~/.claude/skills`.
+- The skills in every global harness skill root, such as `~/.agents/skills` and `~/.claude/skills`. Ferry does not carry the `.system` directory in a skill root, because Codex manages it and installs its own copy on each machine.
 - `~/AGENTS.md`, linked as the instruction file of each harness.
 - The Claude subagents in `~/.claude/agents` and the Claude commands in `~/.claude/commands`. Ferry links each directory whole into the store. On the box, a live directory at one of these paths stops the sync. `ferry sync --force` moves it to `~/.ferry/backups` and then links it.
 - An allowlist of keys from `~/.claude/settings.json`: the plugin declarations `enabledPlugins` and `extraKnownMarketplaces`, and `permissions` and `hooks`. The snapshot holds these keys in `settings/claude.json`. It holds no other settings key and no plugin cache. Keys that can hold secrets, such as `env` and `apiKeyHelper`, stay on the operator machine.

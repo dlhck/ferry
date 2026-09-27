@@ -24,6 +24,7 @@ import {
   type TargetInspectionRequest,
 } from "./apply-remote.ts";
 import type { Link } from "./link.ts";
+import { CODEX_SYSTEM_SKILLS } from "./manifest.ts";
 import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
 
 export type ApplyInput = {
@@ -242,7 +243,9 @@ function planInspection(
   joinPath: (...paths: string[]) => string,
 ): ApplyPlan {
   const storeSkills = joinPath(checkout, "skills");
-  const snapshotNames = new Set(inspection.skillNames);
+  // An older snapshot can still hold the Codex system skills. Links to them are leftovers.
+  const skillNames = inspection.skillNames.filter((name) => name !== CODEX_SYSTEM_SKILLS);
+  const snapshotNames = new Set(skillNames);
   const actions: ApplyAction[] = [];
   const unmanaged: UnmanagedExtra[] = [];
 
@@ -252,7 +255,7 @@ function planInspection(
     const owns = ownsSkills(harness);
     const backups = backupDirectory(joinPath, targetHome, timestamp, harness.id);
     if (owns) {
-      for (const name of inspection.skillNames) {
+      for (const name of skillNames) {
         planLink(
           harness.name,
           joinPath(root, name),

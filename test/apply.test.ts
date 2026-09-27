@@ -92,6 +92,30 @@ describe("apply plan and commit", () => {
     );
   });
 
+  test("the Codex system skills are never linked and leftover links to them are removed", () => {
+    const checkout = makeCheckout(["unslop", ".system"]);
+    const home = makeRoot("home");
+    const leftovers = [...ownedSkillRoots, ".pi/agent/skills", ".cursor/skills"].map((root) =>
+      join(home, root, ".system"),
+    );
+    for (const leftover of leftovers) {
+      mkdirSync(dirname(leftover), { recursive: true });
+      symlinkSync(join(checkout, "skills", ".system"), leftover);
+    }
+    const official = join(home, ".codex", "skills", ".system", "SKILL.md");
+    write(official, "codex system skill");
+
+    const plan = planApply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES });
+
+    expect(plan.actions.filter((action) => action.path.endsWith(".system"))).toEqual(
+      leftovers.map((path) => expect.objectContaining({ kind: "delete-managed-name", path })),
+    );
+    commitApply(plan);
+
+    for (const leftover of leftovers) expect(existsSync(leftover)).toBe(false);
+    expect(readFileSync(official, "utf8")).toBe("codex system skill");
+  });
+
   test("a deleted snapshot name is planned and removed", () => {
     const checkout = makeCheckout();
     const home = makeRoot("home");
