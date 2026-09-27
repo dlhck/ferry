@@ -184,15 +184,19 @@ describe("ferry move to the box", () => {
     const w = world();
     const app = project(w, w.operator);
     write(join(app, "notes.md"), "notes\n");
-    Bun.spawnSync(["xattr", "-w", "com.example.test", "value", join(app, "notes.md")]);
+    // Only macOS has the xattr tool and the AppleDouble behaviour of tar.
+    const darwin = process.platform === "darwin";
+    if (darwin) {
+      const set = Bun.spawnSync(["xattr", "-w", "com.example.test", "value", join(app, "notes.md")]);
+      expect(set.exitCode).toBe(0);
+    }
 
     await move(w, { path: "Developer/app" });
 
     const carried = w.commands.find((entry) => entry.command.startsWith("tar -xf -"));
     const listing = Bun.spawnSync(["tar", "-tf", "-"], { stdin: carried?.options.input }).stdout.toString();
     expect(listing.split("\n").filter(Boolean)).toEqual(["notes.md"]);
-    expect(Buffer.from(carried?.options.input ?? []).includes("com.example.test")).toBe(false);
-    expect(Buffer.from(carried?.options.input ?? []).includes("com.example.test")).toBe(false);
+    if (darwin) expect(Buffer.from(carried?.options.input ?? []).includes("com.example.test")).toBe(false);
   });
 
   test("refuses an unpushed commit and names the commit and branch", async () => {
