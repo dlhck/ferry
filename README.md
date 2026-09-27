@@ -217,6 +217,34 @@ If you do not finish the login, Ferry does not do steps 3 to 6. If gh is already
 
 To revoke the box key, delete the key with the title `<box host> (ferry)` in GitHub under Settings > SSH and GPG keys. You can also run `gh ssh-key list` and `gh ssh-key delete <id>`. To remove the key from the box, delete `~/.ssh/id_ed25519` and `~/.ssh/id_ed25519.pub` there.
 
+## Move a project
+
+Use `ferry move` to continue work on a project on the other machine.
+
+```sh
+ferry move ~/Developer/app                # this machine -> box
+ferry move --from-box ~/Developer/app     # box -> this machine
+ferry move ~/Developer/app --dry-run      # show what Ferry carries, refuses, and skips
+ferry move ~/Developer/app --remove       # after verification, move the source copy to a trash directory
+ferry move ~/Developer/app --include-env  # also carry .env files that pass the deny rules
+```
+
+The project must be inside your home directory. The destination uses the same path relative to its home. For example, `~/Developer/app` on this machine becomes `~/Developer/app` on the box. Ferry does these steps:
+
+1. **Preflight.** Ferry reads the remote branches and tags of `origin` with `git ls-remote`. Ferry refuses the move if a commit on a local branch is not on `origin`. If `git cherry` shows that an equivalent patch is on the default branch of `origin`, Ferry accepts the commit. Ferry does not fetch, so run `git fetch` first if the patch was merged recently. Ferry also refuses uncommitted changes to tracked files, and a destination path that exists. Ferry reports stashes, because the clone does not get them.
+2. **Clone.** The destination clones the project from `origin`, at the current branch if `origin` has it. The box uses its own SSH key. Run `ferry auth gh` first to set up that key.
+3. **Carry.** Ferry carries the untracked and ignored files. Ferry skips `node_modules`, `.next`, `.nuxt`, `.svelte-kit`, `.turbo`, `.cache`, `.parcel-cache`, `dist`, `build`, `coverage`, `target`, `__pycache__`, `.venv`, `venv`, `.gradle`, `.terraform`, `.idea`, `.vscode`, `.DS_Store`, and `._*` at any depth. Each carried file must pass the deny rules of [What Ferry carries](#what-ferry-carries): credential and token file names, private keys, token content, secret fields in JSON, YAML, and TOML files, and executable binaries. Ferry refuses symbolic links and nested git repositories. The archive has no macOS extended attributes, so the box gets no `._*` files.
+4. **Environment files.** Ferry refuses `.env` and `.env.*` files. With `--include-env`, Ferry carries an environment file only if it has no token and no `PASSWORD`, `SECRET`, `API_KEY`, or similar key with a value.
+5. **Verify.** Ferry compares the SHA-256 checksum of each carried file on the destination with the checksum of the bytes that Ferry checked.
+6. **Paseo.** If the destination has the `paseo` CLI, Ferry runs `paseo project create <path>` there.
+7. **Remove.** With `--remove`, Ferry moves the source copy after verification. On macOS, this machine uses `~/.Trash/<name>-<timestamp>`. The box, and a Linux operator machine, use `~/.ferry/trash/<name>-<timestamp>`. Ferry never deletes the source copy. Ferry refuses `--remove` before any change if it refuses a local-only file.
+
+A folder without git has no clone. Ferry copies all its files with the same skip list and deny rules.
+
+`--dry-run` prints the plan: the clone, and each file that Ferry carries, refuses, or skips. It does not write on either machine. With `--from-box`, Ferry reads the box files into a temporary directory on this machine for the deny checks, and removes that directory after the run.
+
+If a step fails after the clone, the destination copy is incomplete. Ferry does not remove it. Move it away before you try again.
+
 ## What Ferry carries
 
 Ferry carries these items from the operator machine to the box:
