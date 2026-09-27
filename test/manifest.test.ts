@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { denyRules, readSeed } from "../src/manifest.ts";
+import { carriedContentHits, carriedNameHit, denyRules, readSeed } from "../src/manifest.ts";
 import type { Refusal, Seed } from "../src/manifest.ts";
 import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 
@@ -1322,5 +1322,38 @@ describe("carried MCP server declarations", () => {
 
     write(home, ".cursor/mcp.json", JSON.stringify({ mcpServers: { a: { url: "https://b.example/mcp" } } }));
     expect(seedOf(home).identity).not.toBe(before);
+  });
+});
+
+describe("carried project files", () => {
+  const bytes = (text: string) => new TextEncoder().encode(text);
+
+  test("a name rule that refuses applies, and a skip rule does not", () => {
+    expect(carriedNameHit("app/id_ed25519")?.code).toBe("private-key");
+    expect(carriedNameHit("auth.json")?.code).toBe("credentials");
+    expect(carriedNameHit(".env.local")?.code).toBe("dotenv");
+    expect(carriedNameHit(".claude/settings.local.json")).toBeNull();
+    expect(carriedNameHit("data/dev.db")).toBeNull();
+  });
+
+  test("an environment file passes the name check only with allowEnv", () => {
+    expect(carriedNameHit(".env", { allowEnv: true })).toBeNull();
+    expect(carriedNameHit("auth.json", { allowEnv: true })?.code).toBe("credentials");
+  });
+
+  test("content rules refuse tokens, private keys, secret fields, and binaries", () => {
+    const codes = (path: string, body: Uint8Array) => carriedContentHits(path, body).map((hit) => hit.code);
+    expect(codes("notes.md", bytes(`token ghp_${"a".repeat(36)}`))).toEqual(["github-token"]);
+    expect(codes("notes.md", bytes("-----BEGIN OPENSSH PRIVATE KEY-----\n"))).toEqual(["private-key"]);
+    expect(codes("config.json", bytes('{"password":"hunter2"}'))).toEqual(["secret-field"]);
+    expect(codes("tool", new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]))).toEqual(["executable"]);
+    expect(codes("draft.mdx", bytes("# Draft\n"))).toEqual([]);
+  });
+
+  test("an environment file gets the secret-field rule line by line", () => {
+    expect(carriedContentHits(".env.local", bytes("PASSWORD=hunter2\n")).map((hit) => hit.code)).toEqual([
+      "secret-field",
+    ]);
+    expect(carriedContentHits(".env.local", bytes("PORT=3000\nPASSWORD=\n"))).toEqual([]);
   });
 });

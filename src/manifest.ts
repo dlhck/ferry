@@ -536,13 +536,22 @@ function secretFieldHits(path: string, bytes: Uint8Array): ForbiddenHit[] {
       format === "json" ? JSON.parse(text) : format === "yaml" ? Bun.YAML.parse(text) : Bun.TOML.parse(text);
     keys = secretKeys(parsed);
   } catch {
-    keys = text.split("\n").flatMap((line) => {
-      const match = line.match(CONFIG_LINE);
-      if (!match || !isSecretKey(match[1]!)) return [];
-      const value = match[2]!.trim().replace(/,$/, "").replace(/^(["'])(.*)\1$/, "$2");
-      return isSecretValue(value) ? [match[1]!] : [];
-    });
+    keys = secretLineKeys(text);
   }
+  return secretKeyHits(path, keys);
+}
+
+/** The secret keys with a value in the `key: value` or `key = value` lines of `text`. */
+function secretLineKeys(text: string): string[] {
+  return text.split("\n").flatMap((line) => {
+    const match = line.match(CONFIG_LINE);
+    if (!match || !isSecretKey(match[1]!)) return [];
+    const value = match[2]!.trim().replace(/,$/, "").replace(/^(["'])(.*)\1$/, "$2");
+    return isSecretValue(value) ? [match[1]!] : [];
+  });
+}
+
+function secretKeyHits(path: string, keys: readonly string[]): ForbiddenHit[] {
   return [...new Set(keys)].map((key) => ({
     path,
     code: DENY_RULES["secret-field"].code,
@@ -582,6 +591,35 @@ function tokenHits(path: string, bytes: Uint8Array): ForbiddenHit[] {
     }
   }
   return [...hits.values()];
+}
+
+/**
+ * The refusal of a file outside a managed root, such as a local-only project
+ * file, from its name alone. Only rules that refuse apply. With `allowEnv`,
+ * an environment file passes this check and `carriedContentHits` checks it.
+ */
+export function carriedNameHit(
+  path: string,
+  options: { readonly allowEnv?: boolean } = {},
+): ForbiddenHit | null {
+  const rule = denyRuleFor(posix.basename(path), false);
+  if (!rule || rule.verdict !== "refuse") return null;
+  if (options.allowEnv && rule === DENY_RULES.dotenv) return null;
+  return note(path, rule);
+}
+
+/**
+ * The refusals of a file outside a managed root, from its bytes: a private key
+ * header, then the rules of `contentHits`. An environment file also gets the
+ * secret-field rule, line by line.
+ */
+export function carriedContentHits(path: string, bytes: Uint8Array): ForbiddenHit[] {
+  if (PRIVATE_KEY_HEADER.test(Buffer.from(bytes.subarray(0, 4096)).toString("latin1"))) {
+    return [note(path, DENY_RULES["private-key"])];
+  }
+  const hits = contentHits(path, bytes);
+  if (hits.length > 0 || denyRuleFor(posix.basename(path), false) !== DENY_RULES.dotenv) return hits;
+  return secretKeyHits(path, secretLineKeys(Buffer.from(bytes).toString("utf8")));
 }
 
 /**
