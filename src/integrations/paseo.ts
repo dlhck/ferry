@@ -1,6 +1,6 @@
 /** The Paseo integration. The Paseo daemon runs on the box, and Paseo Desktop connects to it over SSH. */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { BunHostAdapter, type HostAdapter } from "../link.ts";
 import type { Integration, LocalVersion } from "./types.ts";
@@ -32,7 +32,7 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
         const fromCli = await cliVersion(host, cli);
         if (fromCli) return { version: fromCli, source: cli };
         const plist = join(macApp, "Contents/Info.plist");
-        const fromPlist = plistVersion(plist);
+        const fromPlist = await plistVersion(host, plist);
         if (fromPlist) return { version: fromPlist, source: plist };
       } else if (platform === "linux") {
         const cli = join(linuxInstallDir, "resources/bin/paseo");
@@ -52,7 +52,7 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
       return [
         "Open Paseo Desktop.",
         "Open Settings → Add host → Remote SSH.",
-        `Enter ssh://${destination}.`,
+        `Enter ${sshUri(destination)}.`,
       ];
     },
   };
@@ -60,10 +60,20 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
 
 export const paseo = createPaseo();
 
-async function cliVersion(host: HostAdapter, cli: string): Promise<string | null> {
-  if (!existsSync(cli)) return null;
+function cliVersion(host: HostAdapter, cli: string): Promise<string | null> {
+  return existsSync(cli) ? runVersion(host, [cli, "--version"]) : Promise.resolve(null);
+}
+
+/** plutil reads both the XML and the binary plist format. */
+function plistVersion(host: HostAdapter, plist: string): Promise<string | null> {
+  return existsSync(plist)
+    ? runVersion(host, ["plutil", "-extract", "CFBundleShortVersionString", "raw", "-o", "-", plist])
+    : Promise.resolve(null);
+}
+
+async function runVersion(host: HostAdapter, argv: readonly string[]): Promise<string | null> {
   try {
-    const result = await host.run({ argv: [cli, "--version"], timeoutMs: 10_000 });
+    const result = await host.run({ argv, timeoutMs: 10_000 });
     if (result.timedOut || result.exitCode !== 0) return null;
     return VERSION_PATTERN.exec(result.stdout)?.[0] ?? null;
   } catch {
@@ -71,12 +81,13 @@ async function cliVersion(host: HostAdapter, cli: string): Promise<string | null
   }
 }
 
-function plistVersion(plist: string): string | null {
-  if (!existsSync(plist)) return null;
-  const match = /<key>CFBundleShortVersionString<\/key>\s*<string>([^<]+)<\/string>/.exec(
-    readFileSync(plist, "utf8"),
-  );
-  return match?.[1] ? (VERSION_PATTERN.exec(match[1])?.[0] ?? null) : null;
+/** Paseo Desktop takes an `ssh://` URI. An IPv6 host must be in brackets. */
+function sshUri(destination: string): string {
+  if (destination.startsWith("ssh://")) return destination;
+  const at = destination.lastIndexOf("@");
+  const host = destination.slice(at + 1);
+  const bracketed = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return `ssh://${destination.slice(0, at + 1)}${bracketed}`;
 }
 
 /** Lanes B and C of issue #99 add the box steps. No command calls these methods before then. */

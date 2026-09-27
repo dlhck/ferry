@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { PartialOperatorConfig } from "../src/config.ts";
 import { INTEGRATIONS, integrationLines } from "../src/integrations/index.ts";
 import { createPaseo } from "../src/integrations/paseo.ts";
-import type { HostAdapter, HostCommand } from "../src/link.ts";
+import { BunHostAdapter, type HostAdapter, type HostCommand } from "../src/link.ts";
 import { noProgress } from "../src/progress.ts";
 
 const roots: string[] = [];
@@ -25,28 +25,23 @@ function touch(path: string, body = ""): void {
   writeFileSync(path, body);
 }
 
-/** Answers `<cli> --version` with the given output and records each argv. */
-function fakeHost(stdout: string, exitCode = 0): HostAdapter & { calls: string[][] } {
+/** Answers `<cli> --version` with `cli` and `plutil` with `plutil`, and records each argv. */
+function fakeHost(
+  cli: { stdout: string; exitCode?: number },
+  plutil: { stdout: string; exitCode?: number } = { stdout: "", exitCode: 1 },
+): HostAdapter & { calls: string[][] } {
   const calls: string[][] = [];
   return {
     calls,
     async run(command: HostCommand) {
       calls.push([...command.argv]);
-      return { exitCode, stdout, stderr: "", timedOut: false };
+      const answer = command.argv[0] === "plutil" ? plutil : cli;
+      return { exitCode: answer.exitCode ?? 0, stdout: answer.stdout, stderr: "", timedOut: false };
     },
   };
 }
 
-const PLIST = `<?xml version="1.0" encoding="UTF-8"?>
-<plist version="1.0">
-  <dict>
-    <key>CFBundleName</key>
-    <string>Paseo</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.9.1</string>
-  </dict>
-</plist>
-`;
+const BINARY_PLIST = join(import.meta.dir, "fixtures/binary-Info.plist");
 
 const CONFIG: PartialOperatorConfig = {
   version: 1,
@@ -60,8 +55,8 @@ describe("Paseo local version", () => {
     const app = join(tempRoot(), "Paseo.app");
     const cli = join(app, "Contents/Resources/bin/paseo");
     touch(cli);
-    touch(join(app, "Contents/Info.plist"), PLIST);
-    const host = fakeHost("0.9.2\n");
+    copyFileSync(BINARY_PLIST, join(app, "Contents/Info.plist"));
+    const host = fakeHost({ stdout: "0.9.2\n" });
 
     const version = await createPaseo({ platform: "darwin", macApp: app, host }).localVersion();
 
@@ -69,22 +64,40 @@ describe("Paseo local version", () => {
     expect(host.calls).toEqual([[cli, "--version"]]);
   });
 
-  test("reads the Info.plist of the macOS app when the CLI fails", async () => {
+  test("reads the Info.plist of the macOS app with plutil when the CLI fails", async () => {
     const app = join(tempRoot(), "Paseo.app");
-    touch(join(app, "Contents/Resources/bin/paseo"));
-    touch(join(app, "Contents/Info.plist"), PLIST);
+    const cli = join(app, "Contents/Resources/bin/paseo");
+    const plist = join(app, "Contents/Info.plist");
+    touch(cli);
+    copyFileSync(BINARY_PLIST, plist);
+    const host = fakeHost({ stdout: "", exitCode: 1 }, { stdout: "0.9.1\n" });
 
-    const version = await createPaseo({ platform: "darwin", macApp: app, host: fakeHost("", 1) })
+    const version = await createPaseo({ platform: "darwin", macApp: app, host }).localVersion();
+
+    expect(version).toEqual({ version: "0.9.1", source: plist });
+    expect(host.calls).toEqual([
+      [cli, "--version"],
+      ["plutil", "-extract", "CFBundleShortVersionString", "raw", "-o", "-", plist],
+    ]);
+  });
+
+  test.skipIf(process.platform !== "darwin")("reads a binary Info.plist with the real plutil", async () => {
+    const app = join(tempRoot(), "Paseo.app");
+    const plist = join(app, "Contents/Info.plist");
+    mkdirSync(dirname(plist), { recursive: true });
+    copyFileSync(BINARY_PLIST, plist);
+
+    const version = await createPaseo({ platform: "darwin", macApp: app, host: new BunHostAdapter() })
       .localVersion();
 
-    expect(version).toEqual({ version: "0.9.1", source: join(app, "Contents/Info.plist") });
+    expect(version).toEqual({ version: "0.9.2", source: plist });
   });
 
   test("reads the version from the CLI in the Linux install directory", async () => {
     const installDir = join(tempRoot(), "Paseo");
     const cli = join(installDir, "resources/bin/paseo");
     touch(cli);
-    const host = fakeHost("paseo 0.10.0-beta.1\n");
+    const host = fakeHost({ stdout: "paseo 0.10.0-beta.1\n" });
 
     const version = await createPaseo({ platform: "linux", linuxInstallDir: installDir, host })
       .localVersion();
@@ -95,7 +108,7 @@ describe("Paseo local version", () => {
 
   test("returns no version and runs nothing when there is no local app", async () => {
     const root = tempRoot();
-    const host = fakeHost("0.9.2\n");
+    const host = fakeHost({ stdout: "0.9.2\n" }, { stdout: "0.9.2\n" });
 
     expect(
       await createPaseo({ platform: "darwin", macApp: join(root, "Paseo.app"), host }).localVersion(),
@@ -120,6 +133,21 @@ describe("Paseo integration", () => {
     ]);
   });
 
+  test("connect steps keep an ssh:// destination with its port", () => {
+    expect(createPaseo().connectSteps("ssh://user@box.example:2222")).toContain(
+      "Enter ssh://user@box.example:2222.",
+    );
+  });
+
+  test("connect steps put an IPv6 host in brackets", () => {
+    expect(createPaseo().connectSteps("user@fd7a:115c:a1e0::1")).toContain(
+      "Enter ssh://user@[fd7a:115c:a1e0::1].",
+    );
+    expect(createPaseo().connectSteps("fd7a:115c:a1e0::1")).toContain(
+      "Enter ssh://[fd7a:115c:a1e0::1].",
+    );
+  });
+
   test("the box steps are not implemented in this release", async () => {
     const paseo = createPaseo();
     const link = { run: async () => { throw new Error("no box call"); } };
@@ -142,7 +170,7 @@ describe("integration list", () => {
     const app = join(tempRoot(), "Paseo.app");
     const cli = join(app, "Contents/Resources/bin/paseo");
     touch(cli);
-    const paseo = createPaseo({ platform: "darwin", macApp: app, host: fakeHost("0.9.2\n") });
+    const paseo = createPaseo({ platform: "darwin", macApp: app, host: fakeHost({ stdout: "0.9.2\n" }) });
 
     expect(await integrationLines(CONFIG, [paseo])).toEqual([
       "paseo  disabled  Paseo daemon on the box",
