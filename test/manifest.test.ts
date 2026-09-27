@@ -48,6 +48,12 @@ function refusalOf(home: string): Refusal {
   return result;
 }
 
+function carried(seed: Seed): unknown {
+  const entry = seed.settings.find((candidate) => candidate.harness === "claude");
+  if (!entry) throw new Error("no carried Claude settings in the seed");
+  return JSON.parse(Buffer.from(entry.bytes).toString());
+}
+
 function names(seed: Seed): string[] {
   return seed.skills.map((skill) => skill.name);
 }
@@ -241,6 +247,11 @@ describe("the deny set", () => {
       {
         code: "settings-credential",
         description: "request headers in a carried settings key",
+        behavior: "refuse",
+      },
+      {
+        code: "hook-path",
+        description: "hook command that refers to a home path outside the managed set",
         behavior: "refuse",
       },
       { code: "history", description: "session history", behavior: "skip" },
@@ -645,13 +656,7 @@ describe("carried Claude settings keys", () => {
     },
   };
 
-  function carried(seed: Seed): unknown {
-    const entry = seed.settings.find((candidate) => candidate.harness === "claude");
-    if (!entry) throw new Error("no carried Claude settings in the seed");
-    return JSON.parse(Buffer.from(entry.bytes).toString());
-  }
-
-  test("only enabledPlugins and extraKnownMarketplaces leave the settings file", () => {
+  test("only the allowlisted keys leave the settings file", () => {
     const home = makeHome();
     write(home, ".claude/settings.json", JSON.stringify(settings));
 
@@ -660,9 +665,11 @@ describe("carried Claude settings keys", () => {
     expect(carried(seed)).toEqual({
       enabledPlugins: settings.enabledPlugins,
       extraKnownMarketplaces: settings.extraKnownMarketplaces,
+      permissions: settings.permissions,
+      hooks: settings.hooks,
     });
     const text = Buffer.from(seed.settings[0]?.bytes ?? []).toString();
-    for (const secret of ["env-secret-value", "print-key", "Bash(git status)", "notify", "opus"]) {
+    for (const secret of ["env", "env-secret-value", "apiKeyHelper", "print-key", "opus"]) {
       expect(text).not.toContain(secret);
     }
   });
@@ -705,6 +712,18 @@ describe("carried Claude settings keys", () => {
 
     expect(refusalOf(home).forbidden).toEqual([
       { path: join(home, ".claude", "settings.json"), code, reason: expect.any(String) },
+    ]);
+  });
+
+  test.each([
+    ["permissions", { permissions: { allow: [`Bash(curl -u ${tokens[0]![1]} https://api.github.com)`] } }],
+    ["hooks", { hooks: { Stop: [{ hooks: [{ type: "command", command: `notify ${tokens[5]![1]}` }] }] } }],
+  ])("a token inside the carried %s key refuses the seed", (_key, value) => {
+    const home = makeHome();
+    write(home, ".claude/settings.json", JSON.stringify(value));
+
+    expect(refusalOf(home).forbidden).toEqual([
+      { path: join(home, ".claude", "settings.json"), code: expect.any(String), reason: expect.any(String) },
     ]);
   });
 
@@ -757,5 +776,77 @@ describe("carried Claude settings keys", () => {
       JSON.stringify({ ...settings, enabledPlugins: { "review@team": false } }),
     );
     expect(seedOf(home).identity).not.toBe(before);
+  });
+});
+
+describe("carried Claude hook commands", () => {
+  function hooksWith(...commands: string[]) {
+    return JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          { matcher: "Bash", hooks: commands.map((command) => ({ type: "command", command })) },
+        ],
+      },
+    });
+  }
+
+  test.each([
+    "jq -r .tool_input.command",
+    "npx --yes prettier --check .",
+    '"$CLAUDE_PROJECT_DIR"/.claude/hooks/check.sh',
+    "~/.claude/skills/lint/run.sh",
+    "bash $HOME/.agents/skills/lint/run.sh",
+    "sh ${HOME}/.claude/agents/review.sh",
+    "cat ~/AGENTS.md",
+    "/usr/local/bin/notify --title done",
+  ])("passes a hook that calls a PATH program, a project path, or a managed path: %s", (command) => {
+    const home = makeHome();
+    write(home, ".claude/settings.json", hooksWith(command));
+
+    expect(carried(seedOf(home))).toEqual({ hooks: JSON.parse(hooksWith(command)).hooks });
+  });
+
+  test.each([
+    ["~/.claude/hooks/guard.sh", "~/.claude/hooks/guard.sh"],
+    ['bash "$HOME/bin/guard"', "$HOME/bin/guard"],
+    ["node ${HOME}/scripts/guard.js --strict", "${HOME}/scripts/guard.js"],
+    ["~/.claude/skills/../../.ssh/run.sh", "~/.claude/skills/../../.ssh/run.sh"],
+    ["~/.codex/skills/lint/run.sh", "~/.codex/skills/lint/run.sh"],
+    ["FILE=~/notes.md notify", "~/notes.md"],
+  ])("refuses a hook that refers to an unmanaged home path: %s", (command, reference) => {
+    const home = makeHome();
+    write(home, ".claude/settings.json", hooksWith("jq .", command));
+
+    expect(refusalOf(home).forbidden).toEqual([
+      {
+        path: join(home, ".claude", "settings.json"),
+        code: "hook-path",
+        reason: `hook command hooks.PreToolUse[0].hooks[1].command refers to ${reference}, outside the managed set`,
+      },
+    ]);
+  });
+
+  test("refuses a hook that refers to the operator home by its absolute path, even a managed one", () => {
+    const home = makeHome();
+    const script = join(home, ".claude", "skills", "lint", "run.sh");
+    write(home, ".claude/settings.json", hooksWith(`bash ${script}`));
+
+    expect(refusalOf(home).forbidden).toEqual([
+      {
+        path: join(home, ".claude", "settings.json"),
+        code: "hook-path",
+        reason: `hook command hooks.PreToolUse[0].hooks[0].command refers to ${script}, outside the managed set`,
+      },
+    ]);
+  });
+
+  test("names every hook path that refuses the seed", () => {
+    const home = makeHome();
+    write(home, ".claude/settings.json", hooksWith("~/a.sh", "~/b.sh"));
+
+    expect(refusalOf(home).forbidden.map((hit) => hit.reason)).toEqual([
+      "hook command hooks.PreToolUse[0].hooks[0].command refers to ~/a.sh, outside the managed set",
+      "hook command hooks.PreToolUse[0].hooks[1].command refers to ~/b.sh, outside the managed set",
+    ]);
   });
 });

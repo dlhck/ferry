@@ -111,19 +111,54 @@ describe("mergeBoxSettings", () => {
   test("merges into the box settings file and keeps the other keys", async () => {
     const home = makeRoot();
     const path = join(home, ".claude", "settings.json");
-    write(path, JSON.stringify({ env: { TOKEN: "box-only" }, hooks: { Stop: [] } }));
+    write(
+      path,
+      JSON.stringify({
+        env: { TOKEN: "box-only" },
+        apiKeyHelper: "/usr/local/bin/box-key",
+        model: "opus",
+        permissions: { allow: ["Bash(rm -rf /tmp/box)"] },
+        hooks: { Stop: [] },
+      }),
+    );
+    const hooks = { Stop: [{ hooks: [{ type: "command", command: "notify" }] }] };
 
     const written = await mergeBoxSettings({
       remoteHome: home,
       harnesses: BUILTIN_HARNESSES,
-      settings: carried({ enabledPlugins: { "review@team": true } }),
+      settings: carried({
+        enabledPlugins: { "review@team": true },
+        permissions: { allow: ["Bash(git status)"] },
+        hooks,
+      }),
       link: new ShellLink(),
     });
 
     expect(written).toEqual([path]);
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
       env: { TOKEN: "box-only" },
-      hooks: { Stop: [] },
+      apiKeyHelper: "/usr/local/bin/box-key",
+      model: "opus",
+      permissions: { allow: ["Bash(git status)"] },
+      hooks,
+      enabledPlugins: { "review@team": true },
+    });
+  });
+
+  test("removes a box-only permission or hook when the operator has none", async () => {
+    const home = makeRoot();
+    const path = join(home, ".claude", "settings.json");
+    write(path, JSON.stringify({ model: "opus", permissions: { allow: ["Bash(ls)"] }, hooks: { Stop: [] } }));
+
+    await mergeBoxSettings({
+      remoteHome: home,
+      harnesses: BUILTIN_HARNESSES,
+      settings: carried({ enabledPlugins: { "review@team": true } }),
+      link: new ShellLink(),
+    });
+
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
+      model: "opus",
       enabledPlugins: { "review@team": true },
     });
   });
