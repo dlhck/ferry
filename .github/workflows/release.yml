@@ -45,19 +45,26 @@ jobs:
   build:
     name: Build ${{ matrix.asset }}
     needs: version
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
       matrix:
         include:
+          # macOS kills an arm64 executable that has no valid signature. A darwin binary
+          # compiled on Linux has a signature that is not valid, so the darwin binaries
+          # compile and get an ad-hoc signature on macOS. Each runs on its own architecture.
           - target: bun-darwin-arm64
             asset: ferry-darwin-arm64
+            os: macos-latest
           - target: bun-darwin-x64
             asset: ferry-darwin-x64
+            os: macos-15-intel
           - target: bun-linux-arm64
             asset: ferry-linux-arm64
+            os: ubuntu-latest
           - target: bun-linux-x64
             asset: ferry-linux-x64
+            os: ubuntu-latest
 
     steps:
       - name: Check out repository
@@ -72,9 +79,26 @@ jobs:
         run: bun ci
 
       - name: Compile executable
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: >-
-          bun build --compile --target=${{ matrix.target }} src/cli.ts
+          bun build --compile --target=${{ matrix.target }}
+          --define "FERRY_VERSION=\"$VERSION\"" src/cli.ts
           --outfile dist/${{ matrix.asset }}
+
+      - name: Sign executable
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --sign - "dist/${{ matrix.asset }}"
+          codesign -v "dist/${{ matrix.asset }}"
+
+      - name: Run executable
+        if: runner.os == 'macOS'
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          "dist/${{ matrix.asset }}" --help
+          test "$("dist/${{ matrix.asset }}" --version)" = "$VERSION"
 
       - name: Upload executable
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
