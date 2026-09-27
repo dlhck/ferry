@@ -158,7 +158,28 @@ Run `ferry uninstall` to remove the local store and config, remove Ferry-managed
 
 ### Progress
 
-`ferry init`, `sync`, `status`, `install`, `auth`, and `update` show the current step on stderr, for example `Publishing the snapshot` or `Installing Claude plugins (3/10)`. When stdout and stderr are both terminals, a spinner shows the step and ends it with a done or failed mark. In other cases, Ferry writes one plain line when a step starts or its count changes, with no control characters. `ferry watch` always writes plain lines, so its log stays readable. `ferry status --json` shows no progress, and its stdout is only the JSON report.
+`ferry init`, `sync`, `status`, `install`, `auth`, `update`, and `move` show the current step on stderr, for example `Publishing the snapshot` or `Installing Claude plugins (3/10)`. When stdout and stderr are both terminals, Ferry rewrites one line in place, with a spinner, the step number, and the step name:
+
+```
+◐ [6/9] Installing Claude plugins (3/10)
+```
+
+A finished step leaves no line. When the command ends, also after an error, Ferry prints a summary table with the result, a short detail, and the duration of each step. The command's own lines, such as `Skipped hook:`, `Box plugins:`, or the status report, come after the table. Lines that a prompt needs, such as the install plan before the confirmation, come before the prompt. `ferry auth` shows the live line for its wait, but prints no table.
+
+```
+Step                              Result     Detail               Time
+Reading the portable set          ✔ done     14 skills            0.2s
+Connecting to user@box.example    ✔ done                          0.9s
+Publishing the snapshot           ✔ done     published 3f2a9c1    2.1s
+Updating the box checkout         ✔ done                          1.4s
+Applying the snapshot on the box  ✔ done     2 changes            1.8s
+Installing Claude plugins         ✔ done     1 warning             12s
+Merging settings on the box       ✔ done                          0.6s
+Declaring MCP servers             ✔ done     4 servers            3.3s
+Adopting published local skills   ✔ done                          0.0s
+```
+
+In other cases, Ferry writes one plain line when a step starts or its count changes, with no control characters and no table. `ferry watch` always writes plain lines, so its log stays readable. `ferry status --json` shows no progress, and its stdout is only the JSON report.
 
 ## Add skills
 

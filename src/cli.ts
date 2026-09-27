@@ -101,7 +101,7 @@ type CliDependencies = {
   readonly approveHostKeys?: (request: SnapshotHostKeyApproval) => Promise<boolean>;
   readonly confirmUninstall?: () => Promise<boolean>;
   readonly writeLine?: (line: string) => void;
-  /** The reporter for one command run. The default is a spinner on a terminal, else plain lines. */
+  /** The reporter for one command run. The default is one live line and a table on a terminal, else plain lines. */
   readonly createProgress?: () => Progress;
   /** The reporter for `ferry watch`, whose log must stay plain. */
   readonly createPlainProgress?: () => Progress;
@@ -117,6 +117,21 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
   const config = () => (dependencies.readConfig ?? readConfig)() ?? {};
   const registry = () => resolveRegistry(config());
   const progress = () => (dependencies.createProgress ?? terminalProgress)();
+  const writeLine = (line: string) => (dependencies.writeLine ?? console.log)(line);
+  /**
+   * Run a command with one reporter. The command's own lines go through the
+   * reporter, and the summary table prints when the command ends, also after an error.
+   */
+  const withProgress = async <T>(
+    run: (progress: Progress, writeLine: (line: string) => void) => Promise<T>,
+    reporter: Progress = progress(),
+  ): Promise<T> => {
+    try {
+      return await run(reporter, reporter.hold(writeLine));
+    } finally {
+      reporter.finish();
+    }
+  };
   const program = new Command();
   program
     .name("ferry")
@@ -143,22 +158,24 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       dryRun?: boolean;
     }) => {
       const execute = dependencies.runInit ?? runInit;
-      const result = await execute(
-        {
-          host: options.host,
-          sshUser: options.sshUser,
-          sshDestination: options.sshDestination,
-          snapshotUrl: options.snapshotUrl,
-          dryRun: options.dryRun === true,
-          harnesses: registry().harnesses,
-        },
-        {
-          prompt: dependencies.prompt ?? promptForInit,
-          approveHostKeys: dependencies.approveHostKeys ?? approveHostKeys,
-          progress: progress(),
-        },
+      const result = await withProgress((progress) =>
+        execute(
+          {
+            host: options.host,
+            sshUser: options.sshUser,
+            sshDestination: options.sshDestination,
+            snapshotUrl: options.snapshotUrl,
+            dryRun: options.dryRun === true,
+            harnesses: registry().harnesses,
+          },
+          {
+            prompt: dependencies.prompt ?? promptForInit,
+            approveHostKeys: dependencies.approveHostKeys ?? approveHostKeys,
+            progress,
+          },
+        ),
       );
-      reportInit(result, dependencies.writeLine ?? console.log);
+      reportInit(result, writeLine);
     });
 
   program
@@ -166,9 +183,11 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .description("Install the supported agent tools on the configured box")
     .option("--yes", "run without a confirmation prompt")
     .action(async (options: { yes?: boolean }) => {
-      await (dependencies.runInstall ?? runInstallCommand)(
-        { yes: options.yes === true },
-        { tools: registry().tools, progress: progress() },
+      await withProgress((progress, writeLine) =>
+        (dependencies.runInstall ?? runInstallCommand)(
+          { yes: options.yes === true },
+          { tools: registry().tools, progress, writeLine },
+        ),
       );
     });
 
@@ -178,9 +197,11 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .option("--yes", "run without a confirmation prompt")
     .option("--dry-run", "print the update plan without running it")
     .action(async (options: { yes?: boolean; dryRun?: boolean }) => {
-      await (dependencies.runUpdate ?? runUpdateCommand)(
-        { yes: options.yes === true, dryRun: options.dryRun === true },
-        { tools: registry().tools, progress: progress() },
+      await withProgress((progress, writeLine) =>
+        (dependencies.runUpdate ?? runUpdateCommand)(
+          { yes: options.yes === true, dryRun: options.dryRun === true },
+          { tools: registry().tools, progress, writeLine },
+        ),
       );
     });
 
@@ -219,13 +240,15 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .option("--force", "back up live managed paths before Apply links them")
     .option("-m, --message <message>", "snapshot commit message")
     .action(async (options: { dryRun?: boolean; force?: boolean; message?: string }) => {
-      await (dependencies.runSync ?? runSyncCommand)(
-        {
-          dryRun: options.dryRun === true,
-          force: options.force === true,
-          message: options.message,
-        },
-        { progress: progress() },
+      await withProgress((progress, writeLine) =>
+        (dependencies.runSync ?? runSyncCommand)(
+          {
+            dryRun: options.dryRun === true,
+            force: options.force === true,
+            message: options.message,
+          },
+          { progress, writeLine },
+        ),
       );
     });
 
@@ -242,15 +265,17 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
         path: string,
         options: { fromBox?: boolean; dryRun?: boolean; remove?: boolean; includeEnv?: boolean },
       ) => {
-        await (dependencies.runMove ?? runMove)(
-          {
-            path,
-            fromBox: options.fromBox === true,
-            dryRun: options.dryRun === true,
-            remove: options.remove === true,
-            includeEnv: options.includeEnv === true,
-          },
-          { writeLine: dependencies.writeLine ?? console.log, progress: progress() },
+        await withProgress((progress, writeLine) =>
+          (dependencies.runMove ?? runMove)(
+            {
+              path,
+              fromBox: options.fromBox === true,
+              dryRun: options.dryRun === true,
+              remove: options.remove === true,
+              includeEnv: options.includeEnv === true,
+            },
+            { writeLine, progress },
+          ),
         );
       },
     );
@@ -260,12 +285,10 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .description("Inspect link, snapshot, managed paths, and box logins without writing")
     .option("--json", "print the status report as JSON")
     .action(async (options: { json?: boolean }) => {
-      await (dependencies.runStatus ?? runStatusCommand)(
-        { json: options.json === true },
-        {
-          writeLine: dependencies.writeLine ?? console.log,
-          progress: options.json === true ? noProgress : progress(),
-        },
+      await withProgress(
+        (progress, writeLine) =>
+          (dependencies.runStatus ?? runStatusCommand)({ json: options.json === true }, { writeLine, progress }),
+        options.json === true ? noProgress : progress(),
       );
     });
 
@@ -274,7 +297,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .description("List the integrations, whether each one is enabled, and the local app versions")
     .action(async () => {
       const lines = await integrationLines(config(), dependencies.integrations ?? INTEGRATIONS);
-      for (const line of lines) (dependencies.writeLine ?? console.log)(line);
+      for (const line of lines) writeLine(line);
     });
 
   const watch = program

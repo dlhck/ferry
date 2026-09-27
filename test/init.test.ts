@@ -13,9 +13,8 @@ import { buildProgram } from "../src/cli.ts";
 import { readConfig } from "../src/config.ts";
 import { InitRefusal, runInit, type InitDependencies } from "../src/init.ts";
 import type { Seed } from "../src/manifest.ts";
-import { plainProgress } from "../src/progress.ts";
 import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
-import { recordProgress } from "./fake-progress.ts";
+import { fakeTerminal, recordProgress } from "./fake-progress.ts";
 
 const homes: string[] = [];
 const skillRoots = [".agents/skills", ".claude/skills"] as const;
@@ -472,6 +471,7 @@ describe("ferry init", () => {
       "done",
       "start:Reading the SSH host keys of github.com on the box",
       "done",
+      "pause",
       "prompt",
       "start:Trusting the SSH host keys of github.com on the box",
       "done",
@@ -597,19 +597,21 @@ describe("ferry init", () => {
       ].join("\n"));
       const { calls, deps } = dependencies(home);
       const lines: string[] = [];
+      const terminal = fakeTerminal();
 
       await buildProgram({
         readConfig: () => readConfig(home),
         runInit: (input, cliDependencies) => runInit({ ...input, home }, { ...deps, ...cliDependencies }),
         writeLine: (line) => lines.push(line),
-        createProgress: () => plainProgress((line) => lines.push(`progress: ${line}`)),
+        createProgress: () => terminal.progress,
       }).parseAsync(["init", "--dry-run"], { from: "user" });
 
       const output = lines.join("\n");
       expect(calls).toEqual({ opened: 0, published: 0, linked: 0 });
       expect(output).toContain("Init plan (no changes will be made):");
-      expect(output).toContain("progress: Reading the portable set...");
+      expect(terminal.table().join("\n")).toContain("Reading the portable set");
       expect(output).not.toMatch(/paseo/i);
+      expect(terminal.writes.join("")).not.toMatch(/paseo/i);
     });
   }
 

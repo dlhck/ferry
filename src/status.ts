@@ -93,6 +93,7 @@ export type StatusReport = {
 /** Compose one read-only report from module-owned inspection methods. */
 export async function composeStatus(dependencies: StatusDependencies): Promise<StatusReport> {
   const progress = dependencies.progress ?? noProgress;
+  progress.plan(9);
   const errors: StatusError[] = [];
   let denyList: readonly DenyRuleDescription[] = [];
   try {
@@ -126,6 +127,8 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     } catch (cause) {
       errors.push(dependencyError("box", cause));
     }
+  } else {
+    progress.skip("Reading the box store tip", OFFLINE);
   }
 
   let boxCheckoutError: LinkError | StatusDependencyError | null = null;
@@ -146,6 +149,8 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
       boxCheckoutError = dependencyError("box", cause);
     }
     if (boxCheckoutError) errors.push(boxCheckoutError);
+  } else {
+    progress.skip("Reading the box checkout changes", OFFLINE);
   }
 
   let gitIdentityError: LinkError | StatusDependencyError | null = null;
@@ -161,6 +166,8 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
       gitIdentityError = dependencyError("box", cause);
     }
     if (gitIdentityError) errors.push(gitIdentityError);
+  } else {
+    progress.skip("Reading the box git identity", OFFLINE);
   }
 
   let boxSudoError: LinkError | StatusDependencyError | null = null;
@@ -174,6 +181,8 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
       boxSudoError = dependencyError("box", cause);
     }
     if (boxSudoError) errors.push(boxSudoError);
+  } else {
+    progress.skip("Checking sudo on the box", OFFLINE);
   }
 
   let operatorIdentity: GitIdentity | null = null;
@@ -213,6 +222,8 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
       managedPathsError = dependencyError("box", cause);
       errors.push(managedPathsError);
     }
+  } else {
+    progress.skip("Checking managed links on the box", OFFLINE);
   }
 
   let authError: StatusDependencyError | null = null;
@@ -227,6 +238,8 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
       authError = dependencyError("box", cause);
       errors.push(authError);
     }
+  } else {
+    progress.skip("Checking logins on the box", OFFLINE);
   }
   const loginRequired = providers
     .filter((provider) => provider.status === "login-required" || provider.status === "manual")
@@ -246,6 +259,8 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
       mcpError = dependencyError("box", cause);
       errors.push(mcpError);
     }
+  } else {
+    progress.skip("Checking MCP logins on the box", OFFLINE);
   }
 
   return {
@@ -273,11 +288,26 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
   };
 }
 
-/** Run one inspection as a progress step. A failed Link result is a failed step. */
+const OFFLINE = "host offline";
+
+/** Run one inspection as a progress step. A failed Link result is a failed step, with its error code as detail. */
 function inspect<T>(progress: Progress, name: string, work: () => T | Promise<T>): Promise<T> {
-  return step(progress, name, work, (result) =>
-    typeof result === "object" && result !== null && "ok" in result && result.ok === false,
+  return step(
+    progress,
+    name,
+    work,
+    (result) => linkError(result) !== null,
+    (result) => {
+      const error = linkError(result);
+      return error ? `${error.origin}/${error.code}` : undefined;
+    },
   );
+}
+
+function linkError(result: unknown): LinkError | null {
+  return typeof result === "object" && result !== null && "ok" in result && result.ok === false && "error" in result
+    ? (result.error as LinkError)
+    : null;
 }
 
 function parseSudoCheck(stdout: string): boolean {

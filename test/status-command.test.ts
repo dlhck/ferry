@@ -3,7 +3,6 @@ import type { ApplyPlan, RemoteApplyInput } from "../src/apply.ts";
 import type { AuthStatusReport } from "../src/auth-start.ts";
 import { buildProgram } from "../src/cli.ts";
 import type { LinkResult } from "../src/link.ts";
-import { plainProgress } from "../src/progress.ts";
 import type { Registry } from "../src/registry/load.ts";
 import type { ToolDescriptor } from "../src/registry/types.ts";
 import type { TipReport } from "../src/store.ts";
@@ -11,7 +10,7 @@ import {
   runStatusCommand,
   type StatusCommandDependencies,
 } from "../src/status-command.ts";
-import { recordProgress } from "./fake-progress.ts";
+import { fakeTerminal, recordProgress } from "./fake-progress.ts";
 
 const registry: Registry = {
   harnesses: [
@@ -235,6 +234,7 @@ describe("ferry status command", () => {
   ] as const) {
     test(`status and status --json print nothing about Paseo with ${label}`, async () => {
       const lines: string[] = [];
+      const terminal = fakeTerminal();
       for (const args of [["status"], ["status", "--json"]]) {
         const stack = fakeStack();
         const readConfig = stack.dependencies.readConfig!;
@@ -246,15 +246,16 @@ describe("ferry status command", () => {
               ...dependencies,
             }),
           writeLine: (line) => lines.push(line),
-          createProgress: () => plainProgress((line) => lines.push(`progress: ${line}`)),
+          createProgress: () => terminal.progress,
         }).parseAsync(args, { from: "user" });
       }
 
       const output = lines.join("\n");
       expect(output).toContain("Host: ONLINE");
       expect(output).toContain('"schemaVersion":1');
-      expect(output).toContain("progress: ");
+      expect(terminal.table().join("\n")).toContain("Connecting to the box");
       expect(output).not.toMatch(/paseo/i);
+      expect(terminal.writes.join("")).not.toMatch(/paseo/i);
     });
   }
 
@@ -459,9 +460,43 @@ describe("ferry status progress", () => {
     expect(progress.events).toEqual([
       "start:Connecting to the box",
       "fail",
+      "skip:Reading the box store tip",
+      "skip:Reading the box checkout changes",
+      "skip:Reading the box git identity",
+      "skip:Checking sudo on the box",
       "start:Comparing the store tips",
       "done",
+      "skip:Checking managed links on the box",
+      "skip:Checking logins on the box",
+      "skip:Checking MCP logins on the box",
     ]);
+  });
+
+  test("prints a summary table with the failed probe and the skipped box steps, then the report", async () => {
+    const stack = fakeStack(false);
+    const terminal = fakeTerminal();
+    const lines: string[] = [];
+
+    await runStatusCommand(
+      { json: false },
+      { ...stack.dependencies, progress: terminal.progress, writeLine: terminal.progress.hold((line) => lines.push(line)) },
+    );
+    expect(lines).toEqual([]);
+    terminal.progress.finish();
+
+    expect(terminal.table()).toEqual([
+      "Step                               Result     Detail                  Time",
+      "Connecting to the box              ✖ failed   network/host-offline    0.1s",
+      "Reading the box store tip          – skipped  host offline",
+      "Reading the box checkout changes   – skipped  host offline",
+      "Reading the box git identity       – skipped  host offline",
+      "Checking sudo on the box           – skipped  host offline",
+      "Comparing the store tips           ✔ done                             0.1s",
+      "Checking managed links on the box  – skipped  host offline",
+      "Checking logins on the box         – skipped  host offline",
+      "Checking MCP logins on the box     – skipped  host offline",
+    ]);
+    expect(lines[0]).toStartWith("Host: OFFLINE");
   });
 
   test("progress does not change the JSON output", async () => {

@@ -88,6 +88,7 @@ export async function runInstallCommand(
   const install = resolved.createInstall(link, resolved.tools);
 
   const plan = install.plan();
+  resolved.progress.plan(plan.length + 1);
   for (const recipe of plan) {
     resolved.writeLine(`${recipe.tool}: ${recipe.command}`);
   }
@@ -101,6 +102,7 @@ export async function runInstallCommand(
   );
 
   if (!input.yes) {
+    resolved.progress.pause();
     const confirmed = await resolved.confirm();
     if (confirmed !== true) return;
   }
@@ -133,7 +135,9 @@ export async function runInstallCommand(
     failLink("Install", result.error, resolved.writeLine);
   }
 
-  if (identityCommand) {
+  if (!identityCommand) {
+    progress.skip("Setting the box git identity", "no operator git identity");
+  } else {
     const identity = await step(
       progress,
       "Setting the box git identity",
@@ -232,7 +236,8 @@ export async function runAuthCommand(
       resolved.writeLine(
         "Open the URL in a browser on this machine. After the login, paste the code that the browser shows.",
       );
-      // The prompt runs between steps, so no spinner covers it.
+      // The prompt runs between steps, and pause() clears the progress line first.
+      resolved.progress.pause();
       const answer = await resolved.readLoginCode();
       if (typeof answer !== "string") return;
       code = answer.trim();

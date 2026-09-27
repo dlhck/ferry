@@ -158,6 +158,7 @@ export async function runInit(
   let missing = missingFields(values);
 
   if (missing.length > 0 && dependencies.prompt) {
+    progress.pause();
     const answers = await dependencies.prompt(missing, values);
     values = mergeValues({ ...answers, harnesses: input.harnesses }, values);
     missing = missingFields(values);
@@ -177,6 +178,8 @@ export async function runInit(
     update: existing?.update,
     integrations: existing?.integrations,
   };
+  const snapshotTarget = snapshotSshTarget(config.snapshotUrl);
+  progress.plan(input.dryRun ? 1 : snapshotTarget ? 8 : 4);
 
   const seed = await step(
     progress,
@@ -193,7 +196,6 @@ export async function runInit(
     };
   }
 
-  const snapshotTarget = snapshotSshTarget(config.snapshotUrl);
   if (snapshotTarget) {
     const agent = await step(
       progress,
@@ -252,12 +254,18 @@ export async function runInit(
     }
   }
 
-  const { store, publication } = await step(progress, "Publishing the snapshot", async () => {
-    const store = dependencies.openStore
-      ? await dependencies.openStore(config.snapshotUrl, seed, home)
-      : await openSnapshotStore(config.snapshotUrl, seed, { home, harnesses: input.harnesses });
-    return { store, publication: await store.publish(seed) };
-  });
+  const { store, publication } = await step(
+    progress,
+    "Publishing the snapshot",
+    async () => {
+      const store = dependencies.openStore
+        ? await dependencies.openStore(config.snapshotUrl, seed, home)
+        : await openSnapshotStore(config.snapshotUrl, seed, { home, harnesses: input.harnesses });
+      return { store, publication: await store.publish(seed) };
+    },
+    undefined,
+    ({ publication }) => (publication.published ? "published" : "no changes"),
+  );
   const applyInput = {
     checkout: store.path,
     targetHome: home,
@@ -436,7 +444,10 @@ async function approveSnapshotHostKey(
     }
     return scan;
   });
-  if (scan === null) return;
+  if (scan === null) {
+    progress.skip(`Trusting the SSH host keys of ${target.knownHost} on the box`, "already trusted");
+    return;
+  }
   const keys = parseHostKeys(scan.stdout, target.knownHost);
   if (keys.length === 0) {
     throw new InitRefusal(
@@ -444,6 +455,7 @@ async function approveSnapshotHostKey(
       `the box could not read an SSH host key for ${target.host}`,
     );
   }
+  progress.pause();
   const accepted = await approve?.({
     host: target.knownHost,
     keys: keys.map(({ algorithm, fingerprint }) => ({ algorithm, fingerprint })),

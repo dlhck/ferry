@@ -27,7 +27,8 @@ import {
   type SyncDependencies,
   type SyncPlan,
 } from "../src/sync.ts";
-import { plainProgress, type Progress } from "../src/progress.ts";
+import { noProgress, type Progress } from "../src/progress.ts";
+import { fakeTerminal } from "./fake-progress.ts";
 
 const config: OperatorConfig = {
   version: 1,
@@ -226,6 +227,7 @@ describe("runSync", () => {
   ] as const) {
     test(`sync --dry-run prints nothing about Paseo with ${label}`, async () => {
       const lines: string[] = [];
+      const terminal = fakeTerminal();
       const log = console.log;
       console.log = (line: string) => lines.push(line);
       try {
@@ -240,7 +242,7 @@ describe("runSync", () => {
                 ...dependencies,
               },
             ),
-          createProgress: () => plainProgress((line) => lines.push(`progress: ${line}`)),
+          createProgress: () => terminal.progress,
         }).parseAsync(["sync", "--dry-run"], { from: "user" });
       } finally {
         console.log = log;
@@ -248,8 +250,9 @@ describe("runSync", () => {
 
       const output = lines.join("\n");
       expect(output).toContain("Deny list:");
-      expect(output).toContain("progress: Reading the portable set...");
+      expect(terminal.table().join("\n")).toContain("Reading the portable set");
       expect(output).not.toMatch(/paseo/i);
+      expect(terminal.writes.join("")).not.toMatch(/paseo/i);
     });
   }
 
@@ -1079,6 +1082,7 @@ describe("runSync progress", () => {
     return {
       events,
       progress: {
+        ...noProgress,
         start: (step) => events.push(`start:${step}`),
         count: (current, total) => events.push(`count:${current}/${total}`),
         done: () => events.push("done"),
@@ -1136,6 +1140,48 @@ describe("runSync progress", () => {
       progress,
     };
   }
+
+  test("prints a summary table with a row, a result, and a detail for each step", async () => {
+    const terminal = fakeTerminal();
+    const update: LinkResult = { ok: true, address: "box", stdout: " M skills/x/SKILL.md\0", stderr: "" };
+
+    await runSync({ home: "/operator" }, dependencies([], terminal.progress, update));
+    terminal.progress.finish();
+
+    expect(terminal.table()).toEqual([
+      "Step                              Result     Detail                    Time",
+      "Reading the portable set          ✔ done     0 skills                  0.1s",
+      "Connecting to ferry@box           ✔ done                               0.1s",
+      "Publishing the snapshot           ✔ done     published abc123          0.1s",
+      "Updating the box checkout         ✔ done     discarded 1 box change    0.1s",
+      "Applying the snapshot on the box  ✔ done     0 changes                 0.1s",
+      "Installing Claude plugins         ✔ done     1 warning                 0.1s",
+      "Merging settings on the box       ✔ done                               0.1s",
+      "Declaring MCP servers             ✔ done     2 servers                 0.1s",
+      "Adopting published local skills   ✔ done                               0.1s",
+    ]);
+  });
+
+  test("ends the summary table at a failed step, with the error as detail", async () => {
+    const terminal = fakeTerminal();
+    const update: LinkResult = {
+      ok: false,
+      error: { origin: "box", code: "command-failed", message: "fatal: could not read from remote" },
+    } as LinkResult;
+
+    await expect(runSync({ home: "/operator" }, dependencies([], terminal.progress, update))).rejects.toThrow(
+      "failed to update",
+    );
+    terminal.progress.finish();
+
+    expect(terminal.table()).toEqual([
+      "Step                       Result     Detail                               Time",
+      "Reading the portable set   ✔ done     0 skills                             0.1s",
+      "Connecting to ferry@box    ✔ done                                          0.1s",
+      "Publishing the snapshot    ✔ done     published abc123                     0.1s",
+      "Updating the box checkout  ✖ failed   box: failed to update ferry@box…     0.1s",
+    ]);
+  });
 
   test("shows each step in order, counts plugins and MCP servers, and prints lines between steps", async () => {
     const { events, progress } = recorder();

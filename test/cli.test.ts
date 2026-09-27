@@ -13,7 +13,7 @@ import { createPaseo } from "../src/integrations/paseo.ts";
 import { denyRules } from "../src/manifest.ts";
 import type { SyncInput, SyncResult } from "../src/sync.ts";
 import type { UninstallInput, UninstallResult } from "../src/uninstall.ts";
-import { noProgress, type Progress } from "../src/progress.ts";
+import { lineProgress, noProgress, type Progress } from "../src/progress.ts";
 import { recordProgress } from "./fake-progress.ts";
 
 describe("ferry --help", () => {
@@ -725,6 +725,43 @@ describe("progress selection", () => {
 
     expect(received).toBe(noProgress);
     expect(lines).toEqual(['{"schemaVersion":1,"link":{"online":false}}']);
+  });
+
+  test("on a terminal, prints the table, then the command's lines, then the error, and shows the cursor again", async () => {
+    const log: string[] = [];
+    const terminal = lineProgress({ write: (text) => log.push(text), columns: 80, color: false, now: () => 0 });
+
+    await runCli(
+      ["sync"],
+      {
+        readConfig: () => null,
+        createProgress: () => terminal,
+        writeLine: (line) => log.push(`line:${line}`),
+        runSync: async (_input, dependencies) => {
+          const progress = dependencies!.progress!;
+          progress.plan(2);
+          progress.start("Reading the portable set");
+          progress.done("3 skills");
+          dependencies!.writeLine!("Skipped hook: hook-path: ~/.claude/hooks/notify.sh");
+          progress.start("Connecting to user@box.example");
+          progress.fail("network/host-offline");
+          throw new Error("box: failed to resolve home");
+        },
+      },
+      { renderError: (message) => log.push(`error:${message}`), setExitCode: () => {} },
+    );
+
+    expect(log.filter((text) => !text.startsWith("\x1b") && !text.startsWith("\r"))).toEqual([
+      [
+        "Step                            Result     Detail                  Time",
+        "Reading the portable set        ✔ done     3 skills                0.0s",
+        "Connecting to user@box.example  ✖ failed   network/host-offline    0.0s",
+        "",
+      ].join("\n"),
+      "line:Skipped hook: hook-path: ~/.claude/hooks/notify.sh",
+      "error:box: failed to resolve home",
+    ]);
+    expect(log.lastIndexOf("\r\x1b[2K\x1b[?25h")).toBeGreaterThan(log.lastIndexOf("\x1b[?25l"));
   });
 
   test("watch always gets the plain reporter", async () => {
