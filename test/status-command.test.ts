@@ -67,6 +67,8 @@ function fakeStack(
   online = true,
   boxChanges = "",
   boxIdentity = "user.name Operator\nuser.email operator@example.com\n",
+  boxSudo = "yes\n",
+  updateWatch?: boolean,
 ): FakeStack {
   const output: string[] = [];
   const reads: string[] = [];
@@ -90,7 +92,9 @@ function fakeStack(
         address: "100.64.0.8",
         stdout: command.startsWith("printf")
           ? "/box/home\n"
-          : command.includes(" status ")
+          : command.startsWith("sudo -n true")
+            ? boxSudo
+            : command.includes(" status ")
             ? boxChanges
             : command.includes("--get-regexp")
               ? boxIdentity
@@ -129,6 +133,7 @@ function fakeStack(
         version: 1 as const,
         host: { tailscale: "box", sshUser: "ferry" },
         harness: [{ id: "custom" }],
+        ...(updateWatch === undefined ? {} : { update: { watch: updateWatch } }),
       };
     },
     loadRegistry: (config: Parameters<StatusCommandDependencies["loadRegistry"]>[0]) => {
@@ -279,6 +284,60 @@ describe("ferry status command", () => {
     expect(missing.mutations).toEqual([]);
   });
 
+  test("shows whether sudo on the box asks for a password in text and JSON", async () => {
+    const passwordless = fakeStack();
+    const password = fakeStack(true, "", undefined, "no\n");
+    const passwordlessJson = fakeStack();
+    const passwordJson = fakeStack(true, "", undefined, "no\n");
+
+    await runStatusCommand({ json: false }, passwordless.dependencies);
+    await runStatusCommand({ json: false }, password.dependencies);
+    await runStatusCommand({ json: true }, passwordlessJson.dependencies);
+    await runStatusCommand({ json: true }, passwordJson.dependencies);
+
+    expect(passwordless.output[0]).toContain("Box sudo: PASSWORDLESS");
+    expect(passwordless.reads).toContain(
+      "link.run:sudo -n true >/dev/null 2>&1 && echo yes || echo no",
+    );
+    expect(password.output[0]).toContain("Box sudo: PASSWORD REQUIRED");
+    expect(password.output[0]).not.toContain("WARNING");
+    expect(JSON.parse(passwordlessJson.output[0]!).boxSudo).toEqual({
+      passwordless: true,
+      watchUpdateBlocked: false,
+      error: null,
+    });
+    expect(JSON.parse(passwordJson.output[0]!).boxSudo).toEqual({
+      passwordless: false,
+      watchUpdateBlocked: false,
+      error: null,
+    });
+    expect(password.mutations).toEqual([]);
+  });
+
+  test("warns that the watch cannot update gh when the watch update is on and sudo asks for a password", async () => {
+    const watchOn = fakeStack(true, "", undefined, "no\n", true);
+    const watchOff = fakeStack(true, "", undefined, "no\n", false);
+    const passwordless = fakeStack(true, "", undefined, "yes\n", true);
+    const json = fakeStack(true, "", undefined, "no\n", true);
+
+    await runStatusCommand({ json: false }, watchOn.dependencies);
+    await runStatusCommand({ json: false }, watchOff.dependencies);
+    await runStatusCommand({ json: false }, passwordless.dependencies);
+    await runStatusCommand({ json: true }, json.dependencies);
+
+    const warning =
+      "Box sudo: PASSWORD REQUIRED\n  WARNING: [update] watch = true, but the watch cannot update gh because sudo on the box asks for a password. See the sudoers rule in the README.";
+    expect(watchOn.output[0]).toContain(warning);
+    expect(watchOff.output[0]).toContain("Box sudo: PASSWORD REQUIRED");
+    expect(watchOff.output[0]).not.toContain("WARNING");
+    expect(passwordless.output[0]).not.toContain("WARNING");
+    expect(JSON.parse(json.output[0]!).boxSudo).toEqual({
+      passwordless: false,
+      watchUpdateBlocked: true,
+      error: null,
+    });
+  });
+
   test("constructs Link from a direct SSH destination", async () => {
     const stack = fakeStack();
     let linkOptions: unknown;
@@ -301,13 +360,22 @@ describe("ferry status command", () => {
   });
 
   test("makes an offline host obvious and skips every box inspection", async () => {
-    const stack = fakeStack(false);
+    const stack = fakeStack(false, "", undefined, "no\n", true);
+    const json = fakeStack(false, "", undefined, "no\n", true);
 
     await runStatusCommand({ json: false }, stack.dependencies);
+    await runStatusCommand({ json: true }, json.dependencies);
 
     expect(stack.output[0]).toContain("Host: OFFLINE");
     expect(stack.output[0]).toContain("Managed links: unavailable while host is offline");
     expect(stack.output[0]).toContain("Box git identity: unavailable");
+    expect(stack.output[0]).toContain("Box sudo: unavailable");
+    expect(stack.output[0]).not.toContain("WARNING");
+    expect(JSON.parse(json.output[0]!).boxSudo).toEqual({
+      passwordless: null,
+      watchUpdateBlocked: false,
+      error: null,
+    });
     expect(stack.output[0]).toContain("Paseo listen hint: unavailable while host is offline");
     expect(stack.output[0]).toContain("network/host-offline");
     expect(stack.reads).not.toContain("apply.inspect");
