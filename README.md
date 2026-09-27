@@ -17,6 +17,8 @@ Ferry never copies logins. OAuth sessions stay on the machine that created them.
 
 ## Install
 
+npm: see #84.
+
 From source:
 
 ```sh
