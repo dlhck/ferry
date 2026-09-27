@@ -28,7 +28,7 @@ const MCP_LOGIN_LIFETIME_S = 330;
 /** The box polls this long for the login URL. */
 const MCP_URL_WAIT_S = 30;
 /** A vendor login and its device code stop after this time on the box. */
-const LOGIN_LIFETIME_S = 900;
+export const LOGIN_LIFETIME_S = 900;
 /** How often ferry probes the login state while the operator finishes the login. */
 const LOGIN_POLL_MS = 5_000;
 /** The setup command talks to the vendor, so it gets more time than one command. */
