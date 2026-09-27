@@ -105,6 +105,7 @@ type Plan = {
 
 const PROBE_TIMEOUT_MS = 30_000;
 const NETWORK_TIMEOUT_MS = 120_000;
+const GH_TIMEOUT_MS = 15_000;
 const TRANSFER_TIMEOUT_MS = 15 * 60_000;
 const SECTION = "ferry-section";
 const NO_PASEO = "ferry-no-paseo";
@@ -358,7 +359,7 @@ async function gitPreflight(source: Side, path: string, problems: string[], note
   for (const stash of lines(stashes)) notes.push(`Stash ${stash} stays in the source copy. The clone does not have it.`);
 
   const log = await must(
-    source.run(`cd ${path} && git log --ignore-missing --stdin --branches HEAD --format='%H%x09%S%x09%s'`, {
+    source.run(`cd ${path} && git log --topo-order --ignore-missing --stdin --branches HEAD --format='%H%x09%S%x09%s'`, {
       input: new TextEncoder().encode([...remoteShas].map((sha) => `^${sha}\n`).join("")),
       timeoutMs: PROBE_TIMEOUT_MS,
     }),
@@ -371,6 +372,11 @@ async function gitPreflight(source: Side, path: string, problems: string[], note
     commits.push({ sha, subject: subject.join("\t") });
     unpushed.set(ref, commits);
   }
+  // A commit that is not on origin passes when git cherry finds an equivalent patch on the default branch of
+  // origin, when git merge-tree shows that the default branch has its changes (a squash merge), or when gh
+  // finds a merged pull request with the branch tip as its head.
+  let mergeTreeUnused = false;
+  let ghUnused = false;
   for (const [ref, commits] of unpushed) {
     const cherry = defaultSha
       ? await source.run(`cd ${path} && git cherry ${defaultSha} ${quoteShell(ref)}`, { timeoutMs: PROBE_TIMEOUT_MS })
@@ -378,12 +384,42 @@ async function gitPreflight(source: Side, path: string, problems: string[], note
     const equivalent = new Set(
       cherry?.ok ? lines(cherry.stdout).filter((line) => line.startsWith("- ")).map((line) => line.slice(2)) : [],
     );
-    for (const commit of commits) {
+    let left = commits.filter((commit) => !equivalent.has(commit.sha));
+    const accepted: [number, string][] = [[commits.length - left.length, "git cherry finds an equivalent patch on origin"]];
+    if (defaultSha && left.length > 0) {
+      const merged = await mergedCommits(source, path, defaultSha, commits, remoteShas);
+      if (merged === null) mergeTreeUnused = true;
+      else {
+        const count = left.length;
+        left = left.filter((commit) => !merged.has(commit.sha));
+        accepted.push([count - left.length, "git merge-tree shows that the default branch of origin has their changes"]);
+      }
+    }
+    if (left.length > 0 && !ghUnused) {
+      const pull = await mergedPull(source, path, url, ref);
+      if (pull === null) ghUnused = true;
+      else if (pull !== undefined) {
+        accepted.push([left.length, `gh finds merged pull request #${pull} with the branch tip as its head`]);
+        left = [];
+      }
+    }
+    for (const [count, reason] of accepted) {
+      if (count === 0) continue;
+      notes.push(
+        `Branch ${ref}: Ferry accepts ${count} ${count === 1 ? "commit that is" : "commits that are"} not on origin, because ${reason}.`,
+      );
+    }
+    for (const commit of left) {
       const name = `${commit.sha.slice(0, 12)} "${commit.subject}"`;
-      if (equivalent.has(commit.sha)) notes.push(`Branch ${ref} has commit ${name}; an equivalent patch is on origin.`);
-      else problems.push(`Branch ${ref} has commit ${name} that is not on origin. Push it. If an equivalent patch is on origin, run git fetch first.`);
+      problems.push(`Branch ${ref} has commit ${name} that is not on origin. Push it. If an equivalent patch is on origin, run git fetch first.`);
     }
   }
+  if (mergeTreeUnused) {
+    notes.push(
+      "Ferry could not compare branches with git merge-tree. It needs git 2.38 or later and the commit of the default branch of origin. Run git fetch.",
+    );
+  }
+  if (ghUnused) notes.push("gh is missing or cannot read origin, so Ferry did not look for merged pull requests.");
 
   const branch = head.trim();
   if (branch && remoteBranches.has(branch)) return { url, branch };
@@ -393,6 +429,65 @@ async function gitPreflight(source: Side, path: string, problems: string[], note
       : "HEAD is detached. The clone uses the default branch.",
   );
   return { url, branch: null };
+}
+
+/**
+ * The commits not on origin that the default branch of origin already has: the ancestors of the newest
+ * commit in `commits` that merges into `defaultSha` with no change to its tree. Null if git cannot do the
+ * check, for example a git before 2.38 or no local copy of `defaultSha`.
+ *
+ * `git merge-tree --write-tree` writes the merged objects. The preflight must not write to the repository,
+ * so git writes them to a temporary object directory and reads the repository objects as alternates.
+ */
+async function mergedCommits(
+  source: Side,
+  path: string,
+  defaultSha: string,
+  commits: readonly { sha: string }[],
+  remoteShas: ReadonlySet<string>,
+): Promise<Set<string> | null> {
+  const base = quoteShell(defaultSha);
+  const script = [
+    `cd ${path} || exit 1`,
+    "objects=$(git rev-parse --path-format=absolute --git-path objects) || { echo unavailable; exit 0; }",
+    `tmp=$(mktemp -d) || exit 1`,
+    `trap 'rm -rf "$tmp"' EXIT`,
+    `export GIT_OBJECT_DIRECTORY="$tmp" GIT_ALTERNATE_OBJECT_DIRECTORIES="$objects"`,
+    `want=$(git rev-parse --verify -q ${base}^{tree}) || { echo unavailable; exit 0; }`,
+    `for c in ${commits.map((commit) => commit.sha).join(" ")}; do`,
+    `  tree=$(git merge-tree --write-tree ${base} "$c" 2>/dev/null)`,
+    "  case $? in",
+    `    0) if [ "$tree" = "$want" ]; then git rev-list --ignore-missing --stdin "$c"; exit; fi ;;`,
+    "    1) ;;",
+    "    *) echo unavailable; exit 0 ;;",
+    "  esac",
+    "done",
+  ].join("\n");
+  const result = await source.run(script, {
+    input: new TextEncoder().encode([...remoteShas].map((sha) => `^${sha}\n`).join("")),
+    timeoutMs: PROBE_TIMEOUT_MS,
+  });
+  if (!result.ok || result.stdout.startsWith("unavailable")) return null;
+  return new Set(lines(result.stdout));
+}
+
+/**
+ * The number of a merged pull request whose head is the tip of `ref`, or undefined if gh finds none. Null if
+ * gh is missing, cannot read origin, or does not answer in time.
+ */
+async function mergedPull(source: Side, path: string, url: string, ref: string): Promise<number | null | undefined> {
+  const result = await source.run(
+    `cd ${path} && tip=$(git rev-parse --verify ${quoteShell(`${ref}^{commit}`)}) && echo "$tip" && GH_PROMPT_DISABLED=1 gh pr list -R ${quoteShell(url)} --state merged --search "$tip" --json number,headRefOid`,
+    { timeoutMs: GH_TIMEOUT_MS },
+  );
+  if (!result.ok) return null;
+  const [tip, ...json] = result.stdout.split("\n");
+  try {
+    const pulls = JSON.parse(json.join("\n")) as { number: number; headRefOid: string }[];
+    return pulls.find((pull) => pull.headRefOid === tip)?.number;
+  } catch {
+    return null;
+  }
 }
 
 const X_SKIPPED = SKIPPED_NAMES.map((name) => `-x ${quoteShell(name)}`).join(" ");
