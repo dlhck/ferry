@@ -144,6 +144,55 @@ describe("ferry tools", () => {
     ]);
   });
 
+  const BOXES: PartialOperatorConfig = {
+    ...CONFIG,
+    boxes: [
+      { name: "a", host: { transport: "ssh", destination: "dev@box-a.example" } },
+      { name: "b", host: { transport: "ssh", destination: "dev@box-b.example" }, tools: { codex: "0.150.0", pnpm: "11.0.0" } },
+    ],
+  };
+
+  test("with box tables, adds the effective policy of each box", async () => {
+    const lines: string[] = [];
+
+    await runToolsCommand({
+      readConfig: () => BOXES,
+      tools: toolsOf(BOXES),
+      local: fakeHost(OPERATOR),
+      writeLine: (line) => lines.push(line),
+    });
+
+    expect(lines).toEqual([
+      "Tools",
+      "  TOOL    KIND   INSTALL  POLICY              BOX a               BOX b               OPERATOR  VERSION  NAME",
+      "  gh      tool   mirror   operator (default)  operator (default)  operator (default)  yes       2.92.0   GitHub CLI",
+      "  claude  agent  always   operator            operator            operator            yes       2.1.281  Claude Code",
+      "  codex   agent  always   latest (default)    latest (default)    0.150.0             no        -        Codex",
+      "  pi      agent  always   latest (default)    latest (default)    latest (default)    no        -        Pi",
+      "  cursor  agent  always   latest (default)    latest (default)    latest (default)    no        -        Cursor Agent",
+      "  node    tool   mirror   operator (default)  operator (default)  operator (default)  yes       24.16.0  node",
+      "  pnpm    tool   mirror   10.2.0              10.2.0              11.0.0              no        -        pnpm",
+      "",
+      "A BOX column shows the version policy of that box, not the version on the box.",
+      "ferry tools reads this machine only. It does not connect to a box.",
+    ]);
+  });
+
+  test("the box selection narrows the box columns", async () => {
+    const lines: string[] = [];
+
+    await runToolsCommand({
+      readConfig: () => BOXES,
+      tools: toolsOf(BOXES),
+      local: fakeHost(OPERATOR),
+      writeLine: (line) => lines.push(line),
+      boxes: ["b"],
+    });
+
+    expect(lines[1]).toBe("  TOOL    KIND   INSTALL  POLICY              BOX b               OPERATOR  VERSION  NAME");
+    expect(lines[4]).toContain("latest (default)    0.150.0  ");
+  });
+
   test("runs without a config and lists only the builtin tools", async () => {
     const lines: string[] = [];
 

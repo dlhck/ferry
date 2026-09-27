@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { createPaseo } from "../src/integrations/paseo.ts";
 import type { Integration } from "../src/integrations/types.ts";
-import type { HostCommand, HostCommandResult, LinkResult } from "../src/link.ts";
+import type { PartialOperatorConfig } from "../src/config.ts";
+import type { HostCommand, HostCommandResult, LinkOptions, LinkResult } from "../src/link.ts";
 import { noProgress } from "../src/progress.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 import type { ToolDescriptor } from "../src/registry/types.ts";
+import { planTools } from "../src/tools/resolve.ts";
 import {
-  planUpdate,
+  planOperator,
   runUpdateCommand,
   UpdateError,
   type UpdateCommandDependencies,
@@ -108,6 +110,8 @@ function dependencies(
       readConfig: () => config,
       createLink: () => ({
         run: async (command: string): Promise<LinkResult> => {
+          // The reach check of each box before its plan.
+          if (command === "true") return { ok: true, address: "100.64.0.1", stdout: "", stderr: "" };
           const read = versionRead(command);
           if (read !== null) {
             const stdout = boxVersions[read];
@@ -165,7 +169,10 @@ describe("update plan", () => {
   test("plans the box by version in depends order and updates only the installed agent CLIs on the operator machine", async () => {
     const { recorder, deps } = dependencies({ installed: ["claude"] });
 
-    const plan = await planUpdate(tools, undefined, deps.local!, deps.createLink!(config.host as never));
+    const plan = {
+      box: await planTools("update", tools, undefined, deps.local!, deps.createLink!(config.host as never)),
+      operator: await planOperator(tools, deps.local!),
+    };
 
     expect(plan.box.map(({ tool, action, command }) => [tool, action, command])).toEqual([
       ["gh", "update", "sudo apt install gh -y"],
@@ -389,6 +396,23 @@ describe("update command", () => {
     ]);
   });
 
+  test("an offline [host] box fails the command after the operator updates, with no prefix", async () => {
+    const { recorder, deps } = dependencies();
+    const createLink = () => ({
+      run: async (): Promise<LinkResult> => ({
+        ok: false,
+        error: { code: "host-offline", origin: "network", message: "the box is offline" },
+      }),
+    });
+
+    await expect(runUpdateCommand({ yes: true, dryRun: false }, { ...deps, createLink })).rejects.toThrow(
+      "1 of 3 updates failed: box offline",
+    );
+    expect(recorder.local).toEqual(["claude update", "codex update"]);
+    expect(recorder.output[0]).toBe("Box offline, Ferry skips it: the box is offline");
+    expect(recorder.output.some((line) => line.startsWith("Box default:"))).toBe(false);
+  });
+
   test("refuses to run without a complete host", async () => {
     const { deps } = dependencies();
 
@@ -526,5 +550,172 @@ describe("update command with integrations", () => {
     expect(calls).toEqual([]);
     expect(recorder.box).toEqual([]);
     expect(recorder.output.slice(-2)).toEqual(["Box paseo:", "  update commands"]);
+  });
+});
+
+describe("update command across boxes", () => {
+  const boxes: PartialOperatorConfig = {
+    version: 1,
+    publisher: "operator",
+    snapshotUrl: "git@example.com:snapshot.git",
+    integrations: { paseo: true },
+    boxes: [
+      { name: "a", host: { transport: "ssh", destination: "dev@box-a.example" } },
+      { name: "b", host: { transport: "ssh", destination: "dev@box-b.example" }, integrations: { paseo: false } },
+    ],
+  };
+
+  /** The dependencies with one fake link per box. Each box command is recorded as `<destination>: <command>`. */
+  function boxDependencies(offline: readonly string[] = []) {
+    const { recorder, deps } = dependencies();
+    const onBoxes: string[] = [];
+    const paseo: string[] = [];
+    const createLink = (options: LinkOptions) => {
+      const destination = "destination" in options ? options.destination : `${options.user}@${options.host}`;
+      const inner = deps.createLink!(options);
+      return {
+        destination,
+        run: async (command: string, runOptions?: { timeoutMs?: number }): Promise<LinkResult> => {
+          if (offline.includes(destination)) {
+            return { ok: false, error: { code: "host-offline", origin: "network", message: `${destination} is offline` } };
+          }
+          const before = recorder.box.length;
+          const result = await inner.run(command, runOptions);
+          if (recorder.box.length > before) onBoxes.push(`${destination}: ${recorder.box.pop()}`);
+          return result;
+        },
+      };
+    };
+    const integration: Integration = {
+      ...createPaseo({ platform: "win32" }),
+      plan: async (action) => [`${action} commands`],
+      update: async (link) => {
+        paseo.push((link as unknown as { destination: string }).destination);
+        return ["Paseo 0.9.2 runs on the box."];
+      },
+    };
+    return {
+      recorder,
+      onBoxes,
+      paseo,
+      deps: { ...deps, readConfig: () => boxes, createLink, integrations: [integration] } as Partial<UpdateCommandDependencies>,
+    };
+  }
+
+  const BOX_COMMANDS = ["sudo apt install gh -y", "claude update", "codex update", "install pnpm '11.17.0'"];
+
+  test("updates each box and runs the operator part once", async () => {
+    const { recorder, onBoxes, deps } = boxDependencies();
+
+    await runUpdateCommand({ yes: true, dryRun: false }, deps);
+
+    expect(onBoxes).toEqual([
+      ...BOX_COMMANDS.map((command) => `dev@box-a.example: ${command}`),
+      ...BOX_COMMANDS.map((command) => `dev@box-b.example: ${command}`),
+    ]);
+    expect(recorder.local).toEqual(["claude update", "codex update"]);
+    expect(recorder.output).toContain("[a] Box gh: update 2.92.0 (policy operator): sudo apt install gh -y");
+    expect(recorder.output).toContain("[b] Box gh: update 2.92.0 (policy operator): sudo apt install gh -y");
+    expect(recorder.output).toContain("Updated [b] box gh.");
+    expect(recorder.output.filter((line) => line.startsWith("Operator claude"))).toEqual(["Operator claude: claude update"]);
+    expect(recorder.output.slice(-2)).toEqual(["Box a: done.", "Box b: done."]);
+  });
+
+  test("an offline box does not stop the other box or the operator part, and the command fails", async () => {
+    const { recorder, onBoxes, deps } = boxDependencies(["dev@box-a.example"]);
+
+    await expect(runUpdateCommand({ yes: true, dryRun: false }, deps)).rejects.toThrow(
+      "1 of 7 updates failed: [a] box offline",
+    );
+
+    expect(onBoxes).toEqual(BOX_COMMANDS.map((command) => `dev@box-b.example: ${command}`));
+    expect(recorder.local).toEqual(["claude update", "codex update"]);
+    expect(recorder.output).toContain("[a] Box offline, Ferry skips it: dev@box-a.example is offline");
+    expect(recorder.output.slice(-2)).toEqual(["Box a: failed, the box is offline.", "Box b: done."]);
+  });
+
+  test("a failed update on one box names the box in the report", async () => {
+    const { recorder, deps } = boxDependencies();
+    const failing = deps.createLink!;
+    const createLink = (options: LinkOptions) => {
+      const link = failing(options);
+      return {
+        run: async (command: string, runOptions?: { timeoutMs?: number }): Promise<LinkResult> =>
+          "destination" in options && options.destination === "dev@box-b.example" && command === "claude update"
+            ? { ok: false, error: { code: "command-failed", origin: "box", message: "update refused" } }
+            : link.run(command, runOptions),
+      };
+    };
+
+    await expect(runUpdateCommand({ yes: true, dryRun: false }, { ...deps, createLink })).rejects.toThrow(
+      "1 of 10 updates failed: [b] box claude",
+    );
+    expect(recorder.output.slice(-2)).toEqual(["Box a: done.", "Box b: failed, 1 update failed."]);
+  });
+
+  test("updates Paseo only on the boxes where it is enabled", async () => {
+    const { recorder, paseo, deps } = boxDependencies();
+
+    await runUpdateCommand({ yes: true, dryRun: false, includeIntegrations: true }, deps);
+
+    expect(paseo).toEqual(["dev@box-a.example"]);
+    expect(recorder.output).toContain("[a] Box paseo:");
+    expect(recorder.output).not.toContain("[b] Box paseo:");
+    expect(recorder.output).toContain("[a] Paseo 0.9.2 runs on the box.");
+  });
+
+  test("a box override turns Paseo on for that box only", async () => {
+    const { paseo, deps } = boxDependencies();
+    const override: PartialOperatorConfig = {
+      ...boxes,
+      integrations: { paseo: false },
+      boxes: [boxes.boxes![0]!, { ...boxes.boxes![1]!, integrations: { paseo: true } }],
+    };
+
+    await runUpdateCommand({ yes: true, dryRun: false, includeIntegrations: true }, { ...deps, readConfig: () => override });
+
+    expect(paseo).toEqual(["dev@box-b.example"]);
+  });
+
+  test("uses the tool policy of each box", async () => {
+    const { onBoxes, deps } = boxDependencies();
+    const pinned: PartialOperatorConfig = {
+      ...boxes,
+      boxes: [boxes.boxes![0]!, { ...boxes.boxes![1]!, tools: { codex: "0.150.0" } }],
+    };
+
+    await runUpdateCommand({ yes: true, dryRun: false }, { ...deps, readConfig: () => pinned });
+
+    expect(onBoxes).toContain("dev@box-a.example: codex update");
+    expect(onBoxes).not.toContain("dev@box-b.example: codex update");
+  });
+
+  test("--box selects the boxes, and one selected box gets no prefix", async () => {
+    const { recorder, onBoxes, deps } = boxDependencies();
+
+    await runUpdateCommand({ yes: true, dryRun: false, boxes: ["b"] }, deps);
+
+    expect(onBoxes).toEqual(BOX_COMMANDS.map((command) => `dev@box-b.example: ${command}`));
+    expect(recorder.output).toContain("Box gh: update 2.92.0 (policy operator): sudo apt install gh -y");
+    expect(recorder.output.some((line) => line.startsWith("Box b:"))).toBe(false);
+  });
+
+  test("refuses an unknown box", async () => {
+    const { deps } = boxDependencies();
+
+    await expect(runUpdateCommand({ yes: true, dryRun: true, boxes: ["c"] }, deps)).rejects.toThrow(
+      "unknown box c. Known boxes: a, b.",
+    );
+  });
+
+  test("dry run lists the plan of each box and changes nothing", async () => {
+    const { recorder, onBoxes, deps } = boxDependencies(["dev@box-b.example"]);
+
+    await runUpdateCommand({ yes: false, dryRun: true }, deps);
+
+    expect(onBoxes).toEqual([]);
+    expect(recorder.local).toEqual([]);
+    expect(recorder.output).toContain("[a] Box claude: update latest (policy latest): claude update");
+    expect(recorder.output).toContain("[b] Box offline, Ferry skips it: dev@box-b.example is offline");
   });
 });

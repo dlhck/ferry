@@ -234,7 +234,10 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
   const integrationBox = (selected: { config: PartialOperatorConfig; box: ResolvedBox } | undefined) => ({
     ...boxConfig(selected),
     ...(selected?.config.boxes
-      ? { setIntegration: (id: "paseo", enabled: boolean) => setIntegration(id, enabled, homedir(), selected.box.name) }
+      ? {
+          setIntegration: (id: "paseo", enabled: boolean) => setIntegration(id, enabled, homedir(), selected.box.name),
+          box: selected.box.name,
+        }
       : {}),
   });
 
@@ -299,8 +302,8 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .action(async (options: { yes?: boolean; dryRun?: boolean }) => {
       await withProgress((progress, writeLine) =>
         (dependencies.runUpdate ?? runUpdateCommand)(
-          { yes: options.yes === true, dryRun: options.dryRun === true, includeIntegrations: true },
-          { tools: registry().tools, createLink, progress, writeLine, ...boxConfig(selectBox("update", false)) },
+          { yes: options.yes === true, dryRun: options.dryRun === true, includeIntegrations: true, boxes: boxNames() },
+          { tools: registry().tools, readConfig: config, createLink, progress, writeLine },
         ),
       );
     });
@@ -408,9 +411,9 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
 
   const integrations = program
     .command("integrations")
-    .description("List the integrations, whether each one is enabled, and the local app versions")
+    .description("List the integrations of each box, whether each one is enabled, and the local app versions")
     .action(async () => {
-      const lines = await integrationLines(config(), dependencies.integrations ?? INTEGRATIONS);
+      const lines = await integrationLines(config(), dependencies.integrations ?? INTEGRATIONS, boxNames());
       for (const line of lines) writeLine(line);
     });
   integrations
@@ -456,9 +459,9 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("tools")
-    .description("List the tools, the version policy of each one, and the versions on this machine")
+    .description("List the tools, the version policy of each one and of each box, and the versions on this machine")
     .action(async () => {
-      await (dependencies.runTools ?? runToolsCommand)({ tools: registry().tools, readConfig: config, writeLine });
+      await (dependencies.runTools ?? runToolsCommand)({ tools: registry().tools, readConfig: config, writeLine, boxes: boxNames() });
     });
 
   const watch = program
@@ -546,7 +549,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .argument("<name>", "box name")
     .action((name: string) => runBoxDefault({ name }, { readConfig: config, writeConfig: (value) => writeConfig(value), writeLine }));
 
-  for (const name of ["init", "install", "update", "auth", "sync", "move", "status"]) {
+  for (const name of ["init", "install", "update", "auth", "sync", "move", "status", "integrations", "tools"]) {
     const command = program.commands.find((known) => known.name() === name);
     if (command) boxCommands.add(command);
   }

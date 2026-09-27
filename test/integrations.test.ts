@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { PartialOperatorConfig } from "../src/config.ts";
+import { configPath, type PartialOperatorConfig } from "../src/config.ts";
 import {
   runIntegrationCommand,
   type IntegrationCommandDependencies,
@@ -431,6 +431,47 @@ describe("integration list", () => {
   });
 });
 
+describe("integration list with box tables", () => {
+  const BOXES: PartialOperatorConfig = {
+    ...CONFIG,
+    host: undefined,
+    integrations: { paseo: true },
+    boxes: [
+      { name: "a", host: { transport: "ssh", destination: "dev@box-a.example" } },
+      { name: "b", host: { tailscale: "box-b", sshUser: "dev" }, integrations: { paseo: false } },
+    ],
+  };
+  const paseo = () => createPaseo({ platform: "linux", linuxInstallDir: join(tempRoot(), "none") });
+
+  test("lists the effective state of each box with the connect steps of that box", async () => {
+    expect(await integrationLines(BOXES, [paseo()])).toEqual([
+      "Box a",
+      "  paseo  enabled  Paseo daemon on the box",
+      "    Local app: not found. The box version is not pinned.",
+      "    Connect to the box:",
+      "      Open Paseo Desktop.",
+      "      Open Settings → Add host → Remote SSH.",
+      "      Enter ssh://dev@box-a.example.",
+      "Box b",
+      "  paseo  disabled  Paseo daemon on the box",
+      "    Local app: not found. The box version is not pinned.",
+    ]);
+  });
+
+  test("the selection narrows the list", async () => {
+    const lines = await integrationLines(BOXES, [paseo()], ["b"]);
+    expect(lines[0]).toBe("Box b");
+    expect(lines.some((line) => line.startsWith("Box a"))).toBe(false);
+  });
+
+  test("reads the local app version once", async () => {
+    let reads = 0;
+    const counted: Integration = { ...paseo(), localVersion: async () => { reads += 1; return { version: null, source: null }; } };
+    await integrationLines(BOXES, [counted]);
+    expect(reads).toBe(1);
+  });
+});
+
 describe("integrations enable and disable", () => {
   type Recorder = { events: string[]; output: string[] };
 
@@ -480,6 +521,7 @@ describe("integrations enable and disable", () => {
 
     expect(recorder.events).toEqual(["plan enable", "confirm", "link", "enable", "config paseo=true"]);
     expect(recorder.output[0]).toBe("Enable Paseo:");
+    expect(recorder.output).toContain(`Set [integrations] paseo = true in ${configPath()}.`);
     expect(recorder.output).toContain("Paseo 0.9.2 runs on the box.");
     expect(recorder.output.slice(-4)).toEqual([
       "Connect Paseo to the box:",
@@ -487,6 +529,17 @@ describe("integrations enable and disable", () => {
       "  Open Settings → Add host → Remote SSH.",
       "  Enter ssh://ploi@box.",
     ]);
+  });
+
+  test("names the box table when the flag goes to [box.<name>.integrations]", async () => {
+    const recorder: Recorder = { events: [], output: [] };
+
+    await runIntegrationCommand(
+      { action: "disable", name: "paseo", yes: true, purge: false },
+      dependencies(recorder, { box: "b" }),
+    );
+
+    expect(recorder.output.at(-1)).toBe(`Set [box.b.integrations] paseo = false in ${configPath()}.`);
   });
 
   test("enable does not set the config flag when a box step fails", async () => {
