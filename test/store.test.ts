@@ -46,6 +46,7 @@ function seed(body = "Use small commits.\n"): Seed {
     mcp: [],
     identity: `seed-${body}`,
     leftovers: [],
+    storeUpdates: [],
   };
 }
 

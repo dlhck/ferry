@@ -47,6 +47,14 @@ Ferry adds `-g` and `--copy` if you do not pass them. The example runs `npx skil
 
 The install does not publish the skill. Run `ferry sync` or keep `ferry watch` running to publish it to the snapshot and apply it on the box.
 
+Some installers replace the store link of a skill in one harness root with a real directory that holds a newer version. For example, `vendurehq/ai-stack` does this in `~/.agents/skills`. Sync then updates the store copy from that directory, publishes it, and links the directory to the store. Sync does this only when all of these conditions are true:
+
+- Exactly one harness root has a real directory for the skill.
+- Each other harness root that has the skill links to `~/.ferry/store/skills/<name>`, directly or through a chain of links.
+- The store copy has no changes since its last commit in `~/.ferry/store`.
+
+In all other cases, sync stops with a clash. `ferry sync` prints `Updated store skill <name> from <path>` for each update. `ferry sync --dry-run` lists the updates in the `Store updates from a harness root:` line and changes nothing.
+
 ## Update the agent tools
 
 `ferry update` runs the update command of each agent tool on the box and on this machine:

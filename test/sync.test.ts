@@ -7,6 +7,8 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
+  lstatSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,7 +19,13 @@ import { denyRules, type Seed } from "../src/manifest.ts";
 import { loadRegistry, type RegistryConfig } from "../src/registry/load.ts";
 import type { LinkResult } from "../src/link.ts";
 import type { HarnessDescriptor } from "../src/registry/types.ts";
-import { remoteUpdateCommand, runSync, type SyncDependencies, type SyncPlan } from "../src/sync.ts";
+import {
+  remoteUpdateCommand,
+  runSync,
+  SyncError,
+  type SyncDependencies,
+  type SyncPlan,
+} from "../src/sync.ts";
 
 const config: OperatorConfig = {
   version: 1,
@@ -35,6 +43,7 @@ const seed: Seed = {
   mcp: [],
   identity: "seed-identity",
   leftovers: [],
+  storeUpdates: [],
 };
 
 describe("remoteUpdateCommand", () => {
@@ -1023,6 +1032,141 @@ describe("runSync", () => {
         `Discarded box change: ${boxCheckout}/skills/tdd/notes.md`,
       ]);
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a store update from one harness root", () => {
+  /**
+   * The published store copy of `tdd` is v1. An installer replaced the
+   * `.agents/skills` link with a real v2 directory. `.claude/skills` links to
+   * the store, and `.codex/skills` chains through `.claude/skills`.
+   */
+  async function installerHome() {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "ferry-sync-store-update-")));
+    const remote = join(root, "remote.git");
+    const home = join(root, "home");
+    const store = join(home, ".ferry", "store");
+    await sh(root, `git init --quiet --bare ${remote} && mkdir -p ${home}/.ferry && git clone --quiet ${remote} ${store}`);
+    await sh(
+      store,
+      "git config user.name 'Ferry Test' && git config user.email ferry@example.test && git config commit.gpgsign false",
+    );
+    mkdirSync(join(store, "skills", "tdd"), { recursive: true });
+    writeFileSync(join(store, "skills", "tdd", "SKILL.md"), "v1\n");
+    await sh(store, "git add -A && git commit --quiet -m v1 && git push --quiet origin HEAD");
+
+    const real = join(home, ".agents", "skills", "tdd");
+    mkdirSync(real, { recursive: true });
+    writeFileSync(join(real, "SKILL.md"), "v2\n");
+    writeFileSync(join(real, ".ai-stack-source"), "stack\n");
+    mkdirSync(join(home, ".claude", "skills"), { recursive: true });
+    symlinkSync(join(store, "skills", "tdd"), join(home, ".claude", "skills", "tdd"));
+    mkdirSync(join(home, ".codex", "skills"), { recursive: true });
+    symlinkSync(join(home, ".claude", "skills", "tdd"), join(home, ".codex", "skills", "tdd"));
+    const remoteTip = (await sh(remote, "git rev-parse HEAD")).trim();
+    return { root, remote, home, store, real, remoteTip };
+  }
+
+  function prohibited(): SyncDependencies {
+    const refuse = () => {
+      throw new Error("must not run");
+    };
+    return { createLink: refuse, openStore: refuse, acquireLock: refuse, apply: refuse, adopt: refuse };
+  }
+
+  test("updates the store copy, publishes it, and links the real directory to the store", async () => {
+    const { root, remote, home, store, real } = await installerHome();
+    const plans: SyncPlan[] = [];
+    const lines: string[] = [];
+    try {
+      await runSync(
+        { home },
+        {
+          readConfig: () => ({ ...config, snapshotUrl: remote }),
+          publisher: () => "operator-machine",
+          createLink: () => ({
+            run: async (command) => ({
+              ok: true,
+              address: "box",
+              stdout: command.startsWith("printf") ? "/box\n" : "",
+              stderr: "",
+            }),
+          }),
+          acquireLock: () => () => {},
+          apply: async (input) => ({
+            checkout: input.checkout,
+            targetHome: input.targetHome,
+            actions: [],
+            unmanaged: [],
+          }),
+          writePlan: (plan) => plans.push(plan),
+          writeLine: (line) => lines.push(line),
+        },
+      );
+
+      expect(plans[0]?.storeUpdates).toEqual([{ name: "tdd", path: real }]);
+      expect(lines).toContain(`Updated store skill tdd from ${real}`);
+      expect(await sh(remote, "git show HEAD:skills/tdd/SKILL.md")).toBe("v2\n");
+      expect(await sh(remote, "git show HEAD:skills/tdd/.ai-stack-source")).toBe("stack\n");
+      expect(readFileSync(join(home, ".codex", "skills", "tdd", "SKILL.md"), "utf8")).toBe("v2\n");
+      expect(lstatSync(real).isSymbolicLink()).toBe(true);
+      expect(realpathSync(real)).toBe(join(store, "skills", "tdd"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses with a clash when the store copy has unpublished changes", async () => {
+    const { root, remote, home, store, real, remoteTip } = await installerHome();
+    try {
+      writeFileSync(join(store, "skills", "tdd", "SKILL.md"), "local edit\n");
+
+      const sync = runSync(
+        { home },
+        {
+          ...prohibited(),
+          readConfig: () => ({ ...config, snapshotUrl: remote }),
+          publisher: () => "operator-machine",
+          writePlan: () => {},
+        },
+      );
+
+      await expect(sync).rejects.toBeInstanceOf(SyncError);
+      await expect(sync).rejects.toMatchObject({ code: "manifest-refusal" });
+      await expect(sync).rejects.toThrow(/clash tdd/);
+      expect(readFileSync(join(store, "skills", "tdd", "SKILL.md"), "utf8")).toBe("local edit\n");
+      expect(lstatSync(real).isDirectory()).toBe(true);
+      expect((await sh(remote, "git rev-parse HEAD")).trim()).toBe(remoteTip);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("dry-run names the skill and changes nothing", async () => {
+    const { root, remote, home, store, real, remoteTip } = await installerHome();
+    const output: string[] = [];
+    const log = console.log;
+    console.log = (line: string) => output.push(line);
+    try {
+      const result = await runSync(
+        { home, dryRun: true },
+        {
+          ...prohibited(),
+          readConfig: () => ({ ...config, snapshotUrl: remote }),
+          publisher: () => "operator-machine",
+        },
+      );
+
+      expect(result.plan.storeUpdates).toEqual([{ name: "tdd", path: real }]);
+      expect(output.join("\n").split("\n")).toContain(`Store updates from a harness root: tdd (${real})`);
+      expect(readFileSync(join(store, "skills", "tdd", "SKILL.md"), "utf8")).toBe("v1\n");
+      expect(await sh(store, "git status --porcelain --untracked-files=all")).toBe("");
+      expect(lstatSync(real).isDirectory()).toBe(true);
+      expect((await sh(remote, "git rev-parse HEAD")).trim()).toBe(remoteTip);
+    } finally {
+      console.log = log;
       rmSync(root, { recursive: true, force: true });
     }
   });

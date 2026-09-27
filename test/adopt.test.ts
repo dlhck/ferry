@@ -37,6 +37,7 @@ function fixture(source = "same\n", stored = "same\n") {
     mcp: [],
     identity: "identity",
     leftovers: [],
+    storeUpdates: [],
   };
   return { home, store, seed };
 }

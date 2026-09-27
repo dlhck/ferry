@@ -216,6 +216,23 @@ function tipReport(local: string | null, remote: string | null, box: string | nu
   };
 }
 
+/**
+ * True when `skills/<name>` in the checkout differs from its last commit, with
+ * untracked files counted. The check takes no git lock, so a dry run can use it.
+ */
+export async function skillChanged(
+  checkout: string,
+  name: string,
+  git: GitRunner = new RealGitRunner(),
+): Promise<boolean> {
+  const result = await checked(
+    git,
+    ["--no-optional-locks", "status", "--porcelain", "--untracked-files=all", "--", `skills/${name}`],
+    checkout,
+  );
+  return result.stdout.length > 0;
+}
+
 export async function configuredValue(git: GitRunner, cwd: string, key: string): Promise<string | null> {
   const result = await git.run({ args: ["config", "--get", key], cwd });
   if (result.status !== 0) return null;
