@@ -203,6 +203,40 @@ describe("update command", () => {
     expect(recorder.output).toContain("Updated operator codex.");
   });
 
+  test("shows a counted step for each update and prints each result after its step", async () => {
+    const { recorder, deps } = dependencies({ boxFails: ["claude update"] });
+    const events = recorder.output;
+    const progress = {
+      start: (step: string) => events.push(`start:${step}`),
+      count: () => {},
+      done: () => events.push("done"),
+      fail: () => events.push("fail"),
+    };
+
+    await expect(runUpdateCommand({ yes: true, dryRun: false }, { ...deps, progress })).rejects.toThrow(
+      "1 of 5 updates failed",
+    );
+
+    expect(events.slice(0, 2)).toEqual(["start:Checking the installed tools", "done"]);
+    expect(events.slice(-15)).toEqual([
+      "start:Updating box gh (1/5)",
+      "done",
+      "Updated box gh.",
+      "start:Updating box claude (2/5)",
+      "fail",
+      "Failed to update box claude: update refused",
+      "start:Updating box codex (3/5)",
+      "done",
+      "Updated box codex.",
+      "start:Updating operator claude (4/5)",
+      "done",
+      "Updated operator claude.",
+      "start:Updating operator codex (5/5)",
+      "done",
+      "Updated operator codex.",
+    ]);
+  });
+
   test("refuses to run without a complete host", async () => {
     const { deps } = dependencies();
 

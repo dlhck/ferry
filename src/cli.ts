@@ -23,9 +23,11 @@ import {
 import {
   denyListLines,
   runSync as runSyncCommand,
+  type SyncDependencies,
   type SyncInput,
   type SyncResult,
 } from "./sync.ts";
+import { noProgress, plainProgress, terminalProgress, type Progress } from "./progress.ts";
 import { readConfig, type PartialOperatorConfig } from "./config.ts";
 import { loadRegistry, type Registry } from "./registry/load.ts";
 import {
@@ -74,7 +76,7 @@ type CliDependencies = {
     input: UpdateCommandInput,
     dependencies?: Partial<UpdateCommandDependencies>,
   ) => Promise<void>;
-  readonly runSync?: (input: SyncInput) => Promise<SyncResult>;
+  readonly runSync?: (input: SyncInput, dependencies?: SyncDependencies) => Promise<SyncResult>;
   readonly runStatus?: (
     input: StatusCommandInput,
     dependencies?: Partial<StatusCommandDependencies>,
@@ -91,6 +93,10 @@ type CliDependencies = {
   readonly approveHostKeys?: (request: SnapshotHostKeyApproval) => Promise<boolean>;
   readonly confirmUninstall?: () => Promise<boolean>;
   readonly writeLine?: (line: string) => void;
+  /** The reporter for one command run. The default is a spinner on a terminal, else plain lines. */
+  readonly createProgress?: () => Progress;
+  /** The reporter for `ferry watch`, whose log must stay plain. */
+  readonly createPlainProgress?: () => Progress;
 };
 
 type CliRuntime = {
@@ -102,6 +108,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
   // Commands that need the registry resolve it when they run, so help never reads the config.
   const config = () => (dependencies.readConfig ?? readConfig)() ?? {};
   const registry = () => resolveRegistry(config());
+  const progress = () => (dependencies.createProgress ?? terminalProgress)();
   const program = new Command();
   program
     .name("ferry")
@@ -139,6 +146,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
         {
           prompt: dependencies.prompt ?? promptForInit,
           approveHostKeys: dependencies.approveHostKeys ?? approveHostKeys,
+          progress: progress(),
         },
       );
       reportInit(result, dependencies.writeLine ?? console.log);
@@ -151,7 +159,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .action(async (options: { yes?: boolean }) => {
       await (dependencies.runInstall ?? runInstallCommand)(
         { yes: options.yes === true },
-        { tools: registry().tools },
+        { tools: registry().tools, progress: progress() },
       );
     });
 
@@ -163,7 +171,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .action(async (options: { yes?: boolean; dryRun?: boolean }) => {
       await (dependencies.runUpdate ?? runUpdateCommand)(
         { yes: options.yes === true, dryRun: options.dryRun === true },
-        { tools: registry().tools },
+        { tools: registry().tools, progress: progress() },
       );
     });
 
@@ -191,7 +199,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .action(async (provider: string | undefined, options: { mcp?: string }) => {
       await (dependencies.runAuth ?? runAuthCommand)(
         options.mcp === undefined ? { provider } : { provider, mcp: options.mcp },
-        { tools: registry().tools },
+        { tools: registry().tools, progress: progress() },
       );
     });
 
@@ -202,11 +210,14 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .option("--force", "back up live managed paths before Apply links them")
     .option("-m, --message <message>", "snapshot commit message")
     .action(async (options: { dryRun?: boolean; force?: boolean; message?: string }) => {
-      await (dependencies.runSync ?? runSyncCommand)({
-        dryRun: options.dryRun === true,
-        force: options.force === true,
-        message: options.message,
-      });
+      await (dependencies.runSync ?? runSyncCommand)(
+        {
+          dryRun: options.dryRun === true,
+          force: options.force === true,
+          message: options.message,
+        },
+        { progress: progress() },
+      );
     });
 
   program
@@ -218,6 +229,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
         { json: options.json === true },
         {
           writeLine: dependencies.writeLine ?? console.log,
+          progress: options.json === true ? noProgress : progress(),
         },
       );
     });
@@ -231,10 +243,18 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       process.once("SIGINT", stop);
       process.once("SIGTERM", stop);
       try {
-        await (dependencies.runWatch ?? runWatch)({
-          signal: controller.signal,
-          dailyUpdate: config().update?.watch === true,
-        });
+        await (dependencies.runWatch ?? runWatch)(
+          {
+            signal: controller.signal,
+            dailyUpdate: config().update?.watch === true,
+          },
+          {
+            progress: (
+              dependencies.createPlainProgress ??
+              (() => plainProgress((line) => process.stderr.write(`${line}\n`)))
+            )(),
+          },
+        );
       } finally {
         process.off("SIGINT", stop);
         process.off("SIGTERM", stop);

@@ -9,6 +9,8 @@ import type {
 import { denyRules } from "../src/manifest.ts";
 import type { SyncInput, SyncResult } from "../src/sync.ts";
 import type { UninstallInput, UninstallResult } from "../src/uninstall.ts";
+import { noProgress, type Progress } from "../src/progress.ts";
+import { recordProgress } from "./fake-progress.ts";
 
 describe("ferry --help", () => {
   test("renders command errors without throwing them to Bun", async () => {
@@ -592,5 +594,93 @@ describe("ferry --help", () => {
     expect(help).toContain("--project");
     expect(help).toContain("Global copy installs match Ferry's snapshot model");
     expect(help).toContain("ferry sync");
+  });
+});
+
+describe("progress selection", () => {
+  const terminal = recordProgress();
+  const plain = recordProgress();
+  const selection = { createProgress: () => terminal, createPlainProgress: () => plain, readConfig: () => null };
+
+  test("passes the terminal reporter to sync, status, init, install, auth, and update", async () => {
+    const received: Record<string, unknown> = {};
+    const program = buildProgram({
+      ...selection,
+      runSync: async (_input, dependencies) => {
+        received.sync = dependencies?.progress;
+        return { dryRun: true, published: false } as unknown as SyncResult;
+      },
+      runStatus: async (_input, dependencies) => {
+        received.status = dependencies?.progress;
+      },
+      runInit: async (_input, dependencies) => {
+        received.init = dependencies?.progress;
+        return { dryRun: false, address: "box", paseoPort: 6767, leftovers: [], published: false };
+      },
+      runInstall: async (_input, dependencies) => {
+        received.install = dependencies?.progress;
+      },
+      runAuth: async (_input, dependencies) => {
+        received.auth = dependencies?.progress;
+      },
+      runUpdate: async (_input, dependencies) => {
+        received.update = dependencies?.progress;
+      },
+      writeLine: () => {},
+    });
+
+    for (const args of [
+      ["sync"],
+      ["status"],
+      ["init", "--host", "box", "--ssh-user", "ferry", "--snapshot-url", "snapshot.git"],
+      ["install", "--yes"],
+      ["auth", "gh"],
+      ["update", "--yes"],
+    ]) {
+      await program.parseAsync(args, { from: "user" });
+    }
+
+    expect(received).toEqual({
+      sync: terminal,
+      status: terminal,
+      init: terminal,
+      install: terminal,
+      auth: terminal,
+      update: terminal,
+    });
+  });
+
+  test("status --json gets no progress and prints the same JSON as before", async () => {
+    let received: Progress | undefined;
+    const lines: string[] = [];
+    const report = { schemaVersion: 1, link: { online: false } };
+    const program = buildProgram({
+      ...selection,
+      runStatus: async (_input, dependencies) => {
+        received = dependencies?.progress;
+        dependencies?.writeLine?.(JSON.stringify(report));
+        return report;
+      },
+      writeLine: (line) => lines.push(line),
+    });
+
+    await program.parseAsync(["status", "--json"], { from: "user" });
+
+    expect(received).toBe(noProgress);
+    expect(lines).toEqual(['{"schemaVersion":1,"link":{"online":false}}']);
+  });
+
+  test("watch always gets the plain reporter", async () => {
+    let received: unknown;
+    const program = buildProgram({
+      ...selection,
+      runWatch: async (_input, dependencies) => {
+        received = dependencies?.progress;
+      },
+    });
+
+    await program.parseAsync(["watch"], { from: "user" });
+
+    expect(received).toBe(plain);
   });
 });

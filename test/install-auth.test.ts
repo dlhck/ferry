@@ -10,6 +10,7 @@ import type { GitIdentity } from "../src/git-identity.ts";
 import type { InstallProgress, InstallRecipe, InstallResult } from "../src/install.ts";
 import type { LinkResult } from "../src/link.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
+import { recordProgress } from "./fake-progress.ts";
 
 const config = {
   version: 1 as const,
@@ -150,7 +151,7 @@ describe("install command", () => {
     expect(confirmed).toBe(true);
   });
 
-  test("shows a spinner and per-tool progress while installing", async () => {
+  test("shows one progress step for each tool and for the box git identity", async () => {
     const progress: string[] = [];
 
     await runInstallCommand(
@@ -170,10 +171,11 @@ describe("install command", () => {
 
     expect(progress).toEqual([
       "start:Installing gh (1/2)",
-      "advance:1:Installed gh (1/2)",
-      "message:Installing codex (2/2)",
-      "advance:1:Installed codex (2/2)",
-      "stop:Installed 2 tools",
+      "done",
+      "start:Installing codex (2/2)",
+      "done",
+      "start:Setting the box git identity",
+      "done",
     ]);
   });
 
@@ -202,10 +204,7 @@ describe("install command", () => {
         }),
       ),
     ).rejects.toThrow("Install stopped because Link reported command-failed from box.");
-    expect(progress).toEqual([
-      "start:Installing gh (1/2)",
-      "error:Failed to install gh (1/2)",
-    ]);
+    expect(progress).toEqual(["start:Installing gh (1/2)", "fail"]);
     expect(output.join("\n")).toContain("box/command-failed");
     expect(output.join("\n")).not.toContain("token-secret");
   });
@@ -266,6 +265,38 @@ describe("auth command", () => {
     expect(linkOptions).toEqual({ host: config.host.tailscale, user: config.host.sshUser });
     expect(authLink).toBe(link);
     expect(providers).toEqual(["gh"]);
+  });
+
+  test("shows the login start as a step and ends it before the result prints", async () => {
+    const events: string[] = [];
+    const progress = recordProgress();
+
+    await runAuthCommand(
+      { provider: "gh" },
+      authDependencies({
+        output: events,
+        progress: { ...progress, done: () => events.push("done") },
+        result: { kind: "printed-url", provider: "gh", url: "https://github.com/login/device" },
+      }),
+    );
+
+    expect(progress.events).toEqual(["start:Starting the gh login on the box"]);
+    expect(events).toEqual(["done", "URL: https://github.com/login/device"]);
+  });
+
+  test("marks the login step failed when the box reports a failure", async () => {
+    const progress = recordProgress();
+
+    await expect(
+      runAuthCommand(
+        { provider: "gh" },
+        authDependencies({
+          progress,
+          result: { kind: "failed", provider: "gh", code: "login-output", message: "no URL" },
+        }),
+      ),
+    ).rejects.toThrow("box/login-output");
+    expect(progress.events).toEqual(["start:Starting the gh login on the box", "fail"]);
   });
 
   test("constructs Link from a direct SSH destination", async () => {
@@ -453,13 +484,12 @@ function installDependencies(overrides: {
       plan: () => overrides.plan,
       run: overrides.run ?? (async () => ({ ok: true })),
     }),
-    createProgress: () => ({
-      start: (message) => overrides.progress?.push(`start:${message}`),
-      message: (message) => overrides.progress?.push(`message:${message}`),
-      advance: (step, message) => overrides.progress?.push(`advance:${step}:${message}`),
-      stop: (message) => overrides.progress?.push(`stop:${message}`),
-      error: (message) => overrides.progress?.push(`error:${message}`),
-    }),
+    progress: {
+      start: (step) => overrides.progress?.push(`start:${step}`),
+      count: (current, total) => overrides.progress?.push(`count:${current}/${total}`),
+      done: () => overrides.progress?.push("done"),
+      fail: () => overrides.progress?.push("fail"),
+    },
     confirm: overrides.confirm ?? (async () => true),
     writeLine: (line) => overrides.output?.push(line),
   };
@@ -471,6 +501,7 @@ function authDependencies(overrides: {
   readonly readConfig?: AuthCommandDependencies["readConfig"];
   readonly createLink?: AuthCommandDependencies["createLink"];
   readonly createAuthStart?: AuthCommandDependencies["createAuthStart"];
+  readonly progress?: AuthCommandDependencies["progress"];
 } = {}): AuthCommandDependencies {
   return {
     tools: BUILTIN_TOOLS,
@@ -481,6 +512,7 @@ function authDependencies(overrides: {
       start: async () => overrides.result ?? ({ kind: "already-done", provider: "gh" }),
     })),
     writeLine: (line) => overrides.output?.push(line),
+    progress: overrides.progress ?? recordProgress(),
   };
 }
 
@@ -514,11 +546,13 @@ describe("runAuthCommand with --mcp", () => {
   test("prints the URL before the forward, then reports the login", async () => {
     const output: string[] = [];
     const calls: string[] = [];
+    const progress = recordProgress();
 
     await runAuthCommand(
       { provider: "claude", mcp: "linear" },
       authDependencies({
         output,
+        progress,
         createAuthStart: () => ({
           start: noMcp.startMcp,
           startMcp: async (tool: string, server: string) => {
@@ -535,6 +569,7 @@ describe("runAuthCommand with --mcp", () => {
     );
 
     expect(calls).toEqual(["start claude linear", "finish 3 lines printed"]);
+    expect(progress.events).toEqual(["start:Starting the claude/linear MCP login on the box", "done"]);
     expect(output).toEqual([
       `URL: ${started.url}`,
       "Open the URL in a browser on this machine.",

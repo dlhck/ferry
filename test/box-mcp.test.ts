@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { mcpCommand, registerBoxMcp } from "../src/box-mcp.ts";
 import type { LinkResult, RunOptions } from "../src/link.ts";
 import { BUILTIN_HARNESSES, BUILTIN_TOOLS } from "../src/registry/builtin.ts";
+import { recordProgress } from "./fake-progress.ts";
 
 const directories: string[] = [];
 
@@ -84,6 +85,31 @@ describe("registerBoxMcp", () => {
       "could not declare claude MCP server linear",
       "the codex CLI is not on the box PATH; no codex MCP server was declared",
     ]);
+  });
+
+  test("runs one box command for each CLI server and counts all carried servers", async () => {
+    const link = new FakeLink((command) => (command.includes("mv ") ? ok() : ok("F{}")));
+    const progress = recordProgress();
+    const server = (name: string) => ({ name, type: "http" as const, url: `https://${name}.example/mcp` });
+
+    await registerBoxMcp({
+      remoteHome: "/home/agent",
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      mcp: [
+        { harness: "claude", servers: [server("linear"), server("notion")] },
+        { harness: "cursor", servers: [server("linear"), server("notion")] },
+        { harness: "codex", servers: [server("linear")] },
+      ],
+      link,
+      progress,
+    });
+
+    expect(link.runs.map((run) => run.command.includes("command -v claude"))).toEqual([true, true, false, false, false]);
+    expect(link.runs[0]!.command).toContain("'\"'\"'linear'\"'\"'");
+    expect(link.runs[0]!.command).not.toContain("notion");
+    expect(link.runs[4]!.command).toContain("command -v codex");
+    expect(progress.events).toEqual(["count:1/5", "count:2/5", "count:4/5", "count:5/5"]);
   });
 
   test("merges Cursor servers into the box mcp.json and keeps the other box servers", async () => {

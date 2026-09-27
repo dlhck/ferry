@@ -26,6 +26,7 @@ import {
   type SyncDependencies,
   type SyncPlan,
 } from "../src/sync.ts";
+import type { Progress } from "../src/progress.ts";
 
 const config: OperatorConfig = {
   version: 1,
@@ -1034,6 +1035,129 @@ describe("runSync", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("runSync progress", () => {
+  /** Record the progress calls and the printed lines in one list, to show that no line prints inside a step. */
+  function recorder(): { readonly events: string[]; readonly progress: Progress } {
+    const events: string[] = [];
+    return {
+      events,
+      progress: {
+        start: (step) => events.push(`start:${step}`),
+        count: (current, total) => events.push(`count:${current}/${total}`),
+        done: () => events.push("done"),
+        fail: () => events.push("fail"),
+      },
+    };
+  }
+
+  const carriedSeed: Seed = {
+    ...seed,
+    leftovers: [
+      { code: "hook-path", reason: "hook entry that refers to a home path outside the managed set", path: "~/.claude/hooks/notify.sh" },
+    ],
+    settings: [
+      {
+        harness: "claude",
+        bytes: Buffer.from(JSON.stringify({ enabledPlugins: { "review@team": true, "broken@team": true } })),
+      },
+    ],
+    mcp: [
+      {
+        harness: "claude",
+        servers: [
+          { name: "linear", type: "http", url: "https://mcp.linear.app/mcp" },
+          { name: "notion", type: "http", url: "https://mcp.notion.com/mcp" },
+        ],
+      },
+    ],
+  };
+
+  function dependencies(events: string[], progress: Progress, update: LinkResult): SyncDependencies {
+    return {
+      readConfig: () => config,
+      publisher: () => "operator-machine",
+      readSeed: () => carriedSeed,
+      createLink: () => ({
+        run: async (command: string) => {
+          let stdout = "";
+          if (command.startsWith("printf")) stdout = "/srv/ferry\n";
+          else if (command.includes("git clone")) return update;
+          else if (command.includes("broken@team")) stdout = "P\tbroken@team\tnot found\n";
+          else if (command.includes("settings.json")) stdout = "M";
+          return { ok: true as const, address: "box", stdout, stderr: "" };
+        },
+      }),
+      writePlan: () => events.push("plan"),
+      writeLine: (line) => events.push(`line:${line}`),
+      acquireLock: () => () => {},
+      openStore: async () => ({
+        path: "/operator/.ferry/store",
+        publish: async () => ({ published: true, tip: "abc123" }),
+      }),
+      apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
+      adopt: () => {},
+      progress,
+    };
+  }
+
+  test("shows each step in order, counts plugins and MCP servers, and prints lines between steps", async () => {
+    const { events, progress } = recorder();
+    const update: LinkResult = { ok: true, address: "box", stdout: " M skills/x/SKILL.md\0", stderr: "" };
+
+    await runSync({ home: "/operator" }, dependencies(events, progress, update));
+
+    expect(events).toEqual([
+      "start:Reading the portable set",
+      "done",
+      "line:Skipped hook: hook entry that refers to a home path outside the managed set: ~/.claude/hooks/notify.sh",
+      "start:Connecting to ferry@box",
+      "done",
+      "plan",
+      "start:Publishing the snapshot",
+      "done",
+      "start:Updating the box checkout",
+      "done",
+      "line:Discarded box change: /srv/ferry/.ferry/store/skills/x/SKILL.md",
+      "start:Applying the snapshot on the box",
+      "done",
+      "start:Installing Claude plugins",
+      "count:1/2",
+      "count:2/2",
+      "done",
+      "line:Box plugins: could not install plugin broken@team: not found",
+      "start:Merging settings on the box",
+      "done",
+      "start:Declaring MCP servers",
+      "count:1/2",
+      "count:2/2",
+      "done",
+      "start:Adopting published local skills",
+      "done",
+    ]);
+  });
+
+  test("ends a failed step with a failed mark before the error", async () => {
+    const { events, progress } = recorder();
+    const update: LinkResult = {
+      ok: false,
+      error: { code: "ssh-failed", origin: "network", message: "connection lost" },
+    };
+
+    await expect(runSync({ home: "/operator" }, dependencies(events, progress, update))).rejects.toBeInstanceOf(
+      SyncError,
+    );
+    expect(events.slice(-2)).toEqual(["start:Updating the box checkout", "fail"]);
+  });
+
+  test("a dry run shows only the local read step", async () => {
+    const { events, progress } = recorder();
+
+    await runSync({ home: "/operator", dryRun: true }, dependencies(events, progress, { ok: true, address: "box", stdout: "", stderr: "" }));
+
+    expect(events.filter((event) => event.startsWith("start:"))).toEqual(["start:Reading the portable set"]);
   });
 });
 

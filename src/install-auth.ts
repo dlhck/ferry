@@ -15,6 +15,7 @@ import {
   type InstallResult,
 } from "./install.ts";
 import { Link, type LinkError, type LinkOptions } from "./link.ts";
+import { noProgress, step, type Progress } from "./progress.ts";
 import { BUILTIN_TOOLS } from "./registry/builtin.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
 import { RealGitRunner } from "./store.ts";
@@ -38,14 +39,6 @@ type InstallCommand = {
 };
 type AuthCommand = Pick<AuthStart, "start" | "startMcp" | "finishMcp">;
 
-export type InstallProgressIndicator = {
-  start(message: string): void;
-  message(message: string): void;
-  advance(step: number, message: string): void;
-  stop(message: string): void;
-  error(message: string): void;
-};
-
 export type InstallCommandDependencies = {
   /** The tools this ferry manages. The CLI resolves the registry once. */
   readonly tools: readonly ToolDescriptor[];
@@ -53,7 +46,7 @@ export type InstallCommandDependencies = {
   readonly createLink: (options: LinkOptions) => CommandLink;
   readonly readOperatorGitIdentity: () => Promise<GitIdentity>;
   readonly createInstall: (link: CommandLink, tools: readonly ToolDescriptor[]) => InstallCommand;
-  readonly createProgress: (total: number) => InstallProgressIndicator;
+  readonly progress: Progress;
   readonly confirm: () => Promise<boolean | symbol | undefined>;
   readonly writeLine: (line: string) => void;
 };
@@ -65,6 +58,7 @@ export type AuthCommandDependencies = {
   readonly createLink: (options: LinkOptions) => CommandLink;
   readonly createAuthStart: (link: CommandLink, tools: readonly ToolDescriptor[]) => AuthCommand;
   readonly writeLine: (line: string) => void;
+  readonly progress: Progress;
 };
 
 export class InstallAuthCommandError extends Error {
@@ -101,27 +95,24 @@ export async function runInstallCommand(
     if (confirmed !== true) return;
   }
 
-  const progress = plan.length > 0 ? resolved.createProgress(plan.length) : undefined;
-  let active: InstallProgress | undefined;
+  const progress = resolved.progress;
+  let active = false;
   let result: InstallResult;
   try {
     result = await install.run(true, (update) => {
-      active = update;
-      const message = `${update.phase === "started" ? "Installing" : "Installed"} ${update.tool} (${update.current}/${update.total})`;
-      if (update.phase === "completed") {
-        progress?.advance(1, message);
-      } else if (update.current === 1) {
-        progress?.start(message);
+      active = update.phase === "started";
+      if (update.phase === "started") {
+        progress.start(`Installing ${update.tool} (${update.current}/${update.total})`);
       } else {
-        progress?.message(message);
+        progress.done();
       }
     });
   } catch (error) {
-    progress?.error(installFailureMessage(active));
+    if (active) progress.fail();
     throw error;
   }
   if (!result.ok) {
-    progress?.error(installFailureMessage(active));
+    if (active) progress.fail();
     if (result.error.code === "confirmation-required") {
       fail(
         "operator/confirmation-required",
@@ -131,10 +122,14 @@ export async function runInstallCommand(
     }
     failLink("Install", result.error, resolved.writeLine);
   }
-  progress?.stop(`Installed ${plan.length} tools`);
 
   if (identityCommand) {
-    const identity = await link.run(identityCommand);
+    const identity = await step(
+      progress,
+      "Setting the box git identity",
+      () => link.run(identityCommand),
+      (outcome) => !outcome.ok,
+    );
     if (!identity.ok) failLink("Install", identity.error, resolved.writeLine);
   }
 }
@@ -162,7 +157,13 @@ export async function runAuthCommand(
     }
     const target = loadTarget(resolved.readConfig, resolved.writeLine);
     const auth = resolved.createAuthStart(resolved.createLink(target), resolved.tools);
-    const started = await auth.startMcp(input.provider, input.mcp);
+    const { provider, mcp } = input;
+    const started = await step(
+      resolved.progress,
+      `Starting the ${provider}/${mcp} MCP login on the box`,
+      () => auth.startMcp(provider, mcp),
+      authFailed,
+    );
     if (started.kind !== "local-port-forward") return reportAuth(started, resolved.writeLine);
     resolved.writeLine(`URL: ${started.url}`);
     resolved.writeLine("Open the URL in a browser on this machine.");
@@ -183,7 +184,14 @@ export async function runAuthCommand(
 
   const target = loadTarget(resolved.readConfig, resolved.writeLine);
   const auth = resolved.createAuthStart(resolved.createLink(target), resolved.tools);
-  reportAuth(await auth.start(input.provider), resolved.writeLine);
+  const provider = input.provider;
+  const result = await step(
+    resolved.progress,
+    `Starting the ${provider} login on the box`,
+    () => auth.start(provider),
+    authFailed,
+  );
+  reportAuth(result, resolved.writeLine);
 }
 
 const defaultInstallDependencies: InstallCommandDependencies = {
@@ -193,16 +201,10 @@ const defaultInstallDependencies: InstallCommandDependencies = {
   readOperatorGitIdentity: () =>
     readOperatorGitIdentity(new RealGitRunner(), join(homedir(), STORE_RELATIVE_PATH)),
   createInstall: (link, tools) => new Install(link, tools),
-  createProgress: (total) => prompts.progress({ max: total }),
+  progress: noProgress,
   confirm: () => prompts.confirm({ message: "Run these commands on the box?" }),
   writeLine: console.log,
 };
-
-function installFailureMessage(progress: InstallProgress | undefined): string {
-  return progress
-    ? `Failed to install ${progress.tool} (${progress.current}/${progress.total})`
-    : "Install failed";
-}
 
 const defaultAuthDependencies: AuthCommandDependencies = {
   tools: BUILTIN_TOOLS,
@@ -210,6 +212,7 @@ const defaultAuthDependencies: AuthCommandDependencies = {
   createLink: (options) => new Link(options),
   createAuthStart: (link, tools) => new AuthStart(link, tools),
   writeLine: console.log,
+  progress: noProgress,
 };
 
 function loadTarget(
@@ -228,6 +231,10 @@ function loadTarget(
     fail("operator/invalid-config", "Ferry config has no complete host. Run ferry init.", writeLine);
   }
   return target;
+}
+
+function authFailed(result: AuthStartResult): boolean {
+  return result.kind === "link-failure" || result.kind === "failed" || result.kind === "refused";
 }
 
 function isAuthProvider(provider: string, tools: readonly ToolDescriptor[]): boolean {

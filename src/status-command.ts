@@ -15,6 +15,7 @@ import {
   type GitIdentity,
 } from "./git-identity.ts";
 import { denyRules, type DenyRuleDescription } from "./manifest.ts";
+import { noProgress, type Progress } from "./progress.ts";
 import {
   loadRegistry,
   type Registry,
@@ -58,6 +59,7 @@ export type StatusCommandDependencies = {
   ) => StatusAuth;
   readonly denyRules: () => readonly DenyRuleDescription[];
   readonly writeLine: (line: string) => void;
+  readonly progress: Progress;
 };
 
 /** Read the configured box and print one report without changing either machine. */
@@ -114,6 +116,7 @@ export async function runStatusCommand(
     },
     auth,
     manifest: { denyRules: resolved.denyRules },
+    progress: resolved.progress,
   });
 
   resolved.writeLine(input.json ? JSON.stringify(report) : formatStatus(report));
@@ -193,6 +196,7 @@ const defaultDependencies: StatusCommandDependencies = {
   createAuthStart: (link, tools) => new AuthStart(link, tools),
   denyRules,
   writeLine: console.log,
+  progress: noProgress,
 };
 
 function configuredTarget(config: StatusConfig): LinkOptions {

@@ -20,6 +20,7 @@ import {
   type RunOptions,
 } from "./link.ts";
 import { readSeed as readManifest, type Leftover, type Seed } from "./manifest.ts";
+import { noProgress, step, type Progress } from "./progress.ts";
 import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
 import { openStore as openSnapshotStore, type PublishResult } from "./store.ts";
 import { captureInitState, writeInitState } from "./uninstall.ts";
@@ -81,6 +82,7 @@ export type InitDependencies = {
   readonly prompt?: InitPrompt;
   readonly checkAgent?: () => Promise<OperatorAgentCheck>;
   readonly approveHostKeys?: (request: SnapshotHostKeyApproval) => Promise<boolean>;
+  readonly progress?: Progress;
 };
 
 export type InitManagedLink = {
@@ -152,6 +154,7 @@ export async function runInit(
   dependencies: InitDependencies = {},
 ): Promise<InitResult> {
   const home = input.home ?? homedir();
+  const progress = dependencies.progress ?? noProgress;
   const readConfig = dependencies.readConfig ?? readOperatorConfig;
   const existing = readConfig(home);
   refuseMixedTarget(input);
@@ -178,7 +181,12 @@ export async function runInit(
     update: existing?.update,
   };
 
-  const seed = (dependencies.readSeed ?? readManifest)(home, input.harnesses);
+  const seed = await step(
+    progress,
+    "Reading the portable set",
+    () => (dependencies.readSeed ?? readManifest)(home, input.harnesses),
+    (result) => !result.ok,
+  );
   if (!seed.ok) throw manifestRefusal(seed);
   if (input.dryRun) {
     return {
@@ -190,7 +198,12 @@ export async function runInit(
 
   const snapshotTarget = snapshotSshTarget(config.snapshotUrl);
   if (snapshotTarget) {
-    const agent = await (dependencies.checkAgent ?? checkOperatorAgent)();
+    const agent = await step(
+      progress,
+      "Checking the operator SSH agent",
+      dependencies.checkAgent ?? checkOperatorAgent,
+      (check) => !check.ok,
+    );
     if (!agent.ok) {
       throw new InitRefusal(
         "agent-refusal",
@@ -208,12 +221,18 @@ export async function runInit(
 
   const target = resolveLinkOptions(config.host);
   const link = dependencies.createLink?.(target) ?? new Link(target);
-  const probe = snapshotTarget
-    ? await link.run(
-        'if [ -z "$SSH_AUTH_SOCK" ]; then printf "%s\\n" "SSH agent forwarding is unavailable" >&2; exit 1; fi; ssh-add -l',
-        { agentForwarding: "git" },
-      )
-    : await link.run("true");
+  const probe = await step(
+    progress,
+    "Connecting to the box",
+    () =>
+      snapshotTarget
+        ? link.run(
+            'if [ -z "$SSH_AUTH_SOCK" ]; then printf "%s\\n" "SSH agent forwarding is unavailable" >&2; exit 1; fi; ssh-add -l',
+            { agentForwarding: "git" },
+          )
+        : link.run("true"),
+    (result) => !result.ok,
+  );
   if (!probe.ok) {
     throw new InitRefusal(
       snapshotTarget ? "agent-refusal" : "link-refusal",
@@ -221,10 +240,12 @@ export async function runInit(
     );
   }
   if (snapshotTarget) {
-    await approveSnapshotHostKey(link, snapshotTarget, dependencies.approveHostKeys);
-    const access = await link.run(
-      `git ls-remote ${quoteShell(config.snapshotUrl)} HEAD`,
-      { agentForwarding: "git" },
+    await approveSnapshotHostKey(link, snapshotTarget, dependencies.approveHostKeys, progress);
+    const access = await step(
+      progress,
+      "Checking access to the snapshot",
+      () => link.run(`git ls-remote ${quoteShell(config.snapshotUrl)} HEAD`, { agentForwarding: "git" }),
+      (result) => !result.ok,
     );
     if (!access.ok) {
       throw new InitRefusal(
@@ -234,24 +255,28 @@ export async function runInit(
     }
   }
 
-  const store = dependencies.openStore
-    ? await dependencies.openStore(config.snapshotUrl, seed, home)
-    : await openSnapshotStore(config.snapshotUrl, seed, { home, harnesses: input.harnesses });
-  const publication = await store.publish(seed);
+  const { store, publication } = await step(progress, "Publishing the snapshot", async () => {
+    const store = dependencies.openStore
+      ? await dependencies.openStore(config.snapshotUrl, seed, home)
+      : await openSnapshotStore(config.snapshotUrl, seed, { home, harnesses: input.harnesses });
+    return { store, publication: await store.publish(seed) };
+  });
   const applyInput = {
     checkout: store.path,
     targetHome: home,
     harnesses: input.harnesses,
     force: true as const,
   };
-  if (dependencies.apply) {
-    const plan = dependencies.apply(applyInput);
-    writeInitState(home, uninstallState, plan);
-  } else {
-    const plan = planApply(applyInput);
-    writeInitState(home, uninstallState, plan);
-    commitApply(plan);
-  }
+  await step(progress, "Linking managed paths", () => {
+    if (dependencies.apply) {
+      const plan = dependencies.apply(applyInput);
+      writeInitState(home, uninstallState, plan);
+    } else {
+      const plan = planApply(applyInput);
+      writeInitState(home, uninstallState, plan);
+      commitApply(plan);
+    }
+  });
   (dependencies.writeConfig ?? writeOperatorConfig)(config, home);
 
   return {
@@ -396,21 +421,27 @@ async function approveSnapshotHostKey(
   link: InitLink,
   target: SnapshotSshTarget,
   approve: InitDependencies["approveHostKeys"],
+  progress: Progress,
 ): Promise<void> {
-  const trust = await link.run(
-    `if ssh-keygen -F ${quoteShell(target.knownHost)} -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1; then printf "trusted\\n"; else printf "missing\\n"; fi`,
-  );
-  if (!trust.ok) {
-    throw new InitRefusal("host-key-refusal", `${trust.error.origin}: ${trust.error.message}`);
-  }
-  if (trust.stdout.trim() === "trusted") return;
+  // The approval prompt must not run inside a step, so the read step ends before it.
+  const scan = await step(progress, `Reading the SSH host keys of ${target.knownHost} on the box`, async () => {
+    const trust = await link.run(
+      `if ssh-keygen -F ${quoteShell(target.knownHost)} -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1; then printf "trusted\\n"; else printf "missing\\n"; fi`,
+    );
+    if (!trust.ok) {
+      throw new InitRefusal("host-key-refusal", `${trust.error.origin}: ${trust.error.message}`);
+    }
+    if (trust.stdout.trim() === "trusted") return null;
 
-  const scan = await link.run(
-    `ssh-keyscan -T 10 ${target.scanPort}${quoteShell(target.host)} 2>/dev/null`,
-  );
-  if (!scan.ok) {
-    throw new InitRefusal("host-key-refusal", `${scan.error.origin}: ${scan.error.message}`);
-  }
+    const scan = await link.run(
+      `ssh-keyscan -T 10 ${target.scanPort}${quoteShell(target.host)} 2>/dev/null`,
+    );
+    if (!scan.ok) {
+      throw new InitRefusal("host-key-refusal", `${scan.error.origin}: ${scan.error.message}`);
+    }
+    return scan;
+  });
+  if (scan === null) return;
   const keys = parseHostKeys(scan.stdout, target.knownHost);
   if (keys.length === 0) {
     throw new InitRefusal(
@@ -428,7 +459,12 @@ async function approveSnapshotHostKey(
       `operator did not trust the SSH host keys for ${target.knownHost}`,
     );
   }
-  const install = await link.run(installHostKeysCommand(keys));
+  const install = await step(
+    progress,
+    `Trusting the SSH host keys of ${target.knownHost} on the box`,
+    () => link.run(installHostKeysCommand(keys)),
+    (result) => !result.ok,
+  );
   if (!install.ok) {
     throw new InitRefusal("host-key-refusal", `${install.error.origin}: ${install.error.message}`);
   }

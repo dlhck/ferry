@@ -8,6 +8,7 @@ import { AdoptionRefusal } from "./adopt.ts";
 import { ApplyError } from "./apply.ts";
 import { StoreRefusal } from "./store.ts";
 import { runUpdateCommand } from "./update.ts";
+import { noProgress, type Progress } from "./progress.ts";
 
 const DEFAULT_POLL_MS = 500;
 const DEFAULT_DEBOUNCE_MS = 1_000;
@@ -40,6 +41,8 @@ export type WatchDependencies = {
   readonly now?: () => number;
   readonly readUpdateState?: (home: string) => number | null;
   readonly writeUpdateState?: (home: string, time: number) => void;
+  /** The reporter for the default sync and update. */
+  readonly progress?: Progress;
 };
 
 export async function runWatch(
@@ -52,7 +55,9 @@ export async function runWatch(
   const maxBackoffMs = positive(input.maxBackoffMs, DEFAULT_MAX_BACKOFF_MS);
   const observe = dependencies.observe ?? observeSource;
   const sleep = dependencies.sleep ?? abortableSleep;
-  const sync = dependencies.sync ?? (async (_identity, sourceHome) => { await runSync({ home: sourceHome }); });
+  const progress = dependencies.progress ?? noProgress;
+  const sync = dependencies.sync ??
+    (async (_identity, sourceHome) => { await runSync({ home: sourceHome }, { progress }); });
   const retryable = dependencies.isRetryable ?? isRetryableWatchError;
   const writeLine = dependencies.writeLine ?? console.log;
   const readState = dependencies.readState ?? readWatchState;
@@ -60,7 +65,7 @@ export async function runWatch(
   let accepted = readState(home);
   let refusal = "";
   const update = dependencies.update ??
-    (() => runUpdateCommand({ yes: true, dryRun: false }, { writeLine }));
+    (() => runUpdateCommand({ yes: true, dryRun: false }, { writeLine, progress }));
   const now = dependencies.now ?? Date.now;
   const readUpdateState = dependencies.readUpdateState ?? readUpdateTime;
   const writeUpdateState = dependencies.writeUpdateState ?? writeUpdateTime;
