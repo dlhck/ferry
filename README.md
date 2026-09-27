@@ -4,8 +4,6 @@ Ferry keeps a remote Linux agent box in the same shape as the machine you work o
 
 Ferry never copies logins. OAuth sessions stay on the machine that created them. Ferry starts a vendor login on the box and you finish it in a browser here.
 
-`PRD.md` holds the v1 specification.
-
 ## Requirements
 
 - An operator machine with macOS or Linux. Ferry runs here. Windows is not supported.
