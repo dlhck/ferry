@@ -1,0 +1,19 @@
+{
+  "name": "@dlhck/ferry-linux-arm64",
+  "version": "0.0.0",
+  "description": "The Ferry binary for linux arm64. Install @dlhck/ferry instead.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dlhck/ferry.git"
+  },
+  "homepage": "https://github.com/dlhck/ferry#readme",
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "files": [
+    "bin/ferry"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

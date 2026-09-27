@@ -52,7 +52,15 @@ Ferry never copies logins. OAuth sessions stay on the machine that created them.
 
 ## Install
 
-npm: see #84.
+With npm:
+
+```sh
+npm i -g @dlhck/ferry
+```
+
+The package runs a prebuilt executable for macOS or Linux on arm64 or x64. You do not need bun. npm installs only the executable for your platform, from the optional dependency `@dlhck/ferry-<os>-<arch>`. Do not install with `--omit=optional`.
+
+To update Ferry itself, run `npm i -g @dlhck/ferry@latest`. `ferry update` updates the agent tools, not Ferry. The watch service keeps the same executable path, so restart it after an update: `launchctl kickstart -k gui/$(id -u)/dev.ferry.watch` on macOS, or `systemctl --user restart ferry-watch.service` on Linux.
 
 From source:
 
@@ -65,7 +73,7 @@ bun link
 
 `bun link` puts `ferry` on your `PATH`. It runs `src/cli.ts` with bun.
 
-The release workflow attaches standalone executables to each tagged GitHub release: `ferry-darwin-arm64`, `ferry-darwin-x64`, `ferry-linux-arm64`, and `ferry-linux-x64`. These executables do not need bun. Download the file for your platform, make it executable, and move it to a directory on your `PATH`:
+The release workflow attaches standalone executables to each GitHub release: `ferry-darwin-arm64`, `ferry-darwin-x64`, `ferry-linux-arm64`, and `ferry-linux-x64`. These executables do not need bun. Download the file for your platform, make it executable, and move it to a directory on your `PATH`:
 
 ```sh
 chmod +x ferry-darwin-arm64
@@ -364,7 +372,7 @@ bun run typecheck
 bun run build
 ```
 
-`bun run build` compiles a standalone executable to `dist/ferry` for the current platform. See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and [SECURITY.md](SECURITY.md) to report a vulnerability.
+`bun run build` compiles a standalone executable to `dist/ferry` for the current platform. See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and [SECURITY.md](SECURITY.md) to report a vulnerability. See [RELEASING.md](RELEASING.md) for the release process and the npm packages.
 
 ## License
 
