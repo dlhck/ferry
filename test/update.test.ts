@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createPaseo } from "../src/integrations/paseo.ts";
+import type { PartialOperatorConfig } from "../src/config.ts";
 import type { Integration } from "../src/integrations/types.ts";
 import type { HostCommand, HostCommandResult, LinkResult } from "../src/link.ts";
 import { noProgress } from "../src/progress.ts";
@@ -247,6 +248,36 @@ describe("update command", () => {
     await expect(
       runUpdateCommand({ yes: true, dryRun: false }, { ...deps, readConfig: () => null }),
     ).rejects.toThrow("Ferry config has no complete host. Run ferry init.");
+  });
+});
+
+describe("update command registry", () => {
+  test("without a tool list, it reads the builtin tools and the [[tool]] entries of the config", async () => {
+    const { recorder, deps } = dependencies();
+    const { tools: _injected, ...rest } = deps;
+
+    await runUpdateCommand(
+      { yes: true, dryRun: true },
+      {
+        ...rest,
+        readConfig: () => ({ ...config, tool: [{ id: "aider", install: { command: "install aider" } }] }) as PartialOperatorConfig,
+      },
+    );
+
+    expect(recorder.output).toContain("Box claude: claude update");
+    expect(recorder.output).toContain("Box aider: skipped, no update command");
+  });
+
+  test("refuses a config whose [[tool]] entries the registry refuses", async () => {
+    const { deps } = dependencies();
+    const { tools: _injected, ...rest } = deps;
+
+    await expect(
+      runUpdateCommand(
+        { yes: true, dryRun: true },
+        { ...rest, readConfig: () => ({ ...config, tool: [{ id: "claude", install: { command: "x" } }] }) as PartialOperatorConfig },
+      ),
+    ).rejects.toThrow("ferry refused the registry: tool claude is already registered");
   });
 });
 

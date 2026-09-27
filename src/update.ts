@@ -9,7 +9,7 @@ import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./co
 import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
 import { BunHostAdapter, Link, type HostAdapter, type LinkOptions } from "./link.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
-import { BUILTIN_TOOLS } from "./registry/builtin.ts";
+import { loadRegistry } from "./registry/load.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
 
 const UPDATE_COMMAND_TIMEOUT_MS = 30 * 60 * 1_000;
@@ -45,8 +45,8 @@ export type UpdateCommandInput = {
 };
 
 export type UpdateCommandDependencies = {
-  /** The tools this ferry manages. */
-  readonly tools: readonly ToolDescriptor[];
+  /** The tools this ferry manages. Without them, update reads the registry of the config. */
+  readonly tools?: readonly ToolDescriptor[];
   readonly integrations: readonly Integration[];
   readonly readConfig: () => PartialOperatorConfig | null;
   readonly createLink: (options: LinkOptions) => Pick<Link, "run">;
@@ -95,13 +95,14 @@ export async function runUpdateCommand(
 ): Promise<void> {
   const resolved = { ...defaultDependencies, ...dependencies };
   const { target, config } = loadTarget(resolved.readConfig);
+  const tools = resolved.tools ?? registryTools(config);
   const integrations = input.includeIntegrations === true
     ? resolved.integrations.filter((integration) => config?.integrations?.[integration.id] === true)
     : [];
   const plan = await step(
     resolved.progress,
     "Checking the installed tools",
-    () => planUpdate(resolved.tools, resolved.local),
+    () => planUpdate(tools, resolved.local),
     undefined,
     (plan) => `${plural(plan.steps.length, "update")}, ${plan.skipped.length} skipped`,
   );
@@ -109,7 +110,7 @@ export async function runUpdateCommand(
 
   // One line for each tool on each side, in registry order.
   for (const side of ["box", "operator"] as const) {
-    for (const tool of resolved.tools) {
+    for (const tool of tools) {
       const step = plan.steps.find((entry) => entry.target === side && entry.tool === tool.id);
       const skip = plan.skipped.find((entry) => entry.target === side && entry.tool === tool.id);
       if (step) resolved.writeLine(`${label(side)} ${tool.id}: ${step.command}`);
@@ -162,7 +163,6 @@ export async function runUpdateCommand(
 }
 
 const defaultDependencies: UpdateCommandDependencies = {
-  tools: BUILTIN_TOOLS,
   integrations: INTEGRATIONS,
   readConfig,
   createLink: (options) => new Link(options),
@@ -189,6 +189,17 @@ function loadTarget(read: () => PartialOperatorConfig | null): {
   const target = resolveLinkOptions(config?.host);
   if (!target) throw new UpdateError("Ferry config has no complete host. Run ferry init.");
   return { target, config };
+}
+
+/** The builtin tools and the `[[tool]]` entries of the config, as `ferry update` in the CLI resolves them. */
+function registryTools(config: PartialOperatorConfig | null): readonly ToolDescriptor[] {
+  const registry = loadRegistry(config ?? {});
+  if (!registry.ok) {
+    throw new UpdateError(
+      `ferry refused the registry: ${registry.problems.map((problem) => problem.reason).join("; ")}`,
+    );
+  }
+  return registry.tools;
 }
 
 async function isInstalled(local: HostAdapter, binary: string): Promise<boolean> {
