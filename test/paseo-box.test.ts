@@ -30,8 +30,11 @@ const FAKES: Record<string, string> = {
   systemctl: `
 [ "$1" = --user ] && shift
 case "$1" in
-  is-active) [ -e "$STATE/active-$3" ]; exit ;;
-  is-enabled) [ -e "$STATE/enabled-$3" ]; exit ;;
+  is-active|is-enabled)
+    check=$1; shift; quiet=; [ "$1" = --quiet ] && { quiet=1; shift; }
+    if [ "$check" = is-active ]; then file=active-$1 yes=active no=inactive; else file=enabled-$1 yes=enabled no=disabled; fi
+    if [ -e "$STATE/$file" ]; then [ -z "$quiet" ] && echo "$yes"; exit 0; fi
+    [ -z "$quiet" ] && echo "$no"; exit 3 ;;
 esac
 echo "systemctl $*" >> "$LOG"
 case "$1" in
@@ -254,6 +257,21 @@ describe("Paseo enable", () => {
       "The Paseo daemon did not report running within 3 s (localDaemon is stopped).",
     );
     expect(statuses).toHaveLength(4);
+  });
+});
+
+describe("Paseo enable and health", () => {
+  test("the health check reads the unit that enable writes and starts", async () => {
+    const box = fakeBox();
+    const paseo = paseoWith("0.9.2");
+    touch(join(box.home, ".config/systemd/user/paseo.service"));
+    touch(join(box.state, "active-paseo.service"));
+
+    await paseo.enable(box, noProgress);
+    const health = await paseo.health(box);
+
+    expect(health.lines[0]).toBe("Service: ferry-paseo.service active, enabled");
+    expect(health.warnings).toEqual([]);
   });
 });
 

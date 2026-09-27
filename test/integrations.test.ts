@@ -7,9 +7,10 @@ import {
   runIntegrationCommand,
   type IntegrationCommandDependencies,
 } from "../src/integrations/command.ts";
-import { INTEGRATIONS, integrationLines, type Integration } from "../src/integrations/index.ts";
-import { createPaseo } from "../src/integrations/paseo.ts";
-import { BunHostAdapter, type HostAdapter, type HostCommand } from "../src/link.ts";
+import { INTEGRATIONS, integrationLines } from "../src/integrations/index.ts";
+import { createPaseo, paseoSourceHint } from "../src/integrations/paseo.ts";
+import type { Integration, IntegrationLink } from "../src/integrations/types.ts";
+import { BunHostAdapter, type HostAdapter, type HostCommand, type LinkResult } from "../src/link.ts";
 
 const roots: string[] = [];
 
@@ -150,14 +151,244 @@ describe("Paseo integration", () => {
       "Enter ssh://[fd7a:115c:a1e0::1].",
     );
   });
+});
 
-  test("health and project moves are not implemented in this release", async () => {
-    const paseo = createPaseo();
-    const link = { run: async () => { throw new Error("no box call"); } };
+/** The daemon status of Paseo 0.9.2 on a box, without `serverId`, `hostname` and the paths. */
+const DAEMON_STATUS = {
+  pid: 142930,
+  listen: "127.0.0.1:6767",
+  configuredListen: "127.0.0.1:6767",
+  localDaemon: "running",
+  desktopManaged: false,
+  daemonVersion: "0.9.2",
+  providers: [
+    { provider: "claude", available: true, error: null },
+    { provider: "copilot", available: false, error: null },
+  ],
+  relay: { enabled: false, endpoint: "relay.paseo.sh:443" },
+  connectedDaemon: "reachable",
+};
 
-    await expect(paseo.health(link)).rejects.toThrow("not implemented in this release");
-    await expect(paseo.onProjectMoved(link, "/home/ploi/app")).rejects.toThrow(
-      "not implemented in this release",
+type BoxState = {
+  active?: string;
+  enabled?: string;
+  oldActive?: string;
+  /** The stdout of `paseo daemon status --json`, or null when `paseo` is not on PATH. */
+  status?: string | null;
+};
+
+/** Answers the health command as `sh` on the box would, and records each command. */
+function boxLink(state: BoxState | LinkResult): IntegrationLink & { commands: string[] } {
+  const commands: string[] = [];
+  return {
+    commands,
+    async run(command) {
+      commands.push(command);
+      if ("ok" in state) return state;
+      const status = state.status === undefined ? JSON.stringify(DAEMON_STATUS) : state.status;
+      const stdout = [
+        `active=${state.active ?? "active"}`,
+        `enabled=${state.enabled ?? "enabled"}`,
+        `old=${state.oldActive ?? "inactive"}`,
+        ...(status === null ? ["missing"] : ["ferry-section", status]),
+      ].join("\n");
+      return { ok: true, address: "100.64.0.8", stdout: `${stdout}\n`, stderr: "" };
+    },
+  };
+}
+
+/** A Paseo integration with a local app at `version`, or no local app. */
+function paseoWithApp(version: string | null): Integration {
+  if (version === null) return createPaseo({ platform: "win32" });
+  const app = join(tempRoot(), "Paseo.app");
+  touch(join(app, "Contents/Resources/bin/paseo"));
+  return createPaseo({ platform: "darwin", macApp: app, host: fakeHost({ stdout: `${version}\n` }) });
+}
+
+function daemonStatus(change: Record<string, unknown>): string {
+  return JSON.stringify({ ...DAEMON_STATUS, ...change });
+}
+
+describe("Paseo health", () => {
+  test("reports a running daemon with the same version as the local app", async () => {
+    const link = boxLink({});
+
+    const health = await paseoWithApp("0.9.2").health(link);
+
+    expect(health.lines).toEqual([
+      "Service: ferry-paseo.service active, enabled",
+      "Daemon: running, reachable",
+      "Version: box 0.9.2, local app 0.9.2",
+      "Listen: 127.0.0.1:6767, relay off",
+      "Providers: claude available, copilot unavailable",
+    ]);
+    expect(health.warnings).toEqual([]);
+    expect(health.json).toEqual({
+      installed: true,
+      service: { unit: "ferry-paseo.service", active: "active", enabled: "enabled" },
+      oldService: { unit: "paseo.service", active: "inactive" },
+      localDaemon: "running",
+      connectedDaemon: "reachable",
+      daemonVersion: "0.9.2",
+      localVersion: "0.9.2",
+      pinned: true,
+      listen: "127.0.0.1:6767",
+      relay: false,
+      providers: [
+        { provider: "claude", available: true },
+        { provider: "copilot", available: false },
+      ],
+      error: null,
+    });
+    expect(link.commands).toHaveLength(1);
+    expect(link.commands[0]).toContain("systemctl --user is-active ferry-paseo.service");
+    expect(link.commands[0]).toContain("systemctl --user is-enabled ferry-paseo.service");
+    expect(link.commands[0]).toContain("systemctl --user is-active paseo.service");
+    expect(link.commands[0]).toContain("paseo daemon status --json");
+  });
+
+  test("warns when the daemon is stopped", async () => {
+    const link = boxLink({
+      active: "inactive",
+      status: daemonStatus({ localDaemon: "stopped", connectedDaemon: "unreachable", daemonVersion: null }),
+    });
+
+    const health = await paseoWithApp("0.9.2").health(link);
+
+    expect(health.lines).toContain("Service: ferry-paseo.service inactive, enabled");
+    expect(health.lines).toContain("Daemon: stopped, unreachable");
+    expect(health.lines).toContain("Version: box unknown, local app 0.9.2");
+    expect(health.warnings).toEqual([
+      "The Paseo daemon on the box is stopped. Run ferry integrations enable paseo to start it.",
+    ]);
+  });
+
+  test("warns when the box version differs from the local app", async () => {
+    const health = await paseoWithApp("0.10.0").health(boxLink({}));
+
+    expect(health.lines).toContain("Version: box 0.9.2, local app 0.10.0");
+    expect(health.warnings).toEqual([
+      "The box runs Paseo 0.9.2 and the local app is 0.10.0. Run ferry update.",
+    ]);
+  });
+
+  test("says not pinned when there is no local app", async () => {
+    const health = await paseoWithApp(null).health(boxLink({}));
+
+    expect(health.lines).toContain("Version: box 0.9.2, not pinned (no local Paseo app)");
+    expect(health.warnings).toEqual([]);
+    expect(health.json).toMatchObject({ localVersion: null, pinned: false });
+  });
+
+  test("warns when the relay is on", async () => {
+    const health = await paseoWithApp("0.9.2").health(boxLink({ status: daemonStatus({ relay: { enabled: true } }) }));
+
+    expect(health.lines).toContain("Listen: 127.0.0.1:6767, relay ON");
+    expect(health.warnings).toEqual(["The Paseo relay is on. Ferry keeps it off on the box."]);
+    expect(health.json).toMatchObject({ relay: true });
+  });
+
+  test("warns when the daemon listens on an address that is not loopback", async () => {
+    const health = await paseoWithApp("0.9.2").health(boxLink({ status: daemonStatus({ listen: "0.0.0.0:6767" }) }));
+
+    expect(health.warnings).toEqual([
+      "Paseo listens on 0.0.0.0:6767, which is not a loopback address. Other hosts can control the daemon.",
+    ]);
+  });
+
+  test("accepts the loopback addresses", async () => {
+    for (const listen of ["127.0.0.1:6767", "localhost:6767", "[::1]:6767", "/run/user/1000/paseo.sock"]) {
+      const health = await paseoWithApp("0.9.2").health(boxLink({ status: daemonStatus({ listen }) }));
+      expect(health.warnings).toEqual([]);
+    }
+  });
+
+  test("warns when the old paseo.service is active", async () => {
+    const health = await paseoWithApp("0.9.2").health(boxLink({ active: "inactive", oldActive: "active" }));
+
+    expect(health.warnings).toEqual([
+      "The old paseo.service is active, so two Paseo daemons can run. Run ferry integrations enable paseo to replace it.",
+    ]);
+    expect(health.json).toMatchObject({ oldService: { unit: "paseo.service", active: "active" } });
+  });
+
+  test("reports an offline host as a line, not an error", async () => {
+    const link = boxLink({
+      ok: false,
+      error: { code: "host-offline", origin: "network", message: "Tailscale host box is offline" },
+    });
+
+    const health = await paseoWithApp("0.9.2").health(link);
+
+    expect(health.lines).toEqual(["Box: unavailable (network/host-offline)"]);
+    expect(health.warnings).toEqual([]);
+    expect(health.json).toEqual({ error: "network/host-offline" });
+  });
+
+  test("reports that Paseo is not installed on the box", async () => {
+    const health = await paseoWithApp("0.9.2").health(
+      boxLink({ active: "inactive", enabled: "not-found", status: null }),
+    );
+
+    expect(health.lines).toEqual([
+      "Service: ferry-paseo.service inactive, not-found",
+      "Paseo: not installed on the box",
+    ]);
+    expect(health.warnings).toEqual(["Paseo is not installed on the box. Run ferry integrations enable paseo."]);
+    expect(health.json).toMatchObject({ installed: false, localDaemon: null, error: null });
+  });
+
+  test("reports malformed status output without the output itself", async () => {
+    const health = await paseoWithApp("0.9.2").health(boxLink({ status: "secretKeyB64=abc {not json" }));
+
+    expect(health.lines).toContain("Daemon: unknown, paseo daemon status printed no valid JSON");
+    expect(health.warnings).toEqual(["Ferry cannot read the output of paseo daemon status --json on the box."]);
+    expect(health.json).toMatchObject({ error: "malformed-status" });
+    expect(JSON.stringify(health)).not.toContain("secretKeyB64");
+  });
+
+  test("never shows the server ID or the hostname", async () => {
+    const health = await paseoWithApp("0.9.2").health(
+      boxLink({ status: daemonStatus({ serverId: "srv_secret", hostname: "box-host", logPath: "/p/daemon.log" }) }),
+    );
+
+    const text = JSON.stringify(health);
+    expect(text).not.toContain("srv_secret");
+    expect(text).not.toContain("box-host");
+    expect(text).not.toContain("daemon.log");
+  });
+});
+
+describe("Paseo project move", () => {
+  test("registers the moved project on the box", async () => {
+    const commands: string[] = [];
+    const link: IntegrationLink = {
+      async run(command) {
+        commands.push(command);
+        return { ok: true, address: "100.64.0.8", stdout: "", stderr: "" };
+      },
+    };
+
+    await createPaseo().onProjectMoved(link, "~/Developer/it's");
+
+    expect(commands).toEqual([`paseo project create "$HOME"/'Developer/it'"'"'s' >/dev/null`]);
+  });
+
+  test("fails with the box message when the command fails", async () => {
+    const link: IntegrationLink = {
+      async run() {
+        return { ok: false, error: { code: "command-failed", origin: "box", message: "directory_not_found" } };
+      },
+    };
+
+    await expect(createPaseo().onProjectMoved(link, "~/app")).rejects.toThrow(
+      "paseo project create failed: directory_not_found",
+    );
+  });
+
+  test("names the command that removes the source project from Paseo", () => {
+    expect(paseoSourceHint("~/Developer/app", "this machine")).toBe(
+      "Paseo still lists ~/Developer/app on this machine. Ferry does not remove it. To remove it from Paseo, run paseo project ls to find its ID, then paseo project delete <id>. The files stay.",
     );
   });
 });

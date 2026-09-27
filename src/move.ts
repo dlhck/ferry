@@ -17,6 +17,9 @@ import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync 
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, posix, relative, resolve } from "node:path";
 import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
+import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
+import { paseoSourceHint } from "./integrations/paseo.ts";
+import type { IntegrationId } from "./integrations/types.ts";
 import { Link, type LinkOptions } from "./link.ts";
 import { carriedContentHits, carriedNameHit } from "./manifest.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
@@ -41,7 +44,12 @@ export type MoveDependencies = {
   readonly now: () => Date;
   readonly writeLine: (line: string) => void;
   readonly progress: Progress;
+  /** All built-in integrations. Move uses the ones that the config enables. */
+  readonly integrations: readonly Integration[];
 };
+
+/** The line for `--remove`. Ferry never removes the source project from an integration. */
+const SOURCE_HINTS: Record<IntegrationId, (path: string, side: string) => string> = { paseo: paseoSourceHint };
 
 export class MoveError extends Error {}
 
@@ -113,7 +121,12 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
   const dependencies: MoveDependencies = { ...defaultDependencies(), ...overrides };
   const home = realpathSync(dependencies.home);
   const rel = homeRelative(input, home, dependencies.cwd);
-  const box = boxSide(dependencies.createLink(loadTarget(dependencies.readConfig)));
+  const { target, config } = loadTarget(dependencies.readConfig);
+  const link = dependencies.createLink(target);
+  const box = boxSide(link);
+  const integrations = dependencies.integrations.filter((integration) => config.integrations?.[integration.id] === true);
+  // An integration service runs on the box. A move to this machine registers nothing.
+  const registered = input.fromBox ? [] : integrations;
   const local = localSide(home, dependencies.platform);
   const [source, destination] = input.fromBox ? [box, local] : [local, box];
   const sourcePath = `${source.home}/${quoteShell(rel)}`;
@@ -121,7 +134,7 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
   const writeLine = dependencies.writeLine;
   const progress = dependencies.progress;
 
-  progress.plan(input.dryRun ? 1 : input.remove ? 5 : 4);
+  progress.plan(input.dryRun ? 1 : (input.remove ? 5 : 4) + registered.length);
   const plan = await step(
     progress,
     "Preflight",
@@ -204,10 +217,29 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       trashLine = `Trash: moved the source copy to ${source.trash.replace(source.home, "~")}/${name}`;
     }
 
+    const warnings: string[] = [];
+    for (const integration of registered) {
+      progress.start(`Registering the project in ${integration.name}`);
+      try {
+        await integration.onProjectMoved(link, `~/${rel}`);
+        progress.done();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        progress.fail(message);
+        warnings.push(
+          `WARNING: Ferry could not register ~/${rel} in ${integration.name}: ${message}. The move is complete.`,
+        );
+      }
+    }
+
     if (trashLine) writeLine(trashLine);
     writeLine(
       `Moved ~/${rel} to ${destination.label}: carried ${plan.carry.length}, refused ${plan.refused.length}, skipped ${plan.skipped.length}.`,
     );
+    for (const warning of warnings) writeLine(warning);
+    if (input.remove) {
+      for (const integration of integrations) writeLine(SOURCE_HINTS[integration.id](`~/${rel}`, source.label));
+    }
   } finally {
     if (input.fromBox) rmSync(plan.stage, { recursive: true, force: true });
   }
@@ -610,7 +642,10 @@ async function must(result: Promise<SideResult>, context: string): Promise<strin
   return settled.stdout;
 }
 
-function loadTarget(read: () => PartialOperatorConfig | null): LinkOptions {
+function loadTarget(read: () => PartialOperatorConfig | null): {
+  readonly target: LinkOptions;
+  readonly config: PartialOperatorConfig;
+} {
   let config: PartialOperatorConfig | null;
   try {
     config = read();
@@ -618,8 +653,8 @@ function loadTarget(read: () => PartialOperatorConfig | null): LinkOptions {
     throw new MoveError("Could not read Ferry config. Run ferry init.");
   }
   const target = resolveLinkOptions(config?.host);
-  if (!target) throw new MoveError("Ferry config has no complete host. Run ferry init.");
-  return target;
+  if (!config || !target) throw new MoveError("Ferry config has no complete host. Run ferry init.");
+  return { target, config };
 }
 
 function defaultDependencies(): MoveDependencies {
@@ -632,6 +667,7 @@ function defaultDependencies(): MoveDependencies {
     now: () => new Date(),
     writeLine: console.log,
     progress: noProgress,
+    integrations: INTEGRATIONS,
   };
 }
 
