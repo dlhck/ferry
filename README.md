@@ -213,28 +213,115 @@ Then run `ferry sync`. The sync carries the skill to the box like any other skil
 
 ## Tools
 
-Ferry has one list of tools. It has two kinds:
+Ferry ships recipes for five tools only: the agent CLIs `claude`, `codex`, `pi`, and `cursor`, and `gh`. `ferry auth gh` and the GitHub SSH setup need `gh`. You define every other tool in `~/.ferry/config.toml`. Ferry does not scan your projects for tools.
 
-- `agent`: the vendor CLIs of the harnesses, `claude`, `codex`, `pi`, and `cursor`. Ferry installs them on every box, at the latest version.
-- `tool`: `gh`, `node` (through nvm), `npm`, `pnpm`, `bun`, `docker`, `vercel`, `infisical`, and the Playwright browsers. Ferry puts a tool on the box only when this machine has it, at the version of this machine.
+Each tool has a kind:
 
-The `[tools]` table in `~/.ferry/config.toml` sets the version policy of a tool. Each value is a string:
+- `agent`: the vendor CLIs of the harnesses. Ferry installs them on every box, at the latest version.
+- `tool`: `gh` and each tool that you define. Ferry puts a tool on the box only when this machine has it, at the version of this machine.
+
+### Version policy
+
+A policy is `"operator"` (the version on this machine), `"latest"` (the latest vendor release), or an exact version such as `"1.4.2"`. A tool without a policy uses the default of its kind: `"latest"` for an agent, `"operator"` for a tool.
+
+To set the policy of a builtin tool, write a string in the `[tools]` table:
 
 ```toml
 [tools]
-node = "operator"   # the version on this machine
-bun = "1.4.2"       # an exact version
-claude = "latest"   # the latest vendor release
+gh = "latest"
+claude = "operator"
+codex = "0.156.1"
 ```
 
-A tool that is not in the table uses the default of its kind: `latest` for an agent, `operator` for a tool. Ferry refuses a tool id that it does not know, and a value that is not `"operator"`, `"latest"`, or an exact version such as `1.4.2`. A repeat `ferry init` keeps the table.
+### Define a tool
 
-`ferry tools` lists each tool with its kind, install mode, policy, and the version on this machine. It loads nvm first, so the `node` row shows the nvm default Node. It also lists the tools that projects need and that Ferry has no recipe for, such as `yarn` and `uv`. `ferry tools` does not connect to the box.
+To define a tool, add a `[tools.<id>]` table:
 
-What works now: the `[tools]` table and `ferry tools`. What comes next:
+```toml
+[tools.pnpm]
+version = "operator"
+local = "pnpm --version"
+box = "pnpm --version"
+install = 'PATH="$HOME/.nvm/current/bin:$PATH" npm install -g --prefix "$HOME/.local" pnpm@{version}'
+path = [".local/bin"]
+depends = ["node"]
+```
 
-- The install and update recipes for the tools, and the box `PATH` from the tool directories.
-- `ferry install` and `ferry update` apply the policy and the install mode. Until then, they work as before: `ferry install` installs `gh` and the agent CLIs, and `ferry update` shows the other tools as skipped.
+| Key | Required | Value |
+| --- | --- | --- |
+| `version` | No | The policy. The default is `"operator"`. |
+| `local` | Yes | A command that prints the version on this machine. Ferry loads nvm first when nvm is there, and runs the command in your home directory. A failed command means that this machine does not have the tool. |
+| `box` | No | A command that prints the version on the box. |
+| `install` | Yes | The command that installs the tool on the box. |
+| `update` | No | The command that updates the tool on the box. The default is `install`. |
+| `path` | No | Directories relative to the home for the box `PATH`. |
+| `depends` | No | The ids of the tools to install first. |
+
+Rules:
+
+- A string in `[tools]` is only for a builtin tool. A tool that you define sets its policy with `version` in its own table.
+- A table cannot use the id of a builtin tool, and the config cannot name one tool two times.
+- Ferry replaces `{version}` in `install` and `update` with the version that the policy selects, in single quotes for the shell. `{version}` is the only placeholder. Ferry refuses each other `{...}` token, and a placeholder in `local` or `box`. A shell expansion such as `${HOME}` is not a placeholder.
+- Each id in `depends` must be a builtin tool or a tool that you define. Ferry refuses a dependency cycle.
+- A `path` directory must be inside the home.
+- Ferry refuses an unknown key, a value of the wrong type, and a policy that is not `"operator"`, `"latest"`, or an exact version. The error names the tool and the key.
+- A string can be in double quotes, or in single quotes. A string in single quotes keeps `"` and `\` as they are, which is easier for shell commands. A list is one line of strings in double quotes. A comment must be on its own line.
+
+A repeat `ferry init` keeps the `[tools]` table and the tool tables.
+
+### Recipes
+
+These recipes are examples to copy and change. Ferry does not ship them.
+
+Node through nvm. The `~/.nvm/current` link points at the Node that this recipe installs, so the box `PATH` has one fixed directory:
+
+```toml
+[tools.node]
+local = "node --version"
+box = "node --version"
+install = '([ -s "$HOME/.nvm/nvm.sh" ] || curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | PROFILE=/dev/null bash) && . "$HOME/.nvm/nvm.sh" && nvm install {version} && nvm alias default {version} && ln -sfn "$HOME/.nvm/versions/node/v"{version} "$HOME/.nvm/current"'
+path = [".nvm/current/bin"]
+```
+
+pnpm, as in the example above.
+
+Bun:
+
+```toml
+[tools.bun]
+local = "bun --version"
+box = "bun --version"
+install = 'curl -fsSL https://bun.sh/install | bash -s "bun-v"{version}'
+path = [".bun/bin"]
+```
+
+Docker. The install script needs `sudo` on the box:
+
+```toml
+[tools.docker]
+local = "docker --version"
+box = "docker --version"
+install = 'curl -fsSL https://get.docker.com | sudo sh -s -- --version {version}'
+```
+
+An npm global CLI, here TypeScript:
+
+```toml
+[tools.typescript]
+local = "tsc --version"
+box = "tsc --version"
+install = 'PATH="$HOME/.nvm/current/bin:$PATH" npm install -g --prefix "$HOME/.local" typescript@{version}'
+path = [".local/bin"]
+depends = ["node"]
+```
+
+### ferry tools
+
+`ferry tools` lists the builtin tools and the tools that you define. For each tool, it shows the kind, the install mode, the policy, and the version on this machine. `ferry tools` does not connect to the box.
+
+What works now: the `[tools]` policies, the tool tables, and `ferry tools`. What comes next:
+
+- `ferry install` and `ferry update` run the recipes of the tools that you define, apply the policy and the install mode, and write the box `PATH` from the `path` directories. Until then, they work as before: `ferry install` installs `gh` and the agent CLIs, and `ferry update` shows the tools that you define as skipped.
 - A "Tools" section in `ferry status` with the box versions.
 
 ## Update the agent tools
