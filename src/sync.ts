@@ -12,7 +12,7 @@ import {
   type OperatorConfig,
   type PartialOperatorConfig,
 } from "./config.ts";
-import { readSeed as readManifest } from "./manifest.ts";
+import { denyRules, readSeed as readManifest } from "./manifest.ts";
 import { Link, type LinkOptions, type LinkResult, type RunOptions } from "./link.ts";
 import {
   loadRegistry as loadEffectiveRegistry,
@@ -335,8 +335,14 @@ function printPlan(plan: SyncPlan): void {
         plan.settingsChanges.map((change) => `${change.harness}: ${change.keys.join(", ")}`).join("; ") ||
         "none"
       }`,
+      ...denyListLines(),
     ].join("\n"),
   );
+}
+
+/** List the deny rules in the `ferry status` format. It reads no remote state. */
+export function denyListLines(): string[] {
+  return ["Deny list:", ...denyRules().map((rule) => `  ${rule.code}: ${rule.behavior} ${rule.description}`)];
 }
 
 /**

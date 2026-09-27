@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplyError } from "../src/apply.ts";
 import type { OperatorConfig } from "../src/config.ts";
-import type { Seed } from "../src/manifest.ts";
+import { denyRules, type Seed } from "../src/manifest.ts";
 import { loadRegistry, type RegistryConfig } from "../src/registry/load.ts";
 import type { LinkResult } from "../src/link.ts";
 import type { HarnessDescriptor } from "../src/registry/types.ts";
@@ -172,6 +172,40 @@ describe("runSync", () => {
         message: "chore: ship skills",
       },
     });
+  });
+
+  test("dry-run prints every deny rule without remote calls", async () => {
+    let prohibitedCalls = 0;
+    const output: string[] = [];
+    const log = console.log;
+    console.log = (line: string) => output.push(line);
+    try {
+      await runSync(
+        { home: "/operator", dryRun: true },
+        {
+          readConfig: () => config,
+          publisher: () => "operator-machine",
+          readSeed: () => seed,
+          createLink: () => {
+            prohibitedCalls += 1;
+            throw new Error("Link must not be created");
+          },
+          openStore: async () => {
+            prohibitedCalls += 1;
+            throw new Error("Store must not be opened");
+          },
+        },
+      );
+    } finally {
+      console.log = log;
+    }
+
+    expect(prohibitedCalls).toBe(0);
+    const lines = output.join("\n").split("\n");
+    expect(lines).toContain("Deny list:");
+    for (const rule of denyRules()) {
+      expect(lines).toContain(`  ${rule.code}: ${rule.behavior} ${rule.description}`);
+    }
   });
 
   test("dry-run lists the carried settings keys that differ from the store, offline", async () => {
