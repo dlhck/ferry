@@ -5,7 +5,7 @@ description: Rules for working with Ferry, the CLI that keeps a remote Linux age
 
 # Ferry
 
-Ferry copies the agent setup of the operator machine to a remote Linux box. The operator machine is the source of truth. A private git repository, the snapshot, carries the setup. Both machines have a checkout of it at `~/.ferry/store`, and the managed paths are symlinks into that checkout. The `ferry` command runs only on the operator machine. The box does not run Ferry.
+Ferry copies the agent setup of the operator machine to a remote Linux box. The operator machine is the source of truth. A private git repository, the snapshot, carries the setup. Both machines have a checkout of it at `~/.ferry/store`, and the managed paths are symlinks into that checkout. The `ferry` command runs on the operator machine. The box has a box install of Ferry that runs only `ferry expose`.
 
 ## Rules
 
@@ -99,7 +99,7 @@ Each entry of `boxes` has these fields:
 | `auth.providers` | Login state per tool: `authenticated`, `login-required`, `manual` (with an `instruction`), or `unavailable`. |
 | `auth.loginRequired` | Tools that need a login. |
 | `mcpLogins.loginRequired` | Box MCP servers that need a login, as `tool/server`. |
-| `tools` | The version state of each registry tool on the box, with Ferry itself last as `id: "ferry"`. Each row has `id`, `mode`, `policy`, `operator`, `target`, `box`, `state`, and a `reason` for `hidden`, `skipped`, and `unknown`. |
+| `tools` | The version state of each registry tool on the box, with Ferry itself last as `id: "ferry"`. Each row has `id`, `mode`, `policy`, `operator`, `target`, `box`, `state`, and a `reason` for `hidden`, `skipped`, and `unknown`. The operator fixes `drift` with `ferry update`, `missing` with `ferry install`, and `hidden` with `ferry sync`. |
 | `integrations` | Present only when an integration is on for this box. |
 | `errors` | Each inspection of this box that failed, with `origin`, `code`, and `message`. |
 
@@ -191,3 +191,4 @@ When Paseo is enabled for a box, its `ferry status` block has an `Integrations` 
 - `ferry update --dry-run` prints the update plan for the agent tools on both machines.
 - `ferry init --dry-run` prints the init plan without writing or connecting.
 - `ferry watch` syncs accepted changes in the foreground. `ferry watch install` installs it as a user service.
+- `ferry <command> --help` has the details and the config formats. For example, `ferry tools --help` shows the `[tools]` tables, `ferry update --help` shows the sudo rule for the daily update, and `ferry box add --help` shows the `git_auth = "box"` deploy key step.
