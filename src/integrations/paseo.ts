@@ -327,14 +327,17 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
         boxRun(link, writeCommand(UNIT_PATH, unitFile(linkPathDirs(link))), `Ferry could not write ~/${UNIT_PATH}`),
       );
       await step(progress, `Starting ${UNIT}`, () => boxRun(link, START_COMMAND, `Ferry could not start ${UNIT}`));
-      await step(progress, "Turning on linger for the box user", async () => {
+      // The daemon runs without linger until the user logs out, so a linger failure is a warning.
+      const linger = await step(progress, "Turning on linger for the box user", async () => {
         const result = await link.run(LINGER_COMMAND, {});
-        if (result.ok) return;
-        throw new PaseoError(
-          `Ferry could not turn on linger (${result.error.message}). Without linger, ${UNIT} stops when you log out of the box. ` +
-            'Run sudo loginctl enable-linger "$USER" on the box, then run ferry integrations enable paseo again.',
+        return result.ok ? null : result.error.message;
+      }, (error) => error !== null, (error) => error ?? undefined);
+      if (linger !== null) {
+        lines.push(
+          `Warning: Ferry could not turn on linger (${linger}). Without linger, ${UNIT} stops when you log out of the box. ` +
+            'Run sudo loginctl enable-linger "$USER" on the box.',
         );
-      });
+      }
       const running = await step(progress, "Waiting for the Paseo daemon", () => waitForDaemon(link), undefined, (v) => v);
 
       const registered = await step(progress, "Registering the box projects", async () =>
