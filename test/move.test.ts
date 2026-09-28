@@ -66,13 +66,18 @@ function world() {
   git(seed, "push", "-q", "origin", "HEAD:main");
 
   const commands: { command: string; options: RunOptions }[] = [];
-  /** Runs each box command in `sh` with the box home, as OpenSSH would on the box. */
-  const link: Pick<Link, "run"> = {
+  const link = boxLink(box, bin, commands);
+  return { root, operator, box, origin, bin, link, commands };
+}
+
+/** Runs each box command in `sh` with the box home, as OpenSSH would on the box. */
+function boxLink(home: string, bin: string, commands: { command: string; options: RunOptions }[]): Pick<Link, "run"> {
+  return {
     async run(command, options = {}) {
       commands.push({ command, options });
       const child = Bun.spawnSync(["sh", "-c", command], {
         stdin: options.input ?? "ignore",
-        env: { ...process.env, HOME: box, PATH: `${bin}:${process.env.PATH}` },
+        env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}` },
       });
       const stdout = child.stdout.toString();
       const stderr = child.stderr.toString();
@@ -83,7 +88,6 @@ function world() {
       return result;
     },
   };
-  return { root, operator, box, origin, link, commands };
 }
 
 type World = ReturnType<typeof world>;
@@ -101,7 +105,7 @@ async function move(w: World, input: Partial<MoveInput> & { path: string }, over
   let error: unknown = null;
   try {
     await runMove(
-      { fromBox: false, dryRun: false, remove: false, includeEnv: false, allowSecrets: false, yes: false, ...input },
+      { dryRun: false, remove: false, includeEnv: false, allowSecrets: false, yes: false, ...input },
       {
         readConfig: () => ({ host: { transport: "ssh", destination: "user@box.example" } }),
         createLink: () => w.link,
@@ -691,7 +695,7 @@ describe("ferry move --allow-secrets", () => {
 
     const result = await move(w, {
       path: "Developer/app",
-      fromBox: true,
+      fromBox: "default",
       includeEnv: true,
       allowSecrets: true,
       yes: true,
@@ -710,7 +714,7 @@ describe("ferry move --from-box", () => {
     write(join(boxApp, ".claude/settings.local.json"), "{}\n");
     write(join(boxApp, ".env.local"), "PORT=3000\n");
 
-    const result = await move(w, { path: "Developer/app", fromBox: true, remove: true, includeEnv: true });
+    const result = await move(w, { path: "Developer/app", fromBox: "default", remove: true, includeEnv: true });
 
     expect(result.error).toBeNull();
     const localApp = join(w.operator, "Developer/app");
@@ -736,7 +740,7 @@ describe("ferry move --from-box", () => {
     );
     chmodSync(join(w.root, "box-bin/gh"), 0o755);
 
-    const result = await move(w, { path: "Developer/app", fromBox: true, dryRun: true });
+    const result = await move(w, { path: "Developer/app", fromBox: "default", dryRun: true });
 
     expect(result.error).toBeNull();
     expect(result.lines).toContain(
@@ -762,7 +766,7 @@ describe("ferry move --from-box", () => {
       run: (command, options) => w.link.run(`PATH='${shim}'; export PATH; ${command}`, options),
     };
 
-    const result = await move(w, { path: "Developer/app", fromBox: true, dryRun: true }, { createLink: () => noGh });
+    const result = await move(w, { path: "Developer/app", fromBox: "default", dryRun: true }, { createLink: () => noGh });
 
     expect(result.error?.message).toContain("Ferry refused to move ~/Developer/app: 3 problems.");
     expect(result.lines).toContain(
@@ -778,7 +782,7 @@ describe("ferry move --from-box", () => {
     git(boxApp, "add", ".");
     git(boxApp, "commit", "-q", "-m", "Box work");
 
-    const result = await move(w, { path: "Developer/app", fromBox: true });
+    const result = await move(w, { path: "Developer/app", fromBox: "default" });
 
     expect(result.lines.find((line) => line.startsWith("Problem: Branch main has commit"))).toContain('"Box work"');
     expect(existsSync(join(w.operator, "Developer/app"))).toBe(false);
@@ -870,7 +874,7 @@ describe("ferry move with integrations", () => {
     project(w, w.box);
     const log = boxPaseo(w);
 
-    const result = await move(w, { path: "Developer/app", fromBox: true, remove: true }, { readConfig: PASEO_ON });
+    const result = await move(w, { path: "Developer/app", fromBox: "default", remove: true }, { readConfig: PASEO_ON });
 
     expect(result.error).toBeNull();
     expect(existsSync(log)).toBe(false);
@@ -878,5 +882,211 @@ describe("ferry move with integrations", () => {
     expect(result.lines).toContain(
       "Paseo still lists ~/Developer/app on the box. Ferry does not remove it. To remove it from Paseo, run paseo project ls to find its ID, then paseo project delete <id>. The files stay.",
     );
+  });
+});
+
+describe("ferry move --from-box --to-box", () => {
+  // A fake credential, built at runtime so that no secret scanner flags this file.
+  const AWS_KEY_ID = "AK" + "IA" + "Q2W3E4R5T6Y7U8I9";
+  const ENV_LOCAL = `AWS_ACCESS_KEY_ID=${AWS_KEY_ID}\nPORT=3000\n`;
+  const BOXES = () => ({
+    integrations: { paseo: true },
+    boxes: [
+      { name: "a", host: { transport: "ssh" as const, destination: "user@a.example" } },
+      { name: "b", host: { transport: "ssh" as const, destination: "user@b.example" }, integrations: { paseo: false } },
+      { name: "c", host: { transport: "ssh" as const, destination: "user@c.example" } },
+    ],
+  });
+
+  /** A world where box a is the `box` home of `world`, boxes b and c share another home, and TMPDIR is empty. */
+  function twoBoxes() {
+    const w = world();
+    const boxB = join(w.root, "box-b");
+    const stage = join(w.root, "tmp");
+    mkdirSync(boxB);
+    mkdirSync(stage);
+    const commandsB: { command: string; options: RunOptions }[] = [];
+    const linkB = boxLink(boxB, w.bin, commandsB);
+    const targets: string[] = [];
+    const createLink = (options: { destination?: string }) => {
+      targets.push(options.destination ?? "");
+      return options.destination === "user@a.example" ? w.link : linkB;
+    };
+    return { w, boxA: w.box, boxB, stage, linkB, commandsB, targets, createLink: createLink as MoveDependencies["createLink"] };
+  }
+
+  const previousTmp = process.env.TMPDIR;
+  afterEach(() => {
+    if (previousTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmp;
+  });
+
+  async function relay(
+    t: ReturnType<typeof twoBoxes>,
+    input: Partial<MoveInput> = {},
+    overrides: Partial<MoveDependencies> = {},
+  ) {
+    process.env.TMPDIR = t.stage;
+    return move(
+      t.w,
+      { path: "Developer/app", fromBox: "a", toBox: "b", ...input },
+      { readConfig: BOXES, createLink: t.createLink, ...overrides },
+    );
+  }
+
+  test("relays the project from box a to box b through this machine and leaves nothing on this machine", async () => {
+    const t = twoBoxes();
+    const appA = project(t.w, t.boxA);
+    write(join(appA, "AGENTS.md"), "# Agents\n");
+    write(join(appA, ".env.local"), "PORT=3000\n");
+    write(join(appA, "node_modules/pkg/index.js"), "x\n");
+    const paseoA = join(t.w.root, "box-bin/paseo");
+    write(paseoA, "#!/bin/sh\nexit 0\n");
+    chmodSync(paseoA, 0o755);
+
+    const result = await relay(t, { remove: true, includeEnv: true });
+
+    expect(result.error).toBeNull();
+    expect(t.targets).toEqual(["user@a.example", "user@b.example"]);
+    const appB = join(t.boxB, "Developer/app");
+    expect(git(appB, "rev-parse", "--abbrev-ref", "HEAD")).toBe("main");
+    expect(readFileSync(join(appB, "AGENTS.md"), "utf8")).toBe("# Agents\n");
+    expect(readFileSync(join(appB, ".env.local"), "utf8")).toBe("PORT=3000\n");
+    expect(existsSync(join(appB, "node_modules"))).toBe(false);
+    expect(existsSync(appA)).toBe(false);
+    expect(existsSync(join(t.boxA, ".ferry/trash/app-20260927T101112Z/AGENTS.md"))).toBe(true);
+    expect(result.lines).toContain("Source: box a ~/Developer/app");
+    expect(result.lines).toContain("Destination: box b ~/Developer/app");
+    expect(result.lines).toContain("Moved ~/Developer/app from box a to box b: carried 2, refused 0, skipped 1.");
+    expect(result.events).toContain("start:Cloning on box b");
+    expect(result.events).toContain("start:Moving the copy on box a to the Ferry trash");
+    // Box b turns off Paseo, so Ferry registers nothing. The --remove hint is for box a.
+    expect(result.events.join("\n")).not.toContain("Registering");
+    expect(result.lines.join("\n")).toContain("Paseo still lists ~/Developer/app on box a.");
+    // Box a only gets reads and the trash move. Box b only gets the destination writes.
+    expect(t.w.commands.some(({ command }) => command.includes("git clone") || command.startsWith("tar -xf"))).toBe(false);
+    expect(t.commandsB.some(({ command }) => command.includes("tar --null -cf"))).toBe(false);
+    // The relay forwards no SSH agent to either box, also for a git_auth = "box" box.
+    expect([...t.w.commands, ...t.commandsB].every(({ options }) => options.agentForwarding === undefined)).toBe(true);
+    expect(listTree(t.w.operator)).toEqual([]);
+    expect(readdirSync(t.stage)).toEqual([]);
+  });
+
+  test("applies the .env rules and the secret question to box b, and prints no secret value", async () => {
+    const t = twoBoxes();
+    const appA = project(t.w, t.boxA);
+    write(join(appA, ".env.local"), ENV_LOCAL);
+    write(join(appA, "id_rsa"), "-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----\n");
+    const questions: string[] = [];
+
+    const declined = await relay(
+      t,
+      { includeEnv: true, allowSecrets: true },
+      { interactive: true, confirm: async (message) => (questions.push(message), false) },
+    );
+    const refused = await relay(t, { includeEnv: true, allowSecrets: true });
+    const carried = await relay(t, { includeEnv: true, allowSecrets: true, yes: true });
+
+    expect(questions).toEqual(["Carry 1 file with secrets to box b? Anyone with access to the box user can read them."]);
+    expect(declined.lines.at(-1)).toBe("Move cancelled.");
+    expect(refused.error?.message).toBe("Ferry found 1 file with secrets. Without a terminal, add --yes to carry them.");
+    expect(carried.error).toBeNull();
+    expect(carried.lines).toContain("Carry with secrets: .env.local (AWS access key ID in file content)");
+    expect(carried.lines.some((line) => line.startsWith("Refuse: id_rsa"))).toBe(true);
+    expect(existsSync(join(t.boxB, "Developer/app/id_rsa"))).toBe(false);
+    expect(statSync(join(t.boxB, "Developer/app/.env.local")).mode & 0o777).toBe(0o600);
+    for (const result of [declined, refused, carried]) {
+      expect([...result.lines, ...result.events, result.error?.message ?? ""].join("\n")).not.toContain(AWS_KEY_ID);
+    }
+    expect(readdirSync(t.stage)).toEqual([]);
+  });
+
+  test("refuses the move when the project already exists on box b", async () => {
+    const t = twoBoxes();
+    project(t.w, t.boxA);
+    mkdirSync(join(t.boxB, "Developer/app"), { recursive: true });
+
+    const result = await relay(t);
+
+    expect(result.lines).toContain("Problem: ~/Developer/app already exists on box b.");
+    expect(result.error?.message).toBe("Ferry refused to move ~/Developer/app: 1 problem.");
+    expect(listTree(join(t.boxB, "Developer/app"))).toEqual([]);
+    expect(readdirSync(t.stage)).toEqual([]);
+  });
+
+  test("--dry-run changes nothing on either box and leaves nothing on this machine", async () => {
+    const t = twoBoxes();
+    const appA = project(t.w, t.boxA);
+    write(join(appA, "AGENTS.md"), "# Agents\n");
+    const before = { a: listTree(t.boxA), b: listTree(t.boxB) };
+
+    const result = await relay(t, { dryRun: true, remove: true });
+
+    expect(result.error).toBeNull();
+    expect(result.lines[0]).toBe("Move plan (no changes will be made):");
+    expect(result.lines).toContain("Carry: AGENTS.md");
+    expect({ a: listTree(t.boxA), b: listTree(t.boxB) }).toEqual(before);
+    expect(readdirSync(t.stage)).toEqual([]);
+  });
+
+  test("removes the temporary copy on this machine when the write to box b fails", async () => {
+    const t = twoBoxes();
+    const appA = project(t.w, t.boxA);
+    write(join(appA, "AGENTS.md"), "# Agents\n");
+    let staged: string[] = [];
+    const failing: Pick<Link, "run"> = {
+      run: (command, options) => {
+        if (!command.startsWith("tar -xf")) return t.linkB.run(command, options);
+        staged = readdirSync(t.stage);
+        return Promise.resolve({ ok: false, error: { code: "command-failed", origin: "box", message: "disk full" } });
+      },
+    };
+
+    const result = await relay(t, {}, {
+      createLink: (options) => ("destination" in options && options.destination === "user@b.example" ? failing : t.w.link),
+    });
+
+    expect(result.error?.message).toContain("Ferry could not carry the files. The copy at ~/Developer/app on box b is incomplete.");
+    expect(existsSync(appA)).toBe(true);
+    expect(staged).toHaveLength(1);
+    expect(readdirSync(t.stage)).toEqual([]);
+  });
+
+  test("refuses the same box twice and an unknown box before it connects", async () => {
+    const t = twoBoxes();
+    project(t.w, t.boxA);
+
+    const same = await relay(t, { toBox: "a" });
+    const unknownSource = await relay(t, { fromBox: "d" });
+    const unknownDestination = await relay(t, { toBox: "d" });
+
+    expect(same.error?.message).toBe("--from-box and --to-box both name box a. Name two different boxes.");
+    expect(unknownSource.error?.message).toBe("unknown box d. Known boxes: a, b, c.");
+    expect(unknownDestination.error?.message).toBe("unknown box d. Known boxes: a, b, c.");
+    expect(t.targets).toEqual([]);
+  });
+
+  test("selects the box of --to-box, else default_box, else asks for a box, and --from-box alone moves to this machine", async () => {
+    const t = twoBoxes();
+    const app = project(t.w, t.w.operator);
+    const appA = join(t.boxA, "Developer/app");
+    write(join(appA, "notes.md"), "notes\n");
+    const withDefault = () => ({ ...BOXES(), defaultBox: "b" });
+
+    const named = await relay(t, { fromBox: undefined, toBox: "c", dryRun: true });
+    const byDefault = await relay(t, { fromBox: undefined, toBox: undefined, dryRun: true }, { readConfig: withDefault });
+    const unnamed = await relay(t, { fromBox: undefined, toBox: undefined, dryRun: true });
+    rmSync(app, { recursive: true, force: true });
+    const toThisMachine = await relay(t, { toBox: undefined });
+
+    expect(named.error).toBeNull();
+    expect(named.lines).toContain("Destination: the box ~/Developer/app");
+    expect(byDefault.error).toBeNull();
+    expect(unnamed.error?.message).toBe(
+      "More than one box is configured (a, b, c). Add --to-box <name>, or set default_box in the config.",
+    );
+    expect(toThisMachine.error).toBeNull();
+    expect(readFileSync(join(t.w.operator, "Developer/app/notes.md"), "utf8")).toBe("notes\n");
+    expect(t.targets).toEqual(["user@c.example", "user@b.example", "user@a.example"]);
   });
 });

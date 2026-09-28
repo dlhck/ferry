@@ -352,9 +352,10 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("move")
-    .description("Continue a project on the box, or with --from-box on this machine")
+    .description("Continue a project on a box, on this machine with --from-box, or on another box with both")
     .argument("<path>", "project folder inside the home directory")
-    .option("--from-box", "move the project from the box to this machine")
+    .option("--from-box <name>", "move the project from this box. Without --to-box, the destination is this machine")
+    .option("--to-box <name>", "move the project to this box. Without it and --from-box, Ferry uses default_box or the only box")
     .option("--dry-run", "print what Ferry would carry, refuse, and skip without changes")
     .option("--remove", "after verification, move the source copy to a trash directory")
     .option("--include-env", "also carry .env files that pass the token and secret rules")
@@ -364,7 +365,8 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       async (
         path: string,
         options: {
-          fromBox?: boolean;
+          fromBox?: string;
+          toBox?: string;
           dryRun?: boolean;
           remove?: boolean;
           includeEnv?: boolean;
@@ -372,18 +374,22 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
           yes?: boolean;
         },
       ) => {
+        if (boxNames().length > 0) {
+          throw new ConfigError("ferry move does not accept --box. Use --from-box <name> or --to-box <name>.");
+        }
         await withProgress((progress, writeLine) =>
           (dependencies.runMove ?? runMove)(
             {
               path,
-              fromBox: options.fromBox === true,
+              fromBox: options.fromBox,
+              toBox: options.toBox,
               dryRun: options.dryRun === true,
               remove: options.remove === true,
               includeEnv: options.includeEnv === true,
               allowSecrets: options.allowSecrets === true,
               yes: options.yes === true,
             },
-            { createLink, writeLine, progress, ...boxConfig(selectBox("move")) },
+            { createLink, writeLine, progress },
           ),
         );
       },

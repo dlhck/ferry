@@ -1,6 +1,9 @@
 /**
  * Move continues a project on the other machine: from the operator machine to
- * the box, or with `fromBox` from the box to the operator machine.
+ * a box, with `fromBox` from a box to the operator machine, or with `fromBox`
+ * and `toBox` from one box to another box. For a move between boxes, the
+ * operator process reads box A over Link, applies the same checks, and writes
+ * to box B over Link. The two boxes do not connect to each other.
  *
  * The destination clones the project from its git remote at the same path
  * relative to the home directory. Ferry then carries the local-only files that
@@ -17,6 +20,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, posix, relative, resolve } from "node:path";
+import { resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
 import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
 import { paseoSourceHint } from "./integrations/paseo.ts";
@@ -26,9 +30,15 @@ import { carriedContentHits, carriedNameHit } from "./manifest.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
 
 export type MoveInput = {
-  /** The project path on the operator machine, or the same path for the box with `fromBox`. */
+  /** The project path on the operator machine, or the same path for the source box with `fromBox`. */
   readonly path: string;
-  readonly fromBox: boolean;
+  /** The source box. Without it, the source is this machine. */
+  readonly fromBox?: string;
+  /**
+   * The destination box. Without it, the destination is this machine with `fromBox`, else the target box of
+   * the config: `default_box` or the only box.
+   */
+  readonly toBox?: string;
   readonly dryRun: boolean;
   readonly remove: boolean;
   readonly includeEnv: boolean;
@@ -105,7 +115,8 @@ type SideResult = { readonly ok: true; readonly stdout: string } | { readonly ok
 
 /** One machine of the move. `home` is a shell word for its home directory. */
 type Side = {
-  readonly label: "the box" | "this machine";
+  /** "the box", "this machine", or "box <name>" for a move between boxes. */
+  readonly label: string;
   readonly home: string;
   readonly trash: string;
   run(command: string, options?: { readonly input?: Uint8Array; readonly timeoutMs?: number }): Promise<SideResult>;
@@ -141,16 +152,26 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
   if (input.allowSecrets && !input.includeEnv) {
     throw new MoveError("--allow-secrets works only together with --include-env.");
   }
+  const fromBox = input.fromBox !== undefined;
   const home = realpathSync(dependencies.home);
   const rel = homeRelative(input, home, dependencies.cwd);
-  const { target, config } = loadTarget(dependencies.readConfig);
-  const link = dependencies.createLink(target);
-  const box = boxSide(link);
-  const integrations = dependencies.integrations.filter((integration) => config.integrations?.[integration.id] === true);
-  // An integration service runs on the box. A move to this machine registers nothing.
-  const registered = input.fromBox ? [] : integrations;
+  const config = loadConfig(dependencies.readConfig);
+  const sourceBox = fromBox ? resolveTargetBox(config, input.fromBox) : null;
+  const destinationBox = !fromBox || input.toBox !== undefined ? destinationTarget(config, input.toBox) : null;
+  // A move between boxes names both boxes in the output. A move with this machine keeps "the box".
+  const relay = sourceBox !== null && destinationBox !== null;
+  if (relay && sourceBox.name === destinationBox.name) {
+    throw new MoveError(`--from-box and --to-box both name box ${sourceBox.name}. Name two different boxes.`);
+  }
+  const label = (box: ResolvedBox) => (relay ? `box ${box.name}` : "the box");
+  const enabled = (box: ResolvedBox | null) =>
+    dependencies.integrations.filter((integration) => box?.integrations[integration.id] === true);
   const local = localSide(home, dependencies.platform);
-  const [source, destination] = input.fromBox ? [box, local] : [local, box];
+  const source = sourceBox ? boxSide(dependencies.createLink(resolveLinkOptions(sourceBox.host)), label(sourceBox)) : local;
+  const destinationLink = destinationBox && dependencies.createLink(resolveLinkOptions(destinationBox.host));
+  const destination = destinationBox && destinationLink ? boxSide(destinationLink, label(destinationBox)) : local;
+  // An integration service runs on the box. A move to this machine registers nothing.
+  const registered = destinationLink ? enabled(destinationBox).map((integration) => ({ integration, link: destinationLink })) : [];
   const sourcePath = `${source.home}/${quoteShell(rel)}`;
   const destinationPath = `${destination.home}/${quoteShell(rel)}`;
   const writeLine = dependencies.writeLine;
@@ -160,7 +181,7 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
   const plan = await step(
     progress,
     "Preflight",
-    () => preflight(input, rel, source, sourcePath, destination, destinationPath, input.fromBox ? null : join(home, rel)),
+    () => preflight(input, rel, source, sourcePath, destination, destinationPath, fromBox ? null : join(home, rel)),
     undefined,
     (plan) =>
       [
@@ -205,7 +226,7 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
         );
       }
       progress.pause();
-      const readers = input.fromBox ? "" : " Anyone with access to the box user can read them.";
+      const readers = destinationBox === null ? "" : " Anyone with access to the box user can read them.";
       const question = `Carry ${plural(secrets.length, "file")} with secrets to ${destination.label}?${readers}`;
       if ((await dependencies.confirm(question)) !== true) {
         writeLine("Move cancelled.");
@@ -253,7 +274,11 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       const name = `${posix.basename(rel)}-${timestamp(dependencies.now())}`;
       await step(
         progress,
-        input.fromBox ? "Moving the box copy to the Ferry trash" : "Moving the local copy to the Trash",
+        relay
+          ? `Moving the copy on ${source.label} to the Ferry trash`
+          : fromBox
+            ? "Moving the box copy to the Ferry trash"
+            : "Moving the local copy to the Trash",
         async () => {
           await must(
             source.run(`mkdir -p ${source.trash} && mv -- ${sourcePath} ${source.trash}/${quoteShell(name)}`),
@@ -265,7 +290,7 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
     }
 
     const warnings: string[] = [];
-    for (const integration of registered) {
+    for (const { integration, link } of registered) {
       progress.start(`Registering the project in ${integration.name}`);
       try {
         await integration.onProjectMoved(link, `~/${rel}`);
@@ -281,21 +306,21 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
 
     if (trashLine) writeLine(trashLine);
     writeLine(
-      `Moved ~/${rel} to ${destination.label}: carried ${plan.carry.length}, refused ${plan.refused.length}, skipped ${plan.skipped.length}.`,
+      `Moved ~/${rel}${relay ? ` from ${source.label}` : ""} to ${destination.label}: carried ${plan.carry.length}, refused ${plan.refused.length}, skipped ${plan.skipped.length}.`,
     );
     for (const warning of warnings) writeLine(warning);
     if (input.remove) {
-      for (const integration of integrations) writeLine(SOURCE_HINTS[integration.id](`~/${rel}`, source.label));
+      for (const integration of enabled(sourceBox ?? destinationBox)) writeLine(SOURCE_HINTS[integration.id](`~/${rel}`, source.label));
     }
   } finally {
-    if (input.fromBox) rmSync(plan.stage, { recursive: true, force: true });
+    if (fromBox) rmSync(plan.stage, { recursive: true, force: true });
   }
 }
 
 /** The project path relative to the home. Ferry refuses a path outside the home. */
 function homeRelative(input: MoveInput, home: string, cwd: string): string {
   let path = resolve(cwd, input.path);
-  if (!input.fromBox) {
+  if (input.fromBox === undefined) {
     if (!existsSync(path)) throw new MoveError(`${path} does not exist.`);
     path = realpathSync(path);
   }
@@ -616,7 +641,7 @@ async function fetchFiles(source: Side, path: string, paths: readonly string[]):
         input: nulList(paths),
         timeoutMs: TRANSFER_TIMEOUT_MS,
       }),
-      "Ferry could not read the local-only files on the box",
+      `Ferry could not read the local-only files on ${source.label}`,
     );
     const extracted = await exec(["tar", "-xf", "-", "-C", stage], { input: Buffer.from(encoded, "base64") });
     if (extracted.exitCode !== 0) throw new MoveError(`Ferry could not unpack the box files: ${extracted.stderr.trim()}`);
@@ -654,9 +679,9 @@ async function verify(destination: Side, path: string, carry: readonly Carried[]
   return carry.filter((file, index) => sums[index] !== file.sha256).map((file) => file.path);
 }
 
-function boxSide(link: Pick<Link, "run">): Side {
+function boxSide(link: Pick<Link, "run">, label: string): Side {
   return {
-    label: "the box",
+    label,
     home: '"$HOME"',
     trash: '"$HOME"/.ferry/trash',
     async run(command, options = {}) {
@@ -718,19 +743,26 @@ async function must(result: Promise<SideResult>, context: string): Promise<strin
   return settled.stdout;
 }
 
-function loadTarget(read: () => PartialOperatorConfig | null): {
-  readonly target: LinkOptions;
-  readonly config: PartialOperatorConfig;
-} {
+function loadConfig(read: () => PartialOperatorConfig | null): PartialOperatorConfig {
   let config: PartialOperatorConfig | null;
   try {
     config = read();
   } catch {
     throw new MoveError("Could not read Ferry config. Run ferry init.");
   }
-  const target = resolveLinkOptions(config?.host);
-  if (!config || !target) throw new MoveError("Ferry config has no complete host. Run ferry init.");
-  return { target, config };
+  if (!config) throw new MoveError("Ferry config has no complete host. Run ferry init.");
+  return config;
+}
+
+/** `resolveTargetBox`, with an error that names `--to-box` instead of `--box`. */
+function destinationTarget(config: PartialOperatorConfig, name: string | undefined): ResolvedBox {
+  const names = resolveBoxes(config).map((box) => box.name);
+  if (name === undefined && config.defaultBox === undefined && names.length > 1) {
+    throw new MoveError(
+      `More than one box is configured (${names.join(", ")}). Add --to-box <name>, or set default_box in the config.`,
+    );
+  }
+  return resolveTargetBox(config, name);
 }
 
 function defaultDependencies(): MoveDependencies {
