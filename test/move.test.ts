@@ -105,7 +105,7 @@ async function move(w: World, input: Partial<MoveInput> & { path: string }, over
   let error: unknown = null;
   try {
     await runMove(
-      { fromBox: false, dryRun: false, remove: false, includeEnv: false, allowSecrets: false, yes: false, ...input },
+      { dryRun: false, remove: false, includeEnv: false, allowSecrets: false, yes: false, ...input },
       {
         readConfig: () => ({ host: { transport: "ssh", destination: "user@box.example" } }),
         createLink: () => w.link,
@@ -695,7 +695,7 @@ describe("ferry move --allow-secrets", () => {
 
     const result = await move(w, {
       path: "Developer/app",
-      fromBox: true,
+      fromBox: "default",
       includeEnv: true,
       allowSecrets: true,
       yes: true,
@@ -714,7 +714,7 @@ describe("ferry move --from-box", () => {
     write(join(boxApp, ".claude/settings.local.json"), "{}\n");
     write(join(boxApp, ".env.local"), "PORT=3000\n");
 
-    const result = await move(w, { path: "Developer/app", fromBox: true, remove: true, includeEnv: true });
+    const result = await move(w, { path: "Developer/app", fromBox: "default", remove: true, includeEnv: true });
 
     expect(result.error).toBeNull();
     const localApp = join(w.operator, "Developer/app");
@@ -740,7 +740,7 @@ describe("ferry move --from-box", () => {
     );
     chmodSync(join(w.root, "box-bin/gh"), 0o755);
 
-    const result = await move(w, { path: "Developer/app", fromBox: true, dryRun: true });
+    const result = await move(w, { path: "Developer/app", fromBox: "default", dryRun: true });
 
     expect(result.error).toBeNull();
     expect(result.lines).toContain(
@@ -766,7 +766,7 @@ describe("ferry move --from-box", () => {
       run: (command, options) => w.link.run(`PATH='${shim}'; export PATH; ${command}`, options),
     };
 
-    const result = await move(w, { path: "Developer/app", fromBox: true, dryRun: true }, { createLink: () => noGh });
+    const result = await move(w, { path: "Developer/app", fromBox: "default", dryRun: true }, { createLink: () => noGh });
 
     expect(result.error?.message).toContain("Ferry refused to move ~/Developer/app: 3 problems.");
     expect(result.lines).toContain(
@@ -782,7 +782,7 @@ describe("ferry move --from-box", () => {
     git(boxApp, "add", ".");
     git(boxApp, "commit", "-q", "-m", "Box work");
 
-    const result = await move(w, { path: "Developer/app", fromBox: true });
+    const result = await move(w, { path: "Developer/app", fromBox: "default" });
 
     expect(result.lines.find((line) => line.startsWith("Problem: Branch main has commit"))).toContain('"Box work"');
     expect(existsSync(join(w.operator, "Developer/app"))).toBe(false);
@@ -874,7 +874,7 @@ describe("ferry move with integrations", () => {
     project(w, w.box);
     const log = boxPaseo(w);
 
-    const result = await move(w, { path: "Developer/app", fromBox: true, remove: true }, { readConfig: PASEO_ON });
+    const result = await move(w, { path: "Developer/app", fromBox: "default", remove: true }, { readConfig: PASEO_ON });
 
     expect(result.error).toBeNull();
     expect(existsSync(log)).toBe(false);
@@ -898,7 +898,7 @@ describe("ferry move --from-box --to-box", () => {
     ],
   });
 
-  /** A world where box a is the `box` home of `world`, box b has its own home, and TMPDIR is empty. */
+  /** A world where box a is the `box` home of `world`, boxes b and c share another home, and TMPDIR is empty. */
   function twoBoxes() {
     const w = world();
     const boxB = join(w.root, "box-b");
@@ -910,7 +910,7 @@ describe("ferry move --from-box --to-box", () => {
     const targets: string[] = [];
     const createLink = (options: { destination?: string }) => {
       targets.push(options.destination ?? "");
-      return options.destination === "user@b.example" ? linkB : w.link;
+      return options.destination === "user@a.example" ? w.link : linkB;
     };
     return { w, boxA: w.box, boxB, stage, linkB, commandsB, targets, createLink: createLink as MoveDependencies["createLink"] };
   }
@@ -929,7 +929,7 @@ describe("ferry move --from-box --to-box", () => {
     process.env.TMPDIR = t.stage;
     return move(
       t.w,
-      { path: "Developer/app", fromBox: true, relay: { from: ["a"], to: "b" }, ...input },
+      { path: "Developer/app", fromBox: "a", toBox: "b", ...input },
       { readConfig: BOXES, createLink: t.createLink, ...overrides },
     );
   }
@@ -1050,21 +1050,41 @@ describe("ferry move --from-box --to-box", () => {
     expect(readdirSync(t.stage)).toEqual([]);
   });
 
-  test("needs two different named boxes and --from-box", async () => {
+  test("refuses the same box twice and an unknown box before it connects", async () => {
     const t = twoBoxes();
     project(t.w, t.boxA);
 
-    const same = await relay(t, { relay: { from: ["a"], to: "a" } });
-    const noSource = await relay(t, { relay: { from: [], to: "b" } });
-    const twoSources = await relay(t, { relay: { from: ["a", "c"], to: "b" } });
-    const unknown = await relay(t, { relay: { from: ["a"], to: "d" } });
-    const toBox = await relay(t, { fromBox: false });
+    const same = await relay(t, { toBox: "a" });
+    const unknownSource = await relay(t, { fromBox: "d" });
+    const unknownDestination = await relay(t, { toBox: "d" });
 
-    expect(same.error?.message).toBe("--box and --to-box both name box a. Name two different boxes.");
-    expect(noSource.error?.message).toBe("--to-box needs the source box. Add --box <name>. Known boxes: a, b, c.");
-    expect(twoSources.error?.message).toBe("ferry move reads from one box. Give --box once.");
-    expect(unknown.error?.message).toBe("unknown box d. Known boxes: a, b, c.");
-    expect(toBox.error?.message).toBe("--to-box works only together with --from-box.");
+    expect(same.error?.message).toBe("--from-box and --to-box both name box a. Name two different boxes.");
+    expect(unknownSource.error?.message).toBe("unknown box d. Known boxes: a, b, c.");
+    expect(unknownDestination.error?.message).toBe("unknown box d. Known boxes: a, b, c.");
     expect(t.targets).toEqual([]);
+  });
+
+  test("selects the box of --to-box, else default_box, else asks for a box, and --from-box alone moves to this machine", async () => {
+    const t = twoBoxes();
+    const app = project(t.w, t.w.operator);
+    const appA = join(t.boxA, "Developer/app");
+    write(join(appA, "notes.md"), "notes\n");
+    const withDefault = () => ({ ...BOXES(), defaultBox: "b" });
+
+    const named = await relay(t, { fromBox: undefined, toBox: "c", dryRun: true });
+    const byDefault = await relay(t, { fromBox: undefined, toBox: undefined, dryRun: true }, { readConfig: withDefault });
+    const unnamed = await relay(t, { fromBox: undefined, toBox: undefined, dryRun: true });
+    rmSync(app, { recursive: true, force: true });
+    const toThisMachine = await relay(t, { toBox: undefined });
+
+    expect(named.error).toBeNull();
+    expect(named.lines).toContain("Destination: the box ~/Developer/app");
+    expect(byDefault.error).toBeNull();
+    expect(unnamed.error?.message).toBe(
+      "More than one box is configured (a, b, c). Add --to-box <name>, or set default_box in the config.",
+    );
+    expect(toThisMachine.error).toBeNull();
+    expect(readFileSync(join(t.w.operator, "Developer/app/notes.md"), "utf8")).toBe("notes\n");
+    expect(t.targets).toEqual(["user@c.example", "user@b.example", "user@a.example"]);
   });
 });

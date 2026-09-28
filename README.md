@@ -316,8 +316,8 @@ Other box commands:
 
 Select a box with the `--box <name>` option:
 
-- `install`, `auth`, `move`, and `integrations enable|disable` change one box. They use the box of `--box`, else `default_box`, else the only box. If there is more than one box and no `default_box`, they stop and ask for `--box`. They accept one `--box` only.
-- `move --from-box --box <a> --to-box <b>` moves a project from box `a` to box `b`. It needs both names. See [Move between boxes](#move-between-boxes).
+- `install`, `auth`, and `integrations enable|disable` change one box. They use the box of `--box`, else `default_box`, else the only box. If there is more than one box and no `default_box`, they stop and ask for `--box`. They accept one `--box` only.
+- `move` does not accept `--box`. It names its boxes with `--from-box <name>` and `--to-box <name>`. Without either option, it uses `default_box`, else the only box. See [Move a project](#move-a-project).
 - `tunnel` uses one box, with the same rules. See [Open a box port locally](#open-a-box-port-locally).
 - With box tables, `integrations enable|disable` writes the key to `[box.<name>.integrations]` of that box. The command prints the name of the table that it changed.
 - `status` works on all boxes, or on the boxes of `--box`. Give `--box` more than one time to select more boxes. See [Status](#status).
@@ -589,14 +589,24 @@ To revoke the box key, delete the key with the title `<box host> (ferry)` in Git
 Use `ferry move` to continue work on a project on the other machine.
 
 ```sh
-ferry move ~/Developer/app                # this machine -> box
-ferry move --from-box ~/Developer/app     # box -> this machine
-ferry move --from-box --box a --to-box b ~/Developer/app  # box a -> box b
+ferry move ~/Developer/app                # this machine -> default_box or the only box
+ferry move ~/Developer/app --to-box b     # this machine -> box b
+ferry move ~/Developer/app --from-box a   # box a -> this machine
+ferry move ~/Developer/app --from-box a --to-box b  # box a -> box b
 ferry move ~/Developer/app --dry-run      # show what Ferry carries, refuses, and skips
 ferry move ~/Developer/app --remove       # after verification, move the source copy to a trash directory
 ferry move ~/Developer/app --include-env  # also carry .env files that pass the deny rules
 ferry move ~/Developer/app --include-env --allow-secrets  # also carry .env files with tokens or secrets
 ```
+
+The options set the direction of the move:
+
+- No option: from this machine to `default_box`, else to the only box. If there is more than one box and no `default_box`, Ferry stops and asks for `--to-box`.
+- `--to-box <b>`: from this machine to box `b`.
+- `--from-box <a>`: from box `a` to this machine.
+- `--from-box <a> --to-box <b>`: from box `a` to box `b`. The two names must be different. See [Move between boxes](#move-between-boxes).
+
+Each name must be a box of the config. A `[host]` config has one box, named `default`. `ferry move` does not accept `--box`.
 
 The project must be inside your home directory. The destination uses the same path relative to its home. For example, `~/Developer/app` on this machine becomes `~/Developer/app` on the box. Ferry does these steps:
 
@@ -615,9 +625,7 @@ If a step fails after the clone, the destination copy is incomplete. Ferry does 
 
 ### Move between boxes
 
-`ferry move --from-box --box <a> --to-box <b> <path>` moves a project from box `a` to box `b` of the config. `--box` names the source box, as it does for `--from-box` alone. `--to-box` names the destination box. `--to-box` works only together with `--from-box`. Ferry needs both names: it does not use `default_box` or the only box for this move. The two names must be different, and each one must be a box of the config.
-
-The two boxes do not connect to each other. Ferry opens a Link to each box from this machine. It reads the project files from box `a` into a temporary directory on this machine and applies the same checks as the other move directions: the deny rules, the `.env` rules, `--allow-secrets`, and the question before a transfer with secrets. Then it writes the files to box `b` and verifies their checksums on box `b`. Ferry removes the temporary directory after the move, also after a failure and after `--dry-run`. Nothing stays on this machine.
+`ferry move <path> --from-box <a> --to-box <b>` moves a project from box `a` to box `b`. The two boxes do not connect to each other. Ferry opens a Link to each box from this machine. It reads the project files from box `a` into a temporary directory on this machine and applies the same checks as the other move directions: the deny rules, the `.env` rules, `--allow-secrets`, and the question before a transfer with secrets. Then it writes the files to box `b` and verifies their checksums on box `b`. Ferry removes the temporary directory after the move, also after a failure and after `--dry-run`. Nothing stays on this machine.
 
 Box `b` clones the project from `origin` with its own SSH key, so run `ferry auth gh --box b` first if box `b` cannot read the repository. Ferry refuses the move if the path already exists on box `b`. `--dry-run` writes on neither box. With `--remove`, the copy on box `a` goes to `~/.ferry/trash` on box `a`. The plan and the progress lines name both boxes, for example `Cloning on box b`.
 
@@ -772,7 +780,7 @@ If there is no local Paseo app, the version line says `not pinned (no local Pase
 
 For each box with `paseo = true`, `ferry status --json` adds `integrations.paseo` to the box entry, with `name`, `lines`, `warnings`, and `state`. `state` has the unit states, `localDaemon`, `connectedDaemon`, `daemonVersion`, `localVersion`, `pinned`, `listen`, `relay`, `providers`, and `error`. Ferry never shows the `serverId`, the hostname, or the values in `~/.paseo/config.json`. When the host is offline, Ferry skips the check.
 
-When `paseo = true`, `ferry move` to the box adds a step called "Registering the project in Paseo" after the move. The step runs `paseo project create <path>` on the box. A repeat run is safe, because Paseo returns the existing project for a known directory. If the step fails, Ferry prints a warning and the move stays complete. `ferry move --from-box` does not register the project on this machine. A move between boxes registers the project on the destination box when that box has `paseo = true`. With `--remove`, Ferry does not remove the source project from Paseo. It prints a line that tells you how to remove it: run `paseo project ls` to find its ID, then `paseo project delete <id>`. This does not delete files.
+When `paseo = true`, `ferry move` to the box adds a step called "Registering the project in Paseo" after the move. The step runs `paseo project create <path>` on the box. A repeat run is safe, because Paseo returns the existing project for a known directory. If the step fails, Ferry prints a warning and the move stays complete. A move to this machine does not register the project on this machine. A move between boxes registers the project on the destination box when that box has `paseo = true`. With `--remove`, Ferry does not remove the source project from Paseo. It prints a line that tells you how to remove it: run `paseo project ls` to find its ID, then `paseo project delete <id>`. This does not delete files.
 
 ### Agent profiles
 

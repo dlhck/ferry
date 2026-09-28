@@ -568,13 +568,26 @@ describe("ferry --help", () => {
     });
 
     await program.parseAsync(
-      ["move", "Developer/app", "--from-box", "--dry-run", "--remove", "--include-env", "--allow-secrets", "--yes"],
+      [
+        "move",
+        "Developer/app",
+        "--from-box",
+        "a",
+        "--to-box",
+        "b",
+        "--dry-run",
+        "--remove",
+        "--include-env",
+        "--allow-secrets",
+        "--yes",
+      ],
       { from: "user" },
     );
 
     expect(received).toEqual({
       path: "Developer/app",
-      fromBox: true,
+      fromBox: "a",
+      toBox: "b",
       dryRun: true,
       remove: true,
       includeEnv: true,
@@ -768,7 +781,7 @@ describe("--box", () => {
   });
 
   test("single-target commands read the config as the named box", async () => {
-    for (const args of [["install"], ["auth", "codex"], ["move", "project"], ["integrations", "enable", "paseo"], ["integrations", "disable", "paseo"]]) {
+    for (const args of [["install"], ["auth", "codex"], ["integrations", "enable", "paseo"], ["integrations", "disable", "paseo"]]) {
       expect(await readBy(BOXES, [...args, "--box", "b"])).toEqual(B_VIEW);
     }
   });
@@ -780,7 +793,7 @@ describe("--box", () => {
   test("single-target commands use default_box, then the only box", async () => {
     expect((await readBy(BOXES, ["install"]))?.host).toEqual({ transport: "ssh", destination: "dev@box-a.example" });
     const onlyB = { ...BOXES, defaultBox: undefined, boxes: BOXES.boxes?.slice(1) };
-    expect((await readBy(onlyB, ["move", "project"]))?.host).toEqual({ tailscale: "box-b", sshUser: "dev" });
+    expect((await readBy(onlyB, ["auth", "codex"]))?.host).toEqual({ tailscale: "box-b", sshUser: "dev" });
   });
 
   test("single-target commands refuse more than one --box, and no box with no default_box", async () => {
@@ -790,21 +803,13 @@ describe("--box", () => {
     await expect(readBy({ ...BOXES, defaultBox: undefined }, ["auth", "codex"])).rejects.toThrow("Add --box <name>");
   });
 
-  test("move --to-box passes the --box names and the whole config to the move module", async () => {
-    let received: unknown;
-    let read: PartialOperatorConfig | null | undefined;
-    await buildProgram({
-      readConfig: () => BOXES,
-      runMove: async (input, dependencies) => {
-        received = input.relay;
-        read = dependencies?.readConfig?.();
-      },
-      createProgress: () => noProgress,
-      writeLine: () => {},
-    }).parseAsync(["move", "Developer/app", "--from-box", "--box", "a", "--to-box", "b"], { from: "user" });
-
-    expect(received).toEqual({ from: ["a"], to: "b" });
-    expect(read).toBeUndefined();
+  test("move reads the whole config and refuses --box", async () => {
+    expect(await readBy(BOXES, ["move", "project", "--from-box", "a", "--to-box", "b"])).toBeUndefined();
+    for (const args of [["move", "project", "--box", "a"], ["--box", "a", "move", "project"]]) {
+      await expect(readBy(BOXES, args)).rejects.toThrow(
+        "ferry move does not accept --box. Use --from-box <name> or --to-box <name>.",
+      );
+    }
   });
 
   test("an unknown or invalid box name is refused", async () => {
