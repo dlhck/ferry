@@ -1260,6 +1260,57 @@ describe("ferry tunnel", () => {
       box: { name: "lab", host: { tailscale: "lab", sshUser: "dev" } },
     });
   });
+
+  test("tunnel install and uninstall pass the box of --box, then default_box, and print the service path", async () => {
+    const boxes: string[] = [];
+    const output: string[] = [];
+    const program = () =>
+      buildProgram({
+        readConfig: () => BOXES,
+        installTunnelService: async ({ box }) => {
+          boxes.push(`install ${box}`);
+          return { manager: "systemd", path: `/home/me/.config/systemd/user/ferry-tunnel-${box}.service` };
+        },
+        uninstallTunnelService: async ({ box }) => {
+          boxes.push(`uninstall ${box}`);
+          return { manager: "launchd", path: `/Users/me/Library/LaunchAgents/dev.ferry.tunnel.${box}.plist`, removed: box === "lab" };
+        },
+        runTunnel: async () => {
+          throw new Error("tunnel ran");
+        },
+        writeLine: (line) => output.push(line),
+      });
+
+    await program().parseAsync(["tunnel", "install", "--box", "lab"], { from: "user" });
+    await program().parseAsync(["tunnel", "install"], { from: "user" });
+    await program().parseAsync(["tunnel", "uninstall", "--box", "lab"], { from: "user" });
+    await program().parseAsync(["tunnel", "uninstall"], { from: "user" });
+
+    expect(boxes).toEqual(["install lab", "install a", "uninstall lab", "uninstall a"]);
+    expect(output).toEqual([
+      "Installed systemd service at /home/me/.config/systemd/user/ferry-tunnel-lab.service",
+      "Installed systemd service at /home/me/.config/systemd/user/ferry-tunnel-a.service",
+      "Removed launchd service at /Users/me/Library/LaunchAgents/dev.ferry.tunnel.lab.plist",
+      "No launchd service at /Users/me/Library/LaunchAgents/dev.ferry.tunnel.a.plist",
+    ]);
+    await expect(
+      buildProgram({ readConfig: () => ({ ...BOXES, defaultBox: undefined }), writeLine: () => {} }).parseAsync(["tunnel", "install"], {
+        from: "user",
+      }),
+    ).rejects.toThrow("Add --box <name>, or set default_box in the config.");
+  });
+
+  test("tunnel install --help names the service files and the logs", () => {
+    const tunnel = buildProgram().commands.find((command) => command.name() === "tunnel")!;
+    const install = tunnel.commands.find((command) => command.name() === "install")!;
+    let text = "";
+    install.configureOutput({ writeOut: (value) => (text += value) });
+    install.outputHelp();
+    expect(text).toContain("~/Library/LaunchAgents/dev.ferry.tunnel.<box>.plist");
+    expect(text).toContain("~/Library/Logs/ferry-tunnel-<box>.log");
+    expect(text).toContain("~/.config/systemd/user/ferry-tunnel-<box>.service");
+    expect(text).toContain("journalctl --user -u ferry-tunnel-<box>.service -f");
+  });
 });
 
 describe("ferry expose", () => {
@@ -1289,6 +1340,7 @@ describe("box mode", () => {
       ["status"],
       ["box", "list"],
       ["watch", "install"],
+      ["tunnel", "install"],
       ["move", "Developer/app"],
       ["move", "Developer/app", "--from-box", "a"],
       ["move", "Developer/app", "--to-box", "lab"],
@@ -1305,7 +1357,7 @@ describe("box mode", () => {
         { renderError: (message) => errors.push(message), setExitCode: () => {} },
       );
       expect(errors).toEqual([
-        `This is a box install of Ferry (~/.ferry/box.json). Only ferry expose runs here. Run ferry ${args[0] === "box" || args[0] === "watch" ? args.join(" ") : args[0]} on the operator machine.`,
+        `This is a box install of Ferry (~/.ferry/box.json). Only ferry expose runs here. Run ferry ${args[0] === "box" || args[0] === "watch" || args[1] === "install" ? args.join(" ") : args[0]} on the operator machine.`,
       ]);
     }
   });
@@ -1507,6 +1559,41 @@ describe("--json", () => {
     expect(list.json[0]).toMatchObject({ command: "tunnel", ok: false, error: { code: "config-missing" } });
   });
 
+  test("tunnel install and uninstall print one envelope", async () => {
+    const install = await run(["tunnel", "install", "--box", "b"], {
+      installTunnelService: async () => ({ manager: "launchd", path: "/Users/me/Library/LaunchAgents/dev.ferry.tunnel.b.plist" }),
+    });
+    expect(install.json).toEqual([
+      {
+        schemaVersion: 1,
+        command: "tunnel install",
+        ok: true,
+        result: { manager: "launchd", path: "/Users/me/Library/LaunchAgents/dev.ferry.tunnel.b.plist" },
+        warnings: [],
+        error: null,
+      },
+    ]);
+
+    const uninstall = await run(["tunnel", "uninstall"], {
+      uninstallTunnelService: async () => ({ manager: "systemd", path: "/home/me/.config/systemd/user/ferry-tunnel-a.service", removed: false }),
+    });
+    expect(uninstall.json[0]).toMatchObject({
+      command: "tunnel uninstall",
+      ok: true,
+      result: { manager: "systemd", path: "/home/me/.config/systemd/user/ferry-tunnel-a.service", removed: false },
+    });
+
+    const failed = await run(["tunnel", "install"], {
+      installTunnelService: async () => {
+        throw new Error("launchctl failed: denied");
+      },
+    });
+    expect(failed.json).toEqual([
+      expect.objectContaining({ command: "tunnel install", ok: false, error: expect.objectContaining({ code: "failed", message: "launchctl failed: denied" }) }),
+    ]);
+    expect(failed.exitCodes).toEqual([1]);
+  });
+
   test("tunnel --list prints the listeners in the envelope", async () => {
     const result = await run(["tunnel", "--list"], {
       runTunnel: async () => [{ port: 3000, address: "127.0.0.1", process: "node" }],
@@ -1622,7 +1709,7 @@ describe("--json", () => {
     expect(help([])).toContain("forward-opened");
     for (const path of [
       "init", "box list", "box add", "box remove", "box default", "install", "sync", "watch", "watch install", "status",
-      "auth", "update", "tools", "skills add", "move", "tunnel", "expose", "integrations", "integrations enable",
+      "auth", "update", "tools", "skills add", "move", "tunnel", "tunnel install", "tunnel uninstall", "expose", "integrations", "integrations enable",
       "integrations disable", "uninstall",
     ]) {
       expect(help(path.split(" "))).toContain("With --json: ");
