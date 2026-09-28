@@ -4,13 +4,14 @@ import { createHash } from "node:crypto";
 import { hostname, homedir } from "node:os";
 import { join } from "node:path";
 import { commitApply, planApply, type ApplyPlan } from "./apply.ts";
-import { resolveTargetBox } from "./boxes.ts";
+import { BOX_SNAPSHOT_KEY, resolveTargetBox, snapshotGit } from "./boxes.ts";
 import {
   configPath,
   readConfig as readOperatorConfig,
   resolveLinkOptions,
   writeConfig as writeOperatorConfig,
   type BoxesOperatorConfig,
+  type GitAuth,
   type OperatorConfig,
   type OperatorHostConfig,
   type PartialOperatorConfig,
@@ -199,7 +200,8 @@ export async function runInit(
   const config: OperatorConfig | BoxesOperatorConfig = boxes
     ? { ...shared, ...(existing?.defaultBox !== undefined ? { defaultBox: existing.defaultBox } : {}), boxes }
     : { ...shared, host };
-  progress.plan(input.dryRun ? 1 : 3 + boxCheckSteps(config.snapshotUrl));
+  const gitAuth = targetBox?.gitAuth ?? "agent";
+  progress.plan(input.dryRun ? 1 : 3 + boxCheckSteps(config.snapshotUrl, gitAuth));
 
   const seed = await step(
     progress,
@@ -217,7 +219,7 @@ export async function runInit(
   }
 
   const target = resolveLinkOptions(host);
-  await checkBoxAccess(dependencies.createLink?.(target) ?? new Link(target), config.snapshotUrl, dependencies);
+  await checkBoxAccess(dependencies.createLink?.(target) ?? new Link(target), config.snapshotUrl, dependencies, gitAuth);
 
   const uninstallState = captureInitState({
     home,
@@ -264,22 +266,35 @@ export async function runInit(
 }
 
 /** The progress steps of `checkBoxAccess`. */
-export function boxCheckSteps(snapshotUrl: string): number {
-  return snapshotSshTarget(snapshotUrl) ? 5 : 1;
+export function boxCheckSteps(snapshotUrl: string, gitAuth: GitAuth = "agent"): number {
+  if (!snapshotSshTarget(snapshotUrl)) return 1;
+  return gitAuth === "box" ? 4 : 5;
 }
 
 /**
  * The checks of init for a box. For an SSH snapshot: the operator SSH agent,
  * agent forwarding to the box, the Git host key on the box, and read access to
  * the snapshot through the forwarded agent. Else: an SSH connection to the box.
+ * With `gitAuth` `"box"`, see `checkBoxDeployKey`.
  */
 export async function checkBoxAccess(
   link: InitLink,
   snapshotUrl: string,
   dependencies: Pick<InitDependencies, "checkAgent" | "approveHostKeys" | "progress">,
+  gitAuth: GitAuth = "agent",
 ): Promise<void> {
   const progress = dependencies.progress ?? noProgress;
   const snapshotTarget = snapshotSshTarget(snapshotUrl);
+  if (gitAuth === "box") {
+    if (!snapshotTarget) {
+      throw new InitRefusal(
+        "invalid-values",
+        `git_auth = "box" needs an SSH snapshot URL, such as git@github.com:you/ferry-snapshot.git, because a deploy key works over SSH only. ${snapshotUrl} is not an SSH URL.`,
+      );
+    }
+    await checkBoxDeployKey(link, snapshotUrl, snapshotTarget, progress, dependencies.approveHostKeys);
+    return;
+  }
   if (snapshotTarget) {
     const agent = await step(
       progress,
@@ -328,6 +343,55 @@ export async function checkBoxAccess(
       );
     }
   }
+}
+
+/**
+ * The checks for a `git_auth = "box"` box. Ferry forwards no agent. It makes
+ * the deploy key on the box if it is missing, trusts the Git host key on the
+ * box, and reads the snapshot with the deploy key. Ferry does not add the key
+ * to the snapshot repository. The refusal prints the public key for the operator.
+ */
+async function checkBoxDeployKey(
+  link: InitLink,
+  snapshotUrl: string,
+  snapshotTarget: SnapshotSshTarget,
+  progress: Progress,
+  approve: InitDependencies["approveHostKeys"],
+): Promise<void> {
+  const key = await step(
+    progress,
+    "Making the snapshot deploy key on the box",
+    () => link.run(deployKeyCommand()),
+    (result) => !result.ok,
+  );
+  if (!key.ok) throw new InitRefusal("link-refusal", `${key.error.origin}: ${key.error.message}`);
+  const publicKey = key.stdout.trim();
+  await approveSnapshotHostKey(link, snapshotTarget, approve, progress);
+  const access = await step(
+    progress,
+    "Checking access to the snapshot",
+    () => link.run(`${snapshotGit("box")} ls-remote ${quoteShell(snapshotUrl)} HEAD`),
+    (result) => !result.ok,
+  );
+  if (!access.ok) {
+    throw new InitRefusal(
+      "snapshot-access-refusal",
+      `${access.error.origin}: could not read ${snapshotUrl} with the box deploy key ~/${BOX_SNAPSHOT_KEY}: ${access.error.message}\n` +
+        "Add this public key as a read-only deploy key on the snapshot repository. Do not give it write access. Then run the command again.\n" +
+        publicKey,
+    );
+  }
+}
+
+/** Make the ed25519 deploy key without a passphrase if it is missing, then print its public key. */
+function deployKeyCommand(): string {
+  const key = `"$HOME/${BOX_SNAPSHOT_KEY}"`;
+  return [
+    "umask 077;",
+    'install -d -m 700 "$HOME/.ssh" &&',
+    `{ [ -f ${key} ] || ssh-keygen -q -t ed25519 -N '' -C ferry-snapshot -f ${key} </dev/null >/dev/null; } &&`,
+    `cat "$HOME/${BOX_SNAPSHOT_KEY}.pub"`,
+  ].join(" ");
 }
 
 function makeInitPlan(
@@ -451,7 +515,17 @@ type ScannedHostKey = {
   readonly fingerprint: string;
 };
 
+/** The SSH host of a snapshot URL. An https, file, or other non-SSH URL, or a local path, has none. */
 function snapshotSshTarget(remote: string): SnapshotSshTarget | null {
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(remote)?.[1]?.toLowerCase();
+  if (scheme !== undefined) {
+    if (scheme !== "ssh" && scheme !== "git+ssh") return null;
+    const url = URL.parse(remote);
+    if (!url?.hostname) return null;
+    return url.port
+      ? { host: url.hostname, knownHost: `[${url.hostname}]:${url.port}`, scanPort: `-p ${url.port} ` }
+      : { host: url.hostname, knownHost: url.hostname, scanPort: "" };
+  }
   const match = /^(?:[^@/:\s]+@)?([^:/\s]+):.+$/.exec(remote);
   if (!match?.[1]) return null;
   return { host: match[1], knownHost: match[1], scanPort: "" };

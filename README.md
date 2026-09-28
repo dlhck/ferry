@@ -185,7 +185,7 @@ In other cases, Ferry writes one plain line when a step starts or its count chan
 
 `ferry status` reads the local store, the git remote, and each box. It does not change a machine. It checks at most 4 boxes at the same time. An offline box shows `unavailable` lines and does not stop the other boxes.
 
-The text output has a shared block first: the local and remote store tips and the deny list. Then it has one block for each box, in config order, with the header `Box <name> (<destination>)`. A box block shows only the integrations that are on for that box. With a `[host]` config, the one box has the name `default`.
+The text output has a shared block first: the local and remote store tips and the deny list. Then it has one block for each box, in config order, with the header `Box <name> (<destination>)`. A box block shows only the integrations that are on for that box. With a `[host]` config, the one box has the name `default`. The `Git auth` line of a box shows `AGENT` or `BOX`. See [Git auth for each box](#git-auth-for-each-box).
 
 With more than one box, each progress step starts with the box name, for example `[a] Checking logins on the box`. The summary table has one row for each box and step, grouped by box.
 
@@ -201,6 +201,7 @@ With more than one box, each progress step starts with the box name, for example
     {
       "name": "a",
       "host": "dev@box-a.example",
+      "gitAuth": "agent",
       "link": { "online": true, "address": "100.64.0.1", "error": null },
       "tip": "1a2b3c4",
       "remoteMatchesBox": true,
@@ -312,7 +313,41 @@ Other box commands:
 
 - `ferry box list` prints the name, transport, and destination of each box. The `Default` column marks the box that a command uses without `--box`.
 - `ferry box remove <name>` removes the table from the config. Ferry does not connect to the box and does not change it. Ferry does not remove the last box. If the box was the `default_box`, Ferry removes `default_box` and prints a warning.
-- `ferry box default <name>` sets `default_box`.
+- `ferry box default <name>` sets `default_box`, the box of `install`, `auth`, `move`, `tunnel`, and `integrations enable|disable` without `--box`.
+
+### Git auth for each box
+
+The `git_auth` key of a `[box.<name>]` table sets how the box git reads the snapshot remote:
+
+- `"agent"` is the default. Ferry forwards your SSH agent (`ssh -A`) to the box for the snapshot update and for the Claude plugin installs of `ferry sync`. While these commands run, the box can use your agent.
+- `"box"`: Ferry never forwards your agent to this box. The box reads the snapshot remote with its own key, `~/.ssh/ferry_snapshot`. Use it for a box that you trust less.
+
+```toml
+[box.b]
+transport = "ssh"
+destination = "user@box-b.example"
+git_auth = "box"
+```
+
+Add a box with its own key:
+
+```sh
+ferry box add b --ssh-destination user@box-b.example --git-auth box
+```
+
+For a `"box"` box, `ferry box add` and `ferry init --box <name>` do these steps:
+
+1. Make an ed25519 key without a passphrase at `~/.ssh/ferry_snapshot` on the box, if the key is missing.
+2. Trust the Git host key on the box, as for `"agent"`.
+3. Run `git ls-remote` on the snapshot remote with the key.
+
+If the box cannot read the snapshot, Ferry stops, prints the public key, and does not write the config. Add the public key as a read-only deploy key on the snapshot repository, then run the command again. Ferry does not add the deploy key for you. Do not give the deploy key write access. The box only reads the snapshot.
+
+Ferry selects the key only for its own snapshot git commands. It runs them as `git -c core.sshCommand='ssh -i ~/.ssh/ferry_snapshot -o IdentitiesOnly=yes'`. It does not write this setting to the box checkout or to `~/.ssh/config`. Thus a `git fetch` that you run by hand in `~/.ferry/store` on the box does not use the key.
+
+To change an existing box to `"box"`, add `git_auth = "box"` to its table, then run `ferry init --box <name>`. `"box"` needs an SSH snapshot URL, because a deploy key works over SSH only. `git_auth` is valid only in a `[box.<name>]` table. A `[host]` config refuses it. Use `ferry box add` to change to box tables.
+
+With `"box"`, `ferry sync` installs Claude plugins without your agent. A plugin from a private repository then fails with a warning, unless the box has its own access.
 
 Select a box with the `--box <name>` option:
 

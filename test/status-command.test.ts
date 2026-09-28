@@ -664,6 +664,7 @@ describe("ferry status with more than one box", () => {
           {
             name: "b",
             host: { tailscale: "box-b", sshUser: "dev" },
+            gitAuth: "box" as const,
             integrations: { paseo: false },
           },
         ],
@@ -696,6 +697,7 @@ describe("ferry status with more than one box", () => {
         "Box a (dev@box-a.example)",
         "Host: ONLINE",
         "Address: 100.64.0.8",
+        "Git auth: AGENT, box git commands use your forwarded SSH agent",
         "",
         "Store tips:",
         "  Box: same-tip",
@@ -704,7 +706,9 @@ describe("ferry status with more than one box", () => {
       ].join("\n"),
     );
     expect(text.indexOf("Box a (dev@box-a.example)")).toBeLessThan(text.indexOf("Box b (dev@box-b)"));
-    expect(text).toContain("Box b (dev@box-b)\nHost: OFFLINE\nAddress: unavailable");
+    expect(text).toContain(
+      "Box b (dev@box-b)\nHost: OFFLINE\nAddress: unavailable\nGit auth: BOX, deploy key ~/.ssh/ferry_snapshot on the box",
+    );
     expect(text).toEndWith("Errors:\n  network/host-offline: Tailscale host box is offline");
     expect(stack.linkOptions).toEqual([{ destination: "dev@box-a.example" }, { host: "box-b", user: "dev" }]);
     expect(stack.mutations).toEqual([]);
@@ -731,9 +735,9 @@ describe("ferry status with more than one box", () => {
     expect(json.schemaVersion).toBe(2);
     expect(json.store).toEqual({ local: "same-tip", remote: "same-tip", localMatchesRemote: true, error: null });
     expect(json.errors).toEqual([]);
-    expect(json.boxes.map((box: { name: string; host: string }) => [box.name, box.host])).toEqual([
-      ["a", "dev@box-a.example"],
-      ["b", "dev@box-b"],
+    expect(json.boxes.map((box: { name: string; host: string; gitAuth: string }) => [box.name, box.host, box.gitAuth])).toEqual([
+      ["a", "dev@box-a.example", "agent"],
+      ["b", "dev@box-b", "box"],
     ]);
     expect(json.boxes[0].link.online).toBe(true);
     expect(json.boxes[0].integrations.paseo.state).toEqual(health.json);

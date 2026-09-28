@@ -7,7 +7,7 @@ import {
   type AuthStatusReport,
   type McpLoginStatus,
 } from "./auth-start.ts";
-import { resolveBoxes, type ResolvedBox } from "./boxes.ts";
+import { BOX_SNAPSHOT_KEY, resolveBoxes, type ResolvedBox } from "./boxes.ts";
 import { readConfig, resolveLinkOptions, type OperatorHostConfig, type PartialOperatorConfig } from "./config.ts";
 import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
 import { BunHostAdapter, Link, type HostAdapter, type HostCommandResult, type LinkOptions } from "./link.ts";
@@ -110,6 +110,7 @@ function boxDependencies(
   return {
     name: box.name,
     host: destination(box.host),
+    gitAuth: box.gitAuth,
     link: {
       async probe() {
         const result = await link.run(`printf '%s\\n' "$HOME"`);
@@ -179,6 +180,9 @@ function boxLines(box: BoxStatus, operator: GitIdentity | null): string[] {
     `Box ${box.name} (${box.host})`,
     `Host: ${box.link.online ? "ONLINE" : "OFFLINE"}`,
     `Address: ${box.link.address ?? "unavailable"}`,
+    box.gitAuth === "box"
+      ? `Git auth: BOX, deploy key ~/${BOX_SNAPSHOT_KEY} on the box`
+      : "Git auth: AGENT, box git commands use your forwarded SSH agent",
     "",
     "Store tips:",
     `  Box: ${tip(box.tip)}`,

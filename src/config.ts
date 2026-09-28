@@ -30,10 +30,19 @@ export type BoxesOperatorConfig = Omit<OperatorConfig, "host"> & {
 export type BoxConfig = {
   readonly name: string;
   readonly host: OperatorHostConfig;
+  /** How the box git reads the snapshot remote. A missing key means `"agent"`. */
+  readonly gitAuth?: GitAuth;
   readonly integrations?: IntegrationsConfig;
   /** Policies by tool id. A policy replaces the `[tools]` policy or the `version` of a `[tools.<id>]` table. */
   readonly tools?: { readonly [id: string]: ToolPolicy };
 };
+
+/**
+ * `"agent"` forwards the operator SSH agent to the box git commands.
+ * `"box"` forwards no agent. The box reads the snapshot remote with its own
+ * read-only deploy key.
+ */
+export type GitAuth = "agent" | "box";
 
 /** A box name goes into flags, lock file names, JSON, and output prefixes, so the characters stay few. */
 const BOX_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -326,6 +335,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     return {
       name: entry.name,
       host,
+      ...(entry.gitAuth ? { gitAuth: entry.gitAuth } : {}),
       ...(entry.integrations ? { integrations: entry.integrations } : {}),
       ...(entry.tools ? { tools: entry.tools } : {}),
     };
@@ -344,6 +354,7 @@ type BoxPart = "host" | "integrations" | "tools";
 type ParsedBox = {
   name: string;
   host: { transport?: "tailscale" | "ssh"; tailscale?: string; sshUser?: string; destination?: string };
+  gitAuth?: GitAuth;
   integrations?: Record<string, boolean>;
   tools?: Record<string, ToolPolicy>;
 };
@@ -353,6 +364,12 @@ function readBoxKey(entry: ParsedBox, part: BoxPart, key: string, encoded: strin
   if (part === "tools") {
     if (entry.tools?.[key] !== undefined) throw new ConfigError(`duplicate tool ${key} in ${section} of ${path}`);
     entry.tools = { ...entry.tools, [key]: parsePolicy(encoded, `${key} in ${section}`, path) };
+    return;
+  }
+  if (part === "host" && key === "git_auth") {
+    const value = tomlString(encoded);
+    if (value !== "agent" && value !== "box") throw new ConfigError(`invalid git_auth in ${section} of ${path}. Use "agent" or "box".`);
+    entry.gitAuth = value;
     return;
   }
   if (!SECTION_KEYS[part === "host" ? "[host]" : "[integrations]"]?.includes(key)) {
@@ -460,6 +477,7 @@ function boxLines(box: BoxConfig): string[] {
   return [
     `[box.${box.name}]`,
     ...hostLines(box.host),
+    ...(box.gitAuth !== undefined ? [`git_auth = ${JSON.stringify(box.gitAuth)}`] : []),
     "",
     ...(box.integrations?.paseo !== undefined
       ? [`[box.${box.name}.integrations]`, `paseo = ${box.integrations.paseo}`, ""]

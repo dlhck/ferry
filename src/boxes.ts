@@ -4,6 +4,7 @@ import {
   ConfigError,
   completeHostConfig,
   type BoxConfig,
+  type GitAuth,
   type IntegrationsConfig,
   type OperatorHostConfig,
   type PartialOperatorConfig,
@@ -14,6 +15,8 @@ import {
 export type ResolvedBox = {
   readonly name: string;
   readonly host: OperatorHostConfig;
+  /** `git_auth` of the box, or `"agent"`. */
+  readonly gitAuth: GitAuth;
   /** `[integrations]`, with the keys of `[box.<name>.integrations]` on top. */
   readonly integrations: IntegrationsConfig;
   /**
@@ -42,7 +45,7 @@ export function resolveBoxes(config: PartialOperatorConfig, selection: readonly 
 
 /**
  * The one box of a command that changes one box on purpose (`install`,
- * `auth`, `move`, `integrations enable|disable`). Without a name, it is
+ * `auth`, `move`, `tunnel`, `integrations enable|disable`). Without a name, it is
  * `default_box` or the only box. With more than one box and no
  * `default_box`, the operator must name a box.
  */
@@ -69,5 +72,23 @@ function resolveBox(config: PartialOperatorConfig, box: BoxConfig): ResolvedBox 
     const entry = tools[id];
     tools[id] = entry === undefined || typeof entry === "string" ? policy : { ...entry, version: policy };
   }
-  return { name: box.name, host: box.host, integrations: { ...config.integrations, ...box.integrations }, tools };
+  return {
+    name: box.name,
+    host: box.host,
+    gitAuth: box.gitAuth ?? "agent",
+    integrations: { ...config.integrations, ...box.integrations },
+    tools,
+  };
+}
+
+/** The deploy key of a `git_auth = "box"` box, relative to the box home. */
+export const BOX_SNAPSHOT_KEY = ".ssh/ferry_snapshot";
+
+/**
+ * The `git` of a box command that reads the snapshot remote. With `"box"`,
+ * `-c core.sshCommand` makes this one git command use the box deploy key and
+ * no other identity. It does not write the setting to the box checkout.
+ */
+export function snapshotGit(gitAuth: GitAuth): string {
+  return gitAuth === "box" ? `git -c core.sshCommand='ssh -i ~/${BOX_SNAPSHOT_KEY} -o IdentitiesOnly=yes'` : "git";
 }

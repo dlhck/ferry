@@ -2004,6 +2004,39 @@ describe("sync with more than one box", () => {
     expect(sync.events.some((event) => event.startsWith("a:"))).toBe(false);
   });
 
+  test("forwards no agent to a git_auth = box box and reads the snapshot with its deploy key", async () => {
+    const config = { ...fleetConfig, boxes: [box("a"), { ...box("b"), gitAuth: "box" as const }] };
+    const sync = fleet({ config });
+    const updates: Array<{ box: string; command: string; options: unknown }> = [];
+    const createLink = sync.dependencies.createLink!;
+    const dependencies: SyncDependencies = {
+      ...sync.dependencies,
+      createLink: (target) => {
+        const inner = createLink(target);
+        const name = (target as { destination: string }).destination;
+        return {
+          run: (command, options) => {
+            if (command.includes("clone")) updates.push({ box: name, command, options });
+            return inner.run(command, options);
+          },
+        };
+      },
+    };
+
+    await runSync({ home: sync.home }, dependencies);
+
+    const [a, b] = [...updates].sort((left, right) => left.box.localeCompare(right.box));
+    expect(a?.options).toEqual({ agentForwarding: "git" });
+    expect(a?.command).not.toContain("core.sshCommand");
+    expect(b?.options).toBeUndefined();
+    expect(b?.command).toContain(
+      "git -c core.sshCommand='ssh -i ~/.ssh/ferry_snapshot -o IdentitiesOnly=yes' -C '/home/b/.ferry/store' fetch --quiet",
+    );
+    expect(b?.command).toContain(
+      "git -c core.sshCommand='ssh -i ~/.ssh/ferry_snapshot -o IdentitiesOnly=yes' clone 'git@example.test:operator/ferry-store.git'",
+    );
+  });
+
   test("refuses an unknown box before it publishes", async () => {
     const sync = fleet();
 
