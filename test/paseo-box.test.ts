@@ -211,14 +211,17 @@ describe("Paseo enable", () => {
     expect(lines.at(-1)).toBe("Paseo 0.9.2 runs on the box at 127.0.0.1:6767. The relay is off.");
   });
 
-  test("names linger and the fix when neither loginctl nor sudo -n can turn it on", async () => {
+  test("warns and still enables Paseo when neither loginctl nor sudo -n can turn on linger", async () => {
     const box = fakeBox();
     writeFileSync(join(box.state, "linger-denied"), "");
     writeFileSync(join(box.state, "sudo-denied"), "");
 
-    await expect(paseoWith("0.9.2").enable(box, noProgress)).rejects.toThrow(
-      'Ferry could not turn on linger (sudo: a password is required). Without linger, ferry-paseo.service stops when you log out of the box. Run sudo loginctl enable-linger "$USER" on the box',
+    const lines = await paseoWith("0.9.2").enable(box, noProgress);
+
+    expect(lines).toContain(
+      'Warning: Ferry could not turn on linger (sudo: a password is required). Without linger, ferry-paseo.service stops when you log out of the box. Run sudo loginctl enable-linger "$USER" on the box.',
     );
+    expect(lines.at(-1)).toBe("Paseo 0.9.2 runs on the box at 127.0.0.1:6767. The relay is off.");
   });
 
   test("the unit runs the daemon in the foreground with the Link PATH, loopback listen and no relay", () => {
