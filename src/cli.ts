@@ -798,7 +798,8 @@ that ferry tunnel install wrote. The macOS log stays.`)
     .description(`Run a command on the box and announce its port to ferry tunnel --follow.
 
 Ferry writes ~/.ferry/exposed/<pid>.json before the command starts and
-removes it when the command exits. Ferry forwards SIGINT and SIGTERM to the
+removes it when the command exits. At the start, Ferry removes the entries
+whose pid does not run. Ferry forwards SIGINT, SIGTERM, and SIGHUP to the
 command and exits with its exit code. Put the command after --.
 
 For example, a service script in paseo.json on the box:
