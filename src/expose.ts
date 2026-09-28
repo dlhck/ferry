@@ -46,7 +46,7 @@ export type ExposeDependencies = {
   readonly stdout: "inherit" | "stderr";
   /** With --json, prints the `exposed` and `exited` events. */
   readonly emit: (event: OutputEvent) => void;
-  /** Calls `handler` for SIGINT and SIGTERM. Returns a function that removes the handlers. */
+  /** Calls `handler` for SIGINT, SIGTERM, and SIGHUP. Returns a function that removes the handlers. */
   readonly onSignal: (handler: (signal: NodeJS.Signals) => void) => () => void;
 };
 
@@ -122,7 +122,7 @@ function defaultDependencies(): ExposeDependencies {
     stdout: "inherit",
     emit: () => {},
     onSignal: (handler) => {
-      const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
+      const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
       for (const signal of signals) process.on(signal, handler);
       return () => {
         for (const signal of signals) process.off(signal, handler);

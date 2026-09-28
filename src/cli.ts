@@ -745,8 +745,8 @@ the next free port, and Ferry connects again 5 seconds after a drop.`)
     .description(`Run a command on the box and announce its port to ferry tunnel --follow.
 
 Ferry writes ~/.ferry/exposed/<pid>.json before the command starts and
-removes it when the command exits. Ferry forwards SIGINT and SIGTERM to the
-command and exits with its exit code. Put the command after --.
+removes it when the command exits. Ferry forwards SIGINT, SIGTERM, and SIGHUP to
+the command and exits with its exit code. Put the command after --.
 
 For example, a service script in paseo.json on the box:
 

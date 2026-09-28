@@ -98,6 +98,24 @@ describe("ferry expose", () => {
     }
   });
 
+  test("forwards SIGHUP to the child, removes the entry, and exits with the code of the child", async () => {
+    const { home } = setup();
+    const dir = join(home, ".ferry", "exposed");
+    const script = `trap 'exit 9' HUP; while :; do sleep 0.05; done`;
+    const ferry = Bun.spawn(["bun", join(import.meta.dir, "..", "src", "cli.ts"), "expose", "--port", "45999", "--", "sh", "-c", script], {
+      env: { ...process.env, HOME: home },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    const entry = join(dir, `${ferry.pid}.json`);
+    // Wait until the child has its trap.
+    while (!existsSync(entry)) await Bun.sleep(10);
+    await Bun.sleep(300);
+    ferry.kill("SIGHUP");
+    expect(await ferry.exited).toBe(9);
+    expect(existsSync(entry)).toBe(false);
+  });
+
   test("removes the entry when the command cannot start", async () => {
     const { entry, dependencies } = setup();
     await expect(
