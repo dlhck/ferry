@@ -320,7 +320,7 @@ Other box commands:
 Select a box with the `--box <name>` option:
 
 - `install`, `auth`, `move`, and `integrations enable|disable` change one box. They use the box of `--box`, else `default_box`, else the only box. If there is more than one box and no `default_box`, they stop and ask for `--box`. They accept one `--box` only.
-- `tunnel` uses one box, with the same rules. See [Open a box port locally](#open-a-box-port-locally).
+- `tunnel` uses one box, with the same rules. See [Open a box port locally](#open-a-box-port-locally). `tunnel --follow` also uses one box.
 - With box tables, `integrations enable|disable` writes the key to `[box.<name>.integrations]` of that box. The command prints the name of the table that it changed.
 - `status` works on all boxes, or on the boxes of `--box`. Give `--box` more than one time to select more boxes. See [Status](#status).
 - `update` works on all boxes, or on the boxes of `--box`. Ferry updates the boxes one after the other. Each box gets the tool versions of its own policy, and the Paseo update only if Paseo is on for that box. The agent CLI updates on this machine run one time, not one time for each box. If a box is offline or an update on a box fails, Ferry continues with the other boxes. At the end, Ferry prints one result line for each box and exits with code 1 if a box failed. With more than one box, each box line starts with `[<name>]`.
@@ -641,6 +641,44 @@ Tunnel closed.
 - All ports use one SSH connection with `ssh -N`. If the connection drops, Ferry prints the SSH error and exits with a non-zero code. Ferry does not reconnect, and it has no background mode.
 - `--list` runs one read-only command on the box: `ss -ltnpH`. If the box has no `ss`, Ferry uses `netstat -ltnp`, then `/proc/net/tcp`. The list shows the ports that listen on loopback or on all interfaces. Without root, the box can hide the process names of other users. The list shows `-` for them.
 - The box is `--box`, then `default_box`, then the only box.
+
+### Follow the dev servers of the box
+
+`ferry expose` on the box announces the port of a command. `ferry tunnel --follow` on this machine opens a forward for each announced port, and closes it when the command stops. Wrap the dev server command, for example in a Paseo `service` script:
+
+```json
+"web": { "type": "service", "command": "ferry expose -- bun run dev --port $PASEO_PORT" }
+```
+
+`ferry expose [--port <n>] -- <command...>`:
+
+- The port is `--port`, else `$PASEO_PORT`. Without a port, `ferry expose` stops with an error before the command starts.
+- Before the command starts, Ferry writes `~/.ferry/exposed/<pid>.json` with the port, the name (`$PASEO_SCRIPTNAME` when it is set), the working directory, and the start time. `<pid>` is the process of `ferry expose`.
+- Ferry forwards SIGINT and SIGTERM to the command, exits with the exit code of the command, and removes the file when the command exits.
+- Put the command after `--`, so Ferry does not read its options.
+
+Then run this on this machine:
+
+```sh
+ferry tunnel --follow             # the default box
+ferry tunnel --follow --box lab   # another box
+```
+
+```text
+Following the ports that ferry expose announces on lab. Press Ctrl-C to close the tunnel.
+web  http://localhost:3000 -> lab:3000 (~/app)
+docs  http://localhost:5174 -> lab:5173 (~/docs)
+web  http://localhost:3000 -> lab:3000 (~/app) closed
+Tunnel closed.
+```
+
+- Ferry opens one SSH master connection (`ssh -M -S <socket>`) and runs one command on the box over it. That command prints the entries each time they change. It waits with `inotifywait` when the box has it, else it reads the directory each second. The wait stays on the box, so it adds no SSH round trips.
+- Ferry adds each forward with `ssh -O forward` and removes it with `ssh -O cancel`. A change to one forward does not stop the other forwards.
+- An entry whose process does not run gets no forward, for example after `kill -9` of `ferry expose`.
+- The local port is the box port when it is free. Else Ferry uses the next free port and prints the mapping.
+- Ferry reads the entries at start, so it finds the commands that started before it. When the connection drops, Ferry connects again after 5 seconds and reads the entries again.
+- Ctrl-C closes the forwards and the master connection.
+- `--follow` does not take ports or `--list`. Plain `ferry tunnel <port>` does not change.
 
 ## Ferry on the box
 

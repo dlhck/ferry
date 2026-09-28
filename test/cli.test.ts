@@ -1160,12 +1160,41 @@ describe("ferry tunnel", () => {
     });
   });
 
-  test("refuses more than one box and an unknown box", async () => {
+  test("refuses more than one box and an unknown box, with a message for the tunnel", async () => {
     await expect(tunnelInput(BOXES, ["tunnel", "3000", "--box", "a", "--box", "lab"])).rejects.toThrow(
-      "ferry tunnel changes one box. Give --box once.",
+      "ferry tunnel opens the ports of one box. Give --box once.",
     );
-    await expect(tunnelInput({ ...BOXES, defaultBox: undefined }, ["tunnel", "3000"])).rejects.toThrow("Add --box <name>");
+    await expect(tunnelInput({ ...BOXES, defaultBox: undefined }, ["tunnel", "3000"])).rejects.toThrow(
+      "ferry tunnel opens the ports of one box, and 2 boxes are configured (a, lab). Add --box <name>, or set default_box in the config.",
+    );
     await expect(tunnelInput(BOXES, ["tunnel", "3000", "--box", "c"])).rejects.toThrow("unknown box c.");
+  });
+
+  test("passes --follow with the selected box", async () => {
+    expect(await tunnelInput(BOXES, ["tunnel", "--follow", "--box", "lab"])).toEqual({
+      ports: [],
+      list: false,
+      follow: true,
+      box: { name: "lab", host: { tailscale: "lab", sshUser: "dev" } },
+    });
+  });
+});
+
+describe("ferry expose", () => {
+  test("passes the command after -- and --port, and sets the exit code of the command", async () => {
+    let received: unknown;
+    const codes: number[] = [];
+    await buildProgram({
+      runExpose: async (input) => {
+        received = input;
+        return 3;
+      },
+      setExitCode: (code) => codes.push(code),
+      isBoxMode: () => true,
+    }).parseAsync(["expose", "--port", "5173", "--", "bun", "run", "dev", "--port", "5173"], { from: "user" });
+
+    expect(received).toEqual({ port: "5173", command: ["bun", "run", "dev", "--port", "5173"] });
+    expect(codes).toEqual([3]);
   });
 });
 

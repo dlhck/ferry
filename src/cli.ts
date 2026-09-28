@@ -40,7 +40,7 @@ import {
   type PartialOperatorConfig,
 } from "./config.ts";
 import { BOX_MARKER } from "./box-ferry.ts";
-import { resolveTargetBox, type ResolvedBox } from "./boxes.ts";
+import { resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import { runBoxAdd, runBoxDefault, runBoxList, runBoxRemove, type BoxCommandDependencies } from "./box.ts";
 import { INTEGRATIONS, integrationLines, type Integration } from "./integrations/index.ts";
 import {
@@ -71,6 +71,7 @@ import {
 } from "./uninstall.ts";
 import { runSkillsAdd, SkillsAddError, type RunProcess } from "./skills-add.ts";
 import { runMove, type MoveDependencies, type MoveInput } from "./move.ts";
+import { runExpose, type ExposeDependencies, type ExposeInput } from "./expose.ts";
 import { runTunnel, type TunnelDependencies, type TunnelInput } from "./tunnel.ts";
 import {
   runUpdateCommand,
@@ -104,8 +105,11 @@ type CliDependencies = {
   readonly runSync?: (input: SyncInput, dependencies?: SyncDependencies) => Promise<SyncResult>;
   readonly runMove?: (input: MoveInput, dependencies?: Partial<MoveDependencies>) => Promise<void>;
   readonly runTunnel?: (input: TunnelInput, dependencies?: Partial<TunnelDependencies>) => Promise<void>;
+  readonly runExpose?: (input: ExposeInput, dependencies?: Partial<ExposeDependencies>) => Promise<number>;
   /** True when this is a box install. The default checks for `~/.ferry/box.json`. */
   readonly isBoxMode?: () => boolean;
+  /** Sets the exit code of `ferry expose`. */
+  readonly setExitCode?: (code: number) => void;
   readonly runStatus?: (
     input: StatusCommandInput,
     dependencies?: Partial<StatusCommandDependencies>,
@@ -398,15 +402,46 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("tunnel")
-    .description("Open box ports on this machine until Ctrl-C, or list the ports that listen on the box")
+    .description("Open box ports on this machine until Ctrl-C, list the ports that listen on the box, or follow the ports of ferry expose")
     .argument("[ports...]", "box port, or box:local to pick another local port, such as 3000 or 3000:4000")
     .option("--list", "list the TCP ports that listen on the box, with process names")
-    .action(async (ports: string[], options: { list?: boolean }) => {
-      const { name, host } = selectBox("tunnel")?.box ?? resolveTargetBox(config());
+    .option("--follow", "open a forward for each port that ferry expose announces on the box, and close it when the port goes away")
+    .action(async (ports: string[], options: { list?: boolean; follow?: boolean }) => {
+      const { name, host } = tunnelBox();
       await (dependencies.runTunnel ?? runTunnel)(
-        { ports, list: options.list === true, box: { name, host } },
+        { ports, list: options.list === true, ...(options.follow === true ? { follow: true } : {}), box: { name, host } },
         { createLink, writeLine },
       );
+    });
+  /** The one box of `ferry tunnel`: --box, then default_box, then the only box. */
+  const tunnelBox = (): ResolvedBox => {
+    const names = boxNames();
+    if (names.length > 1) throw new ConfigError("ferry tunnel opens the ports of one box. Give --box once.");
+    const current = config();
+    const selected = names[0] ?? current.defaultBox;
+    const boxes = resolveBoxes(current, selected === undefined ? [] : [selected]);
+    if (boxes.length === 1) return boxes[0]!;
+    throw new ConfigError(
+      `ferry tunnel opens the ports of one box, and ${boxes.length} boxes are configured (${boxes.map((box) => box.name).join(", ")}). ` +
+        "Add --box <name>, or set default_box in the config.",
+    );
+  };
+
+  program
+    .command("expose")
+    .description(`Run a command on the box and announce its port to ferry tunnel --follow.
+
+Ferry writes ~/.ferry/exposed/<pid>.json before the command starts and
+removes it when the command exits. Ferry forwards SIGINT and SIGTERM to the
+command and exits with its exit code. Put the command after --.`)
+    .argument("<command...>", "the command to run, after --, such as -- bun run dev")
+    .option("--port <n>", "the port of the command. The default is $PASEO_PORT")
+    .action(async (command: string[], options: { port?: string }) => {
+      const code = await (dependencies.runExpose ?? runExpose)({
+        command,
+        ...(options.port !== undefined ? { port: options.port } : {}),
+      });
+      (dependencies.setExitCode ?? setExitCode)(code);
     });
 
   program
