@@ -99,7 +99,7 @@ Each entry of `boxes` has these fields:
 | `auth.providers` | Login state per tool: `authenticated`, `login-required`, `manual` (with an `instruction`), or `unavailable`. |
 | `auth.loginRequired` | Tools that need a login. |
 | `mcpLogins.loginRequired` | Box MCP servers that need a login, as `tool/server`. |
-| `tools` | The version state of each registry tool on the box. |
+| `tools` | The version state of each registry tool on the box, with Ferry itself last as `id: "ferry"`. Each row has `id`, `mode`, `policy`, `operator`, `target`, `box`, `state`, and a `reason` for `hidden`, `skipped`, and `unknown`. |
 | `integrations` | Present only when an integration is on for this box. |
 | `errors` | Each inspection of this box that failed, with `origin`, `code`, and `message`. |
 
