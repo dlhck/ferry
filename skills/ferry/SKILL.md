@@ -294,12 +294,14 @@ With `--json`, Ferry never asks:
 | `integrations` | `{ boxes: [{ name, destination, integrations: [{ id, description, enabled, localVersion, localSource, connectSteps }] }] }`. `name` is `null` for a `[host]` config. |
 | `integrations enable`, `integrations disable` | `{ integration, action, dryRun, plan, output, enabled, connectSteps }`. `enabled` is the new config value, or `null` for a dry run. |
 | `watch install` | `{ manager: "launchd" or "systemd", path }` |
+| `tunnel install` | `{ manager: "launchd" or "systemd", path }` |
+| `tunnel uninstall` | `{ manager, path, removed }`. `removed` is `false` when the box had no service file. |
 | `uninstall` | `{ removed, restored }` |
 
 ## Other commands
 
 - `ferry --version` prints the Ferry version.
-- On the box, `ferry expose [--port <n>] -- <command...>` runs a dev server and announces its port. The port is `--port`, else `$PASEO_PORT`. On the operator machine, `ferry tunnel --follow` opens a forward for each announced port until Ctrl-C. Do not write to or remove files in `~/.ferry/exposed/` yourself.
+- On the box, `ferry expose [--port <n>] -- <command...>` runs a dev server and announces its port. The port is `--port`, else `$PASEO_PORT`. On the operator machine, `ferry tunnel --follow` opens a forward for each announced port until Ctrl-C. `ferry tunnel install [--box <name>]` runs `--follow` for one box as a user service, and `ferry tunnel uninstall [--box <name>]` removes it. `ferry tunnel install --help` names the service file and the log. Do not write to or remove files in `~/.ferry/exposed/` yourself.
 - `ferry update --dry-run` prints the update plan for the agent tools on both machines.
 - `ferry init --dry-run` prints the init plan without writing or connecting.
 - `ferry watch` syncs accepted changes in the foreground. `ferry watch install` installs it as a user service.

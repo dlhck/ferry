@@ -96,6 +96,12 @@ import { runMove, type MoveDependencies, type MoveInput, type MoveResult } from 
 import { runExpose, type ExposeDependencies, type ExposeInput } from "./expose.ts";
 import { runTunnel, type Listener, type TunnelDependencies, type TunnelInput } from "./tunnel.ts";
 import {
+  installTunnelService,
+  uninstallTunnelService,
+  type TunnelServiceInput,
+  type TunnelServiceUninstallResult,
+} from "./tunnel-service.ts";
+import {
   runUpdateCommand,
   UpdateError,
   type UpdateCommandDependencies,
@@ -132,6 +138,8 @@ type CliDependencies = {
     input: TunnelInput,
     dependencies?: Partial<TunnelDependencies>,
   ) => Promise<readonly Listener[] | undefined>;
+  readonly installTunnelService?: (input: TunnelServiceInput) => Promise<WatchServiceResult>;
+  readonly uninstallTunnelService?: (input: TunnelServiceInput) => Promise<TunnelServiceUninstallResult>;
   readonly runBoxAdd?: typeof runBoxAdd;
   readonly runExpose?: (input: ExposeInput, dependencies?: Partial<ExposeDependencies>) => Promise<number>;
   /** True when this is a box install. The default checks for `~/.ferry/box.json`. */
@@ -220,6 +228,8 @@ const JSON_RESULTS: Record<string, string> = {
   tunnel:
     "events forward-opened, forward-closed, forward-failed, following, connection-lost, tunnel-closed. " +
     "With --list, one envelope: { box, listeners: [{ port, address, process }] }",
+  "tunnel install": "{ manager, path }",
+  "tunnel uninstall": "{ manager, path, removed }",
   expose: "events exposed and exited. The output of the command goes to stderr",
   status: "the status report, schema version 2",
   integrations: "{ boxes: [{ name, destination, integrations: [{ id, description, enabled, localVersion, localSource, connectSteps }] }] }",
@@ -705,7 +715,7 @@ macOS, else to ~/.ferry/trash. Run --dry-run first.`)
       },
     );
 
-  program
+  const tunnel = program
     .command("tunnel")
     .summary("Open box ports on this machine until Ctrl-C, list the ports that listen on the box, or follow the ports of ferry expose")
     .description(`Open box ports on this machine until Ctrl-C, list the ports that listen on the box, or follow the ports of ferry expose.
@@ -713,7 +723,8 @@ macOS, else to ~/.ferry/trash. Run --dry-run first.`)
 Local ports bind to 127.0.0.1 only. The box end is 127.0.0.1 on the box, so a
 dev server that listens only on ::1 does not answer. A plain tunnel does not
 reconnect. With --follow, the local port is the box port when it is free, else
-the next free port, and Ferry connects again 5 seconds after a drop.`)
+the next free port, and Ferry connects again 5 seconds after a drop. Run
+ferry tunnel install to run --follow as a user service.`)
     .argument("[ports...]", "box port, or box:local to pick another local port, such as 3000 or 3000:4000")
     .option("--list", "list the TCP ports that listen on the box, with process names")
     .option("--follow", "open a forward for each port that ferry expose announces on the box, and close it when the port goes away")
@@ -725,6 +736,48 @@ the next free port, and Ferry connects again 5 seconds after a drop.`)
       );
       if (options.list === true) report({ box: name, listeners: listeners ?? [] });
     });
+  const tunnelInstall = tunnel
+    .command("install")
+    .summary("Install and start a user service that runs ferry tunnel --follow for one box")
+    .description(`Install and start a user service that runs ferry tunnel --follow for one box.
+
+The box is --box, then default_box, then the only box. The service always
+runs with --box <box>, so a later default_box does not change it. Each box has
+its own service:
+
+  macOS  ~/Library/LaunchAgents/dev.ferry.tunnel.<box>.plist
+         log: ~/Library/Logs/ferry-tunnel-<box>.log
+  Linux  ~/.config/systemd/user/ferry-tunnel-<box>.service
+         log: journalctl --user -u ferry-tunnel-<box>.service -f
+
+The service starts again each time it exits. The service records the path of
+this Ferry, the current PATH, and SSH_AUTH_SOCK. PATH must find ssh, and
+tailscale for a Tailscale box. Run the command again after you move Ferry or
+change these values. After a Ferry update, restart the service:
+
+  launchctl kickstart -k gui/$(id -u)/dev.ferry.tunnel.<box>
+  systemctl --user restart ferry-tunnel-<box>.service`)
+    .action(async () => {
+      const { name } = tunnelBox();
+      const result = await (dependencies.installTunnelService ?? installTunnelService)({ box: name });
+      report(result, (result) => writeLine(`Installed ${result.manager} service at ${result.path}`));
+    });
+  const tunnelUninstall = tunnel
+    .command("uninstall")
+    .summary("Stop and remove the tunnel user service of one box")
+    .description(`Stop and remove the tunnel user service of one box.
+
+The box is --box, then default_box, then the only box. Ferry removes the file
+that ferry tunnel install wrote. The macOS log stays.`)
+    .action(async () => {
+      const { name } = tunnelBox();
+      const result = await (dependencies.uninstallTunnelService ?? uninstallTunnelService)({ box: name });
+      report(result, (result) =>
+        writeLine(result.removed ? `Removed ${result.manager} service at ${result.path}` : `No ${result.manager} service at ${result.path}`),
+      );
+    });
+  boxCommands.add(tunnelInstall);
+  boxCommands.add(tunnelUninstall);
   /** The one box of `ferry tunnel`: --box, then default_box, then the only box. */
   const tunnelBox = (): ResolvedBox => {
     const names = boxNames();
