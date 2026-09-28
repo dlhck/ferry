@@ -35,6 +35,7 @@ import {
   refreshUnitPath,
   type AgentProfile,
 } from "./integrations/paseo.ts";
+import { denyRuleCause } from "./output.ts";
 import { groupProgress, noProgress, plural, step, type Progress } from "./progress.ts";
 import { boxPathDirs, profileBlockCommand } from "./tools/path.ts";
 
@@ -606,7 +607,12 @@ export function inspectSyncSource(
       ...seed.clashes.map((clash) => `clash ${clash.name}: ${clash.paths.join(", ")}`),
       ...seed.forbidden.map((hit) => `${hit.reason}: ${hit.path}`),
     ];
-    throw new SyncError("manifest-refusal", "operator", `Manifest refused publisher ${config.publisher}: ${details.join("; ")}`);
+    throw new SyncError(
+      "manifest-refusal",
+      "operator",
+      `Manifest refused publisher ${config.publisher}: ${details.join("; ")}`,
+      denyRuleCause(seed.forbidden),
+    );
   }
   return { config, boxes, registry, seed };
 }

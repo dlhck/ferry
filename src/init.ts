@@ -24,6 +24,7 @@ import {
   type RunOptions,
 } from "./link.ts";
 import { readSeed as readManifest, type Leftover, type Seed } from "./manifest.ts";
+import { denyRuleCause, linkFailure } from "./output.ts";
 import { noProgress, step, type Progress } from "./progress.ts";
 import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
 import { openStore as openSnapshotStore, type PublishResult } from "./store.ts";
@@ -133,8 +134,9 @@ export class InitRefusal extends Error {
   constructor(
     readonly code: InitRefusalCode,
     message: string,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = "InitRefusal";
   }
 }
@@ -326,6 +328,7 @@ export async function checkBoxAccess(
     throw new InitRefusal(
       snapshotTarget ? "agent-refusal" : "link-refusal",
       `${probe.error.origin}: ${probe.error.message}`,
+      { cause: linkFailure(probe.error) },
     );
   }
   if (snapshotTarget) {
@@ -364,7 +367,7 @@ async function checkBoxDeployKey(
     () => link.run(deployKeyCommand()),
     (result) => !result.ok,
   );
-  if (!key.ok) throw new InitRefusal("link-refusal", `${key.error.origin}: ${key.error.message}`);
+  if (!key.ok) throw new InitRefusal("link-refusal", `${key.error.origin}: ${key.error.message}`, { cause: linkFailure(key.error) });
   const publicKey = key.stdout.trim();
   await approveSnapshotHostKey(link, snapshotTarget, approve, progress);
   const access = await step(
@@ -648,5 +651,5 @@ function manifestRefusal(
     ...refusal.clashes.map((clash) => `clash ${clash.name}: ${clash.paths.join(", ")}`),
     ...refusal.forbidden.map((hit) => `${hit.reason}: ${hit.path}`),
   ];
-  return new InitRefusal("manifest-refusal", `Manifest refused the source: ${details.join("; ")}`);
+  return new InitRefusal("manifest-refusal", `Manifest refused the source: ${details.join("; ")}`, denyRuleCause(refusal.forbidden));
 }

@@ -246,12 +246,10 @@ describe("ferry init", () => {
           }),
         },
       ),
-    ).rejects.toEqual(
-      new InitRefusal(
-        "agent-refusal",
-        "box: SSH agent forwarding is unavailable",
-      ),
-    );
+    ).rejects.toMatchObject({
+      code: "agent-refusal",
+      message: "box: SSH agent forwarding is unavailable",
+    });
 
     expect(calls).toEqual({ opened: 0, published: 0, linked: 1 });
     expect(existsSync(join(home, ".ferry"))).toBe(false);
@@ -1025,8 +1023,6 @@ describe("ferry init", () => {
         { home, harnesses: BUILTIN_HARNESSES, host: "box", sshUser: "david", snapshotUrl: "snapshot.git" },
         linkDeps,
       ),
-    ).rejects.toEqual(
-      new InitRefusal("link-refusal", "operator: could not run Tailscale"),
-    );
+    ).rejects.toMatchObject({ code: "link-refusal", message: "operator: could not run Tailscale" });
   });
 });

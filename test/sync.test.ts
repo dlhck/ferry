@@ -119,6 +119,8 @@ describe("runSync", () => {
         code: "manifest-refusal",
         origin: "operator",
         message: expect.stringContaining("deploy/.env"),
+        // The forbidden file gives the --json error code deny-rule-match.
+        cause: expect.objectContaining({ code: "deny-rule-match" }),
       }),
     );
     await expect(
