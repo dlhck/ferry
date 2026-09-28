@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { runBoxAdd, runBoxDefault, runBoxList, runBoxRemove, type BoxCommandDependencies } from "../src/box.ts";
+import { boxListLines, runBoxAdd, runBoxDefault, runBoxList, runBoxRemove, type BoxCommandDependencies } from "../src/box.ts";
 import { readConfig, writeConfig, type BoxesOperatorConfig } from "../src/config.ts";
 import type { LinkOptions } from "../src/link.ts";
 import { noProgress } from "../src/progress.ts";
@@ -94,7 +94,7 @@ describe("ferry box list", () => {
   test("lists a [host] config as one box named default, marked as the default", () => {
     const { deps, lines } = dependencies(makeHome(HOST_CONFIG));
 
-    runBoxList(deps);
+    lines.push(...boxListLines(runBoxList(deps)));
 
     expect(lines).toEqual([
       "Box      Transport  Destination        Default",
@@ -105,7 +105,14 @@ describe("ferry box list", () => {
   test("lists each box in config order and marks default_box", () => {
     const { deps, lines } = dependencies(makeHome(BOXES_CONFIG));
 
-    runBoxList(deps);
+    expect(runBoxList(deps)).toEqual({
+      boxes: [
+        { name: "a", transport: "ssh", destination: "dev@box-a.example", default: true },
+        { name: "b", transport: "tailscale", destination: "dev@box-b", default: false },
+      ],
+    });
+
+    lines.push(...boxListLines(runBoxList(deps)));
 
     expect(lines).toEqual([
       "Box  Transport  Destination        Default",
@@ -117,7 +124,7 @@ describe("ferry box list", () => {
   test("marks no box when there is more than one box and no default_box", () => {
     const { deps, lines } = dependencies(makeHome(BOXES_CONFIG.replace('default_box = "a"\n', "")));
 
-    runBoxList(deps);
+    lines.push(...boxListLines(runBoxList(deps)));
 
     expect(lines.slice(1)).toEqual(["a    ssh        dev@box-a.example", "b    tailscale  dev@box-b"]);
   });
@@ -134,8 +141,9 @@ describe("ferry box add", () => {
     const home = makeHome(BOXES_CONFIG);
     const { deps, links, commands, lines, confirms } = dependencies(home);
 
-    await runBoxAdd({ name: "c", sshDestination: "dev@box-c.example", yes: false }, deps);
+    const result = await runBoxAdd({ name: "c", sshDestination: "dev@box-c.example", yes: false }, deps);
 
+    expect(result).toEqual({ name: "c", transport: "ssh", destination: "dev@box-c.example", gitAuth: "agent", migrated: false });
     expect(links).toEqual([{ destination: "dev@box-c.example" }]);
     expect(commands).toEqual(["true"]);
     expect(confirms).toEqual([]);
@@ -253,8 +261,9 @@ describe("ferry box add", () => {
       const home = makeHome(HOST_CONFIG);
       const { deps, confirms } = dependencies(home);
 
-      await runBoxAdd({ name: "b", sshDestination: "dev@box-b.example", yes: true }, deps);
+      const result = await runBoxAdd({ name: "b", sshDestination: "dev@box-b.example", yes: true }, deps);
 
+      expect(result?.migrated).toBe(true);
       expect(confirms).toEqual([]);
       expect(readConfig(home)?.defaultBox).toBe("default");
     });
@@ -362,9 +371,10 @@ describe("ferry box remove", () => {
 
   test("warns and removes default_box when it named the removed box", () => {
     const home = makeHome(BOXES_CONFIG);
-    const { deps, lines } = dependencies(home);
+    const warnings: string[] = [];
+    const { deps, lines } = dependencies(home, { warn: (line) => warnings.push(line) });
 
-    runBoxRemove({ name: "a" }, deps);
+    expect(runBoxRemove({ name: "a" }, deps)).toEqual({ name: "a", defaultBoxRemoved: true });
 
     expect(readConfig(home)?.defaultBox).toBeUndefined();
     expect(readConfig(home)?.boxes?.map((box) => box.name)).toEqual(["b"]);
@@ -372,6 +382,7 @@ describe("ferry box remove", () => {
       "Removed box a from the config. Ferry did not change the box.",
       "Warning: box a was the default_box. Ferry removed default_box. Set a new one with ferry box default <name>.",
     ]);
+    expect(warnings).toEqual(lines.slice(1));
   });
 
   test("refuses the last box", () => {
@@ -395,7 +406,7 @@ describe("ferry box default", () => {
     const home = makeHome(BOXES_CONFIG);
     const { deps, lines } = dependencies(home);
 
-    runBoxDefault({ name: "b" }, deps);
+    expect(runBoxDefault({ name: "b" }, deps)).toEqual({ defaultBox: "b" });
 
     expect(readConfig(home)?.defaultBox).toBe("b");
     expect(lines).toEqual(['Set default_box = "b".']);

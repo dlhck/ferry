@@ -56,7 +56,7 @@ Use `--host <tailscale host> --ssh-user <user>` instead of `--ssh-destination` f
 | `ferry install` | Install gh, the agent CLIs, the tools of the config, and Ferry on a box. |
 | `ferry sync` | Publish the snapshot and apply it on all boxes, or on the boxes of `--box`. |
 | `ferry watch` | Sync each accepted change. `ferry watch install` runs it as a launchd or systemd user service. |
-| `ferry status` | Show the state of the snapshot and of each box. `--json` is for scripts and agents. |
+| `ferry status` | Show the state of the snapshot and of each box. |
 | `ferry auth <tool>` | Start a login for `gh`, `claude`, `codex`, or `cursor` on the box. `--mcp <server>` logs in to an MCP server. |
 | `ferry update` | Update the agent tools on the boxes and on this machine. |
 | `ferry tools` | List the tools and their version policies. |
@@ -68,6 +68,8 @@ Use `--host <tailscale host> --ssh-user <user>` instead of `--ssh-destination` f
 | `ferry uninstall` | Remove Ferry from this machine and restore the paths that `init` changed. |
 
 `ferry <command> --help` has the options, the config formats, and the details of each command.
+
+Add `--json` to any command for scripts and agents: stdout then has only JSON, and Ferry asks nothing. `ferry --help` describes the output.
 
 ## Security model
 

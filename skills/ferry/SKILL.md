@@ -11,12 +11,13 @@ Ferry copies the agent setup of the operator machine to a remote Linux box. The 
 
 1. On the box, do not edit a Ferry-managed file: a skill, an instruction file such as `AGENTS.md`, `~/.claude/agents`, `~/.claude/commands`, a carried Claude settings key, or a carried MCP declaration. Each sync resets the box checkout with `git reset --hard` and writes the carried keys again, so your change is lost. Tell the operator what to change on the operator machine instead.
 2. Read state with `ferry status --json` before you change anything.
-3. Run `ferry sync --dry-run` before `ferry sync`. Do not pass `--force` unless the operator tells you to.
-4. Do not start `ferry auth`. It needs a person with a browser. Tell the operator the exact command to run.
-5. Do not pass `--yes` to `ferry install`, `ferry update`, or `ferry uninstall`, and do not answer their confirmation prompts. The operator confirms.
-6. Never work around a refusal. Do not rename, move, split, or encode a file to get past a deny rule. Do not copy a secret, a login, or a token to the box by other means.
-7. Run `ferry move --dry-run` before `ferry move`. Add `--include-env` or `--remove` only when the operator asks for it. Never pass `--allow-secrets` or `--yes` to `ferry move` unless the operator asks for it in this conversation.
-8. Install skills with `ferry skills add`, not with a plain `npx skills add`.
+3. Add `--json` to each Ferry command whose output you read. Use the error `code`, not the message text. See [JSON output](#json-output).
+4. Run `ferry sync --dry-run` before `ferry sync`. Do not pass `--force` unless the operator tells you to.
+5. Do not start `ferry auth`. It needs a person with a browser. Tell the operator the exact command to run.
+6. Do not pass `--yes` to `ferry install`, `ferry update`, `ferry uninstall`, `ferry init`, `ferry box add`, or `ferry integrations enable|disable`, and do not answer their confirmation prompts. The operator confirms. With `--json`, such a command fails with the code `confirmation-required`. Then give the operator the command to run.
+7. Never work around a refusal. Do not rename, move, split, or encode a file to get past a deny rule. Do not copy a secret, a login, or a token to the box by other means.
+8. Run `ferry move --dry-run` before `ferry move`. Add `--include-env` or `--remove` only when the operator asks for it. Never pass `--allow-secrets` or `--yes` to `ferry move` unless the operator asks for it in this conversation.
+9. Install skills with `ferry skills add`, not with a plain `npx skills add`.
 
 ## Find out where you are
 
@@ -70,7 +71,7 @@ If `ferry status` shows `boxCheckout.dirty: true`, the box checkout has local ch
 
 ## Read state
 
-Run `ferry status --json` on the operator machine. It changes nothing. Its stdout is one JSON object with `schemaVersion: 2`, also for one box. Each `--box <name>` selects one box. The top level has the shared fields:
+Run `ferry status --json` on the operator machine. It changes nothing. Its stdout is one envelope (see [JSON output](#json-output)). The `result` of the envelope is the status report, with `schemaVersion: 2`, also for one box. Each `--box <name>` selects one box. The top level of `result` has the shared fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -122,6 +123,8 @@ Read these output lines:
 - `Updated store skill <name> from <path>` means an installer put a newer copy of a skill in one harness root, and sync published it.
 - `Discarded box change: <path>` means sync threw away an edit on the box.
 - `Box plugins: ...` and `Box MCP: ...` are warnings. The sync continues.
+
+With `--json`, the `warnings` array of the envelope holds the `Skipped ...`, `Box plugins: ...`, `Box MCP: ...`, and `Warning: ...` lines. A deny rule refusal has the code `deny-rule-match`, and a clash has the code `refused`.
 
 A skipped entry is expected. A refusal is a stop. Do not edit Ferry, its config, or the file only to get a sync through. Report it.
 
@@ -183,6 +186,111 @@ When Paseo is enabled for a box, its `ferry status` block has an `Integrations` 
 | `Listen:`, `state.listen`, `state.relay` | The daemon must listen on `127.0.0.1:6767` with the relay off. |
 | `Providers:`, `state.providers` | The agent providers on the box. Sync skips a profile whose provider is `unavailable`. |
 | `WARNING` lines, `warnings` | A problem that the operator must fix, such as a version difference or a daemon that is not running. Tell the operator. |
+
+## JSON output
+
+Each command accepts the global option `--json`. With it, stdout has only JSON. Progress and the text lines of the command go to stderr as plain lines. Ferry shows no prompt.
+
+### Envelope
+
+A command that runs and exits prints exactly one JSON object:
+
+```json
+{
+  "schemaVersion": 1,
+  "command": "sync",
+  "ok": true,
+  "result": {},
+  "warnings": [],
+  "error": null
+}
+```
+
+- `command` is the command path, such as `sync`, `box add`, or `integrations enable`.
+- `warnings` holds the warning lines of the run, also on failure.
+- On failure, `ok` is `false`, `result` is `null`, the exit code is not 0, and `error` is `{ "code", "message", "hint" }`. `hint` is a string or `null`.
+- A usage error, such as an unknown option, also gives an envelope, with the code `usage`.
+- `--dry-run --json` gives the plan in `result`.
+
+### Commands that stay running
+
+`ferry watch`, `ferry tunnel`, `ferry tunnel --follow`, and `ferry expose` print one JSON event for each line (NDJSON). Each event has `type`. An error event also has `code`, `message`, and `hint`. When the command fails, the last line is an `error` event. `ferry tunnel --list` runs and exits, so it prints an envelope.
+
+| Command | Event | Fields |
+| --- | --- | --- |
+| `watch` | `watch-started` | `boxes` |
+| `watch` | `synced` | `box`, `manifest` |
+| `watch` | `sync-failed` (error) | `box` (`null` when the sync failed before the box steps), `retryInMs` |
+| `watch` | `sync-refused` (error) | `box`. The watch does not retry this content. |
+| `watch` | `content-refused` (error) | A deny rule or a clash refused the portable set. The watch waits for a change. |
+| `watch` | `config-error` (error) | The watch cannot read the config. It tries again in the next cycle. |
+| `watch` | `update-started`, `update-failed` (error) | The daily tool update. |
+| `watch` | `watch-stopped` | The watch stopped after SIGINT or SIGTERM. |
+| `tunnel` | `forward-opened` | `name` (`null` for a plain tunnel), `localPort`, `box`, `remotePort`, and with `--follow` also `pid`, `cwd` |
+| `tunnel --follow` | `forward-closed` | the fields of `forward-opened` |
+| `tunnel --follow` | `forward-failed` (error) | the fields of `forward-opened`. `localPort` is `null` when no local port is free. |
+| `tunnel --follow` | `following` | `box`, `reconnected` |
+| `tunnel --follow` | `connection-lost` (error) | `box`, `retryInMs` |
+| `tunnel` | `tunnel-closed` | `box`. Ctrl-C closed the tunnel. |
+| `expose` | `exposed` | `port`, `name`, `cwd`, `pid` |
+| `expose` | `exited` | `port`, `exitCode`. Ferry exits with the same code. |
+| all four | `error` (error) | The command failed. It is the last line. |
+
+With `--json`, the stdout of the command of `ferry expose` goes to stderr.
+
+### Prompts
+
+With `--json`, Ferry never asks:
+
+- A step that needs a confirmation fails with `confirmation-required`, unless the command has `--yes`. This applies to `install`, `update`, `uninstall`, `integrations enable|disable`, `box add` on a `[host]` config, the SSH host keys of the snapshot host in `init` and `box add`, and `.env` files with secrets in `move`. The message of the error names what needs the confirmation, such as the host key fingerprints.
+- `ferry init --json` without the values that it needs fails with `missing-values`. The message lists the missing values, such as `host, sshUser, snapshotUrl`.
+- `ferry auth <tool> --json` prints a `login` event before the envelope: `{ "type": "login", "provider", "url", "userCode", "codeRequired", "localPort", "timeoutMs" }`, and for `--mcp` also `server`. The login ends in the browser. When `codeRequired` is `true`, Ferry reads the code that the browser shows as one line on stdin. Without a line, it fails with `missing-values`.
+
+### Error codes
+
+| Code | Meaning |
+| --- | --- |
+| `usage` | An argument or an option is wrong, or does not apply to the command. |
+| `config-missing` | There is no config, or it is not complete. The operator runs `ferry init`. |
+| `config-invalid` | The config or a tool table has an error, or this machine is not the publisher. |
+| `unknown-box` | A box name is not in the config. |
+| `box-required` | More than one box is configured, and the command changes one box. Name the box, or set `default_box`. |
+| `box-offline` | Ferry cannot reach the box. |
+| `box-command-failed` | A command on the box failed or timed out. |
+| `forward-failed` | A port forward did not open or close. |
+| `confirmation-required` | The step needs a confirmation, and `--yes` is not given. |
+| `missing-values` | A value that the command needs is missing. |
+| `deny-rule-match` | A deny rule refused a file. The message names the file, never the value. |
+| `refused` | A safety check refused the change, such as a clash, a live path, an unpushed commit, or an untrusted host key. |
+| `sync-busy` | Another sync is active. |
+| `sync-failed` | The sync failed on one or more boxes, or the publish failed. |
+| `update-failed` | One or more updates failed. |
+| `login-failed` | The login on the box did not finish. |
+| `command-failed` | A child command, such as `npx skills add`, failed. |
+| `failed` | Any other error. |
+
+### Results
+
+| Command | `result` |
+| --- | --- |
+| `init` | `{ dryRun: false, leftovers, published }`. With `--dry-run`: `{ dryRun: true, leftovers, plan: { operator, box, gitRemote, localCheckout, configPath, skills, instructions, links } }`. |
+| `box list` | `{ boxes: [{ name, transport, destination, default }] }` |
+| `box add` | `{ name, transport, destination, gitAuth, migrated }` |
+| `box remove` | `{ name, defaultBoxRemoved }` |
+| `box default` | `{ defaultBox }` |
+| `install` | `{ plan: [{ tool, policy, version, action, command, dependsOn }], gitIdentity: { name, email } or null }` |
+| `update` | `{ dryRun, boxes: [{ name, offline, plan, integrations: [{ id, plan }] }], operator: [{ tool, command } or { tool, reason }], updated }`. `updated` names each update that ran, such as `box gh` or `[a] box gh`. |
+| `sync` | `{ dryRun, published, boxes: [{ name, plan, applyPlan, discarded }] }`. `plan` is the sync plan of the box, `applyPlan` its link changes (`null` for a dry run), and `discarded` the box checkout changes that the sync threw away. |
+| `status` | The status report. See [Read state](#read-state). |
+| `auth` | Without a tool: `{ providers: [{ id, login: "startable" or "manual" }] }`. With a tool: the last login result, `{ kind, provider, ... }`, where `kind` is `logged-in`, `already-done`, `device-url`, `printed-url`, `local-port-forward`, or `manual-ssh`. |
+| `tools` | `{ tools: [{ id, name, kind, install, policy: { policy, default }, boxes: [{ name, policy, default }], operatorVersion }] }` |
+| `skills add` | `{ argv }`, the `npx skills add` command that ran. |
+| `move` | `{ path, source, destination, dryRun, git: { url, branch } or null, carry: [{ path, sha256, secrets }], refused: [{ path, code, reason }], skipped, notes, trash }` |
+| `tunnel --list` | `{ box, listeners: [{ port, address, process }] }` |
+| `integrations` | `{ boxes: [{ name, destination, integrations: [{ id, description, enabled, localVersion, localSource, connectSteps }] }] }`. `name` is `null` for a `[host]` config. |
+| `integrations enable`, `integrations disable` | `{ integration, action, dryRun, plan, output, enabled, connectSteps }`. `enabled` is the new config value, or `null` for a dry run. |
+| `watch install` | `{ manager: "launchd" or "systemd", path }` |
+| `uninstall` | `{ removed, restored }` |
 
 ## Other commands
 

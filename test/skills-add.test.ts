@@ -70,12 +70,13 @@ describe("skillsAddArgv", () => {
 describe("runSkillsAdd", () => {
   test("runs npx skills add with the built argv", async () => {
     const calls: (readonly string[])[] = [];
-    await runSkillsAdd({ args: ["owner/repo"], project: false }, async (argv) => {
+    const argv = await runSkillsAdd({ args: ["owner/repo"], project: false }, async (argv) => {
       calls.push(argv);
       return 0;
     });
 
     expect(calls).toEqual([["npx", "skills", "add", "owner/repo", "-g", "--copy"]]);
+    expect(argv).toEqual(["npx", "skills", "add", "owner/repo", "-g", "--copy"]);
   });
 
   test("reports the child exit code when npx fails", async () => {

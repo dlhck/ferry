@@ -11,6 +11,12 @@ import {
   type ToolsConfig,
 } from "./config.ts";
 
+/** A selection names a box that the config does not have. */
+export class UnknownBoxError extends ConfigError {}
+
+/** More than one box is configured, and the command changes one box without a name for it. */
+export class BoxRequiredError extends ConfigError {}
+
 /** A box with its effective values. */
 export type ResolvedBox = {
   readonly name: string;
@@ -37,7 +43,7 @@ export function resolveBoxes(config: PartialOperatorConfig, selection: readonly 
   const boxes = configuredBoxes(config);
   const names = boxes.map((box) => box.name);
   const unknown = selection.find((name) => !names.includes(name));
-  if (unknown !== undefined) throw new ConfigError(`unknown box ${unknown}. Known boxes: ${names.join(", ")}.`);
+  if (unknown !== undefined) throw new UnknownBoxError(`unknown box ${unknown}. Known boxes: ${names.join(", ")}.`);
   return boxes
     .filter((box) => selection.length === 0 || selection.includes(box.name))
     .map((box) => resolveBox(config, box));
@@ -53,7 +59,7 @@ export function resolveTargetBox(config: PartialOperatorConfig, name?: string): 
   const selected = name ?? config.defaultBox;
   const [box, ...others] = resolveBoxes(config, selected === undefined ? [] : [selected]);
   if (box && others.length === 0) return box;
-  throw new ConfigError(
+  throw new BoxRequiredError(
     `More than one box is configured (${configuredBoxes(config).map((known) => known.name).join(", ")}). ` +
       "Add --box <name>, or set default_box in the config.",
   );

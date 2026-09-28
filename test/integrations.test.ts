@@ -7,7 +7,12 @@ import {
   runIntegrationCommand,
   type IntegrationCommandDependencies,
 } from "../src/integrations/command.ts";
-import { INTEGRATIONS, integrationLines } from "../src/integrations/index.ts";
+import { INTEGRATIONS, integrationLines, listIntegrations } from "../src/integrations/index.ts";
+
+/** The `ferry integrations` lines, as the CLI prints them. */
+async function integrationText(...args: Parameters<typeof listIntegrations>): Promise<string[]> {
+  return integrationLines(await listIntegrations(...args));
+}
 import { createPaseo, paseoSourceHint } from "../src/integrations/paseo.ts";
 import type { Integration, IntegrationLink } from "../src/integrations/types.ts";
 import { BunHostAdapter, type HostAdapter, type HostCommand, type LinkResult } from "../src/link.ts";
@@ -400,7 +405,7 @@ describe("integration list", () => {
     touch(cli);
     const paseo = createPaseo({ platform: "darwin", macApp: app, host: fakeHost({ stdout: "0.9.2\n" }) });
 
-    expect(await integrationLines(CONFIG, [paseo])).toEqual([
+    expect(await integrationText(CONFIG, [paseo])).toEqual([
       "paseo  disabled  Paseo daemon on the box",
       `  Local app: 0.9.2 (${cli})`,
     ]);
@@ -409,7 +414,7 @@ describe("integration list", () => {
   test("shows an enabled integration with the Desktop connect steps", async () => {
     const paseo = createPaseo({ platform: "linux", linuxInstallDir: join(tempRoot(), "none") });
 
-    expect(await integrationLines({ ...CONFIG, integrations: { paseo: true } }, [paseo])).toEqual([
+    expect(await integrationText({ ...CONFIG, integrations: { paseo: true } }, [paseo])).toEqual([
       "paseo  enabled  Paseo daemon on the box",
       "  Local app: not found. The box version is not pinned.",
       "  Connect to the box:",
@@ -427,7 +432,7 @@ describe("integration list", () => {
       integrations: { paseo: true },
     };
 
-    expect(await integrationLines(config, [paseo])).toContain("    Enter ssh://ferry@box.");
+    expect(await integrationText(config, [paseo])).toContain("    Enter ssh://ferry@box.");
   });
 });
 
@@ -444,7 +449,7 @@ describe("integration list with box tables", () => {
   const paseo = () => createPaseo({ platform: "linux", linuxInstallDir: join(tempRoot(), "none") });
 
   test("lists the effective state of each box with the connect steps of that box", async () => {
-    expect(await integrationLines(BOXES, [paseo()])).toEqual([
+    expect(await integrationText(BOXES, [paseo()])).toEqual([
       "Box a",
       "  paseo  enabled  Paseo daemon on the box",
       "    Local app: not found. The box version is not pinned.",
@@ -459,7 +464,7 @@ describe("integration list with box tables", () => {
   });
 
   test("the selection narrows the list", async () => {
-    const lines = await integrationLines(BOXES, [paseo()], ["b"]);
+    const lines = await integrationText(BOXES, [paseo()], ["b"]);
     expect(lines[0]).toBe("Box b");
     expect(lines.some((line) => line.startsWith("Box a"))).toBe(false);
   });
@@ -467,7 +472,7 @@ describe("integration list with box tables", () => {
   test("reads the local app version once", async () => {
     let reads = 0;
     const counted: Integration = { ...paseo(), localVersion: async () => { reads += 1; return { version: null, source: null }; } };
-    await integrationLines(BOXES, [counted]);
+    await integrationText(BOXES, [counted]);
     expect(reads).toBe(1);
   });
 });
@@ -517,8 +522,17 @@ describe("integrations enable and disable", () => {
   test("enable shows the plan, asks, runs the box steps, then sets the config flag and prints the connect steps", async () => {
     const recorder: Recorder = { events: [], output: [] };
 
-    await runIntegrationCommand({ action: "enable", name: "paseo", yes: false, dryRun: false }, dependencies(recorder));
+    const result = await runIntegrationCommand({ action: "enable", name: "paseo", yes: false, dryRun: false }, dependencies(recorder));
 
+    expect(result).toEqual({
+      integration: "paseo",
+      action: "enable",
+      plan: ["Box: enable commands"],
+      dryRun: false,
+      output: ["Paseo 0.9.2 runs on the box."],
+      enabled: true,
+      connectSteps: ["Open Paseo Desktop.", "Open Settings → Add host → Remote SSH.", "Enter ssh://ploi@box."],
+    });
     expect(recorder.events).toEqual(["plan enable", "confirm", "link", "enable", "config paseo=true"]);
     expect(recorder.output[0]).toBe("Enable Paseo:");
     expect(recorder.output).toContain(`Set [integrations] paseo = true in ${configPath()}.`);

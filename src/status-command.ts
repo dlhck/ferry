@@ -38,7 +38,6 @@ const STORE_RELATIVE_PATH = ".ferry/store";
 const BOX_SUDO_COMMAND = "sudo -n /usr/bin/true >/dev/null 2>&1 && echo yes || echo no";
 
 export type StatusCommandInput = {
-  readonly json: boolean;
   /** Box names. An empty selection selects all boxes. */
   readonly selection?: readonly string[];
 };
@@ -70,13 +69,12 @@ export type StatusCommandDependencies = {
   readonly local: HostAdapter;
   /** All built-in integrations. Status checks the ones that the config enables. */
   readonly integrations: readonly Integration[];
-  readonly writeLine: (line: string) => void;
   readonly progress: Progress;
   /** The version of this Ferry. The Ferry row compares the box install with it. */
   readonly ferryVersion: string;
 };
 
-/** Read the selected boxes and print one report without changing any machine. */
+/** Read the selected boxes and return one report without changing any machine. The CLI prints it. */
 export async function runStatusCommand(
   input: StatusCommandInput,
   dependencies: Partial<StatusCommandDependencies> = {},
@@ -98,7 +96,6 @@ export async function runStatusCommand(
     progress: resolved.progress,
   });
 
-  resolved.writeLine(input.json ? JSON.stringify(report) : formatStatus(report));
   return report;
 }
 
@@ -251,7 +248,6 @@ const defaultDependencies: StatusCommandDependencies = {
   denyRules,
   local: new BunHostAdapter(),
   integrations: INTEGRATIONS,
-  writeLine: console.log,
   progress: noProgress,
   ferryVersion: VERSION,
 };

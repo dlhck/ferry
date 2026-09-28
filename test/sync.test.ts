@@ -119,6 +119,8 @@ describe("runSync", () => {
         code: "manifest-refusal",
         origin: "operator",
         message: expect.stringContaining("deploy/.env"),
+        // The forbidden file gives the --json error code deny-rule-match.
+        cause: expect.objectContaining({ code: "deny-rule-match" }),
       }),
     );
     await expect(
@@ -543,6 +545,7 @@ describe("runSync", () => {
   test("declares the carried MCP servers on the box after the settings, and prints each warning", async () => {
     const events: string[] = [];
     const lines: string[] = [];
+    const warnings: string[] = [];
     const link = {
       run: async (command: string) => {
         let stdout = "";
@@ -567,6 +570,7 @@ describe("runSync", () => {
         createLink: () => link,
         writePlan: () => {},
         writeLine: (line) => lines.push(line),
+        warn: (line) => warnings.push(line),
         acquireStoreLock: async () => () => {},
         acquireLock: () => () => events.push("unlock"),
         openStore: async () => ({
@@ -583,6 +587,7 @@ describe("runSync", () => {
 
     expect(events).toEqual(["apply", "declare-mcp", "unlock", "adopt"]);
     expect(lines).toContain("Box MCP: could not declare claude MCP server linear");
+    expect(warnings).toEqual(["Box MCP: could not declare claude MCP server linear"]);
   });
 
   test("dry-run names a skipped local MCP server and plans the carried one", async () => {

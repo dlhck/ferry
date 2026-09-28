@@ -29,12 +29,15 @@ export function skillsAddArgv(args: readonly string[], options: { readonly proje
   return ["npx", "skills", "add", ...flags, ...added, ...args.slice(at)];
 }
 
+/** Returns the argv that ran. */
 export async function runSkillsAdd(
   input: SkillsAddInput,
   run: RunProcess = runInherited,
-): Promise<void> {
-  const exitCode = await run(skillsAddArgv(input.args, input));
+): Promise<string[]> {
+  const argv = skillsAddArgv(input.args, input);
+  const exitCode = await run(argv);
   if (exitCode !== 0) throw new SkillsAddError(exitCode);
+  return argv;
 }
 
 async function runInherited(argv: readonly string[]): Promise<number> {

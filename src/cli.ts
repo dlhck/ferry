@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { Command, Option } from "commander";
+import { Command, CommanderError, Option } from "commander";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -20,8 +20,10 @@ import {
   runInstallCommand,
   type AuthCommandDependencies,
   type AuthCommandInput,
+  type AuthCommandResult,
   type InstallCommandDependencies,
   type InstallCommandInput,
+  type InstallCommandResult,
 } from "./install-auth.ts";
 import {
   denyListLines,
@@ -30,9 +32,18 @@ import {
   type SyncInput,
   type SyncResult,
 } from "./sync.ts";
-import { noProgress, plainProgress, terminalProgress, type Progress } from "./progress.ts";
+import { plainProgress, terminalProgress, type Progress } from "./progress.ts";
 import {
-  ConfigError,
+  confirmationRequired,
+  ERROR_CODES,
+  errorEvent,
+  EVENT_TYPES,
+  FerryError,
+  failureEnvelope,
+  successEnvelope,
+  type OutputEvent,
+} from "./output.ts";
+import {
   isBoxName,
   readConfig,
   setIntegration,
@@ -41,22 +52,32 @@ import {
   type PartialOperatorConfig,
 } from "./config.ts";
 import { BOX_MARKER } from "./box-ferry.ts";
-import { resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
-import { runBoxAdd, runBoxDefault, runBoxList, runBoxRemove, type BoxCommandDependencies } from "./box.ts";
-import { INTEGRATIONS, integrationLines, type Integration } from "./integrations/index.ts";
+import { BoxRequiredError, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
+import {
+  boxListLines,
+  runBoxAdd,
+  runBoxDefault,
+  runBoxList,
+  runBoxRemove,
+  type BoxCommandDependencies,
+} from "./box.ts";
+import { INTEGRATIONS, integrationLines, listIntegrations, type Integration } from "./integrations/index.ts";
 import {
   runIntegrationCommand,
   type IntegrationCommandDependencies,
   type IntegrationCommandInput,
+  type IntegrationCommandResult,
 } from "./integrations/command.ts";
 import { Link, type LinkOptions } from "./link.ts";
 import { loadRegistry, type Registry } from "./registry/load.ts";
 import {
+  formatStatus,
   runStatusCommand,
   type StatusCommandDependencies,
   type StatusCommandInput,
 } from "./status-command.ts";
-import { runToolsCommand, type ToolsCommandDependencies } from "./tools/command.ts";
+import type { StatusReport } from "./status.ts";
+import { runToolsCommand, toolsLines, type ToolsCommandDependencies, type ToolsReport } from "./tools/command.ts";
 import { boxPathDirs } from "./tools/path.ts";
 import { runWatch, type WatchDependencies, type WatchInput } from "./watch.ts";
 import {
@@ -71,13 +92,14 @@ import {
   type UninstallResult,
 } from "./uninstall.ts";
 import { runSkillsAdd, SkillsAddError, type RunProcess } from "./skills-add.ts";
-import { runMove, type MoveDependencies, type MoveInput } from "./move.ts";
+import { runMove, type MoveDependencies, type MoveInput, type MoveResult } from "./move.ts";
 import { runExpose, type ExposeDependencies, type ExposeInput } from "./expose.ts";
-import { runTunnel, type TunnelDependencies, type TunnelInput } from "./tunnel.ts";
+import { runTunnel, type Listener, type TunnelDependencies, type TunnelInput } from "./tunnel.ts";
 import {
   runUpdateCommand,
   type UpdateCommandDependencies,
   type UpdateCommandInput,
+  type UpdateCommandResult,
 } from "./update.ts";
 import { VERSION } from "./version.ts";
 
@@ -94,18 +116,21 @@ type CliDependencies = {
   readonly runInstall?: (
     input: InstallCommandInput,
     dependencies?: Partial<InstallCommandDependencies>,
-  ) => Promise<void>;
+  ) => Promise<InstallCommandResult | null>;
   readonly runAuth?: (
     input: AuthCommandInput,
     dependencies?: Partial<AuthCommandDependencies>,
-  ) => Promise<void>;
+  ) => Promise<AuthCommandResult | null>;
   readonly runUpdate?: (
     input: UpdateCommandInput,
     dependencies?: Partial<UpdateCommandDependencies>,
-  ) => Promise<void>;
+  ) => Promise<UpdateCommandResult | null>;
   readonly runSync?: (input: SyncInput, dependencies?: SyncDependencies) => Promise<SyncResult>;
-  readonly runMove?: (input: MoveInput, dependencies?: Partial<MoveDependencies>) => Promise<void>;
-  readonly runTunnel?: (input: TunnelInput, dependencies?: Partial<TunnelDependencies>) => Promise<void>;
+  readonly runMove?: (input: MoveInput, dependencies?: Partial<MoveDependencies>) => Promise<MoveResult | null>;
+  readonly runTunnel?: (
+    input: TunnelInput,
+    dependencies?: Partial<TunnelDependencies>,
+  ) => Promise<readonly Listener[] | undefined>;
   readonly runExpose?: (input: ExposeInput, dependencies?: Partial<ExposeDependencies>) => Promise<number>;
   /** True when this is a box install. The default checks for `~/.ferry/box.json`. */
   readonly isBoxMode?: () => boolean;
@@ -114,7 +139,7 @@ type CliDependencies = {
   readonly runStatus?: (
     input: StatusCommandInput,
     dependencies?: Partial<StatusCommandDependencies>,
-  ) => Promise<unknown>;
+  ) => Promise<StatusReport>;
   readonly runWatch?: (input: WatchInput, dependencies?: WatchDependencies) => Promise<void>;
   readonly runUninstall?: (input: UninstallInput) => UninstallResult;
   readonly installWatchService?: (
@@ -124,10 +149,10 @@ type CliDependencies = {
   readonly runIntegration?: (
     input: IntegrationCommandInput,
     dependencies?: Partial<IntegrationCommandDependencies>,
-  ) => Promise<void>;
+  ) => Promise<IntegrationCommandResult | null>;
   readonly runTools?: (
     dependencies: Pick<ToolsCommandDependencies, "tools"> & Partial<ToolsCommandDependencies>,
-  ) => Promise<void>;
+  ) => Promise<ToolsReport>;
   readonly runProcess?: RunProcess;
   readonly readConfig?: () => PartialOperatorConfig | null;
   readonly integrations?: readonly Integration[];
@@ -136,11 +161,73 @@ type CliDependencies = {
   readonly confirmUninstall?: () => Promise<boolean>;
   /** The question of `ferry box add` before it changes a `[host]` config. */
   readonly confirm?: (message: string) => Promise<boolean | symbol | undefined>;
+  /** Writes a line to stdout: the text of a command, or with --json, the JSON. */
   readonly writeLine?: (line: string) => void;
+  /** Writes a line to stderr. With --json, the text lines of a command go here. */
+  readonly writeError?: (line: string) => void;
   /** The reporter for one command run. The default is one live line and a table on a terminal, else plain lines. */
   readonly createProgress?: () => Progress;
-  /** The reporter for `ferry watch`, whose log must stay plain. */
+  /** The reporter for `ferry watch` and for --json, whose log must stay plain. The default writes to stderr. */
   readonly createPlainProgress?: () => Progress;
+};
+
+/** The commands that stay running and print one event for each line with --json. */
+const STREAM_COMMANDS = new Set(["watch", "tunnel", "expose"]);
+
+const JSON_HELP = `JSON output (--json):
+  stdout has only JSON. Progress and the text lines go to stderr. Ferry
+  shows no prompt: a confirmation fails with confirmation-required unless
+  you give --yes. A command that runs and exits prints one envelope:
+    {"schemaVersion":1,"command","ok","result","warnings","error"}
+  error is null, or {"code","message","hint"}. On failure, ok is false and
+  the exit code is not 0. watch, tunnel, tunnel --follow, and expose print
+  one event for each line. Each event has "type". An error event also has
+  "code", "message", and "hint".
+
+${helpList("Error codes", ERROR_CODES)}
+${helpList("Event types", EVENT_TYPES)}
+
+  The help of each command gives its result. The ferry agent skill
+  describes the full contract.`;
+
+/** A labeled list for the help, wrapped at 78 columns. */
+function helpList(label: string, items: readonly string[]): string {
+  const lines = [`  ${label}:`];
+  for (const item of items) {
+    const last = lines.length - 1;
+    if (`${lines[last]} ${item},`.length > 78) lines.push(`    ${item},`);
+    else lines[last] = `${lines[last]} ${item},`;
+  }
+  return lines.join("\n").replace(/,$/, ".");
+}
+
+/** The --json result of each command, for its help. */
+const JSON_RESULTS: Record<string, string> = {
+  init: "{ dryRun, leftovers, published }, or with --dry-run { dryRun, leftovers, plan }",
+  install: "{ plan: [{ tool, policy, version, action, command, dependsOn }], gitIdentity }",
+  update: "{ dryRun, boxes: [{ name, offline, plan, integrations }], operator, updated }",
+  uninstall: "{ removed, restored }",
+  auth:
+    "{ providers: [{ id, login }] } without a provider, else the login result { kind, provider, ... }. " +
+    'A "login" event line with the URL comes before the envelope. A login that needs the code from the browser reads it as one line on stdin',
+  sync: "{ dryRun, published, boxes: [{ name, plan, applyPlan, discarded }] }",
+  move: "{ path, source, destination, dryRun, git, carry, refused, skipped, notes, trash }",
+  tunnel:
+    "events forward-opened, forward-closed, forward-failed, following, connection-lost, tunnel-closed. " +
+    "With --list, one envelope: { box, listeners: [{ port, address, process }] }",
+  expose: "events exposed and exited. The output of the command goes to stderr",
+  status: "the status report, schema version 2",
+  integrations: "{ boxes: [{ name, destination, integrations: [{ id, description, enabled, localVersion, localSource, connectSteps }] }] }",
+  "integrations enable": "{ integration, action, dryRun, plan, output, enabled, connectSteps }",
+  "integrations disable": "{ integration, action, dryRun, plan, output, enabled, connectSteps }",
+  tools: "{ tools: [{ id, name, kind, install, policy: { policy, default }, boxes, operatorVersion }] }",
+  watch: "events watch-started, synced, sync-failed, sync-refused, content-refused, config-error, update-started, update-failed, watch-stopped",
+  "watch install": "{ manager, path }",
+  "box list": "{ boxes: [{ name, transport, destination, default }] }",
+  "box add": "{ name, transport, destination, gitAuth, migrated }",
+  "box remove": "{ name, defaultBoxRemoved }",
+  "box default": "{ defaultBox }",
+  "skills add": "{ argv }. The output of npx goes to stderr",
 };
 
 type CliRuntime = {
@@ -148,14 +235,50 @@ type CliRuntime = {
   readonly setExitCode?: (code: number) => void;
 };
 
+/** The state of one run that `runCli` reads after an error. */
+type RunState = {
+  /** True when the run has --json. */
+  json(): boolean;
+  /** Print the error as JSON: an error event for a command that prints events, else the failure envelope. */
+  printError(error: unknown, args: readonly string[]): void;
+};
+
 export function buildProgram(dependencies: CliDependencies = {}): Command {
+  return createProgram(dependencies).program;
+}
+
+function createProgram(dependencies: CliDependencies): { program: Command; state: RunState } {
   // Commands that need the registry resolve it when they run, so help never reads the config.
   const config = () => (dependencies.readConfig ?? readConfig)() ?? {};
   const registry = () => resolveRegistry(config());
   /** Each box command puts the PATH directories of the registry tools in front of PATH. `ferry sync` adds them itself. */
   const createLink = (options: LinkOptions) => new Link({ ...options, pathDirs: boxPathDirs(registry().tools) });
-  const progress = () => (dependencies.createProgress ?? terminalProgress)();
-  const writeLine = (line: string) => (dependencies.writeLine ?? console.log)(line);
+  const program = new Command();
+  const json = () => program.opts<{ json?: boolean }>().json === true;
+  const writeOut = (line: string) => (dependencies.writeLine ?? console.log)(line);
+  const writeError = (line: string) => (dependencies.writeError ?? ((text: string) => process.stderr.write(`${text}\n`)))(line);
+  /** The text lines of a command. With --json, stdout carries only JSON, so they go to stderr. */
+  const writeLine = (line: string) => (json() ? writeError : writeOut)(line);
+  const plainReporter = () => (dependencies.createPlainProgress ?? (() => plainProgress(writeError)))();
+  /** With --json, the progress is plain lines on stderr, with no live line. */
+  const progress = () => (json() ? plainReporter() : (dependencies.createProgress ?? terminalProgress)());
+  /** The command path of the run, such as `box add`. The preAction hook sets it. */
+  let active: string | undefined;
+  const warnings: string[] = [];
+  const warn = (line: string) => {
+    warnings.push(line);
+  };
+  /** Print the envelope with --json. Else `text` prints the result. */
+  const report = <T>(result: T, text?: (result: T) => void) => {
+    if (json()) writeOut(JSON.stringify(successEnvelope(active ?? "", result, warnings)));
+    else text?.(result);
+  };
+  /** With --json, the dependency that prints one event for each line. */
+  const events = () => (json() ? { emit: (event: OutputEvent) => writeOut(JSON.stringify(event)) } : {});
+  /** With --json, a confirmation fails instead of a prompt. */
+  const refuse = (question: string) => async (): Promise<never> => {
+    throw confirmationRequired(question);
+  };
   /**
    * Run a command with one reporter. The command's own lines go through the
    * reporter, and the summary table prints when the command ends, also after an error.
@@ -170,17 +293,46 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       reporter.finish();
     }
   };
-  const program = new Command();
+  /**
+   * The approval of the snapshot host keys. --yes trusts them without a
+   * prompt. With --json and without --yes, the approval fails.
+   */
+  const hostKeyApproval = (yes: boolean) => async (request: SnapshotHostKeyApproval): Promise<boolean> => {
+    const keys = request.keys.map((key) => `${key.algorithm} ${key.fingerprint}`).join(", ");
+    if (yes) {
+      writeLine(`Trusting the SSH host keys for ${request.host} on the box: ${keys}`);
+      return true;
+    }
+    if (json()) throw confirmationRequired(`Trust these SSH host keys for ${request.host} on the box: ${keys}?`);
+    return (dependencies.approveHostKeys ?? approveHostKeys)(request);
+  };
+  const state: RunState = {
+    json,
+    printError(error, args) {
+      const command = active ?? commandOf(program, args);
+      const options = args.slice(0, args.includes("--") ? args.indexOf("--") : args.length);
+      // A command that stays running prints events, also for an error before it starts. `tunnel --list` runs and exits.
+      const events = STREAM_COMMANDS.has(command) && !(command === "tunnel" && options.includes("--list"));
+      writeOut(JSON.stringify(events ? errorEvent("error", error) : failureEnvelope(command, error, warnings)));
+    },
+  };
   program
     .name("ferry")
     .description(DESCRIPTION)
     .version(VERSION)
+    // Commander throws instead of calling process.exit, so runCli can print a usage error as JSON.
+    .exitOverride()
     .option(
       "--box <name>",
       "select a box of the config; repeat it to select more boxes",
       (name: string, names: string[] = []) => [...names, name],
     )
+    .option(
+      "--json",
+      "print JSON on stdout: one result envelope, or one event for each line for watch, tunnel, and expose. Progress goes to stderr",
+    )
     .showHelpAfterError()
+    .addHelpText("after", `\n${JSON_HELP}`)
     .action(() => {
       program.outputHelp();
     });
@@ -188,21 +340,24 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
   /** The commands that accept --box. Each other command refuses it. */
   const boxCommands = new Set<Command>();
   program.hook("preAction", (_program, action) => {
+    active = commandPath(action);
     // A box install runs only the box commands. Commander prints the version and help before this hook.
     if (action !== program && action.name() !== "expose" && (dependencies.isBoxMode ?? isBoxMode)()) {
-      throw new ConfigError(
+      throw new FerryError(
+        "usage",
         `This is a box install of Ferry (~/${BOX_MARKER}). Only ferry expose runs here. Run ferry ${commandPath(action)} on the operator machine.`,
       );
     }
     const names = boxNames();
     const invalid = names.find((name) => !isBoxName(name));
     if (invalid !== undefined) {
-      throw new ConfigError(
+      throw new FerryError(
+        "usage",
         `invalid box name ${invalid}. Use 1 to 32 characters from a-z, 0-9, and -, with no - at the start. The name all is reserved.`,
       );
     }
     if (names.length > 0 && !boxCommands.has(action)) {
-      throw new ConfigError(`--box does not apply to ferry ${commandPath(action)}.`);
+      throw new FerryError("usage", `--box does not apply to ferry ${commandPath(action)}.`);
     }
   });
   /**
@@ -221,7 +376,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
       throw error;
     }
     if (!current.boxes && names.length === 0) return undefined;
-    if (names.length > 1) throw new ConfigError(`ferry ${command} changes one box. Give --box once.`);
+    if (names.length > 1) throw new FerryError("usage", `ferry ${command} changes one box. Give --box once.`);
     return { config: current, box: resolveTargetBox(current, names[0]) };
   };
   /** A `readConfig` that shows the command one box as a `[host]` config, or nothing. */
@@ -273,16 +428,18 @@ Add a custom harness in ~/.ferry/config.toml. A repeat init keeps it:
     .option("--ssh-destination <destination>", "explicit OpenSSH destination")
     .option("--snapshot-url <url>", "private snapshot git URL")
     .option("--dry-run", "print the init plan without writing or connecting")
+    .option("--yes", "trust the SSH host keys of the snapshot host on the box without a confirmation prompt")
     .action(async (options: {
       host?: string;
       sshUser?: string;
       sshDestination?: string;
       snapshotUrl?: string;
       dryRun?: boolean;
+      yes?: boolean;
     }) => {
       const execute = dependencies.runInit ?? runInit;
       const [box, ...others] = boxNames();
-      if (others.length > 0) throw new ConfigError("ferry init changes one box. Give --box once.");
+      if (others.length > 0) throw new FerryError("usage", "ferry init changes one box. Give --box once.");
       const result = await withProgress((progress) =>
         execute(
           {
@@ -295,14 +452,15 @@ Add a custom harness in ~/.ferry/config.toml. A repeat init keeps it:
             ...(box !== undefined ? { box } : {}),
           },
           {
-            prompt: dependencies.prompt ?? promptForInit,
-            approveHostKeys: dependencies.approveHostKeys ?? approveHostKeys,
+            // With --json, init asks for nothing, so missing values fail with missing-values.
+            ...(json() ? {} : { prompt: dependencies.prompt ?? promptForInit }),
+            approveHostKeys: hostKeyApproval(options.yes === true),
             createLink,
             progress,
           },
         ),
       );
-      reportInit(result, writeLine);
+      report(result, (result) => reportInit(result, writeLine));
     });
 
   program
@@ -316,12 +474,20 @@ box is the version of this machine. It is a box install that runs only
 ferry expose. Run ferry tools --help for the tool config.`)
     .option("--yes", "run without a confirmation prompt")
     .action(async (options: { yes?: boolean }) => {
-      await withProgress((progress, writeLine) =>
+      const result = await withProgress((progress, writeLine) =>
         (dependencies.runInstall ?? runInstallCommand)(
           { yes: options.yes === true },
-          { tools: registry().tools, createLink, progress, writeLine, ...boxConfig(selectBox("install")) },
+          {
+            tools: registry().tools,
+            createLink,
+            progress,
+            writeLine,
+            ...(json() ? { confirm: refuse("Run these commands on the box?") } : {}),
+            ...boxConfig(selectBox("install")),
+          },
         ),
       );
+      report(result);
     });
 
   program
@@ -346,12 +512,20 @@ ferry status shows "Box sudo: PASSWORDLESS" when the rule works.`)
     .option("--yes", "run without a confirmation prompt")
     .option("--dry-run", "print the update plan without running it")
     .action(async (options: { yes?: boolean; dryRun?: boolean }) => {
-      await withProgress((progress, writeLine) =>
+      const result = await withProgress((progress, writeLine) =>
         (dependencies.runUpdate ?? runUpdateCommand)(
           { yes: options.yes === true, dryRun: options.dryRun === true, includeIntegrations: true, boxes: boxNames() },
-          { tools: registry().tools, readConfig: config, createLink, progress, writeLine },
+          {
+            tools: registry().tools,
+            readConfig: config,
+            createLink,
+            progress,
+            writeLine,
+            ...(json() ? { confirm: refuse("Run these updates?") } : {}),
+          },
         ),
       );
+      report(result);
     });
 
   program
@@ -359,16 +533,17 @@ ferry status shows "Box sudo: PASSWORDLESS" when the rule works.`)
     .description("Remove Ferry's local state and restore paths changed by init")
     .option("--yes", "run without a confirmation prompt")
     .action(async (options: { yes?: boolean }) => {
-      if (!options.yes && !(await (dependencies.confirmUninstall ?? confirmUninstall)())) {
-        (dependencies.writeLine ?? console.log)("Uninstall cancelled.");
+      const question = "Remove Ferry's local state and restore the paths changed by init?";
+      if (!options.yes && !(await (json() ? refuse(question) : (dependencies.confirmUninstall ?? confirmUninstall))())) {
+        writeLine("Uninstall cancelled.");
         return;
       }
       const result = (dependencies.runUninstall ?? runUninstall)({ harnesses: registry().harnesses });
-      const restored = `${result.restored} ${result.restored === 1 ? "path" : "paths"}`;
-      const removed = `${result.removed} managed ${result.removed === 1 ? "path" : "paths"}`;
-      (dependencies.writeLine ?? console.log)(
-        `Uninstalled Ferry. Restored ${restored} and removed ${removed}.`,
-      );
+      report(result, (result) => {
+        const restored = `${result.restored} ${result.restored === 1 ? "path" : "paths"}`;
+        const removed = `${result.removed} managed ${result.removed === 1 ? "path" : "paths"}`;
+        writeLine(`Uninstalled Ferry. Restored ${restored} and removed ${removed}.`);
+      });
     });
 
   program
@@ -391,10 +566,20 @@ localhost callback port, such as 3118 for Claude, for up to 300 seconds. The
 port must be free on this machine.`)
     .option("--mcp <server>", "start the MCP server login of the provider CLI on the box")
     .action(async (provider: string | undefined, options: { mcp?: string }) => {
-      await (dependencies.runAuth ?? runAuthCommand)(
+      const result = await (dependencies.runAuth ?? runAuthCommand)(
         options.mcp === undefined ? { provider } : { provider, mcp: options.mcp },
-        { tools: registry().tools, createLink, progress: progress(), ...boxConfig(selectBox("auth")) },
+        {
+          tools: registry().tools,
+          createLink,
+          progress: progress(),
+          writeLine,
+          ...events(),
+          // With --json, Ferry shows no prompt. A login that needs the code from the browser reads it from stdin.
+          ...(json() ? { readLoginCode: readStdinLine } : {}),
+          ...boxConfig(selectBox("auth")),
+        },
       );
+      report(result);
     });
 
   program
@@ -415,7 +600,7 @@ once on this machine.`)
     .option("--force", "back up live managed paths before Apply links them")
     .option("-m, --message <message>", "snapshot commit message")
     .action(async (options: { dryRun?: boolean; force?: boolean; message?: string }) => {
-      await withProgress((progress, writeLine) =>
+      const result = await withProgress((progress, writeLine) =>
         (dependencies.runSync ?? runSyncCommand)(
           {
             dryRun: options.dryRun === true,
@@ -423,9 +608,10 @@ once on this machine.`)
             message: options.message,
             boxes: boxNames(),
           },
-          { progress, writeLine },
+          { progress, writeLine, warn },
         ),
       );
+      report(syncResult(result));
     });
 
   program
@@ -464,9 +650,9 @@ macOS, else to ~/.ferry/trash. Run --dry-run first.`)
         },
       ) => {
         if (boxNames().length > 0) {
-          throw new ConfigError("ferry move does not accept --box. Use --from-box <name> or --to-box <name>.");
+          throw new FerryError("usage", "ferry move does not accept --box. Use --from-box <name> or --to-box <name>.");
         }
-        await withProgress((progress, writeLine) =>
+        const result = await withProgress((progress, writeLine) =>
           (dependencies.runMove ?? runMove)(
             {
               path,
@@ -478,9 +664,17 @@ macOS, else to ~/.ferry/trash. Run --dry-run first.`)
               allowSecrets: options.allowSecrets === true,
               yes: options.yes === true,
             },
-            { createLink, writeLine, progress },
+            {
+              createLink,
+              writeLine,
+              progress,
+              warn,
+              // With --json, Ferry asks nothing, so files with secrets need --yes.
+              ...(json() ? { interactive: false } : {}),
+            },
           ),
         );
+        report(result);
       },
     );
 
@@ -498,20 +692,21 @@ the next free port, and Ferry connects again 5 seconds after a drop.`)
     .option("--follow", "open a forward for each port that ferry expose announces on the box, and close it when the port goes away")
     .action(async (ports: string[], options: { list?: boolean; follow?: boolean }) => {
       const { name, host } = tunnelBox();
-      await (dependencies.runTunnel ?? runTunnel)(
+      const listeners = await (dependencies.runTunnel ?? runTunnel)(
         { ports, list: options.list === true, ...(options.follow === true ? { follow: true } : {}), box: { name, host } },
-        { createLink, writeLine },
+        { createLink, writeLine, ...events() },
       );
+      if (options.list === true) report({ box: name, listeners: listeners ?? [] });
     });
   /** The one box of `ferry tunnel`: --box, then default_box, then the only box. */
   const tunnelBox = (): ResolvedBox => {
     const names = boxNames();
-    if (names.length > 1) throw new ConfigError("ferry tunnel opens the ports of one box. Give --box once.");
+    if (names.length > 1) throw new FerryError("usage", "ferry tunnel opens the ports of one box. Give --box once.");
     const current = config();
     const selected = names[0] ?? current.defaultBox;
     const boxes = resolveBoxes(current, selected === undefined ? [] : [selected]);
     if (boxes.length === 1) return boxes[0]!;
-    throw new ConfigError(
+    throw new BoxRequiredError(
       `ferry tunnel opens the ports of one box, and ${boxes.length} boxes are configured (${boxes.map((box) => box.name).join(", ")}). ` +
         "Add --box <name>, or set default_box in the config.",
     );
@@ -535,10 +730,14 @@ For example, a service script in paseo.json on the box:
     .argument("<command...>", "the command to run, after --, such as -- bun run dev")
     .option("--port <n>", "the port of the command. The default is $PASEO_PORT")
     .action(async (command: string[], options: { port?: string }) => {
-      const code = await (dependencies.runExpose ?? runExpose)({
-        command,
-        ...(options.port !== undefined ? { port: options.port } : {}),
-      });
+      const code = await (dependencies.runExpose ?? runExpose)(
+        {
+          command,
+          ...(options.port !== undefined ? { port: options.port } : {}),
+        },
+        // With --json, stdout carries only the events, so the output of the command goes to stderr.
+        json() ? { ...events(), stdout: "stderr" } : {},
+      );
       (dependencies.setExitCode ?? setExitCode)(code);
     });
 
@@ -550,27 +749,27 @@ For example, a service script in paseo.json on the box:
 The Tools part of each box shows one state for each tool: ok; drift, run
 ferry update; missing, run ferry install; hidden, a login shell on the box
 does not find the tool, run ferry sync; skipped, the tool has no target;
-unknown, Ferry cannot read the box version. --json prints schema version 2.
-The ferry agent skill describes its fields. Install the skill with
-ferry skills add dlhck/ferry --skill ferry.`)
-    .option("--json", "print the status report as JSON")
-    .action(async (options: { json?: boolean }) => {
-      await withProgress(
-        (progress, writeLine) =>
-          (dependencies.runStatus ?? runStatusCommand)(
-            { json: options.json === true, selection: boxNames() },
-            { createLink, writeLine, progress },
-          ),
-        options.json === true ? noProgress : progress(),
-      );
+unknown, Ferry cannot read the box version. With --json, result is the
+status report, schema version 2. The ferry agent skill describes its fields.
+Install the skill with ferry skills add dlhck/ferry --skill ferry.`)
+    .action(async () => {
+      await withProgress(async (progress, writeLine) => {
+        const result = await (dependencies.runStatus ?? runStatusCommand)(
+          { selection: boxNames() },
+          { createLink, progress },
+        );
+        report(result, (result) => writeLine(formatStatus(result)));
+      });
     });
 
   const integrations = program
     .command("integrations")
     .description("List the integrations of each box, whether each one is enabled, and the local app versions")
     .action(async () => {
-      const lines = await integrationLines(config(), dependencies.integrations ?? INTEGRATIONS, boxNames());
-      for (const line of lines) writeLine(line);
+      const result = await listIntegrations(config(), dependencies.integrations ?? INTEGRATIONS, boxNames());
+      report(result, (result) => {
+        for (const line of integrationLines(result)) writeLine(line);
+      });
     });
   integrations
     .command("enable")
@@ -587,7 +786,7 @@ and move registers the project in Paseo on the box.`)
     .option("--dry-run", "print the box commands without connecting or writing")
     .option("--yes", "run without a confirmation prompt")
     .action(async (name: string, options: { dryRun?: boolean; yes?: boolean }) => {
-      await withProgress((progress, writeLine) =>
+      const result = await withProgress((progress, writeLine) =>
         (dependencies.runIntegration ?? runIntegrationCommand)(
           { action: "enable", name, dryRun: options.dryRun === true, yes: options.yes === true },
           {
@@ -595,10 +794,12 @@ and move registers the project in Paseo on the box.`)
             progress,
             writeLine,
             ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}),
+            ...(json() ? { confirm: refuse(`Enable ${name} on the box?`) } : {}),
             ...integrationBox(selectBox("integrations enable")),
           },
         ),
       );
+      report(result);
     });
   integrations
     .command("disable")
@@ -610,7 +811,7 @@ Ferry never removes ~/.paseo on the box.`)
     .option("--purge", "also uninstall the integration package on the box")
     .option("--yes", "run without a confirmation prompt")
     .action(async (name: string, options: { purge?: boolean; yes?: boolean }) => {
-      await withProgress((progress, writeLine) =>
+      const result = await withProgress((progress, writeLine) =>
         (dependencies.runIntegration ?? runIntegrationCommand)(
           { action: "disable", name, purge: options.purge === true, yes: options.yes === true },
           {
@@ -618,10 +819,12 @@ Ferry never removes ~/.paseo on the box.`)
             progress,
             writeLine,
             ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}),
+            ...(json() ? { confirm: refuse(`Disable ${name} on the box?`) } : {}),
             ...integrationBox(selectBox("integrations disable")),
           },
         ),
       );
+      report(result);
     });
 
   program
@@ -657,7 +860,10 @@ install. {version} is the only placeholder. path adds home directories to the
 box PATH, and depends names the tools to install first. A comment must be on
 its own line. Run ferry sync after a path change.`)
     .action(async () => {
-      await (dependencies.runTools ?? runToolsCommand)({ tools: registry().tools, readConfig: config, writeLine, boxes: boxNames() });
+      const result = await (dependencies.runTools ?? runToolsCommand)({ tools: registry().tools, readConfig: config, boxes: boxNames() });
+      report(result, (result) => {
+        for (const line of toolsLines(result)) writeLine(line);
+      });
     });
 
   const watch = program
@@ -682,12 +888,7 @@ once each day. Run ferry update --help for the sudo rule on the box.`)
             signal: controller.signal,
             dailyUpdate: config().update?.watch === true,
           },
-          {
-            progress: (
-              dependencies.createPlainProgress ??
-              (() => plainProgress((line) => process.stderr.write(`${line}\n`)))
-            )(),
-          },
+          { progress: plainReporter(), writeLine, ...events() },
         );
       } finally {
         process.off("SIGINT", stop);
@@ -713,23 +914,28 @@ Ferry update, restart the service:
   systemctl --user restart ferry-watch.service`)
     .action(async () => {
       const result = await (dependencies.installWatchService ?? installWatchService)();
-      (dependencies.writeLine ?? console.log)(`Installed ${result.manager} service at ${result.path}`);
+      report(result, (result) => writeLine(`Installed ${result.manager} service at ${result.path}`));
     });
 
   const box = program.command("box").description("List, add, and remove the boxes of the config");
-  const boxDependencies = (reporter: Progress, writeLine: (line: string) => void): BoxCommandDependencies => ({
+  const boxDependencies = (reporter: Progress, writeLine: (line: string) => void, yes: boolean): BoxCommandDependencies => ({
     readConfig: config,
     writeConfig: (value) => writeConfig(value),
     createLink,
-    approveHostKeys: dependencies.approveHostKeys ?? approveHostKeys,
-    confirm: dependencies.confirm ?? ((message) => prompts.confirm({ message, initialValue: false })),
+    approveHostKeys: hostKeyApproval(yes),
+    confirm: json()
+      ? (message) => refuse(message)()
+      : (dependencies.confirm ?? ((message) => prompts.confirm({ message, initialValue: false }))),
     writeLine,
+    warn,
     progress: reporter,
   });
   box
     .command("list")
     .description("List the boxes, their transport and destination, and the default box")
-    .action(() => runBoxList({ readConfig: config, writeLine }));
+    .action(() => report(runBoxList({ readConfig: config }), (result) => {
+      for (const line of boxListLines(result)) writeLine(line);
+    }));
   box
     .command("add")
     .summary("Check a new box like ferry init, then add it to the config")
@@ -754,9 +960,9 @@ git_auth = "box" in its [box.<name>] table and run ferry init --box <name>.`)
         "box",
       ]),
     )
-    .option("--yes", "change a [host] config to box tables without a confirmation prompt")
+    .option("--yes", "change a [host] config to box tables, and trust the SSH host keys of the snapshot host on the box, without a confirmation prompt")
     .action(async (name: string, options: { host?: string; sshUser?: string; sshDestination?: string; gitAuth?: GitAuth; yes?: boolean }) => {
-      await withProgress((reporter, writeLine) =>
+      const result = await withProgress((reporter, writeLine) =>
         runBoxAdd(
           {
             name,
@@ -766,20 +972,21 @@ git_auth = "box" in its [box.<name>] table and run ferry init --box <name>.`)
             ...(options.gitAuth !== undefined ? { gitAuth: options.gitAuth } : {}),
             yes: options.yes === true,
           },
-          boxDependencies(reporter, writeLine),
+          boxDependencies(reporter, writeLine, options.yes === true),
         ),
       );
+      report(result);
     });
   box
     .command("remove")
     .description("Remove a box from the config. Ferry does not connect to the box")
     .argument("<name>", "box name")
-    .action((name: string) => runBoxRemove({ name }, { readConfig: config, writeConfig: (value) => writeConfig(value), writeLine }));
+    .action((name: string) => report(runBoxRemove({ name }, { readConfig: config, writeConfig: (value) => writeConfig(value), writeLine, warn })));
   box
     .command("default")
     .description("Set default_box, the box of install, auth, move, tunnel, and integrations enable|disable without --box")
     .argument("<name>", "box name")
-    .action((name: string) => runBoxDefault({ name }, { readConfig: config, writeConfig: (value) => writeConfig(value), writeLine }));
+    .action((name: string) => report(runBoxDefault({ name }, { readConfig: config, writeConfig: (value) => writeConfig(value), writeLine })));
 
   for (const name of ["init", "install", "update", "auth", "sync", "move", "tunnel", "status", "integrations", "tools"]) {
     const command = program.commands.find((known) => known.name() === name);
@@ -803,12 +1010,20 @@ Run ferry sync or ferry watch to publish the skill.`)
     .option("--project", "install into the current project and do not add -g")
     .allowUnknownOption()
     .action(async (source: string, args: string[], options: { project?: boolean }) => {
-      await runSkillsAdd(
+      const argv = await runSkillsAdd(
         { args: [source, ...args], project: options.project === true },
-        dependencies.runProcess,
+        // With --json, stdout carries only JSON, so the output of npx goes to stderr.
+        dependencies.runProcess ?? (json() ? runToStderr : undefined),
       );
+      report({ argv });
     });
-  return program;
+  const addJsonHelp = (command: Command) => {
+    const result = JSON_RESULTS[commandPath(command)];
+    if (result !== undefined) command.addHelpText("after", `\nWith --json: ${result}.`);
+    command.commands.forEach(addJsonHelp);
+  };
+  program.commands.forEach(addJsonHelp);
+  return { program, state };
 }
 
 export async function runCli(
@@ -816,13 +1031,21 @@ export async function runCli(
   dependencies: CliDependencies = {},
   runtime: CliRuntime = {},
 ): Promise<void> {
+  const { program, state } = createProgram(dependencies);
   try {
-    await buildProgram(dependencies).parseAsync([...args], { from: "user" });
+    await program.parseAsync([...args], { from: "user" });
   } catch (error) {
-    if (!(error instanceof InstallAuthCommandError)) {
+    // Commander ends --help and --version with an error whose exit code is 0.
+    if (error instanceof CommanderError && error.exitCode === 0) return;
+    if (state.json()) {
+      state.printError(error, args);
+    } else if (!(error instanceof InstallAuthCommandError) && !(error instanceof CommanderError)) {
+      // Commander wrote its own error. InstallAuthCommandError wrote its line.
       (runtime.renderError ?? renderError)(errorMessage(error));
     }
-    (runtime.setExitCode ?? setExitCode)(error instanceof SkillsAddError ? error.exitCode : 1);
+    (runtime.setExitCode ?? setExitCode)(
+      error instanceof SkillsAddError || error instanceof CommanderError ? error.exitCode : 1,
+    );
   }
 }
 
@@ -954,6 +1177,54 @@ function reportInit(result: InitResult, writeLine: (line: string) => void): void
     return;
   }
   writeLine(result.published ? "Snapshot seed published." : "Snapshot already matches the seed.");
+}
+
+/** The shape of `result` for `ferry sync --json`: one entry for each selected box. */
+function syncResult(result: SyncResult) {
+  return {
+    dryRun: result.dryRun,
+    published: result.published,
+    boxes: result.boxes.map((box) => ({
+      name: box.name,
+      plan: box.plan,
+      applyPlan: box.applyPlan ?? null,
+      discarded: box.discarded ?? [],
+    })),
+  };
+}
+
+/** The command path of `args`, for a usage error before a command runs. */
+function commandOf(program: Command, args: readonly string[]): string {
+  const names: string[] = [];
+  let current = program;
+  for (const arg of args) {
+    if (arg === "--") break;
+    const next = current.commands.find((command) => command.name() === arg);
+    if (!next) continue;
+    names.push(arg);
+    current = next;
+  }
+  return names.join(" ");
+}
+
+/** Read one line from stdin, such as the code that the browser shows after a login. */
+async function readStdinLine(): Promise<string> {
+  let text = "";
+  const decoder = new TextDecoder();
+  for await (const chunk of Bun.stdin.stream()) {
+    text += decoder.decode(chunk, { stream: true });
+    const end = text.indexOf("\n");
+    if (end !== -1) return text.slice(0, end);
+  }
+  if (text.trim() === "") {
+    throw new FerryError("missing-values", "The login needs the code that the browser shows. Ferry read no line from stdin.", "Write the code as one line on stdin.");
+  }
+  return text;
+}
+
+/** Run a command with the stdout of the command on stderr, and return its exit code. */
+async function runToStderr(argv: readonly string[]): Promise<number> {
+  return Bun.spawn([...argv], { stdin: "inherit", stdout: 2, stderr: "inherit" }).exited;
 }
 
 function commandPath(command: Command): string {

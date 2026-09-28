@@ -4,11 +4,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildProgram, runCli } from "../src/cli.ts";
-import type {
-  InitDependencies,
-  InitInput,
-  InitResult,
-  SnapshotHostKeyApproval,
+import {
+  InitRefusal,
+  type InitDependencies,
+  type InitInput,
+  type InitResult,
+  type SnapshotHostKeyApproval,
 } from "../src/init.ts";
 import { createPaseo } from "../src/integrations/paseo.ts";
 import { denyRules } from "../src/manifest.ts";
@@ -19,6 +20,18 @@ import type { SyncInput, SyncResult } from "../src/sync.ts";
 import type { UninstallInput, UninstallResult } from "../src/uninstall.ts";
 import { lineProgress, noProgress, type Progress } from "../src/progress.ts";
 import { recordProgress } from "./fake-progress.ts";
+import type { StatusCommandInput } from "../src/status-command.ts";
+import type { StatusReport } from "../src/status.ts";
+
+/** A status report without boxes, for the mocks of runStatus. */
+const EMPTY_REPORT: StatusReport = {
+  schemaVersion: 2,
+  store: { local: null, remote: null, localMatchesRemote: false, error: null },
+  operator: { gitIdentity: null, error: null },
+  denyList: [],
+  boxes: [],
+  errors: [],
+};
 
 describe("ferry --help", () => {
   test("renders command errors without throwing them to Bun", async () => {
@@ -218,6 +231,7 @@ describe("ferry --help", () => {
       readConfig: () => ({ tools: { bun: "1.4.2" } }),
       runTools: async (dependencies) => {
         received.push(dependencies.tools.map((tool) => tool.id));
+        return { tools: [] };
       },
     });
 
@@ -232,6 +246,7 @@ describe("ferry --help", () => {
       readConfig: () => null,
       runIntegration: async (input) => {
         received.push(input);
+        return null;
       },
     });
 
@@ -263,6 +278,7 @@ describe("ferry --help", () => {
       readConfig: () => null,
       runInstall: async (input) => {
         received = input;
+        return null;
       },
     });
 
@@ -365,6 +381,7 @@ describe("ferry --help", () => {
       readConfig: () => null,
       runAuth: async (input) => {
         received = input;
+        return null;
       },
     });
 
@@ -379,6 +396,7 @@ describe("ferry --help", () => {
       readConfig: () => null,
       runAuth: async (input) => {
         received = input;
+        return null;
       },
     });
 
@@ -393,6 +411,7 @@ describe("ferry --help", () => {
       readConfig: () => null,
       runAuth: async () => {
         calls += 1;
+        return null;
       },
     });
     program.exitOverride();
@@ -421,7 +440,10 @@ describe("ferry --help", () => {
     const tools = { bun: { local: "bun --version", install: "curl -fsSL https://bun.sh/install | bash", path: [".bun/bin"] } };
     await buildProgram({
       readConfig: () => ({ tools }),
-      runStatus: async (_input, dependencies) => links.push(dependencies?.createLink?.({ destination: "user@box.example" })),
+      runStatus: async (_input, dependencies) => {
+        links.push(dependencies?.createLink?.({ destination: "user@box.example" }));
+        return EMPTY_REPORT;
+      },
       writeLine: () => {},
       createProgress: () => noProgress,
     }).parseAsync(["status"], { from: "user" });
@@ -429,6 +451,7 @@ describe("ferry --help", () => {
       readConfig: () => ({ tools }),
       runInstall: async (_input, dependencies) => {
         links.push(dependencies?.createLink?.({ destination: "user@box.example" }));
+        return null;
       },
       createProgress: () => noProgress,
     }).parseAsync(["install", "--yes"], { from: "user" });
@@ -493,26 +516,29 @@ describe("ferry --help", () => {
     expect(help).toContain("-m, --message <message>");
   });
 
-  test("wires status --json to the status command", async () => {
-    let received: { json: boolean; selection?: readonly string[] } | undefined;
+  test("status --json puts the status report in the envelope", async () => {
+    let received: StatusCommandInput | undefined;
+    const lines: string[] = [];
     const program = buildProgram({
       readConfig: () => null,
       runStatus: async (input) => {
         received = input;
+        return EMPTY_REPORT;
       },
+      writeLine: (line) => lines.push(line),
+      writeError: () => {},
     });
 
     await program.parseAsync(["status", "--json"], { from: "user" });
 
-    expect(received).toEqual({ json: true, selection: [] });
+    expect(received).toEqual({ selection: [] });
+    expect(lines.map((line) => JSON.parse(line))).toEqual([
+      { schemaVersion: 1, command: "status", ok: true, result: EMPTY_REPORT, warnings: [], error: null },
+    ]);
   });
 
-  test("status help lists the json flag", () => {
-    const help = buildProgram().commands
-      .find((command) => command.name() === "status")
-      ?.helpInformation();
-
-    expect(help).toContain("--json");
+  test("the program help lists the json flag", () => {
+    expect(buildProgram().helpInformation()).toContain("--json");
   });
 
   test("command help holds the setup facts that the README points to", () => {
@@ -569,6 +595,7 @@ describe("ferry --help", () => {
       readConfig: () => null,
       runUpdate: async (input) => {
         received = input;
+        return null;
       },
     });
 
@@ -583,6 +610,7 @@ describe("ferry --help", () => {
       readConfig: () => null,
       runMove: async (input) => {
         received = input;
+        return null;
       },
     });
 
@@ -765,6 +793,7 @@ describe("--box", () => {
     let read: (() => PartialOperatorConfig | null) | undefined;
     const capture = async (_input: unknown, dependencies?: { readConfig?: (home: string) => PartialOperatorConfig | null }) => {
       read = dependencies?.readConfig ? () => dependencies.readConfig!("/home/user") : undefined;
+      return null;
     };
     await buildProgram({
       readConfig: () => config,
@@ -773,10 +802,13 @@ describe("--box", () => {
       runMove: capture,
       runIntegration: capture,
       runUpdate: capture,
-      runStatus: capture,
+      runStatus: async (input, dependencies) => {
+        await capture(input, dependencies);
+        return EMPTY_REPORT;
+      },
       runSync: async (input, dependencies) => {
         await capture(input, dependencies);
-        return { dryRun: false, published: false } as unknown as SyncResult;
+        return { dryRun: false, published: false, boxes: [] } as unknown as SyncResult;
       },
       createProgress: () => noProgress,
       writeLine: () => {},
@@ -849,7 +881,7 @@ describe("--box", () => {
         runSync: async (input, dependencies) => {
           selections.push(input.boxes);
           expect(dependencies?.readConfig).toBeUndefined();
-          return undefined as never;
+          return { dryRun: false, published: false, boxes: [] } as unknown as SyncResult;
         },
         createProgress: () => noProgress,
         writeLine: () => {},
@@ -870,7 +902,7 @@ describe("--box", () => {
         runStatus: async (input, dependencies) => {
           selections.push(input.selection);
           expect(dependencies?.readConfig).toBeUndefined();
-          return undefined as never;
+          return EMPTY_REPORT;
         },
         createProgress: () => noProgress,
         writeLine: () => {},
@@ -911,6 +943,7 @@ describe("--box", () => {
       runIntegration: async (_input, dependencies) => {
         setIntegration = dependencies?.setIntegration;
         box = dependencies?.box;
+        return null;
       },
     }).parseAsync(["integrations", "enable", "paseo", "--box", "b"], { from: "user" });
     expect(setIntegration).toBeFunction();
@@ -921,6 +954,7 @@ describe("--box", () => {
       readConfig: () => HOST,
       runIntegration: async (_input, dependencies) => {
         hostSet = dependencies?.setIntegration;
+        return null;
       },
     }).parseAsync(["integrations", "enable", "paseo"], { from: "user" });
     expect(hostSet).toBeUndefined();
@@ -933,6 +967,7 @@ describe("--box", () => {
         readConfig: () => BOXES,
         runUpdate: async (input, dependencies) => {
           received.push({ boxes: input.boxes, config: dependencies?.readConfig?.() });
+          return null;
         },
         createProgress: () => noProgress,
       });
@@ -969,6 +1004,7 @@ describe("--box", () => {
       readConfig: () => BOXES,
       runTools: async (dependencies) => {
         boxes = dependencies.boxes;
+        return { tools: [] };
       },
     }).parseAsync(["tools", "--box", "b"], { from: "user" });
     expect(boxes).toEqual(["b"]);
@@ -1012,10 +1048,11 @@ describe("progress selection", () => {
       ...selection,
       runSync: async (_input, dependencies) => {
         received.sync = dependencies?.progress;
-        return { dryRun: true, published: false } as unknown as SyncResult;
+        return { dryRun: true, published: false, boxes: [] } as unknown as SyncResult;
       },
       runStatus: async (_input, dependencies) => {
         received.status = dependencies?.progress;
+        return EMPTY_REPORT;
       },
       runInit: async (_input, dependencies) => {
         received.init = dependencies?.progress;
@@ -1023,12 +1060,15 @@ describe("progress selection", () => {
       },
       runInstall: async (_input, dependencies) => {
         received.install = dependencies?.progress;
+        return null;
       },
       runAuth: async (_input, dependencies) => {
         received.auth = dependencies?.progress;
+        return null;
       },
       runUpdate: async (_input, dependencies) => {
         received.update = dependencies?.progress;
+        return null;
       },
       writeLine: () => {},
     });
@@ -1054,24 +1094,23 @@ describe("progress selection", () => {
     });
   });
 
-  test("status --json gets no progress and prints the same JSON as before", async () => {
+  test("--json gets the plain reporter, and stdout gets only the envelope", async () => {
     let received: Progress | undefined;
     const lines: string[] = [];
-    const report = { schemaVersion: 1, link: { online: false } };
     const program = buildProgram({
       ...selection,
       runStatus: async (_input, dependencies) => {
         received = dependencies?.progress;
-        dependencies?.writeLine?.(JSON.stringify(report));
-        return report;
+        return EMPTY_REPORT;
       },
       writeLine: (line) => lines.push(line),
     });
 
     await program.parseAsync(["status", "--json"], { from: "user" });
 
-    expect(received).toBe(noProgress);
-    expect(lines).toEqual(['{"schemaVersion":1,"link":{"online":false}}']);
+    expect(received).toBe(plain);
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!).result).toEqual(EMPTY_REPORT);
   });
 
   test("on a terminal, prints the table, then the command's lines, then the error, and shows the cursor again", async () => {
@@ -1277,5 +1316,279 @@ describe("box mode", () => {
     expect(out.join("")).toBe("0.0.0-dev\n");
     await program.parseAsync([], { from: "user" });
     expect(out.join("")).toContain("Usage: ferry");
+  });
+});
+
+describe("--json", () => {
+  const BOXES: PartialOperatorConfig = {
+    version: 1,
+    publisher: "operator",
+    snapshotUrl: "snapshot.git",
+    defaultBox: "a",
+    boxes: [
+      { name: "a", host: { transport: "ssh", destination: "dev@box-a.example" } },
+      { name: "b", host: { tailscale: "box-b", sshUser: "dev" } },
+    ],
+  };
+  const HOST: PartialOperatorConfig = {
+    version: 1,
+    publisher: "operator",
+    snapshotUrl: "snapshot.git",
+    host: { transport: "ssh", destination: "dev@box-a.example" },
+  };
+
+  /** Run the CLI with --json. `stdout` holds the parsed JSON lines, `stderr` the text lines. */
+  async function run(args: string[], dependencies: Parameters<typeof runCli>[1] = {}) {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const rendered: string[] = [];
+    const exitCodes: number[] = [];
+    await runCli(
+      ["--json", ...args],
+      {
+        readConfig: () => BOXES,
+        createPlainProgress: () => noProgress,
+        ...dependencies,
+        writeLine: (line) => stdout.push(line),
+        writeError: (line) => stderr.push(line),
+      },
+      { renderError: (message) => rendered.push(message), setExitCode: (code) => exitCodes.push(code) },
+    );
+    expect(rendered).toEqual([]);
+    return { json: stdout.map((line) => JSON.parse(line)), stderr, exitCodes };
+  }
+
+  test("a command prints one envelope with its result, and nothing else on stdout", async () => {
+    const result = await run(["box", "list"]);
+
+    expect(result.json).toEqual([
+      {
+        schemaVersion: 1,
+        command: "box list",
+        ok: true,
+        result: {
+          boxes: [
+            { name: "a", transport: "ssh", destination: "dev@box-a.example", default: true },
+            { name: "b", transport: "tailscale", destination: "dev@box-b", default: false },
+          ],
+        },
+        warnings: [],
+        error: null,
+      },
+    ]);
+    expect(result.exitCodes).toEqual([]);
+  });
+
+  test("the text lines of a command go to stderr", async () => {
+    const result = await run(["auth"]);
+
+    expect(result.json).toHaveLength(1);
+    expect(result.json[0].result.providers).toContainEqual({ id: "pi", login: "manual" });
+    expect(result.stderr).toContain("pi: manual SSH flow");
+  });
+
+  test("a failure prints the envelope with the error code, and exits with 1", async () => {
+    const unknown = await run(["integrations", "--box", "c"], { integrations: [] });
+    expect(unknown.json).toEqual([
+      {
+        schemaVersion: 1,
+        command: "integrations",
+        ok: false,
+        result: null,
+        warnings: [],
+        error: { code: "unknown-box", message: "unknown box c. Known boxes: a, b.", hint: "Run ferry box list for the box names." },
+      },
+    ]);
+    expect(unknown.exitCodes).toEqual([1]);
+
+    expect((await run(["box", "list"], { readConfig: () => null })).json[0].error.code).toBe("config-missing");
+    expect((await run(["install", "--box", "a", "--box", "b"])).json[0].error.code).toBe("usage");
+  });
+
+  test("a usage error from the option parser is an envelope with the code usage", async () => {
+    const result = await run(["sync", "--bogus"]);
+
+    expect(result.json).toEqual([
+      expect.objectContaining({ command: "sync", ok: false, error: expect.objectContaining({ code: "usage" }) }),
+    ]);
+    expect(result.exitCodes).toEqual([1]);
+  });
+
+  test("sync puts the plan of each box in result, and its warnings in the envelope", async () => {
+    const result = await run(["sync", "--dry-run"], {
+      runSync: async (input, dependencies) => {
+        dependencies?.warn?.("Box MCP: could not declare claude MCP server linear");
+        const plan = { box: "dev@box-a.example" } as SyncResult["plan"];
+        return { dryRun: input.dryRun === true, published: false, plan, boxes: [{ name: "a", plan }] };
+      },
+    });
+
+    expect(result.json[0]).toMatchObject({
+      ok: true,
+      result: { dryRun: true, published: false, boxes: [{ name: "a", plan: { box: "dev@box-a.example" }, applyPlan: null, discarded: [] }] },
+      warnings: ["Box MCP: could not declare claude MCP server linear"],
+    });
+  });
+
+  test("a command that stays running prints its events, and an error event on failure", async () => {
+    const watch = await run(["watch"], {
+      runWatch: async (_input, dependencies) => {
+        dependencies?.emit?.({ type: "watch-started", boxes: ["a"] });
+      },
+    });
+    expect(watch.json).toEqual([{ type: "watch-started", boxes: ["a"] }]);
+
+    const tunnel = await run(["tunnel", "3000"], { readConfig: () => null });
+    expect(tunnel.json).toEqual([
+      { type: "error", code: "config-missing", message: "Ferry config has no complete box. Run ferry init.", hint: "Run ferry init." },
+    ]);
+    expect(tunnel.exitCodes).toEqual([1]);
+
+    const list = await run(["tunnel", "--list"], { readConfig: () => null });
+    expect(list.json[0]).toMatchObject({ command: "tunnel", ok: false, error: { code: "config-missing" } });
+  });
+
+  test("tunnel --list prints the listeners in the envelope", async () => {
+    const result = await run(["tunnel", "--list"], {
+      runTunnel: async () => [{ port: 3000, address: "127.0.0.1", process: "node" }],
+    });
+
+    expect(result.json[0].result).toEqual({ box: "a", listeners: [{ port: 3000, address: "127.0.0.1", process: "node" }] });
+  });
+
+  describe("asks nothing", () => {
+    const refused = { code: "confirmation-required", hint: "Add --yes to confirm." };
+
+    test("uninstall fails without --yes", async () => {
+      let asked = 0;
+      const result = await run(["uninstall"], {
+        confirmUninstall: async () => {
+          asked += 1;
+          return true;
+        },
+        runUninstall: () => {
+          throw new Error("uninstall ran");
+        },
+      });
+
+      expect(asked).toBe(0);
+      expect(result.json[0].error).toMatchObject(refused);
+      expect(result.exitCodes).toEqual([1]);
+    });
+
+    test("install, update, and integrations enable|disable fail at the confirmation", async () => {
+      const confirm = async (dependencies?: { confirm?: (message: string) => Promise<unknown> }) => {
+        await dependencies?.confirm?.("Run?");
+        return null;
+      };
+      for (const args of [["install"], ["update"], ["integrations", "enable", "paseo"], ["integrations", "disable", "paseo"]]) {
+        const result = await run(args, {
+          runInstall: (_input, dependencies) => confirm(dependencies),
+          runUpdate: (_input, dependencies) => confirm(dependencies),
+          runIntegration: (_input, dependencies) => confirm(dependencies),
+        });
+        expect(result.json[0].error).toMatchObject(refused);
+      }
+    });
+
+    test("box add fails before it changes a [host] config", async () => {
+      const result = await run(["box", "add", "b", "--ssh-destination", "dev@box-b.example"], {
+        readConfig: () => HOST,
+        confirm: async () => true,
+      });
+
+      expect(result.json[0]).toMatchObject({ command: "box add", ok: false, error: refused });
+    });
+
+    test("init gets no prompt, and the host keys need --yes", async () => {
+      const received: InitDependencies[] = [];
+      const key: SnapshotHostKeyApproval = { host: "github.com", keys: [{ algorithm: "ssh-ed25519", fingerprint: "SHA256:abc" }] };
+      const runInit = async (_input: InitInput, dependencies?: InitDependencies): Promise<InitResult> => {
+        received.push(dependencies!);
+        await dependencies?.approveHostKeys?.(key);
+        return { dryRun: false, leftovers: [], published: true };
+      };
+
+      const refusedInit = await run(["init"], { readConfig: () => HOST, runInit, approveHostKeys: async () => true, prompt: async () => ({}) });
+      expect(received[0]?.prompt).toBeUndefined();
+      expect(refusedInit.json[0].error).toMatchObject(refused);
+      expect(refusedInit.json[0].error.message).toContain("ssh-ed25519 SHA256:abc");
+
+      const accepted = await run(["init", "--yes"], { readConfig: () => HOST, runInit });
+      expect(accepted.json[0]).toMatchObject({ ok: true, result: { published: true } });
+      expect(accepted.stderr).toEqual([
+        "Trusting the SSH host keys for github.com on the box: ssh-ed25519 SHA256:abc",
+      ]);
+    });
+
+    test("init without the values fails with missing-values", async () => {
+      const result = await run(["init"], {
+        runInit: async () => {
+          throw new InitRefusal("missing-values", "missing init values: host, sshUser, snapshotUrl");
+        },
+      });
+
+      expect(result.json[0].error).toEqual({
+        code: "missing-values",
+        message: "missing init values: host, sshUser, snapshotUrl",
+        hint: "Give the missing values as options.",
+      });
+    });
+
+    test("move carries no file with secrets without --yes, and auth reads the login code from stdin", async () => {
+      let interactive: boolean | undefined;
+      await run(["move", "Developer/app"], {
+        runMove: async (_input, dependencies) => {
+          interactive = dependencies?.interactive;
+          return null;
+        },
+      });
+      expect(interactive).toBe(false);
+
+      let readLoginCode: unknown;
+      await run(["auth", "claude"], {
+        runAuth: async (_input, dependencies) => {
+          readLoginCode = dependencies?.readLoginCode;
+          return null;
+        },
+      });
+      expect(readLoginCode).toBeFunction();
+    });
+  });
+
+  test("the help gives the contract, and the help of each command gives its result", () => {
+    const program = buildProgram();
+    const help = (path: string[]) => {
+      let command = program;
+      for (const name of path) command = command.commands.find((known) => known.name() === name)!;
+      let text = "";
+      command.configureOutput({ writeOut: (value) => (text += value) });
+      command.outputHelp();
+      return text;
+    };
+    expect(help([])).toContain("confirmation-required");
+    expect(help([])).toContain("forward-opened");
+    for (const path of [
+      "init", "box list", "box add", "box remove", "box default", "install", "sync", "watch", "watch install", "status",
+      "auth", "update", "tools", "skills add", "move", "tunnel", "expose", "integrations", "integrations enable",
+      "integrations disable", "uninstall",
+    ]) {
+      expect(help(path.split(" "))).toContain("With --json: ");
+    }
+  });
+
+  test("without --json, the confirmations and prompts stay", async () => {
+    let received: InitDependencies | undefined;
+    await buildProgram({
+      readConfig: () => HOST,
+      runInit: async (_input, dependencies) => {
+        received = dependencies;
+        return { dryRun: false, leftovers: [], published: true };
+      },
+      prompt: async () => ({}),
+      writeLine: () => {},
+    }).parseAsync(["init"], { from: "user" });
+
+    expect(received?.prompt).toBeFunction();
   });
 });

@@ -35,6 +35,7 @@ import {
   refreshUnitPath,
   type AgentProfile,
 } from "./integrations/paseo.ts";
+import { denyRuleCause } from "./output.ts";
 import { groupProgress, noProgress, plural, step, type Progress } from "./progress.ts";
 import { boxPathDirs, profileBlockCommand } from "./tools/path.ts";
 
@@ -71,6 +72,8 @@ export type SyncDependencies = {
   readonly adopt?: typeof adoptPublishedSkills;
   readonly writePlan?: (plan: SyncPlan) => void;
   readonly writeLine?: (line: string) => void;
+  /** Records a warning for the --json envelope. The warning line also goes to `writeLine`. */
+  readonly warn?: (line: string) => void;
   readonly progress?: Progress;
 };
 
@@ -193,6 +196,10 @@ export async function runSync(
   const home = input.home ?? homedir();
   const progress = dependencies.progress ?? noProgress;
   const writeLine = dependencies.writeLine ?? console.log;
+  const warn = (line: string) => {
+    dependencies.warn?.(line);
+    writeLine(line);
+  };
   // The operator steps are the read, the publish, and the adopt.
   const operatorSteps = input.publish === false ? 2 : 3;
   progress.plan(input.dryRun ? 1 : operatorSteps + BOX_STEPS);
@@ -224,18 +231,18 @@ export async function runSync(
   for (const leftover of seed.leftovers) {
     const label = leftover.code === "hook-path" ? "hook" : leftover.code === "mcp-local" ? "MCP server" : null;
     if (!label) continue;
-    writeLine(`Skipped ${label}: ${leftover.reason}: ${leftover.path}`);
+    warn(`Skipped ${label}: ${leftover.reason}: ${leftover.path}`);
   }
 
   // With one box, the output stays as before. With more boxes, each box line and step starts with `[<name>] `.
   const several = boxes.length > 1;
   const output = (box: SyncBox) => {
-    const boxLine = several
-      ? (line: string) => writeLine(line.split("\n").map((part) => `[${box.name}] ${part}`).join("\n"))
-      : writeLine;
+    const prefixed = (line: string) => (several ? line.split("\n").map((part) => `[${box.name}] ${part}`).join("\n") : line);
+    const boxLine = (line: string) => writeLine(prefixed(line));
     return {
       progress: several ? groupProgress(progress, box.name) : progress,
       writeLine: boxLine,
+      warn: (line: string) => warn(prefixed(line)),
       writePlan: dependencies.writePlan ?? ((plan: SyncPlan) => printPlan(plan, box.gitAuth, boxLine)),
     };
   };
@@ -297,7 +304,7 @@ export async function runSync(
 
   /** Run the box steps on one box. A failure ends this box only. */
   const syncBox = async (box: SyncBox): Promise<BoxSyncResult> => {
-    const { progress, writeLine, writePlan } = output(box);
+    const { progress, writeLine, warn, writePlan } = output(box);
     let current = "Locking the box";
     const boxStep = <T>(
       name: string,
@@ -332,6 +339,7 @@ export async function runSync(
           boxStep,
           progress,
           writeLine,
+          warn,
         });
         return { name: box.name, plan, applyPlan, discarded };
       } finally {
@@ -357,7 +365,7 @@ export async function runSync(
       { cause },
     );
     if (failed.length === 0) throw error;
-    writeLine(`Warning: ${error.message}`);
+    warn(`Warning: ${error.message}`);
   }
 
   if (failed.length > 0) throw several ? new BoxesSyncError(results) : failed[0]!.failure!.error;
@@ -392,8 +400,9 @@ async function applyOnBox(context: {
   readonly boxStep: <T>(name: string, work: () => T | Promise<T>, describe?: (result: T) => string | undefined) => Promise<T>;
   readonly progress: Progress;
   readonly writeLine: (line: string) => void;
+  readonly warn: (line: string) => void;
 }): Promise<{ applyPlan: ApplyPlan; discarded: string[] }> {
-  const { plan, box, link, publication, config, registry, seed, boxStep, progress, writeLine } = context;
+  const { plan, box, link, publication, config, registry, seed, boxStep, progress, writeLine, warn } = context;
   const { profiles, pathDirs } = box;
   const update = await boxStep(
     "Updating the box checkout",
@@ -452,7 +461,7 @@ async function applyOnBox(context: {
       () => installBoxPlugins({ settings: seed.settings, link, progress, gitAuth: box.gitAuth }),
       (warnings) => (warnings.length > 0 ? plural(warnings.length, "warning") : undefined),
     );
-    for (const warning of warnings) writeLine(`Box plugins: ${warning}`);
+    for (const warning of warnings) warn(`Box plugins: ${warning}`);
     await boxStep("Merging settings on the box", () =>
       mergeBoxSettings({
         remoteHome: required(plan.remoteHome),
@@ -487,7 +496,7 @@ async function applyOnBox(context: {
           .filter(Boolean)
           .join(", "),
     );
-    for (const warning of warnings) writeLine(`Box MCP: ${warning}`);
+    for (const warning of warnings) warn(`Box MCP: ${warning}`);
   } catch (cause) {
     throw new SyncError(
       "apply-failure",
@@ -530,9 +539,9 @@ async function applyOnBox(context: {
                 .filter(Boolean)
                 .join(", "),
       );
-      for (const warning of carry.warnings) writeLine(`Warning: ${warning}`);
+      for (const warning of carry.warnings) warn(`Warning: ${warning}`);
     } catch (cause) {
-      writeLine(`Warning: Ferry could not carry the Paseo agent profiles: ${messageOf(cause)}. The sync is complete.`);
+      warn(`Warning: Ferry could not carry the Paseo agent profiles: ${messageOf(cause)}. The sync is complete.`);
     }
     // The restart also applies the profiles, so it runs after the carry.
     try {
@@ -542,12 +551,12 @@ async function applyOnBox(context: {
         (restarted) => (restarted ? "restarted" : "no changes"),
       );
       if (restarted) {
-        writeLine(
+        warn(
           "The box PATH changed, so Ferry updated ferry-paseo.service and restarted the Paseo daemon. The restart stopped the agents that ran on the box.",
         );
       }
     } catch (cause) {
-      writeLine(`Warning: Ferry could not update the PATH of ferry-paseo.service: ${messageOf(cause)}. The sync is complete.`);
+      warn(`Warning: Ferry could not update the PATH of ferry-paseo.service: ${messageOf(cause)}. The sync is complete.`);
     }
   }
   return { applyPlan, discarded };
@@ -606,7 +615,12 @@ export function inspectSyncSource(
       ...seed.clashes.map((clash) => `clash ${clash.name}: ${clash.paths.join(", ")}`),
       ...seed.forbidden.map((hit) => `${hit.reason}: ${hit.path}`),
     ];
-    throw new SyncError("manifest-refusal", "operator", `Manifest refused publisher ${config.publisher}: ${details.join("; ")}`);
+    throw new SyncError(
+      "manifest-refusal",
+      "operator",
+      `Manifest refused publisher ${config.publisher}: ${details.join("; ")}`,
+      denyRuleCause(seed.forbidden),
+    );
   }
   return { config, boxes, registry, seed };
 }

@@ -20,13 +20,14 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, posix, relative, resolve } from "node:path";
-import { resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
+import { BoxRequiredError, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
 import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
 import { paseoSourceHint } from "./integrations/paseo.ts";
 import type { IntegrationId } from "./integrations/types.ts";
 import { Link, type LinkOptions } from "./link.ts";
 import { carriedContentHits, carriedNameHit } from "./manifest.ts";
+import { FerryError } from "./output.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
 
 export type MoveInput = {
@@ -58,6 +59,8 @@ export type MoveDependencies = {
   readonly platform: NodeJS.Platform;
   readonly now: () => Date;
   readonly writeLine: (line: string) => void;
+  /** Records a warning for the --json envelope. The warning line also goes to `writeLine`. */
+  readonly warn?: (line: string) => void;
   readonly progress: Progress;
   /** All built-in integrations. Move uses the ones that the config enables. */
   readonly integrations: readonly Integration[];
@@ -69,7 +72,31 @@ export type MoveDependencies = {
 /** The line for `--remove`. Ferry never removes the source project from an integration. */
 const SOURCE_HINTS: Record<IntegrationId, (path: string, side: string) => string> = { paseo: paseoSourceHint };
 
-export class MoveError extends Error {}
+export class MoveError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MoveError";
+  }
+}
+
+/** The plan of a move, and what the move did. The paths are relative to the project folder. */
+export type MoveResult = {
+  /** The project path, relative to the home, as `~/<path>`. */
+  readonly path: string;
+  /** "this machine", "the box", or "box <name>". */
+  readonly source: string;
+  readonly destination: string;
+  readonly dryRun: boolean;
+  /** The git remote and branch of the clone, or null when Ferry copies a folder without git. */
+  readonly git: GitSource | null;
+  /** `secrets` holds the kinds of secret in a carried environment file, never the values. */
+  readonly carry: readonly Carried[];
+  readonly refused: readonly Hit[];
+  readonly skipped: readonly Hit[];
+  readonly notes: readonly string[];
+  /** The trash path of the source copy, after --remove. */
+  readonly trash: string | null;
+};
 
 /**
  * Directory and file names that Ferry does not carry: build output, caches,
@@ -147,7 +174,8 @@ const SECTION = "ferry-section";
 /** Content rules that refuse an environment file also with `allowSecrets`. */
 const ALWAYS_REFUSED = new Set(["private-key", "executable"]);
 
-export async function runMove(input: MoveInput, overrides: Partial<MoveDependencies> = {}): Promise<void> {
+/** Returns null when the operator does not confirm. */
+export async function runMove(input: MoveInput, overrides: Partial<MoveDependencies> = {}): Promise<MoveResult | null> {
   const dependencies: MoveDependencies = { ...defaultDependencies(), ...overrides };
   if (input.allowSecrets && !input.includeEnv) {
     throw new MoveError("--allow-secrets works only together with --include-env.");
@@ -216,12 +244,24 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
         `Ferry refused to move ~/${rel}: ${plan.problems.length} ${plan.problems.length === 1 ? "problem" : "problems"}.`,
       );
     }
-    if (input.dryRun) return;
+    const result = {
+      path: `~/${rel}`,
+      source: source.label,
+      destination: destination.label,
+      dryRun: input.dryRun,
+      git: plan.git,
+      carry: plan.carry,
+      refused: plan.refused,
+      skipped: plan.skipped,
+      notes: plan.notes,
+    };
+    if (input.dryRun) return { ...result, trash: null };
 
     const secrets = plan.carry.filter((file) => file.secrets.length > 0);
     if (secrets.length > 0 && !input.yes) {
       if (!dependencies.interactive) {
-        throw new MoveError(
+        throw new FerryError(
+          "confirmation-required",
           `Ferry found ${plural(secrets.length, "file")} with secrets. Without a terminal, add --yes to carry them.`,
         );
       }
@@ -230,7 +270,7 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       const question = `Carry ${plural(secrets.length, "file")} with secrets to ${destination.label}?${readers}`;
       if ((await dependencies.confirm(question)) !== true) {
         writeLine("Move cancelled.");
-        return;
+        return null;
       }
     }
 
@@ -269,7 +309,7 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       });
     }
 
-    let trashLine: string | null = null;
+    let trash: string | null = null;
     if (input.remove) {
       const name = `${posix.basename(rel)}-${timestamp(dependencies.now())}`;
       await step(
@@ -286,7 +326,7 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
           );
         },
       );
-      trashLine = `Trash: moved the source copy to ${source.trash.replace(source.home, "~")}/${name}`;
+      trash = `${source.trash.replace(source.home, "~")}/${name}`;
     }
 
     const warnings: string[] = [];
@@ -304,14 +344,18 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       }
     }
 
-    if (trashLine) writeLine(trashLine);
+    if (trash) writeLine(`Trash: moved the source copy to ${trash}`);
     writeLine(
       `Moved ~/${rel}${relay ? ` from ${source.label}` : ""} to ${destination.label}: carried ${plan.carry.length}, refused ${plan.refused.length}, skipped ${plan.skipped.length}.`,
     );
-    for (const warning of warnings) writeLine(warning);
+    for (const warning of warnings) {
+      dependencies.warn?.(warning);
+      writeLine(warning);
+    }
     if (input.remove) {
       for (const integration of enabled(sourceBox ?? destinationBox)) writeLine(SOURCE_HINTS[integration.id](`~/${rel}`, source.label));
     }
+    return { ...result, trash };
   } finally {
     if (fromBox) rmSync(plan.stage, { recursive: true, force: true });
   }
@@ -758,7 +802,7 @@ function loadConfig(read: () => PartialOperatorConfig | null): PartialOperatorCo
 function destinationTarget(config: PartialOperatorConfig, name: string | undefined): ResolvedBox {
   const names = resolveBoxes(config).map((box) => box.name);
   if (name === undefined && config.defaultBox === undefined && names.length > 1) {
-    throw new MoveError(
+    throw new BoxRequiredError(
       `More than one box is configured (${names.join(", ")}). Add --to-box <name>, or set default_box in the config.`,
     );
   }

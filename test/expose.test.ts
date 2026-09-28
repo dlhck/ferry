@@ -54,6 +54,31 @@ describe("ferry expose", () => {
     expect(readdirSync(join(home, ".ferry", "exposed"))).toEqual([]);
   });
 
+  test("with --json, prints the exposed and exited events and gives the stdout of the command to stderr", async () => {
+    const { dependencies } = setup();
+    const events: unknown[] = [];
+    let stdout: string | undefined;
+    const code = await runExpose(
+      { command: ["bun", "run", "dev"] },
+      {
+        ...dependencies,
+        stdout: "stderr",
+        emit: (event) => events.push(event),
+        spawn: (_argv, target) => {
+          stdout = target;
+          return { exited: Promise.resolve(2), kill: () => {} };
+        },
+      },
+    );
+
+    expect(code).toBe(2);
+    expect(stdout).toBe("stderr");
+    expect(events).toEqual([
+      { type: "exposed", port: 3000, name: "web", cwd: "/home/user/app", pid: 4242 },
+      { type: "exited", port: 3000, exitCode: 2 },
+    ]);
+  });
+
   test("returns the exit code of the child", async () => {
     const { dependencies } = setup();
     expect(await runExpose({ command: ["sh", "-c", "exit 3"] }, dependencies)).toBe(3);

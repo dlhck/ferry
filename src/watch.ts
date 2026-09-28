@@ -10,6 +10,7 @@ import { AdoptionRefusal } from "./adopt.ts";
 import { ApplyError } from "./apply.ts";
 import { StoreRefusal } from "./store.ts";
 import { runUpdateCommand } from "./update.ts";
+import { errorEvent, type OutputEvent } from "./output.ts";
 import { noProgress, type Progress } from "./progress.ts";
 
 const DEFAULT_POLL_MS = 500;
@@ -32,7 +33,7 @@ export type WatchInput = {
 
 export type WatchObservation =
   | { readonly ok: true; readonly identity: string }
-  | { readonly ok: false; readonly signature: string; readonly message: string };
+  | { readonly ok: false; readonly signature: string; readonly message: string; readonly error?: unknown };
 
 /** One sync run of the watch. */
 export type WatchSyncRequest = {
@@ -80,7 +81,9 @@ export type WatchDependencies = {
   readonly readState?: (home: string) => WatchState | null;
   readonly writeState?: (home: string, state: WatchStateRecord) => void;
   readonly writeLine?: (line: string) => void;
-  readonly update?: () => Promise<void>;
+  /** With --json, prints one event for each watch line. */
+  readonly emit?: (event: OutputEvent) => void;
+  readonly update?: () => Promise<unknown>;
   /** The update command that the default daily update runs. */
   readonly runUpdate?: typeof runUpdateCommand;
   readonly now?: () => number;
@@ -108,12 +111,17 @@ export async function runWatch(
     (async (request: WatchSyncRequest) => {
       await (dependencies.runSync ?? runSync)(
         { home: request.home, boxes: request.boxes, publish: request.publish },
-        { progress },
+        { progress, writeLine },
       );
     });
   const readBoxes = dependencies.readBoxes ?? configuredBoxNames;
   const retryable = dependencies.isRetryable ?? isRetryableWatchError;
   const writeLine = dependencies.writeLine ?? console.log;
+  /** Write a watch line, and with --json, its event. */
+  const note = (line: string, event: OutputEvent) => {
+    dependencies.emit?.(event);
+    writeLine(line);
+  };
   const readState = dependencies.readState ?? readWatchState;
   const writeState = dependencies.writeState ?? writeWatchState;
   let refusal = "";
@@ -138,9 +146,10 @@ export async function runWatch(
     const last = readUpdateState(home);
     if (last !== null && time - last < UPDATE_INTERVAL_MS) return;
     writeUpdateState(home, time);
-    writeLine("Running the daily tool update.");
+    note("Running the daily tool update.", { type: "update-started" });
     updating = update()
-      .catch((error) => writeLine(`Watch update failed: ${messageOf(error)}`))
+      .then(() => undefined)
+      .catch((error) => note(`Watch update failed: ${messageOf(error)}`, errorEvent("update-failed", error)))
       .finally(() => {
         updating = null;
       });
@@ -167,7 +176,7 @@ export async function runWatch(
       names = readBoxes(home);
     } catch (error) {
       const message = messageOf(error);
-      if (message !== configError) writeLine(`Watch cannot read the config: ${message}`);
+      if (message !== configError) note(`Watch cannot read the config: ${message}`, errorEvent("config-error", error));
       configError = message;
       return false;
     }
@@ -187,10 +196,10 @@ export async function runWatch(
 
   if (!initial.ok) {
     refusal = initial.signature;
-    writeLine(`Watch refused content: ${initial.message}`);
+    note(`Watch refused content: ${initial.message}`, errorEvent("content-refused", initial.error ?? initial.message));
   }
   loadBoxes();
-  writeLine("Ferry watch is running.");
+  note("Ferry watch is running.", { type: "watch-started", boxes: names });
 
   while (!input.signal?.aborted) {
     startDueUpdate();
@@ -198,7 +207,9 @@ export async function runWatch(
     if (input.signal?.aborted) break;
     const changed = await observe(home);
     if (!changed.ok) {
-      if (changed.signature !== refusal) writeLine(`Watch refused content: ${changed.message}`);
+      if (changed.signature !== refusal) {
+        note(`Watch refused content: ${changed.message}`, errorEvent("content-refused", changed.error ?? changed.message));
+      }
       refusal = changed.signature;
       continue;
     }
@@ -232,10 +243,13 @@ export async function runWatch(
         if (retryable(error)) {
           const backoff = retry?.identity === identity ? Math.min(retry.backoff * 2, maxBackoffMs) : 1_000;
           retry = { identity, backoff, at: now() + backoff };
-          writeLine(`Watch sync failed; retrying in ${backoff} ms: ${messageOf(error)}`);
+          note(
+            `Watch sync failed; retrying in ${backoff} ms: ${messageOf(error)}`,
+            errorEvent("sync-failed", error, { box: null, retryInMs: backoff }),
+          );
         } else {
           retry = null;
-          writeLine(`Watch sync refused: ${messageOf(error)}`);
+          note(`Watch sync refused: ${messageOf(error)}`, errorEvent("sync-refused", error, { box: null }));
           if (!isManifestReadFailure(error)) {
             for (const name of ready) accepted[name] = identity;
             save();
@@ -254,21 +268,25 @@ export async function runWatch(
       if (error === undefined) {
         accepted[name] = identity;
         retries.delete(name);
-        writeLine(`${prefix(name)}Synced Manifest ${identity.slice(0, 12)}.`);
+        note(`${prefix(name)}Synced Manifest ${identity.slice(0, 12)}.`, { type: "synced", box: name, manifest: identity });
       } else if (retryable(error)) {
         const previous = retries.get(name);
         const backoff = previous?.identity === identity ? Math.min(previous.backoff * 2, maxBackoffMs) : 1_000;
         retries.set(name, { identity, backoff, at: now() + backoff });
-        writeLine(`${prefix(name)}Watch sync failed; retrying in ${backoff} ms: ${messageOf(error)}`);
+        note(
+          `${prefix(name)}Watch sync failed; retrying in ${backoff} ms: ${messageOf(error)}`,
+          errorEvent("sync-failed", error, { box: name, retryInMs: backoff }),
+        );
       } else {
         accepted[name] = identity;
         retries.delete(name);
-        writeLine(`${prefix(name)}Watch sync refused: ${messageOf(error)}`);
+        note(`${prefix(name)}Watch sync refused: ${messageOf(error)}`, errorEvent("sync-refused", error, { box: name }));
       }
     }
     save();
   }
   await updating;
+  dependencies.emit?.({ type: "watch-stopped" });
 }
 
 /**
@@ -317,7 +335,7 @@ async function observeSource(home: string): Promise<WatchObservation> {
     return { ok: true, identity: inspectSyncSource(home).seed.identity };
   } catch (error) {
     const message = messageOf(error);
-    return { ok: false, signature: message, message };
+    return { ok: false, signature: message, message, error };
   }
 }
 
