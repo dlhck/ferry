@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { HostAdapter, HostCommand, HostCommandResult, LinkResult } from "../src/link.ts";
 import type { ToolDescriptor } from "../src/registry/types.ts";
-import { effectivePolicy, planTools, resolveToolVersion, ToolPlanError } from "../src/tools/resolve.ts";
+import { describeStep, effectivePolicy, planTools, resolveToolVersion, ToolPlanError } from "../src/tools/resolve.ts";
 
 const PREFIX_END = 'cd "$HOME" || exit 1; ';
 
@@ -258,5 +258,39 @@ describe("planTools", () => {
     const plan = await planTools("install", [tool], undefined, fakeLocal({ "bun --version": "1.4.2" }), fakeBox({}));
 
     expect(plan[0]?.action).toBe("install");
+  });
+});
+
+describe('the "off" policy', () => {
+  test("install and update skip an off tool and read neither machine", async () => {
+    for (const purpose of ["install", "update"] as const) {
+      const local = fakeLocal({ "claude --version": "2.1.0" });
+      const box = fakeBox({ "claude --version": "2.0.9" });
+
+      const plan = await planTools(purpose, [agent, gh], { claude: "off", gh: "off" }, local, box);
+
+      expect(plan).toEqual([
+        { tool: "claude", policy: "off", version: null, action: "skip-off", dependsOn: [] },
+        { tool: "gh", policy: "off", version: null, action: "skip-off", dependsOn: [] },
+      ]);
+      expect(local.scripts).toEqual([]);
+      expect(box.commands).toEqual([]);
+    }
+  });
+
+  test("refuses a tool to install that depends on an off tool", async () => {
+    const tools = [gh, configTool("gh-dash", { dependsOn: ["gh"] })];
+
+    await expect(
+      planTools("install", tools, { gh: "off" }, fakeLocal({ "gh-dash --version": "4.0.0" }), fakeBox({})),
+    ).rejects.toThrow(
+      new ToolPlanError("gh-dash depends on gh, which is off. Set another policy for gh, or remove gh from depends of gh-dash."),
+    );
+  });
+
+  test("describes the skip", () => {
+    expect(describeStep({ tool: "pi", policy: "off", version: null, action: "skip-off", dependsOn: [] })).toBe(
+      "skipped, Ferry does not manage it (policy off)",
+    );
   });
 });

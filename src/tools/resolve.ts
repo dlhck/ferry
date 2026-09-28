@@ -2,7 +2,7 @@
  * Resolve the version policy of each tool and plan what `ferry install` and
  * `ferry update` do on the box.
  *
- * `operator` is the version on the operator machine. A mirror tool that the
+ * `off` skips the tool. `operator` is the version on the operator machine. A mirror tool that the
  * operator machine does not have is skipped, and an always tool falls back to
  * its latest recipe. `latest` is the latest recipe of a builtin tool, or the
  * output of the `latest` command of a tool that the config defines. Any other
@@ -20,11 +20,14 @@ import { readBoxVersion, readLocalVersion } from "./version.ts";
  */
 export type ResolvedVersion =
   | { readonly kind: "version"; readonly policy: ToolPolicy; readonly version: string | null }
-  | { readonly kind: "skip"; readonly policy: ToolPolicy; readonly reason: "not on the operator machine" }
+  | { readonly kind: "skip"; readonly policy: ToolPolicy; readonly reason: "not on the operator machine" | "off" }
   | { readonly kind: "refused"; readonly policy: ToolPolicy; readonly reason: string };
 
-/** `skip-dev-build`: this Ferry is a development build, so Ferry puts no Ferry on the box. */
-export type ToolAction = "install" | "update" | "skip-same" | "skip-not-on-operator" | "skip-dev-build";
+/**
+ * `skip-off`: the policy is `off`, so Ferry does not manage the tool.
+ * `skip-dev-build`: this Ferry is a development build, so Ferry puts no Ferry on the box.
+ */
+export type ToolAction = "install" | "update" | "skip-same" | "skip-not-on-operator" | "skip-off" | "skip-dev-build";
 
 /** One tool in the plan. `command` is set for `install` and `update`. */
 export type ToolStep = {
@@ -55,6 +58,7 @@ export async function resolveToolVersion(
   local: HostAdapter,
 ): Promise<ResolvedVersion> {
   const policy = effectivePolicy(tool, config);
+  if (policy === "off") return { kind: "skip", policy, reason: "off" };
   if (policy === "operator") {
     const version = await readLocalVersion(tool, local);
     if (version !== null) return { kind: "version", policy, version };
@@ -108,7 +112,7 @@ export async function planTools(
     if (entry === undefined || entry.kind === "refused") continue;
     const base = { tool: tool.id, policy: entry.policy, dependsOn: tool.dependsOn ?? [] };
     if (entry.kind === "skip") {
-      steps.push({ ...base, version: null, action: "skip-not-on-operator" });
+      steps.push({ ...base, version: null, action: entry.reason === "off" ? "skip-off" : "skip-not-on-operator" });
       continue;
     }
     const { version } = entry;
@@ -126,13 +130,18 @@ export async function planTools(
   const blocked = steps.flatMap((step) =>
     step.command === undefined
       ? []
-      : step.dependsOn.flatMap((dependency) =>
-          byId.get(dependency)?.action === "skip-not-on-operator"
-            ? [
-                `${step.tool} depends on ${dependency}, which is not on the operator machine. Install ${dependency} on this machine, or remove ${dependency} from depends of ${step.tool}.`,
-              ]
-            : [],
-        ),
+      : step.dependsOn.flatMap((dependency) => {
+          const action = byId.get(dependency)?.action;
+          if (action === "skip-not-on-operator") {
+            return [
+              `${step.tool} depends on ${dependency}, which is not on the operator machine. Install ${dependency} on this machine, or remove ${dependency} from depends of ${step.tool}.`,
+            ];
+          }
+          if (action === "skip-off") {
+            return [`${step.tool} depends on ${dependency}, which is off. Set another policy for ${dependency}, or remove ${dependency} from depends of ${step.tool}.`];
+          }
+          return [];
+        }),
   );
   if (blocked.length > 0) throw new ToolPlanError(blocked.join(" "));
   return steps;
@@ -175,6 +184,8 @@ export function describeStep(step: ToolStep): string {
       return `skipped, the box has ${step.version} ${policy}`;
     case "skip-not-on-operator":
       return `skipped, not on the operator machine ${policy}`;
+    case "skip-off":
+      return `skipped, Ferry does not manage it ${policy}`;
     case "skip-dev-build":
       return `skipped, this Ferry is a development build without a release version ${policy}`;
     default:

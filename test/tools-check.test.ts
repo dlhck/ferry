@@ -133,6 +133,27 @@ describe("checkTools", () => {
     expect(local.calls.some((call) => call.includes("npm view"))).toBe(false);
   });
 
+  test("an off tool is off, with no drift or missing state, and says that the box keeps it", async () => {
+    const tools = [tool("gh"), tool("pi")];
+    const box = fakeBox([line("gh", "ferry", "2.90.0"), line("gh", "login", "2.90.0"), line("pi", "ferry", null), line("pi", "login", null)]);
+
+    const rows = await checkTools(tools, { gh: "off", pi: "off" }, fakeLocal({ "gh --version": "2.92.0" }), box);
+
+    expect(rows).toEqual([
+      {
+        id: "gh",
+        mode: "mirror",
+        policy: "off",
+        operator: "2.92.0",
+        target: null,
+        box: "2.90.0",
+        state: "off",
+        reason: "Ferry does not manage it and does not uninstall it from the box",
+      },
+      { id: "pi", mode: "mirror", policy: "off", operator: null, target: null, box: null, state: "off", reason: "Ferry does not manage it" },
+    ]);
+  });
+
   test("an exact policy compares the box with that version", async () => {
     const box = fakeBox([line("bun", "ferry", "1.4.2"), line("bun", "login", "1.4.2")]);
 

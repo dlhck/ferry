@@ -742,6 +742,50 @@ describe("update command across boxes", () => {
     expect(onBoxes).not.toContain("dev@box-b.example: codex update");
   });
 
+  test("an off tool is skipped on the box where it is off, and a box can turn it on again", async () => {
+    const { recorder, onBoxes, deps } = boxDependencies();
+    const off: PartialOperatorConfig = {
+      ...boxes,
+      tools: { codex: "off", gh: "off" },
+      boxes: [boxes.boxes![0]!, { ...boxes.boxes![1]!, tools: { codex: "latest" } }],
+    };
+
+    const result = await runUpdateCommand({ yes: true, dryRun: false }, { ...deps, readConfig: () => off });
+
+    expect(onBoxes).toEqual([
+      "dev@box-a.example: claude update",
+      "dev@box-a.example: install pnpm '11.17.0'",
+      "dev@box-b.example: claude update",
+      "dev@box-b.example: codex update",
+      "dev@box-b.example: install pnpm '11.17.0'",
+    ]);
+    expect(recorder.output).toContain("[a] Box codex: skipped, Ferry does not manage it (policy off)");
+    expect(recorder.output).toContain("[a] Box gh: skipped, Ferry does not manage it (policy off)");
+    expect(recorder.output).toContain("[b] Box codex: update latest (policy latest): codex update");
+    // The operator machine follows [tools], where codex is off.
+    expect(recorder.local).toEqual(["claude update"]);
+    expect(recorder.output).toContain("Operator codex: skipped, off");
+    expect(result?.boxes[0]?.plan.find((step) => step.tool === "codex")).toEqual({
+      tool: "codex",
+      policy: "off",
+      version: null,
+      action: "skip-off",
+      dependsOn: [],
+    });
+    expect(result?.operator).toContainEqual({ tool: "codex", reason: "off" });
+  });
+
+  test("the watch update (latestOnly) skips an off tool", async () => {
+    const { recorder, onBoxes, deps } = boxDependencies();
+    const off: PartialOperatorConfig = { ...boxes, tools: { claude: "off" } };
+
+    await runUpdateCommand({ yes: true, dryRun: false, latestOnly: true }, { ...deps, readConfig: () => off });
+
+    expect(onBoxes).toEqual(["dev@box-a.example: codex update", "dev@box-b.example: codex update"]);
+    expect(recorder.local).toEqual(["codex update"]);
+    expect(recorder.output.some((line) => line.includes("claude"))).toBe(false);
+  });
+
   test("--box selects the boxes, and one selected box gets no prefix", async () => {
     const { recorder, onBoxes, deps } = boxDependencies();
 

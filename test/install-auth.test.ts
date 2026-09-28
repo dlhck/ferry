@@ -7,7 +7,7 @@ import {
   type InstallCommandDependencies,
 } from "../src/install-auth.ts";
 import type { GitIdentity } from "../src/git-identity.ts";
-import type { OutputEvent } from "../src/output.ts";
+import { errorInfo, type OutputEvent } from "../src/output.ts";
 import { Install, type InstallProgress, type InstallResult } from "../src/install.ts";
 import type { ToolDescriptor } from "../src/registry/types.ts";
 import type { LinkResult } from "../src/link.ts";
@@ -169,6 +169,40 @@ describe("install command", () => {
       "ferry: skipped, this Ferry is a development build without a release version (policy operator)",
       `git identity: ${identityCommand}`,
     ]);
+  });
+
+  test("skips an off tool: no version read and no install command", async () => {
+    const output: string[] = [];
+    const commands: string[] = [];
+
+    await runInstallCommand(
+      { yes: true },
+      {
+        ...installDependencies({ plan, output }),
+        tools: [BUILTIN_TOOLS[0]!, BUILTIN_TOOLS[1]!],
+        readConfig: () => ({ ...config, tools: { gh: "off", claude: "off" } }),
+        createLink: () => ({
+          ...fakeLink(),
+          run: async (command) => {
+            commands.push(command);
+            return { ok: true, address: "builder", stdout: "", stderr: "" };
+          },
+        }),
+        createInstall: (link, tools, toolsConfig) =>
+          new Install(link, tools, toolsConfig, {
+            run: async (command) => {
+              commands.push(`local: ${command.argv.at(-1)}`);
+              return { exitCode: 127, stdout: "", stderr: "", timedOut: false };
+            },
+          }),
+      },
+    );
+
+    expect(output.slice(0, 2)).toEqual([
+      "gh: skipped, Ferry does not manage it (policy off)",
+      "claude: skipped, Ferry does not manage it (policy off)",
+    ]);
+    expect(commands.some((command) => /\bgh\b|claude/.test(command))).toBe(false);
   });
 
   test("stops before any box change when the plan is refused", async () => {
@@ -850,6 +884,36 @@ describe("auth command", () => {
 
       for (const expected of renderCase.expected) expect(output.join("\n")).toContain(expected);
       expect(output.join("\n")).not.toContain("token-secret");
+    });
+  }
+
+  for (const input of [{ provider: "codex" }, { provider: "claude", mcp: "linear" }]) {
+    test(`refuses ${input.provider}${input.mcp ? " --mcp" : ""} when the tool is off, before Link or AuthStart, with the code refused`, async () => {
+      let links = 0;
+      const output: string[] = [];
+
+      const error = await runAuthCommand(
+        input,
+        authDependencies({
+          output,
+          readConfig: () => ({ ...config, tools: { [input.provider]: "off" } }),
+          createLink: () => {
+            links += 1;
+            return fakeLink();
+          },
+          createAuthStart: () => {
+            throw new Error("unexpected AuthStart");
+          },
+        }),
+      ).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe(
+        `operator/tool-off: The ${input.provider} tool is off for this box, so Ferry does not log it in. Set another policy for ${input.provider} in [tools] or [box.<name>.tools] to turn it on.`,
+      );
+      expect(errorInfo(error).code).toBe("refused");
+      expect(links).toBe(0);
+      expect(output).toEqual([(error as Error).message]);
     });
   }
 

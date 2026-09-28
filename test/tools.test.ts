@@ -176,6 +176,29 @@ describe("ferry tools", () => {
     ]);
   });
 
+  test("lists the off policy, in [tools] and in a box, in text and in the report", async () => {
+    const config: PartialOperatorConfig = {
+      tools: { pi: "off", gh: "off" },
+      boxes: [
+        { name: "a", host: { transport: "ssh", destination: "dev@box-a.example" }, tools: { pi: "latest", codex: "off" } },
+      ],
+    };
+
+    const report = await runToolsCommand({ readConfig: () => config, tools: toolsOf(config), local: fakeHost(OPERATOR) });
+
+    const pi = report.tools.find((tool) => tool.id === "pi");
+    expect(pi?.policy).toEqual({ policy: "off", default: false });
+    expect(pi?.boxes).toEqual([{ name: "a", policy: "latest", default: false }]);
+    expect(report.tools.find((tool) => tool.id === "codex")?.boxes).toEqual([{ name: "a", policy: "off", default: false }]);
+    expect(toolsLines(report).slice(1, 6)).toEqual([
+      "  TOOL    KIND   INSTALL  POLICY            BOX a             OPERATOR  VERSION  NAME",
+      "  gh      tool   mirror   off               off               yes       2.92.0   GitHub CLI",
+      "  claude  agent  always   latest (default)  latest (default)  yes       2.1.281  Claude Code",
+      "  codex   agent  always   latest (default)  off               no        -        Codex",
+      "  pi      agent  always   off               latest            no        -        Pi",
+    ]);
+  });
+
   test("the box selection narrows the box columns", async () => {
     const lines: string[] = [];
 

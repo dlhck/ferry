@@ -24,9 +24,10 @@ import { parseVersion, PREFIX, readLocalVersion } from "./version.ts";
  * `ok`: the box has the target version, or any version for `latest`.
  * `drift`: the box has another version. `missing`: the box does not have the
  * tool. `hidden`: the login shell PATH does not find the same version.
- * `skipped`: the tool has no target. `unknown`: ferry cannot read the box.
+ * `skipped`: the tool has no target. `off`: the policy is `off`, so ferry does
+ * not manage the tool and does not uninstall it. `unknown`: ferry cannot read the box.
  */
-export type ToolState = "ok" | "drift" | "missing" | "hidden" | "skipped" | "unknown";
+export type ToolState = "ok" | "drift" | "missing" | "hidden" | "skipped" | "off" | "unknown";
 
 export type ToolStatus = {
   readonly id: string;
@@ -39,7 +40,7 @@ export type ToolStatus = {
   /** The version with the ferry PATH on the box. */
   readonly box: string | null;
   readonly state: ToolState;
-  /** Why the state is `hidden`, `skipped`, or `unknown`. */
+  /** Why the state is `hidden`, `skipped`, `off`, or `unknown`. */
   readonly reason?: string;
 };
 
@@ -99,6 +100,10 @@ export async function checkTools(
     };
     const runs = versions?.get(tool.id);
     const onBox = runs?.ferry ?? null;
+    if (resolved.kind === "skip" && resolved.reason === "off") {
+      const reason = onBox === null ? "Ferry does not manage it" : "Ferry does not manage it and does not uninstall it from the box";
+      return { ...base, box: onBox, state: "off", reason };
+    }
     if (resolved.kind !== "version") return { ...base, box: onBox, state: "skipped", reason: resolved.reason };
     if (tool.boxVersion === undefined) return { ...base, box: null, state: "unknown", reason: "no box version command" };
     if (versions === null) return { ...base, box: null, state: "unknown", reason: "host offline" };

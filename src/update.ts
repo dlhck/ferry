@@ -34,7 +34,7 @@ const PROBE_TIMEOUT_MS = 10_000;
 /** A tool on the operator machine: its update command, or why ferry skips it. */
 export type OperatorUpdate =
   | { readonly tool: string; readonly command: string }
-  | { readonly tool: string; readonly reason: "no own update command" | "not installed" };
+  | { readonly tool: string; readonly reason: "no own update command" | "not installed" | "off" };
 
 export type UpdateCommandInput = {
   readonly yes: boolean;
@@ -101,11 +101,17 @@ export class UpdateError extends Error {
   }
 }
 
-/** The operator machine gets only the installed agent CLIs, in registry order. */
-export async function planOperator(tools: readonly ToolDescriptor[], local: HostAdapter): Promise<OperatorUpdate[]> {
+/** The operator machine gets only the installed agent CLIs whose `[tools]` policy is not `off`, in registry order. */
+export async function planOperator(
+  tools: readonly ToolDescriptor[],
+  local: HostAdapter,
+  policies?: ToolsConfig,
+): Promise<OperatorUpdate[]> {
   const operator: OperatorUpdate[] = [];
   for (const tool of tools) {
-    if (tool.update?.binary === undefined) {
+    if (effectivePolicy(tool, policies) === "off") {
+      operator.push({ tool: tool.id, reason: "off" });
+    } else if (tool.update?.binary === undefined) {
       operator.push({ tool: tool.id, reason: "no own update command" });
     } else if (!(await isInstalled(local, tool.update.binary))) {
       operator.push({ tool: tool.id, reason: "not installed" });
@@ -175,7 +181,7 @@ export async function runUpdateCommand(
             offline,
           });
         }
-        return { boxes, operator: await planOperator(selectTools(config.tools), resolved.local) };
+        return { boxes, operator: await planOperator(selectTools(config.tools), resolved.local, config.tools) };
       },
       (plan) => plan.boxes.some((box) => box.offline !== null),
       (plan) => {
