@@ -62,6 +62,8 @@ export function unitFile(pathDirs: readonly string[]): string {
     unitPathLine(pathDirs),
     `Environment=PASEO_LISTEN=${LISTEN}`,
     "Environment=PASEO_RELAY_ENABLED=false",
+    // The daemon self-update runs npm -g. This prefix points it to the Ferry install.
+    "Environment=NPM_CONFIG_PREFIX=%h/.local",
     "Restart=on-failure",
     "RestartSec=5",
     "KillSignal=SIGTERM",

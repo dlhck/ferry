@@ -233,6 +233,8 @@ describe("Paseo enable", () => {
     );
     expect(UNIT_FILE).toContain("Environment=PASEO_LISTEN=127.0.0.1:6767\n");
     expect(UNIT_FILE).toContain("Environment=PASEO_RELAY_ENABLED=false\n");
+    // The daemon self-update runs npm -g, which must find the Ferry install.
+    expect(UNIT_FILE).toContain("Environment=NPM_CONFIG_PREFIX=%h/.local\n");
     expect(UNIT_FILE).toContain("Restart=on-failure\nRestartSec=5\n");
     expect(UNIT_FILE).toContain("[Install]\nWantedBy=default.target\n");
   });
