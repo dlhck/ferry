@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
 
 import { Command } from "commander";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import * as prompts from "@clack/prompts";
 import {
   runInit,
@@ -37,6 +39,7 @@ import {
   writeConfig,
   type PartialOperatorConfig,
 } from "./config.ts";
+import { BOX_MARKER } from "./box-ferry.ts";
 import { resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import { runBoxAdd, runBoxDefault, runBoxList, runBoxRemove, type BoxCommandDependencies } from "./box.ts";
 import { INTEGRATIONS, integrationLines, type Integration } from "./integrations/index.ts";
@@ -74,6 +77,7 @@ import {
   type UpdateCommandDependencies,
   type UpdateCommandInput,
 } from "./update.ts";
+import { VERSION } from "./version.ts";
 
 const DESCRIPTION = `Ferry keeps a remote Linux agent box in the same shape as this machine.
 
@@ -82,10 +86,6 @@ private snapshot.
 
 Ferry never copies logins. Vendor sessions stay on the machine that created
 them. Ferry starts a login on the box and you finish it in a browser here.`;
-
-// The release build sets FERRY_VERSION with `bun build --define`. A run from source does not.
-declare const FERRY_VERSION: string | undefined;
-const VERSION = typeof FERRY_VERSION === "string" ? FERRY_VERSION : "0.0.0-dev";
 
 type CliDependencies = {
   readonly runInit?: (input: InitInput, dependencies?: InitDependencies) => Promise<InitResult>;
@@ -104,6 +104,8 @@ type CliDependencies = {
   readonly runSync?: (input: SyncInput, dependencies?: SyncDependencies) => Promise<SyncResult>;
   readonly runMove?: (input: MoveInput, dependencies?: Partial<MoveDependencies>) => Promise<void>;
   readonly runTunnel?: (input: TunnelInput, dependencies?: Partial<TunnelDependencies>) => Promise<void>;
+  /** True when this is a box install. The default checks for `~/.ferry/box.json`. */
+  readonly isBoxMode?: () => boolean;
   readonly runStatus?: (
     input: StatusCommandInput,
     dependencies?: Partial<StatusCommandDependencies>,
@@ -181,6 +183,12 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
   /** The commands that accept --box. Each other command refuses it. */
   const boxCommands = new Set<Command>();
   program.hook("preAction", (_program, action) => {
+    // A box install runs only the box commands. Commander prints the version and help before this hook.
+    if (action !== program && action.name() !== "expose" && (dependencies.isBoxMode ?? isBoxMode)()) {
+      throw new ConfigError(
+        `This is a box install of Ferry (~/${BOX_MARKER}). Only ferry expose runs here. Run ferry ${commandPath(action)} on the operator machine.`,
+      );
+    }
     const names = boxNames();
     const invalid = names.find((name) => !isBoxName(name));
     if (invalid !== undefined) {
@@ -733,6 +741,10 @@ function commandPath(command: Command): string {
   const names: string[] = [];
   for (let current: Command | null = command; current?.parent; current = current.parent) names.unshift(current.name());
   return names.join(" ");
+}
+
+function isBoxMode(): boolean {
+  return existsSync(join(homedir(), BOX_MARKER));
 }
 
 function renderError(message: string): void {

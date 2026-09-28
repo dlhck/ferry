@@ -1168,3 +1168,29 @@ describe("ferry tunnel", () => {
     await expect(tunnelInput(BOXES, ["tunnel", "3000", "--box", "c"])).rejects.toThrow("unknown box c.");
   });
 });
+
+describe("box mode", () => {
+  test("a box install refuses the operator commands and names the box install", async () => {
+    for (const args of [["sync"], ["install", "--yes"], ["tunnel", "3000"], ["status"], ["box", "list"], ["watch", "install"]]) {
+      const errors: string[] = [];
+      await runCli(
+        args,
+        { isBoxMode: () => true, runSync: async () => { throw new Error("sync ran"); } },
+        { renderError: (message) => errors.push(message), setExitCode: () => {} },
+      );
+      expect(errors).toEqual([
+        `This is a box install of Ferry (~/.ferry/box.json). Only ferry expose runs here. Run ferry ${args[0] === "box" || args[0] === "watch" ? args.join(" ") : args[0]} on the operator machine.`,
+      ]);
+    }
+  });
+
+  test("a box install still prints the version and the help", async () => {
+    const out: string[] = [];
+    const program = buildProgram({ isBoxMode: () => true }).exitOverride();
+    program.configureOutput({ writeOut: (text) => out.push(text), writeErr: () => {} });
+    expect(() => program.parse(["--version"], { from: "user" })).toThrow();
+    expect(out.join("")).toBe("0.0.0-dev\n");
+    await program.parseAsync([], { from: "user" });
+    expect(out.join("")).toContain("Usage: ferry");
+  });
+});

@@ -8,6 +8,7 @@ import {
   type AuthLink,
   type AuthStartResult,
 } from "./auth-start.ts";
+import { planBoxFerry } from "./box-ferry.ts";
 import { readConfig, resolveLinkOptions, type PartialOperatorConfig, type ToolsConfig } from "./config.ts";
 import {
   readOperatorGitIdentity,
@@ -21,6 +22,7 @@ import { BUILTIN_TOOLS } from "./registry/builtin.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
 import { RealGitRunner } from "./store.ts";
 import { describeStep, ToolPlanError, type ToolStep } from "./tools/resolve.ts";
+import { VERSION } from "./version.ts";
 
 const STORE_RELATIVE_PATH = ".ferry/store";
 
@@ -56,6 +58,8 @@ export type InstallCommandDependencies = {
   readonly progress: Progress;
   readonly confirm: () => Promise<boolean | symbol | undefined>;
   readonly writeLine: (line: string) => void;
+  /** The Ferry version to put on the box: the version of this Ferry. */
+  readonly ferryVersion: string;
 };
 
 export type AuthCommandDependencies = {
@@ -90,7 +94,10 @@ export async function runInstallCommand(
 
   let plan: readonly ToolStep[];
   try {
-    plan = await step(resolved.progress, "Checking the tool versions", () => install.plan());
+    plan = await step(resolved.progress, "Checking the tool versions", async () => [
+      ...(await install.plan()),
+      await planBoxFerry("install", link, resolved.ferryVersion),
+    ]);
   } catch (error) {
     if (!(error instanceof ToolPlanError)) throw error;
     fail("operator/tool-plan", `Install stopped before it changed the box. ${error.message}`, resolved.writeLine);
@@ -280,6 +287,7 @@ const defaultInstallDependencies: InstallCommandDependencies = {
   progress: noProgress,
   confirm: () => prompts.confirm({ message: "Run these commands on the box?" }),
   writeLine: console.log,
+  ferryVersion: VERSION,
 };
 
 const defaultAuthDependencies: AuthCommandDependencies = {

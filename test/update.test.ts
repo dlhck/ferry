@@ -3,6 +3,7 @@ import { createPaseo } from "../src/integrations/paseo.ts";
 import type { Integration } from "../src/integrations/types.ts";
 import type { PartialOperatorConfig } from "../src/config.ts";
 import type { HostCommand, HostCommandResult, LinkOptions, LinkResult } from "../src/link.ts";
+import { BOX_FERRY_VERSION_COMMAND, boxFerryInstallCommand } from "../src/box-ferry.ts";
 import { noProgress } from "../src/progress.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 import type { ToolDescriptor } from "../src/registry/types.ts";
@@ -158,6 +159,7 @@ const PLAN = [
   "Box codex: update latest (policy latest): codex update",
   "Box node: skipped, the box has 24.16.0 (policy operator)",
   "Box pnpm: install 11.17.0 (policy operator): install pnpm '11.17.0'",
+  "Box ferry: skipped, this Ferry is a development build without a release version (policy operator)",
   "Operator gh: skipped, no own update command",
   "Operator claude: claude update",
   "Operator codex: codex update",
@@ -204,6 +206,34 @@ describe("update plan", () => {
 });
 
 describe("update command", () => {
+  test("keeps Ferry on the box at the version of this Ferry, and the latestOnly update leaves it", async () => {
+    const run = async (latestOnly: boolean) => {
+      const { recorder, deps } = dependencies();
+      const inner = deps.createLink!({ destination: "box.example" });
+      const withFerry = {
+        ...deps,
+        ferryVersion: "1.2.3",
+        createLink: () => ({
+          run: async (command: string): Promise<LinkResult> =>
+            command === BOX_FERRY_VERSION_COMMAND
+              ? { ok: true, address: "100.64.0.1", stdout: "1.2.0\n", stderr: "" }
+              : inner.run(command),
+        }),
+      };
+      await runUpdateCommand({ yes: true, dryRun: false, latestOnly }, withFerry);
+      return recorder;
+    };
+
+    const full = await run(false);
+    expect(full.output).toContain(`Box ferry: update 1.2.3 (policy operator): ${boxFerryInstallCommand("1.2.3")}`);
+    expect(full.box).toContain(boxFerryInstallCommand("1.2.3"));
+    expect(full.output).toContain("Updated box ferry.");
+
+    const latest = await run(true);
+    expect(latest.output.some((line) => line.includes("ferry:") || line.startsWith("Box ferry"))).toBe(false);
+    expect(latest.box).not.toContain(boxFerryInstallCommand("1.2.3"));
+  });
+
   test("prints the plan before confirmation and runs nothing without it", async () => {
     let outputAtPrompt: readonly string[] = [];
     const { recorder, deps } = dependencies({
