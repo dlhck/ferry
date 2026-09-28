@@ -108,7 +108,7 @@ import {
   type UpdateCommandInput,
   type UpdateCommandResult,
 } from "./update.ts";
-import { VERSION } from "./version.ts";
+import { isReleaseVersion, VERSION } from "./version.ts";
 
 const DESCRIPTION = `Ferry keeps a remote Linux agent box in the same shape as this machine.
 
@@ -142,7 +142,7 @@ type CliDependencies = {
   readonly uninstallTunnelService?: (input: TunnelServiceInput) => Promise<TunnelServiceUninstallResult>;
   readonly runBoxAdd?: typeof runBoxAdd;
   readonly runExpose?: (input: ExposeInput, dependencies?: Partial<ExposeDependencies>) => Promise<number>;
-  /** True when this is a box install. The default checks for `~/.ferry/box.json`. */
+  /** True when this is a box install. The default is `isBoxMode`. */
   readonly isBoxMode?: () => boolean;
   /** Sets the exit code of `ferry expose`. */
   readonly setExitCode?: (code: number) => void;
@@ -221,7 +221,7 @@ const JSON_RESULTS: Record<string, string> = {
   update: "{ dryRun, boxes: [{ name, ok, error, offline, plan, integrations }], operator, updated, failed }, also on failure",
   uninstall: "{ removed, restored }",
   auth:
-    "{ providers: [{ id, login }] } without a provider, else the login result { kind, provider, ... }. " +
+    '{ providers: [{ id, login }] } without a provider, where login is "startable", "manual", or "off", else the login result { kind, provider, ... }. ' +
     'A "login" event line with the URL comes before the envelope. A login that needs the code from the browser reads it as one line on stdin',
   sync: "{ dryRun, published, boxes: [{ name, ok, step, error, plan, applyPlan, discarded }] }, also on failure of more than one box",
   move: "{ path, source, destination, dryRun, git, carry, refused, skipped, notes, trash }",
@@ -593,10 +593,15 @@ ferry auth gh also creates ~/.ssh/id_ed25519 on the box if it is missing, and
 adds it to your GitHub account with the title "<box host> (ferry)", so agents
 on the box can push. Delete that key in GitHub to revoke it.
 
---mcp <server> logs in to a remote MCP server on the box. Ferry forwards the
-localhost callback port, such as 3118 for Claude, for up to 300 seconds. The
-port must be free on this machine.`)
-    .option("--mcp <server>", "start the MCP server login of the provider CLI on the box")
+--mcp <server> logs in to a remote MCP server on the box. Give the provider,
+as in ferry auth codex --mcp linear, or the name that ferry status shows, as
+in ferry auth --mcp codex/linear. Ferry forwards the localhost callback port,
+such as 3118 for Claude, for up to 300 seconds. The port must be free on
+this machine.
+
+Without a provider, Ferry lists the tools and their login: startable,
+manual SSH flow, or off.`)
+    .option("--mcp <server>", "start the MCP server login of the provider CLI on the box, such as linear or codex/linear")
     .action(async (provider: string | undefined, options: { mcp?: string }) => {
       const result = await (dependencies.runAuth ?? runAuthCommand)(
         options.mcp === undefined ? { provider } : { provider, mcp: options.mcp },
@@ -1339,8 +1344,13 @@ function commandPath(command: Command): string {
   return names.join(" ");
 }
 
-function isBoxMode(): boolean {
-  return existsSync(join(homedir(), BOX_MARKER));
+/**
+ * True for a release build that finds `~/.ferry/box.json`. A development
+ * build ignores the marker, so a checkout on a box runs each command, and so
+ * do its tests.
+ */
+export function isBoxMode(version = VERSION, home = homedir()): boolean {
+  return isReleaseVersion(version) && existsSync(join(home, BOX_MARKER));
 }
 
 function renderError(message: string): void {

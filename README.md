@@ -57,7 +57,7 @@ Use `--host <tailscale host> --ssh-user <user>` instead of `--ssh-destination` f
 | `ferry sync` | Publish the snapshot and apply it on all boxes, or on the boxes of `--box`. |
 | `ferry watch` | Sync each accepted change. `ferry watch install` runs it as a launchd or systemd user service. |
 | `ferry status` | Show the state of the snapshot and of each box. |
-| `ferry auth <tool>` | Start a login for `gh`, `claude`, `codex`, or `cursor` on the box. `--mcp <server>` logs in to an MCP server. |
+| `ferry auth <tool>` | Start a login for `gh`, `claude`, `codex`, or `cursor` on the box. `--mcp <server>` logs in to an MCP server. `--mcp <tool>/<server>`, the name in `ferry status`, also works. |
 | `ferry update` | Update the agent tools on the boxes and on this machine. |
 | `ferry tools` | List the tools and their version policies. |
 | `ferry skills add` | Install skills with `npx skills add` as a global copy, so that Ferry carries them. |

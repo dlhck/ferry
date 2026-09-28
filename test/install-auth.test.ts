@@ -404,6 +404,46 @@ describe("install command", () => {
     expect(output.join("\n")).toContain("box/command-failed");
     expect(output.join("\n")).not.toContain("token-secret");
   });
+
+  test("prints the last lines of stderr and stdout of a failed installer, and puts them in the JSON error", async () => {
+    const output: string[] = [];
+    const stdout = Array.from({ length: 25 }, (_, index) => `step ${index + 1}`).join("\n");
+
+    const error = await runInstallCommand(
+      { yes: true },
+      installDependencies({
+        plan,
+        output,
+        run: async (_confirmed, _plan, reportProgress) => {
+          reportProgress?.({ phase: "started", tool: "codex", current: 2, total: 2 });
+          return {
+            ok: false,
+            error: {
+              code: "command-failed",
+              origin: "box",
+              message: "error: unzip is required",
+              output: { stdout, stderr: "\nerror: unzip is required to install bun\n" },
+            },
+          };
+        },
+      }),
+    ).catch((caught: unknown) => caught);
+
+    const stdoutTail = Array.from({ length: 20 }, (_, index) => `step ${index + 6}`);
+    expect(output.slice(output.findIndex((line) => line.startsWith("git identity: ")) + 1)).toEqual([
+      "The last lines of the codex install stderr:",
+      "  error: unzip is required to install bun",
+      "The last lines of the codex install stdout:",
+      ...stdoutTail.map((line) => `  ${line}`),
+      "box/command-failed: Install stopped because Link reported command-failed from box.",
+    ]);
+    expect(errorInfo(error)).toEqual({
+      code: "box-command-failed",
+      message: "box/command-failed: Install stopped because Link reported command-failed from box.",
+      hint: null,
+      details: { tool: "codex", stderr: ["error: unzip is required to install bun"], stdout: stdoutTail },
+    });
+  });
 });
 
 describe("auth command", () => {
@@ -437,6 +477,26 @@ describe("auth command", () => {
         { id: "codex", login: "startable" },
         { id: "cursor", login: "startable" },
         { id: "pi", login: "manual" },
+      ],
+    });
+  });
+
+  test("lists the tools with the policy off as off", async () => {
+    const output: string[] = [];
+
+    const result = await runAuthCommand(
+      {},
+      authDependencies({ output, readConfig: () => ({ ...config, tools: { cursor: "off", pi: "off" } }) }),
+    );
+
+    expect(output).toEqual(["gh: startable", "claude: startable", "codex: startable", "cursor: off", "pi: off"]);
+    expect(result).toEqual({
+      providers: [
+        { id: "gh", login: "startable" },
+        { id: "claude", login: "startable" },
+        { id: "codex", login: "startable" },
+        { id: "cursor", login: "off" },
+        { id: "pi", login: "off" },
       ],
     });
   });
@@ -1123,6 +1183,69 @@ describe("runAuthCommand with --mcp", () => {
     );
 
     expect(events).toEqual(["listen", "aborted false", "aborted true", "unlisten"]);
+  });
+
+  test("--mcp without a provider is a usage error that names both forms", async () => {
+    const output: string[] = [];
+
+    const error = await runAuthCommand(
+      { mcp: "linear" },
+      authDependencies({
+        output,
+        createAuthStart: () => {
+          throw new Error("unexpected AuthStart");
+        },
+      }),
+    ).catch((caught: unknown) => caught);
+
+    const message =
+      "operator/usage: Give the provider: ferry auth <provider> --mcp linear, or ferry auth --mcp <provider>/linear. " +
+      "The providers with an MCP login are claude, codex, cursor.";
+    expect((error as Error).message).toBe(message);
+    expect(errorInfo(error).code).toBe("usage");
+    expect(output).toEqual([message]);
+  });
+
+  for (const input of [{ mcp: "codex/linear" }, { provider: "codex", mcp: "codex/linear" }]) {
+    test(`accepts the ferry status name ${input.provider ? "with" : "without"} the provider argument`, async () => {
+      const calls: string[] = [];
+
+      await runAuthCommand(
+        input,
+        authDependencies({
+          createAuthStart: () => ({
+            ...noMcp,
+            start: noMcp.startMcp,
+            startMcp: async (tool: string, server: string) => {
+              calls.push(`${tool} ${server}`);
+              return { kind: "already-done", provider: `${tool}/${server}` };
+            },
+          }),
+        }),
+      );
+
+      expect(calls).toEqual(["codex linear"]);
+    });
+  }
+
+  test("accepts a claude plugin server name from ferry status", async () => {
+    const calls: string[] = [];
+
+    await runAuthCommand(
+      { mcp: "claude/plugin:figma:figma" },
+      authDependencies({
+        createAuthStart: () => ({
+          ...noMcp,
+          start: noMcp.startMcp,
+          startMcp: async (tool: string, server: string) => {
+            calls.push(`${tool} ${server}`);
+            return { kind: "already-done", provider: `${tool}/${server}` };
+          },
+        }),
+      }),
+    );
+
+    expect(calls).toEqual(["claude plugin:figma:figma"]);
   });
 
   test("refuses a tool without an MCP login before it reads the config", async () => {

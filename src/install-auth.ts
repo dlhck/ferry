@@ -27,6 +27,8 @@ import { describeStep, effectivePolicy, ToolPlanError, type ToolStep } from "./t
 import { VERSION } from "./version.ts";
 
 const STORE_RELATIVE_PATH = ".ferry/store";
+/** The number of lines of stderr, and of stdout, that a failed install command shows. */
+const OUTPUT_TAIL_LINES = 20;
 
 export type InstallCommandInput = { readonly yes: boolean };
 export type AuthCommandInput = {
@@ -88,7 +90,7 @@ export type InstallCommandResult = {
 
 /** The auth tools without a provider, else the last login result. */
 export type AuthCommandResult =
-  | { readonly providers: readonly { readonly id: string; readonly login: "startable" | "manual" }[] }
+  | { readonly providers: readonly { readonly id: string; readonly login: "startable" | "manual" | "off" }[] }
   | Exclude<AuthStartResult, { readonly kind: "link-failure" | "failed" | "refused" }>;
 
 export class InstallAuthCommandError extends Error {
@@ -145,10 +147,12 @@ export async function runInstallCommand(
 
   const progress = resolved.progress;
   let active = false;
+  let tool = "";
   let result: InstallResult;
   try {
     result = await install.run(true, plan, (update) => {
       active = update.phase === "started";
+      tool = update.tool;
       if (update.phase === "started") {
         progress.start(`Installing ${update.tool} (${update.current}/${update.total})`);
       } else {
@@ -170,7 +174,7 @@ export async function runInstallCommand(
         resolved.writeLine,
       );
     }
-    failLink("Install", result.error, resolved.writeLine);
+    failInstaller(tool, result.error, resolved.writeLine);
   }
 
   if (!identityCommand) {
@@ -189,17 +193,24 @@ export async function runInstallCommand(
 
 /** Returns null when the operator gives no login code. */
 export async function runAuthCommand(
-  input: AuthCommandInput,
+  given: AuthCommandInput,
   dependencies: Partial<AuthCommandDependencies> = {},
 ): Promise<AuthCommandResult | null> {
   const resolved = { ...defaultAuthDependencies, ...dependencies };
+  const input = mcpProvider(given, resolved.tools, resolved.writeLine);
   if (input.provider === undefined) {
+    const tools = resolved.readConfig()?.tools;
     const providers = authTools(resolved.tools).map((tool) => ({
       id: tool.id,
-      login: tool.auth.completion.kind === "manual" ? ("manual" as const) : ("startable" as const),
+      login:
+        effectivePolicy(tool, tools) === "off"
+          ? ("off" as const)
+          : tool.auth.completion.kind === "manual"
+            ? ("manual" as const)
+            : ("startable" as const),
     }));
     for (const provider of providers) {
-      resolved.writeLine(`${provider.id}: ${provider.login === "manual" ? "manual SSH flow" : "startable"}`);
+      resolved.writeLine(`${provider.id}: ${provider.login === "manual" ? "manual SSH flow" : provider.login}`);
     }
     return { providers };
   }
@@ -391,6 +402,32 @@ function loadTarget(
   return { target, config };
 }
 
+/**
+ * `--mcp <provider>/<server>`, the name that `ferry status` shows, gives the
+ * provider. `--mcp <server>` needs the provider argument.
+ */
+function mcpProvider(
+  input: AuthCommandInput,
+  tools: readonly ToolDescriptor[],
+  writeLine: (line: string) => void,
+): AuthCommandInput {
+  if (input.mcp === undefined) return input;
+  const slash = input.mcp.indexOf("/");
+  const provider = input.mcp.slice(0, slash);
+  if (slash !== -1 && (input.provider ?? provider) === provider && tools.some((tool) => tool.id === provider && tool.mcp)) {
+    return { provider, mcp: input.mcp.slice(slash + 1) };
+  }
+  if (input.provider === undefined) {
+    const providers = tools.filter((tool) => tool.mcp).map((tool) => tool.id).join(", ");
+    fail(
+      "operator/usage",
+      `Give the provider: ferry auth <provider> --mcp ${input.mcp}, or ferry auth --mcp <provider>/${input.mcp}. The providers with an MCP login are ${providers}.`,
+      writeLine,
+    );
+  }
+  return input;
+}
+
 /** A tool with the policy `off` gets no login. The JSON code is `refused`. */
 function refuseOff(
   provider: string,
@@ -456,6 +493,28 @@ function failLink(
     `${error.origin}/${error.code}`,
     `${operation} stopped because Link reported ${error.code} from ${error.origin}.`,
     writeLine,
+  );
+}
+
+/**
+ * Print the last lines of the output of a failed install command, such as
+ * "unzip is required". The JSON error has them in `details`.
+ */
+function failInstaller(tool: string, error: LinkError, writeLine: (line: string) => void): never {
+  if (error.output === undefined) failLink("Install", error, writeLine);
+  const stderr = outputLines(error.output.stderr).slice(-OUTPUT_TAIL_LINES);
+  const stdout = outputLines(error.output.stdout).slice(-OUTPUT_TAIL_LINES);
+  for (const [name, lines] of [["stderr", stderr], ["stdout", stdout]] as const) {
+    if (lines.length === 0) continue;
+    writeLine(`The last lines of the ${tool} install ${name}:`);
+    for (const line of lines) writeLine(`  ${line}`);
+  }
+  const message = `Install stopped because Link reported ${error.code} from ${error.origin}.`;
+  fail(
+    `${error.origin}/${error.code}`,
+    message,
+    writeLine,
+    new FerryError("box-command-failed", message, { details: { tool, stderr, stdout } }),
   );
 }
 

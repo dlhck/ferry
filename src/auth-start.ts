@@ -18,8 +18,11 @@ import { mcpBinary, mcpCommand } from "./box-mcp.ts";
 import { quoteShell } from "./box-settings.ts";
 import type { AuthFallback, ToolAuth, ToolDescriptor, ToolMcp } from "./registry/types.ts";
 
-/** Same rule as Manifest: an MCP server name reaches a remote shell command. */
-const MCP_SERVER_NAME = /^[A-Za-z0-9._-]+$/;
+/**
+ * An MCP server name reaches a remote shell command, quoted. The Manifest rule
+ * and a colon, for the plugin servers of `ferry status`, such as plugin:figma:figma.
+ */
+const MCP_SERVER_NAME = /^[A-Za-z0-9._:-]+$/;
 /** `mcp list` checks the health of every server, so it gets more time than one command. */
 const MCP_LIST_TIMEOUT_MS = 120_000;
 /** How long ferry keeps the callback forward open. */
@@ -352,7 +355,7 @@ export class AuthStart {
       return {
         kind: "refused",
         code: "invalid-server",
-        message: "An MCP server name has only letters, digits, dot, underscore, and hyphen.",
+        message: "An MCP server name has only letters, digits, dot, underscore, colon, and hyphen.",
       };
     }
 

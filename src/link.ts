@@ -46,6 +46,8 @@ export type LinkError = {
   readonly code: LinkErrorCode;
   readonly origin: LinkOrigin;
   readonly message: string;
+  /** The output of a command that failed on the box. Only `command-failed` has it. */
+  readonly output?: { readonly stdout: string; readonly stderr: string };
 };
 
 export type LinkFailure = { readonly ok: false; readonly error: LinkError };
@@ -181,7 +183,15 @@ export class Link {
       return failure("ssh-failed", "network", outputMessage(execution, "OpenSSH could not reach the box"));
     }
     if (execution.exitCode !== 0) {
-      return failure("command-failed", "box", outputMessage(execution, "the command failed on the box"));
+      return {
+        ok: false,
+        error: {
+          code: "command-failed",
+          origin: "box",
+          message: outputMessage(execution, "the command failed on the box"),
+          output: { stdout: execution.stdout, stderr: execution.stderr },
+        },
+      };
     }
     return success(resolved.address, execution);
   }

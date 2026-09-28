@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { UpdateError, type UpdateCommandInput, type UpdateCommandResult } from "../src/update.ts";
 import { BoxesSyncError, SyncError } from "../src/sync.ts";
 import { FerryError } from "../src/errors.ts";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildProgram, runCli } from "../src/cli.ts";
+import { buildProgram, isBoxMode, runCli } from "../src/cli.ts";
 import {
   InitRefusal,
   type InitDependencies,
@@ -1373,6 +1373,19 @@ describe("box mode", () => {
     expect(out.join("")).toBe("0.0.0-dev\n");
     await program.parseAsync([], { from: "user" });
     expect(out.join("")).toContain("Usage: ferry");
+  });
+
+  test("only a release build with ~/.ferry/box.json is a box install, so a development build and its tests run on a box", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ferry-box-mode-"));
+    try {
+      expect(isBoxMode("0.4.0", home)).toBe(false);
+      await mkdir(join(home, ".ferry"));
+      await writeFile(join(home, ".ferry/box.json"), '{"mode":"box","version":"0.4.0"}\n');
+      expect(isBoxMode("0.4.0", home)).toBe(true);
+      expect(isBoxMode("0.0.0-dev", home)).toBe(false);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   });
 });
 
