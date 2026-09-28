@@ -966,6 +966,8 @@ describe("ferry move --from-box --to-box", () => {
     // Box a only gets reads and the trash move. Box b only gets the destination writes.
     expect(t.w.commands.some(({ command }) => command.includes("git clone") || command.startsWith("tar -xf"))).toBe(false);
     expect(t.commandsB.some(({ command }) => command.includes("tar --null -cf"))).toBe(false);
+    // The relay forwards no SSH agent to either box, also for a git_auth = "box" box.
+    expect([...t.w.commands, ...t.commandsB].every(({ options }) => options.agentForwarding === undefined)).toBe(true);
     expect(listTree(t.w.operator)).toEqual([]);
     expect(readdirSync(t.stage)).toEqual([]);
   });
