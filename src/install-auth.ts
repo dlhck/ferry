@@ -27,6 +27,8 @@ import { describeStep, effectivePolicy, ToolPlanError, type ToolStep } from "./t
 import { VERSION } from "./version.ts";
 
 const STORE_RELATIVE_PATH = ".ferry/store";
+/** The number of lines of stderr, and of stdout, that a failed install command shows. */
+const OUTPUT_TAIL_LINES = 20;
 
 export type InstallCommandInput = { readonly yes: boolean };
 export type AuthCommandInput = {
@@ -145,10 +147,12 @@ export async function runInstallCommand(
 
   const progress = resolved.progress;
   let active = false;
+  let tool = "";
   let result: InstallResult;
   try {
     result = await install.run(true, plan, (update) => {
       active = update.phase === "started";
+      tool = update.tool;
       if (update.phase === "started") {
         progress.start(`Installing ${update.tool} (${update.current}/${update.total})`);
       } else {
@@ -170,7 +174,7 @@ export async function runInstallCommand(
         resolved.writeLine,
       );
     }
-    failLink("Install", result.error, resolved.writeLine);
+    failInstaller(tool, result.error, resolved.writeLine);
   }
 
   if (!identityCommand) {
@@ -456,6 +460,28 @@ function failLink(
     `${error.origin}/${error.code}`,
     `${operation} stopped because Link reported ${error.code} from ${error.origin}.`,
     writeLine,
+  );
+}
+
+/**
+ * Print the last lines of the output of a failed install command, such as
+ * "unzip is required". The JSON error has them in `details`.
+ */
+function failInstaller(tool: string, error: LinkError, writeLine: (line: string) => void): never {
+  if (error.output === undefined) failLink("Install", error, writeLine);
+  const stderr = outputLines(error.output.stderr).slice(-OUTPUT_TAIL_LINES);
+  const stdout = outputLines(error.output.stdout).slice(-OUTPUT_TAIL_LINES);
+  for (const [name, lines] of [["stderr", stderr], ["stdout", stdout]] as const) {
+    if (lines.length === 0) continue;
+    writeLine(`The last lines of the ${tool} install ${name}:`);
+    for (const line of lines) writeLine(`  ${line}`);
+  }
+  const message = `Install stopped because Link reported ${error.code} from ${error.origin}.`;
+  fail(
+    `${error.origin}/${error.code}`,
+    message,
+    writeLine,
+    new FerryError("box-command-failed", message, { details: { tool, stderr, stdout } }),
   );
 }
 

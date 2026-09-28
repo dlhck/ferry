@@ -193,7 +193,12 @@ describe("Link", () => {
 
     expect(outcome).toEqual({
       ok: false,
-      error: { code: "command-failed", origin: "box", message: "command failed" },
+      error: {
+        code: "command-failed",
+        origin: "box",
+        message: "command failed",
+        output: { stdout: "", stderr: "command failed" },
+      },
     });
   });
 

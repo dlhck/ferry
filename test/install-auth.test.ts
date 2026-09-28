@@ -404,6 +404,46 @@ describe("install command", () => {
     expect(output.join("\n")).toContain("box/command-failed");
     expect(output.join("\n")).not.toContain("token-secret");
   });
+
+  test("prints the last lines of stderr and stdout of a failed installer, and puts them in the JSON error", async () => {
+    const output: string[] = [];
+    const stdout = Array.from({ length: 25 }, (_, index) => `step ${index + 1}`).join("\n");
+
+    const error = await runInstallCommand(
+      { yes: true },
+      installDependencies({
+        plan,
+        output,
+        run: async (_confirmed, _plan, reportProgress) => {
+          reportProgress?.({ phase: "started", tool: "codex", current: 2, total: 2 });
+          return {
+            ok: false,
+            error: {
+              code: "command-failed",
+              origin: "box",
+              message: "error: unzip is required",
+              output: { stdout, stderr: "\nerror: unzip is required to install bun\n" },
+            },
+          };
+        },
+      }),
+    ).catch((caught: unknown) => caught);
+
+    const stdoutTail = Array.from({ length: 20 }, (_, index) => `step ${index + 6}`);
+    expect(output.slice(output.findIndex((line) => line.startsWith("git identity: ")) + 1)).toEqual([
+      "The last lines of the codex install stderr:",
+      "  error: unzip is required to install bun",
+      "The last lines of the codex install stdout:",
+      ...stdoutTail.map((line) => `  ${line}`),
+      "box/command-failed: Install stopped because Link reported command-failed from box.",
+    ]);
+    expect(errorInfo(error)).toEqual({
+      code: "box-command-failed",
+      message: "box/command-failed: Install stopped because Link reported command-failed from box.",
+      hint: null,
+      details: { tool: "codex", stderr: ["error: unzip is required to install bun"], stdout: stdoutTail },
+    });
+  });
 });
 
 describe("auth command", () => {
