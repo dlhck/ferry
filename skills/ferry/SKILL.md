@@ -44,6 +44,17 @@ These items are not symlinks. Sync writes them into box files:
 
 Ferry never carries logins, credential files, tokens, request headers, `.env` files, session history, caches, databases, or whole settings files.
 
+## Tools and agents that are off
+
+The policy `"off"` in `[tools]` or `[box.<name>.tools]` of `~/.ferry/config.toml` turns off `gh` or an agent CLI: `claude`, `codex`, `pi`, or `cursor`. A box policy can turn the tool on again for that box. For a tool that is off:
+
+- `ferry install`, `ferry update`, and the daily watch update skip it. The plan step has the action `skip-off`.
+- `ferry status` shows the state `off`, never `drift` or `missing`. Ferry does not uninstall the CLI from the box, and does not check its login.
+- `ferry auth <tool>` fails with the code `refused`.
+- `ferry tools` shows the policy `off`.
+
+An agent that is off also turns off its harness (`.claude`, `.codex`, `.pi/agent`, or `.cursor`). Sync does not read the harness on the operator machine while the agent is off on every box. On a box where it is off, sync writes no links, settings keys, plugins, or MCP servers there, and removes the links that Ferry made there earlier (the links into `~/.ferry/store`). The sync plan names these harnesses in `offHarnesses`. Ferry never removes other files there, and it keeps the settings keys and MCP servers that it wrote before. The shared `.agents/skills` and `~/AGENTS.md` have no off switch.
+
 ## Recognize a managed path
 
 Resolve the path. It is managed if the result is inside `~/.ferry/store`:
@@ -101,7 +112,7 @@ Each entry of `boxes` has these fields:
 | `auth.providers` | Login state per tool: `authenticated`, `login-required`, `manual` (with an `instruction`), or `unavailable`. |
 | `auth.loginRequired` | Tools that need a login. |
 | `mcpLogins.loginRequired` | Box MCP servers that need a login, as `tool/server`. |
-| `tools` | The version state of each registry tool on the box, with Ferry itself last as `id: "ferry"`. Each row has `id`, `mode`, `policy`, `operator`, `target`, `box`, `state`, and a `reason` for `hidden`, `skipped`, and `unknown`. The operator fixes `drift` with `ferry update`, `missing` with `ferry install`, and `hidden` with `ferry sync`. |
+| `tools` | The version state of each registry tool on the box, with Ferry itself last as `id: "ferry"`. Each row has `id`, `mode`, `policy`, `operator`, `target`, `box`, `state`, and a `reason` for `hidden`, `skipped`, `off`, and `unknown`. `off` is a tool with the policy `"off"`, not a problem. The operator fixes `drift` with `ferry update`, `missing` with `ferry install`, and `hidden` with `ferry sync`. |
 | `integrations` | Present only when an integration is on for this box. |
 | `errors` | Each inspection of this box that failed, with `origin`, `code`, and `message`. |
 
@@ -133,7 +144,7 @@ A skipped entry is expected. A refusal is a stop. Do not edit Ferry, its config,
 
 `ferry auth <tool>` starts a vendor login on the box and prints a URL, and sometimes a code, that a person opens in a browser. Tools are `gh`, `claude`, `codex`, and `cursor`. `ferry auth` without a tool lists them. `ferry auth <tool> --mcp <server>` logs in to one MCP server on the box.
 
-Do not run these commands yourself. When `auth.loginRequired` or `mcpLogins.loginRequired` is not empty, tell the operator the command, for example `ferry auth claude --mcp linear`. Pi has no remote login. The operator runs `pi` on the box and uses `/login`.
+Do not run these commands yourself. When `auth.loginRequired` or `mcpLogins.loginRequired` is not empty, tell the operator the command, for example `ferry auth claude --mcp linear`. Pi has no remote login. The operator runs `pi` on the box and uses `/login`. A tool with the policy `"off"` gets no login.
 
 `ferry auth gh` also creates an SSH key on the box and adds it to the operator's GitHub account, so agents on the box can push. A box that cannot push to GitHub usually needs this login.
 
@@ -265,7 +276,7 @@ With `--json`, Ferry never asks:
 | `confirmation-required` | The step needs a confirmation, and `--yes` is not given. For SSH host keys, `--accept-host-keys` is not given, and `error.details.hostKeys` lists the keys. |
 | `missing-values` | A value that the command needs is missing. |
 | `deny-rule-match` | A deny rule refused a file. The message names the file, never the value. |
-| `refused` | A safety check refused the change, such as a clash, a live path, an unpushed commit, or an untrusted host key. |
+| `refused` | A safety check refused the change, such as a clash, a live path, an unpushed commit, or an untrusted host key. `ferry auth` of a tool that is off also has this code. |
 | `sync-busy` | Another sync is active. |
 | `sync-failed` | The sync failed on one or more boxes, or the publish failed. |
 | `update-failed` | One or more updates failed. |
