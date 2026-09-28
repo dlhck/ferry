@@ -515,6 +515,25 @@ describe("ferry --help", () => {
     expect(help).toContain("--json");
   });
 
+  test("command help holds the setup facts that the README points to", () => {
+    const program = buildProgram();
+    const help = (...path: string[]) => {
+      let command = program;
+      for (const name of path) command = command.commands.find((known) => known.name() === name)!;
+      return command.helpInformation();
+    };
+
+    expect(help("update")).toContain("NOPASSWD: /usr/bin/true, \\\n    /usr/bin/apt update, /usr/bin/apt install gh -y");
+    expect(help("tools")).toContain("[tools.pnpm]");
+    expect(help("tools")).toContain("{version} is the only placeholder");
+    expect(help("box", "add")).toContain("read-only deploy key");
+    expect(help("expose")).toContain('"command": "ferry expose -- bun run dev --port $PASEO_PORT"');
+    expect(help("watch", "install")).toContain("dev.ferry.watch.plist");
+    expect(help("watch", "install")).toContain("ferry-watch.service");
+    // The command list shows the one-line summary, not the long description.
+    expect(program.helpInformation()).not.toContain("paseo.json");
+  });
+
   test("runs watch in the foreground with a shutdown signal", async () => {
     let signal: AbortSignal | undefined;
     const program = buildProgram({

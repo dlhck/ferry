@@ -249,7 +249,25 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("init")
-    .description("Record a Tailscale host or SSH destination, seed the snapshot, and convert this machine")
+    .summary("Record a Tailscale host or SSH destination, seed the snapshot, and convert this machine")
+    .description(`Record a Tailscale host or SSH destination, seed the snapshot, and convert this machine.
+
+The snapshot URL is an empty private git repository. Ferry does not create it.
+For an SSH snapshot URL, load a key that can push to it into your SSH agent.
+Ferry forwards the agent to the box to test read access, and asks before it
+trusts the Git host key on the box. Ferry never falls back from Tailscale to
+direct SSH.
+
+With box tables, init runs again for the box of --box, else default_box, else
+the only box. Use ferry box add to add a box.
+
+Add a custom harness in ~/.ferry/config.toml. A repeat init keeps it:
+
+  [[harness]]
+  id = "opencode"
+  name = "OpenCode"
+  skill_root = ".config/opencode/skills"
+  instruction_file = ".config/opencode/AGENTS.md"`)
     .option("--host <host>", "Tailscale host name or IP address")
     .option("--ssh-user <user>", "SSH user on the host")
     .option("--ssh-destination <destination>", "explicit OpenSSH destination")
@@ -289,7 +307,13 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("install")
-    .description("Install the supported agent tools on the configured box")
+    .summary("Install the supported agent tools on the configured box")
+    .description(`Install gh, the agent CLIs, the tools of the config, and Ferry on the box.
+
+Ferry prints the plan for each tool and asks before it runs a command on the
+box. gh comes from apt, so Debian or Ubuntu is the tested target. Ferry on the
+box is the version of this machine. It is a box install that runs only
+ferry expose. Run ferry tools --help for the tool config.`)
     .option("--yes", "run without a confirmation prompt")
     .action(async (options: { yes?: boolean }) => {
       await withProgress((progress, writeLine) =>
@@ -302,7 +326,23 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("update")
-    .description("Update the agent tools on the configured box and on this machine")
+    .summary("Update the agent tools on the configured box and on this machine")
+    .description(`Update the agent tools on the boxes and on this machine.
+
+On this machine, Ferry updates only the agent CLIs that are installed. It does
+not update Ferry itself. Each box gets the tool versions of its policy, the
+Ferry version of this machine, and Paseo when the integration is on. The Paseo
+update restarts the daemon, which stops the agents on the box.
+
+With [update] watch = true in ~/.ferry/config.toml, ferry watch runs this
+update once each day for the tools with the "latest" policy. The gh update
+runs sudo apt on the box, and the watch has no terminal for a password. Add
+this rule on the box with sudo visudo -f /etc/sudoers.d/ferry:
+
+  <ssh-user> ALL=(root) NOPASSWD: /usr/bin/true, \\
+    /usr/bin/apt update, /usr/bin/apt install gh -y
+
+ferry status shows "Box sudo: PASSWORDLESS" when the rule works.`)
     .option("--yes", "run without a confirmation prompt")
     .option("--dry-run", "print the update plan without running it")
     .action(async (options: { yes?: boolean; dryRun?: boolean }) => {
@@ -333,7 +373,22 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("auth [provider]")
-    .description("Start a login on the configured box without copying credentials")
+    .summary("Start a login on the configured box without copying credentials")
+    .description(`Start a login on the configured box without copying credentials.
+
+Tools: gh, claude, codex, and cursor. Ferry starts the vendor login on the box
+and prints a URL, and a code if the tool has one. Finish the login in a browser
+on this machine. When codex gives no device code, Ferry forwards local port
+1455 to the box for up to 120 seconds. Pi has no remote login. Run pi on the
+box and use /login.
+
+ferry auth gh also creates ~/.ssh/id_ed25519 on the box if it is missing, and
+adds it to your GitHub account with the title "<box host> (ferry)", so agents
+on the box can push. Delete that key in GitHub to revoke it.
+
+--mcp <server> logs in to a remote MCP server on the box. Ferry forwards the
+localhost callback port, such as 3118 for Claude, for up to 300 seconds. The
+port must be free on this machine.`)
     .option("--mcp <server>", "start the MCP server login of the provider CLI on the box")
     .action(async (provider: string | undefined, options: { mcp?: string }) => {
       await (dependencies.runAuth ?? runAuthCommand)(
@@ -344,7 +399,18 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("sync")
-    .description("Publish the snapshot and apply it to the selected boxes, or to all boxes")
+    .summary("Publish the snapshot and apply it to the selected boxes, or to all boxes")
+    .description(`Publish the snapshot and apply it to the selected boxes, or to all boxes.
+
+A file that looks like a secret stops the sync before the publish. The error
+names the file, never the value. Ferry skips local MCP servers and hooks that
+refer to home paths that the box does not have, and prints a line for each.
+Ferry syncs up to 4 boxes at the same time. A failed box does not stop the
+other boxes. Sync also writes the ferry PATH block in ~/.profile on the box.
+
+If a plugin in enabledPlugins comes from a marketplace that
+extraKnownMarketplaces does not list, run claude plugin marketplace add for it
+once on this machine.`)
     .option("--dry-run", "print the plan without writing")
     .option("--force", "back up live managed paths before Apply links them")
     .option("-m, --message <message>", "snapshot commit message")
@@ -364,7 +430,18 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("move")
-    .description("Continue a project on a box, on this machine with --from-box, or on another box with both")
+    .summary("Continue a project on a box, on this machine with --from-box, or on another box with both")
+    .description(`Continue a project on a box, on this machine with --from-box, or on another box with both.
+
+The path must be inside the home directory. The destination uses the same path
+relative to its home. Ferry refuses unpushed commits, uncommitted changes to
+tracked files, and a destination path that exists. The destination clones from
+origin with its own SSH key, so run ferry auth gh for a box first. Ferry
+carries the untracked and ignored files that pass the deny rules, skips build
+output such as node_modules and dist, and checks each file with SHA-256.
+Between two boxes, the files go through a temporary directory on this machine,
+and nothing stays here. With --remove, the source copy goes to ~/.Trash on
+macOS, else to ~/.ferry/trash. Run --dry-run first.`)
     .argument("<path>", "project folder inside the home directory")
     .option("--from-box <name>", "move the project from this box. Without --to-box, the destination is this machine")
     .option("--to-box <name>", "move the project to this box. Without it and --from-box, Ferry uses default_box or the only box")
@@ -409,7 +486,13 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("tunnel")
-    .description("Open box ports on this machine until Ctrl-C, list the ports that listen on the box, or follow the ports of ferry expose")
+    .summary("Open box ports on this machine until Ctrl-C, list the ports that listen on the box, or follow the ports of ferry expose")
+    .description(`Open box ports on this machine until Ctrl-C, list the ports that listen on the box, or follow the ports of ferry expose.
+
+Local ports bind to 127.0.0.1 only. The box end is 127.0.0.1 on the box, so a
+dev server that listens only on ::1 does not answer. A plain tunnel does not
+reconnect. With --follow, the local port is the box port when it is free, else
+the next free port, and Ferry connects again 5 seconds after a drop.`)
     .argument("[ports...]", "box port, or box:local to pick another local port, such as 3000 or 3000:4000")
     .option("--list", "list the TCP ports that listen on the box, with process names")
     .option("--follow", "open a forward for each port that ferry expose announces on the box, and close it when the port goes away")
@@ -436,11 +519,19 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("expose")
+    .summary("Run a command on the box and announce its port to ferry tunnel --follow")
     .description(`Run a command on the box and announce its port to ferry tunnel --follow.
 
 Ferry writes ~/.ferry/exposed/<pid>.json before the command starts and
 removes it when the command exits. Ferry forwards SIGINT and SIGTERM to the
-command and exits with its exit code. Put the command after --.`)
+command and exits with its exit code. Put the command after --.
+
+For example, a service script in paseo.json on the box:
+
+  "web": {
+    "type": "service",
+    "command": "ferry expose -- bun run dev --port $PASEO_PORT"
+  }`)
     .argument("<command...>", "the command to run, after --, such as -- bun run dev")
     .option("--port <n>", "the port of the command. The default is $PASEO_PORT")
     .action(async (command: string[], options: { port?: string }) => {
@@ -453,7 +544,15 @@ command and exits with its exit code. Put the command after --.`)
 
   program
     .command("status")
-    .description("Inspect link, snapshot, managed paths, and box logins without writing")
+    .summary("Inspect link, snapshot, managed paths, and box logins without writing")
+    .description(`Inspect link, snapshot, managed paths, and box logins without writing.
+
+The Tools part of each box shows one state for each tool: ok; drift, run
+ferry update; missing, run ferry install; hidden, a login shell on the box
+does not find the tool, run ferry sync; skipped, the tool has no target;
+unknown, Ferry cannot read the box version. --json prints schema version 2.
+The ferry agent skill describes its fields. Install the skill with
+ferry skills add dlhck/ferry --skill ferry.`)
     .option("--json", "print the status report as JSON")
     .action(async (options: { json?: boolean }) => {
       await withProgress(
@@ -475,7 +574,15 @@ command and exits with its exit code. Put the command after --.`)
     });
   integrations
     .command("enable")
-    .description("Install and start an integration on the box, then turn it on in the config")
+    .summary("Install and start an integration on the box, then turn it on in the config")
+    .description(`Install and start an integration on the box, then turn it on in the config.
+
+paseo: Ferry installs Node 22 or later and the Paseo CLI at the version of the
+local Paseo app, then starts the user service ferry-paseo.service. The daemon
+listens on 127.0.0.1:6767 with the relay off. It has no password, so use it
+only on a box with one user. To connect Paseo Desktop, add the Remote SSH host
+ssh://<box destination>. With Paseo on, sync carries the Paseo agent profiles,
+and move registers the project in Paseo on the box.`)
     .argument("<name>", "integration name, such as paseo")
     .option("--dry-run", "print the box commands without connecting or writing")
     .option("--yes", "run without a confirmation prompt")
@@ -495,7 +602,10 @@ command and exits with its exit code. Put the command after --.`)
     });
   integrations
     .command("disable")
-    .description("Stop and remove an integration on the box, then turn it off in the config")
+    .summary("Stop and remove an integration on the box, then turn it off in the config")
+    .description(`Stop and remove an integration on the box, then turn it off in the config.
+
+Ferry never removes ~/.paseo on the box.`)
     .argument("<name>", "integration name, such as paseo")
     .option("--purge", "also uninstall the integration package on the box")
     .option("--yes", "run without a confirmation prompt")
@@ -516,14 +626,49 @@ command and exits with its exit code. Put the command after --.`)
 
   program
     .command("tools")
-    .description("List the tools, the version policy of each one and of each box, and the versions on this machine")
+    .summary("List the tools, the version policy of each one and of each box, and the versions on this machine")
+    .description(`List the tools, the version policy of each one and of each box, and the versions on this machine.
+
+Ferry has recipes for gh and the agent CLIs claude, codex, pi, and cursor.
+Define each other tool in ~/.ferry/config.toml. Ferry does not scan projects.
+
+A policy is "operator" (the version on this machine), "latest", or an exact
+version. The default is "latest" for an agent CLI and "operator" for a tool.
+With "operator", Ferry skips a tool that this machine does not have.
+[box.<name>.tools] sets the policy for one box.
+
+  [tools]
+  gh = "latest"
+  codex = "0.156.1"
+
+  [tools.pnpm]
+  version = "operator"
+  local = "pnpm --version"
+  box = "pnpm --version"
+  latest = "npm view pnpm version"
+  install = 'npm install -g --prefix "$HOME/.local" pnpm@{version}'
+  path = [".local/bin"]
+  depends = ["node"]
+
+local and install are required. local prints the version on this machine, box
+prints the version on the box, and latest prints the newest version, which the
+"latest" policy needs. update is the update command, and the default is
+install. {version} is the only placeholder. path adds home directories to the
+box PATH, and depends names the tools to install first. A comment must be on
+its own line. Run ferry sync after a path change.`)
     .action(async () => {
       await (dependencies.runTools ?? runToolsCommand)({ tools: registry().tools, readConfig: config, writeLine, boxes: boxNames() });
     });
 
   const watch = program
     .command("watch")
-    .description("Watch the portable set and sync accepted changes")
+    .summary("Watch the portable set and sync accepted changes")
+    .description(`Watch the portable set and sync accepted changes.
+
+The watch syncs all boxes one second after a change stays stable. A box that
+fails retries with its own backoff, up to 60 seconds. The watch reads the
+config in each cycle. With [update] watch = true, it also runs ferry update
+once each day. Run ferry update --help for the sudo rule on the box.`)
     .action(async () => {
       // The watch syncs all boxes and reads the config in each cycle. It does not accept --box,
       // because one watch-state.json follows all boxes, and the watch service runs without flags.
@@ -551,7 +696,21 @@ command and exits with its exit code. Put the command after --.`)
     });
   watch
     .command("install")
-    .description("Install and start the watch user service")
+    .summary("Install and start the watch user service")
+    .description(`Install and start the watch user service.
+
+The macOS service is ~/Library/LaunchAgents/dev.ferry.watch.plist. Its log
+is ~/Library/Logs/ferry-watch.log. The Linux service is
+~/.config/systemd/user/ferry-watch.service. Read its log with
+journalctl --user -u ferry-watch.service -f.
+
+The service records the path of this Ferry, the current PATH, and
+SSH_AUTH_SOCK. PATH must find git, ssh, and tailscale for a Tailscale box.
+Run the command again after you move Ferry or change these values. After a
+Ferry update, restart the service:
+
+  launchctl kickstart -k gui/$(id -u)/dev.ferry.watch
+  systemctl --user restart ferry-watch.service`)
     .action(async () => {
       const result = await (dependencies.installWatchService ?? installWatchService)();
       (dependencies.writeLine ?? console.log)(`Installed ${result.manager} service at ${result.path}`);
@@ -573,7 +732,18 @@ command and exits with its exit code. Put the command after --.`)
     .action(() => runBoxList({ readConfig: config, writeLine }));
   box
     .command("add")
-    .description("Check a new box like ferry init, then add it to the config")
+    .summary("Check a new box like ferry init, then add it to the config")
+    .description(`Check a new box like ferry init, then add it to the config.
+
+The first box add on a [host] config moves [host] to [box.default] and sets
+default_box = "default". Ferry asks before it writes.
+
+With --git-auth box, Ferry never forwards your SSH agent to the box. Ferry
+creates ~/.ssh/ferry_snapshot on the box and tests read access to the
+snapshot with it. If the test fails, Ferry prints the public key and does not
+change the config. Add the key as a read-only deploy key on the snapshot
+repository, then run the command again. To change an existing box, set
+git_auth = "box" in its [box.<name>] table and run ferry init --box <name>.`)
     .argument("<name>", "box name: 1 to 32 characters from a-z, 0-9, and -")
     .option("--host <host>", "Tailscale host name or IP address")
     .option("--ssh-user <user>", "SSH user on the host")
