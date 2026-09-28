@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ExposeError, exposePort, runExpose, type ExposeDependencies } from "../src/expose.ts";
@@ -96,6 +96,48 @@ describe("ferry expose", () => {
       expect(await running).toBe(code);
       expect(existsSync(entry)).toBe(false);
     }
+  });
+
+  test("forwards SIGHUP to the child, removes the entry, and exits with the code of the child", async () => {
+    const { home } = setup();
+    const dir = join(home, ".ferry", "exposed");
+    const script = `trap 'exit 9' HUP; while :; do sleep 0.05; done`;
+    const ferry = Bun.spawn(["bun", join(import.meta.dir, "..", "src", "cli.ts"), "expose", "--port", "45999", "--", "sh", "-c", script], {
+      env: { ...process.env, HOME: home },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    const entry = join(dir, `${ferry.pid}.json`);
+    // Wait until the child has its trap.
+    while (!existsSync(entry)) await Bun.sleep(10);
+    await Bun.sleep(300);
+    ferry.kill("SIGHUP");
+    expect(await ferry.exited).toBe(9);
+    expect(existsSync(entry)).toBe(false);
+  });
+
+  test("removes the entries of pids that do not run, and keeps the other files", async () => {
+    const { home, dependencies } = setup();
+    const dir = join(home, ".ferry", "exposed");
+    const dead = Bun.spawn(["true"]);
+    await dead.exited;
+    mkdirSync(dir, { recursive: true });
+    for (const file of [`${dead.pid}.json`, `${process.pid}.json`, "notes.txt", "abc.json"]) {
+      writeFileSync(join(dir, file), "{}\n");
+    }
+    let seen: string[] = [];
+    await runExpose(
+      { command: ["vite"] },
+      {
+        ...dependencies,
+        spawn: () => {
+          seen = readdirSync(dir).sort();
+          return { exited: Promise.resolve(0), kill: () => {} };
+        },
+      },
+    );
+    expect(seen).toEqual([`${process.pid}.json`, "4242.json", "abc.json", "notes.txt"].sort());
+    expect(readdirSync(dir).sort()).toEqual([`${process.pid}.json`, "abc.json", "notes.txt"].sort());
   });
 
   test("removes the entry when the command cannot start", async () => {
