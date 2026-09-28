@@ -279,6 +279,20 @@ describe("installBoxPlugins", () => {
     expect(link.calls).toHaveLength(1);
   });
 
+  test("forwards no agent to a git_auth = box box", async () => {
+    const root = makeRoot();
+    const link = new ShellLink(fakeClaude(root).path);
+
+    await installBoxPlugins({
+      settings: carried({ enabledPlugins: { "review@team": true } }),
+      link,
+      gitAuth: "box",
+    });
+
+    expect(link.calls).toHaveLength(1);
+    expect(link.calls[0]?.options?.agentForwarding).toBeUndefined();
+  });
+
   test("runs nothing when no Claude plugin declarations are carried", async () => {
     const link = new ShellLink();
 

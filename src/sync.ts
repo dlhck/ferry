@@ -10,11 +10,12 @@ import {
   completeHostConfig,
   readConfig as readOperatorConfig,
   resolveLinkOptions,
+  type GitAuth,
   type OperatorConfig,
   type OperatorHostConfig,
   type PartialOperatorConfig,
 } from "./config.ts";
-import { resolveBoxes, type ResolvedBox } from "./boxes.ts";
+import { resolveBoxes, snapshotGit, type ResolvedBox } from "./boxes.ts";
 import { denyRules, readSeed as readManifest, type StoreUpdate } from "./manifest.ts";
 import { Link, type LinkOptions, type LinkResult, type RunOptions } from "./link.ts";
 import {
@@ -386,8 +387,8 @@ async function applyOnBox(context: {
     "Updating the box checkout",
     async () => {
       const result = await link.run(
-        remoteUpdateCommand(required(plan.remoteCheckout), config.snapshotUrl, publication.tip),
-        { agentForwarding: "git" },
+        remoteUpdateCommand(required(plan.remoteCheckout), config.snapshotUrl, publication.tip, box.gitAuth),
+        box.gitAuth === "agent" ? { agentForwarding: "git" } : undefined,
       );
       if (!result.ok) {
         throw new SyncError(
@@ -436,7 +437,7 @@ async function applyOnBox(context: {
   try {
     const warnings = await boxStep(
       "Installing Claude plugins",
-      () => installBoxPlugins({ settings: seed.settings, link, progress }),
+      () => installBoxPlugins({ settings: seed.settings, link, progress, gitAuth: box.gitAuth }),
       (warnings) => (warnings.length > 0 ? plural(warnings.length, "warning") : undefined),
     );
     for (const warning of warnings) writeLine(`Box plugins: ${warning}`);
@@ -733,18 +734,19 @@ export function denyListLines(): string[] {
  * Clone the snapshot on the box when missing. Otherwise print the box changes, then reset the
  * existing checkout to the pushed commit and remove its untracked files, so the box never wins.
  */
-export function remoteUpdateCommand(checkout: string, remote: string, tip: string | null): string {
+export function remoteUpdateCommand(checkout: string, remote: string, tip: string | null, gitAuth: GitAuth = "agent"): string {
   const quotedCheckout = quoteShell(checkout);
   const quotedRemote = quoteShell(remote);
   const target = tip === null ? "@{upstream}" : tip;
+  const git = snapshotGit(gitAuth);
   return [
     `if [ -d ${quoteShell(`${checkout}/.git`)} ]; then`,
     `${boxChangesCommand(checkout)} &&`,
-    `git -C ${quotedCheckout} fetch --quiet &&`,
+    `${git} -C ${quotedCheckout} fetch --quiet &&`,
     `git -C ${quotedCheckout} reset --quiet --hard ${quoteShell(target)} &&`,
     `git -C ${quotedCheckout} clean --quiet --force -d;`,
     `else`,
-    `mkdir -p ${quoteShell(posix.dirname(checkout))} && git clone ${quotedRemote} ${quotedCheckout};`,
+    `mkdir -p ${quoteShell(posix.dirname(checkout))} && ${git} clone ${quotedRemote} ${quotedCheckout};`,
     `fi`,
   ].join(" ");
 }

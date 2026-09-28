@@ -1,5 +1,6 @@
 import type { ApplyAction, ApplyPlan } from "./apply.ts";
 import type { AuthProviderStatus, AuthStatusReport, McpLoginStatus } from "./auth-start.ts";
+import type { GitAuth } from "./config.ts";
 import { parseGitIdentity, type GitIdentity } from "./git-identity.ts";
 import type { LinkError, LinkResult } from "./link.ts";
 import type { IntegrationHealth, IntegrationId } from "./integrations/types.ts";
@@ -22,6 +23,8 @@ export type BoxStatusDependencies = {
   readonly name: string;
   /** The destination of the box, for example `dev@box-a.example`. */
   readonly host: string;
+  /** `git_auth` of the box. */
+  readonly gitAuth: GitAuth;
   readonly link: {
     probe(): Promise<LinkResult>;
     readBoxTip(): Promise<LinkResult>;
@@ -77,6 +80,8 @@ export type IntegrationStatus = {
 export type BoxStatus = {
   readonly name: string;
   readonly host: string;
+  /** `"agent"` forwards the operator SSH agent to the box git commands. `"box"` uses the box deploy key. */
+  readonly gitAuth: GitAuth;
   readonly link: {
     readonly online: boolean;
     readonly address: string | null;
@@ -431,6 +436,7 @@ async function composeBoxStatus(
   return {
     name: dependencies.name,
     host: dependencies.host,
+    gitAuth: dependencies.gitAuth,
     link: { online, address, error: linkError },
     tip: boxTip,
     remoteMatchesBox,
