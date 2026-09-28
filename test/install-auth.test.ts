@@ -481,6 +481,26 @@ describe("auth command", () => {
     });
   });
 
+  test("lists the tools with the policy off as off", async () => {
+    const output: string[] = [];
+
+    const result = await runAuthCommand(
+      {},
+      authDependencies({ output, readConfig: () => ({ ...config, tools: { cursor: "off", pi: "off" } }) }),
+    );
+
+    expect(output).toEqual(["gh: startable", "claude: startable", "codex: startable", "cursor: off", "pi: off"]);
+    expect(result).toEqual({
+      providers: [
+        { id: "gh", login: "startable" },
+        { id: "claude", login: "startable" },
+        { id: "codex", login: "startable" },
+        { id: "cursor", login: "off" },
+        { id: "pi", login: "off" },
+      ],
+    });
+  });
+
   test("constructs Link from config and calls start once", async () => {
     const link = fakeLink();
     let linkOptions: unknown;
@@ -1163,6 +1183,69 @@ describe("runAuthCommand with --mcp", () => {
     );
 
     expect(events).toEqual(["listen", "aborted false", "aborted true", "unlisten"]);
+  });
+
+  test("--mcp without a provider is a usage error that names both forms", async () => {
+    const output: string[] = [];
+
+    const error = await runAuthCommand(
+      { mcp: "linear" },
+      authDependencies({
+        output,
+        createAuthStart: () => {
+          throw new Error("unexpected AuthStart");
+        },
+      }),
+    ).catch((caught: unknown) => caught);
+
+    const message =
+      "operator/usage: Give the provider: ferry auth <provider> --mcp linear, or ferry auth --mcp <provider>/linear. " +
+      "The providers with an MCP login are claude, codex, cursor.";
+    expect((error as Error).message).toBe(message);
+    expect(errorInfo(error).code).toBe("usage");
+    expect(output).toEqual([message]);
+  });
+
+  for (const input of [{ mcp: "codex/linear" }, { provider: "codex", mcp: "codex/linear" }]) {
+    test(`accepts the ferry status name ${input.provider ? "with" : "without"} the provider argument`, async () => {
+      const calls: string[] = [];
+
+      await runAuthCommand(
+        input,
+        authDependencies({
+          createAuthStart: () => ({
+            ...noMcp,
+            start: noMcp.startMcp,
+            startMcp: async (tool: string, server: string) => {
+              calls.push(`${tool} ${server}`);
+              return { kind: "already-done", provider: `${tool}/${server}` };
+            },
+          }),
+        }),
+      );
+
+      expect(calls).toEqual(["codex linear"]);
+    });
+  }
+
+  test("accepts a claude plugin server name from ferry status", async () => {
+    const calls: string[] = [];
+
+    await runAuthCommand(
+      { mcp: "claude/plugin:figma:figma" },
+      authDependencies({
+        createAuthStart: () => ({
+          ...noMcp,
+          start: noMcp.startMcp,
+          startMcp: async (tool: string, server: string) => {
+            calls.push(`${tool} ${server}`);
+            return { kind: "already-done", provider: `${tool}/${server}` };
+          },
+        }),
+      }),
+    );
+
+    expect(calls).toEqual(["claude plugin:figma:figma"]);
   });
 
   test("refuses a tool without an MCP login before it reads the config", async () => {

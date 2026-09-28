@@ -142,7 +142,7 @@ A skipped entry is expected. A refusal is a stop. Do not edit Ferry, its config,
 
 ## Logins
 
-`ferry auth <tool>` starts a vendor login on the box and prints a URL, and sometimes a code, that a person opens in a browser. Tools are `gh`, `claude`, `codex`, and `cursor`. `ferry auth` without a tool lists them. `ferry auth <tool> --mcp <server>` logs in to one MCP server on the box.
+`ferry auth <tool>` starts a vendor login on the box and prints a URL, and sometimes a code, that a person opens in a browser. Tools are `gh`, `claude`, `codex`, and `cursor`. `ferry auth` without a tool lists them. `ferry auth <tool> --mcp <server>` logs in to one MCP server on the box. `ferry auth --mcp <tool>/<server>` also works, with the name that `mcpLogins.loginRequired` gives.
 
 Do not run these commands yourself. When `auth.loginRequired` or `mcpLogins.loginRequired` is not empty, tell the operator the command, for example `ferry auth claude --mcp linear`. Pi has no remote login. The operator runs `pi` on the box and uses `/login`. A tool with the policy `"off"` gets no login.
 
@@ -297,7 +297,7 @@ With `--json`, Ferry never asks:
 | `update` | `{ dryRun, boxes: [{ name, ok, error, offline, plan, integrations: [{ id, plan }] }], operator: [{ tool, command } or { tool, reason }], updated, failed }`. `updated` and `failed` name each update, such as `box gh`, `[a] box gh`, or `operator codex`. A box with `ok: false` has `error`: `box-offline`, or `update-failed` with its failed updates. Also on failure. |
 | `sync` | `{ dryRun, published, boxes: [{ name, ok, step, error, plan, applyPlan, discarded }] }`. `plan` is the sync plan of the box, `applyPlan` its link changes (`null` for a dry run or a failed box), and `discarded` the box checkout changes that the sync threw away. A box with `ok: false` has `step`, the step that failed, and `error`. With more than one box, also on failure. |
 | `status` | The status report. See [Read state](#read-state). |
-| `auth` | Without a tool: `{ providers: [{ id, login: "startable" or "manual" }] }`. With a tool: the last login result, `{ kind, provider, ... }`, where `kind` is `logged-in`, `already-done`, `device-url`, `printed-url`, `local-port-forward`, or `manual-ssh`. |
+| `auth` | Without a tool: `{ providers: [{ id, login: "startable", "manual", or "off" }] }`. With a tool: the last login result, `{ kind, provider, ... }`, where `kind` is `logged-in`, `already-done`, `device-url`, `printed-url`, `local-port-forward`, or `manual-ssh`. |
 | `tools` | `{ tools: [{ id, name, kind, install, policy: { policy, default }, boxes: [{ name, policy, default }], operatorVersion }] }` |
 | `skills add` | `{ argv }`, the `npx skills add` command that ran. |
 | `move` | `{ path, source, destination, dryRun, git: { url, branch } or null, carry: [{ path, sha256, secrets }], refused: [{ path, code, reason }], skipped, notes, trash }` |
