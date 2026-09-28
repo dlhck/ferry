@@ -23,7 +23,7 @@ Ferry copies the agent setup of the operator machine to a remote Linux box. The 
 ## Find out where you are
 
 - The operator machine has `~/.ferry/config.toml` and the `ferry` command.
-- The box has `~/.ferry/store` and `~/.ferry/box.json`, but no `~/.ferry/config.toml`. On the box, `ferry` is a box install: only `ferry expose`, `ferry --version`, and the help run.
+- The box has `~/.ferry/store` and `~/.ferry/box.json`, but no `~/.ferry/config.toml`. On the box, `ferry` is a box install: only `ferry expose`, `ferry --version`, and the help run. A development build of Ferry ignores `~/.ferry/box.json`.
 
 ## What Ferry manages
 

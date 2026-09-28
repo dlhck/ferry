@@ -108,7 +108,7 @@ import {
   type UpdateCommandInput,
   type UpdateCommandResult,
 } from "./update.ts";
-import { VERSION } from "./version.ts";
+import { isReleaseVersion, VERSION } from "./version.ts";
 
 const DESCRIPTION = `Ferry keeps a remote Linux agent box in the same shape as this machine.
 
@@ -142,7 +142,7 @@ type CliDependencies = {
   readonly uninstallTunnelService?: (input: TunnelServiceInput) => Promise<TunnelServiceUninstallResult>;
   readonly runBoxAdd?: typeof runBoxAdd;
   readonly runExpose?: (input: ExposeInput, dependencies?: Partial<ExposeDependencies>) => Promise<number>;
-  /** True when this is a box install. The default checks for `~/.ferry/box.json`. */
+  /** True when this is a box install. The default is `isBoxMode`. */
   readonly isBoxMode?: () => boolean;
   /** Sets the exit code of `ferry expose`. */
   readonly setExitCode?: (code: number) => void;
@@ -1339,8 +1339,13 @@ function commandPath(command: Command): string {
   return names.join(" ");
 }
 
-function isBoxMode(): boolean {
-  return existsSync(join(homedir(), BOX_MARKER));
+/**
+ * True for a release build that finds `~/.ferry/box.json`. A development
+ * build ignores the marker, so a checkout on a box runs each command, and so
+ * do its tests.
+ */
+export function isBoxMode(version = VERSION, home = homedir()): boolean {
+  return isReleaseVersion(version) && existsSync(join(home, BOX_MARKER));
 }
 
 function renderError(message: string): void {
