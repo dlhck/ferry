@@ -354,6 +354,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .description("Continue a project on the box, or with --from-box on this machine")
     .argument("<path>", "project folder inside the home directory")
     .option("--from-box", "move the project from the box to this machine")
+    .option("--to-box <name>", "with --from-box and --box <name>, move the project to this other box")
     .option("--dry-run", "print what Ferry would carry, refuse, and skip without changes")
     .option("--remove", "after verification, move the source copy to a trash directory")
     .option("--include-env", "also carry .env files that pass the token and secret rules")
@@ -364,6 +365,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
         path: string,
         options: {
           fromBox?: boolean;
+          toBox?: string;
           dryRun?: boolean;
           remove?: boolean;
           includeEnv?: boolean;
@@ -381,8 +383,10 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
               includeEnv: options.includeEnv === true,
               allowSecrets: options.allowSecrets === true,
               yes: options.yes === true,
+              ...(options.toBox === undefined ? {} : { relay: { from: boxNames(), to: options.toBox } }),
             },
-            { createLink, writeLine, progress, ...boxConfig(selectBox("move")) },
+            // A move between boxes reads both boxes from the whole config.
+            { createLink, writeLine, progress, ...(options.toBox === undefined ? boxConfig(selectBox("move")) : {}) },
           ),
         );
       },

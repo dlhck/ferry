@@ -790,6 +790,23 @@ describe("--box", () => {
     await expect(readBy({ ...BOXES, defaultBox: undefined }, ["auth", "codex"])).rejects.toThrow("Add --box <name>");
   });
 
+  test("move --to-box passes the --box names and the whole config to the move module", async () => {
+    let received: unknown;
+    let read: PartialOperatorConfig | null | undefined;
+    await buildProgram({
+      readConfig: () => BOXES,
+      runMove: async (input, dependencies) => {
+        received = input.relay;
+        read = dependencies?.readConfig?.();
+      },
+      createProgress: () => noProgress,
+      writeLine: () => {},
+    }).parseAsync(["move", "Developer/app", "--from-box", "--box", "a", "--to-box", "b"], { from: "user" });
+
+    expect(received).toEqual({ from: ["a"], to: "b" });
+    expect(read).toBeUndefined();
+  });
+
   test("an unknown or invalid box name is refused", async () => {
     await expect(readBy(BOXES, ["install", "--box", "c"])).rejects.toThrow("unknown box c. Known boxes: a, b.");
     await expect(readBy(HOST, ["install", "--box", "a"])).rejects.toThrow("unknown box a. Known boxes: default.");
