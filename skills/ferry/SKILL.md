@@ -70,16 +70,28 @@ If `ferry status` shows `boxCheckout.dirty: true`, the box checkout has local ch
 
 ## Read state
 
-Run `ferry status --json` on the operator machine. It changes nothing. Its stdout is one JSON object with `schemaVersion: 1`. These fields matter most:
+Run `ferry status --json` on the operator machine. It changes nothing. Its stdout is one JSON object with `schemaVersion: 2`, also for one box. Each `--box <name>` selects one box. The top level has the shared fields:
 
 | Field | Meaning |
 | --- | --- |
-| `link.online`, `link.address` | The box answers over SSH or Tailscale, and its address. |
+| `store.local`, `store.remote` | The snapshot commit on the operator machine and on the git remote. `null` means unknown. |
+| `store.localMatchesRemote` | The local tip and the remote tip are the same. |
+| `operator.gitIdentity` | `{ name, email }` of git on the operator machine. |
+| `denyList` | The deny rules: `code`, `description`, and `behavior` (`refuse` or `skip`). |
+| `boxes` | One entry for each box, in config order. With a `[host]` config, the one box has the name `default`. |
+| `errors` | Each operator or git remote inspection that failed, with `origin`, `code`, and `message`. |
+
+Each entry of `boxes` has these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `name`, `host` | The box name and its destination. |
 | `gitAuth` | `agent`: Ferry forwards the operator SSH agent to the box git commands. `box`: the box reads the snapshot with its own deploy key, `~/.ssh/ferry_snapshot`, and gets no agent. |
-| `store.local`, `store.remote`, `store.box` | The snapshot commit on the operator machine, the git remote, and the box. `null` means unknown. |
-| `store.localMatchesRemote`, `store.remoteMatchesBox`, `store.allMatch` | Tip comparisons. `allMatch: false` usually means a sync is due. |
+| `link.online`, `link.address` | The box answers over SSH or Tailscale, and its address. |
+| `tip` | The snapshot commit on the box. `null` means unknown. |
+| `remoteMatchesBox`, `allMatch` | Tip comparisons. `allMatch: false` usually means a sync of this box is due. |
 | `boxCheckout.dirty`, `boxCheckout.changes` | Local changes in the box checkout, as paths. The next sync discards them. |
-| `gitIdentity.box`, `gitIdentity.operator` | `{ name, email }` of git on each machine. |
+| `gitIdentity.box` | `{ name, email }` of git on the box. |
 | `gitIdentity.boxConfigured`, `gitIdentity.matchesOperator` | The box has a git identity, and it is the same as the operator's. |
 | `boxSudo.passwordless` | `sudo` on the box runs without a password. |
 | `boxSudo.watchUpdateBlocked` | `ferry watch` runs daily updates, but sudo asks for a password, so the `gh` update on the box fails. |
@@ -87,8 +99,9 @@ Run `ferry status --json` on the operator machine. It changes nothing. Its stdou
 | `auth.providers` | Login state per tool: `authenticated`, `login-required`, `manual` (with an `instruction`), or `unavailable`. |
 | `auth.loginRequired` | Tools that need a login. |
 | `mcpLogins.loginRequired` | Box MCP servers that need a login, as `tool/server`. |
-| `denyList` | The deny rules: `code`, `description`, and `behavior` (`refuse` or `skip`). |
-| `errors` | Each inspection that failed, with `origin`, `code`, and `message`. |
+| `tools` | The version state of each registry tool on the box. |
+| `integrations` | Present only when an integration is on for this box. |
+| `errors` | Each inspection of this box that failed, with `origin`, `code`, and `message`. |
 
 Each section also has an `error` field. A `null` value with an error means Ferry could not read it. It does not mean false.
 
@@ -160,7 +173,7 @@ On the box, do not edit these files. Ferry writes them, and it overwrites your c
 
 To change a profile, tell the operator to change it in Paseo on the operator machine and to run `ferry sync`.
 
-When Paseo is enabled, `ferry status` has an `Integrations` section, and `ferry status --json` has `integrations.paseo`:
+When Paseo is enabled for a box, its `ferry status` block has an `Integrations` section, and its `ferry status --json` entry has `integrations.paseo`:
 
 | Line or field | Meaning |
 | --- | --- |

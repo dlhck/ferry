@@ -123,7 +123,7 @@ Ferry never carries:
 
 A carried file that looks like a secret stops the sync, and the error names the file, never the value. Logins happen on the box, and the tokens stay there.
 
-Ferry opens no public listening port. The Codex callback login forwards local port 1455 to the box for 120 seconds. `ferry tunnel` binds its local ports to `127.0.0.1` only. Ferry never turns off SSH host-key checks, and it never falls back from Tailscale to direct SSH. Ferry forwards your SSH agent to the box only for the snapshot update. `ferry auth gh` creates an SSH key without a passphrase on the box and adds it to your GitHub account, so agents on the box can push. See [GitHub over SSH](#github-over-ssh).
+Ferry opens no public listening port. The Codex callback login forwards local port 1455 to the box for 120 seconds. `ferry tunnel` binds its local ports to `127.0.0.1` only. Ferry never turns off SSH host-key checks, and it never falls back from Tailscale to direct SSH. For a box with `git_auth = "agent"`, Ferry forwards your SSH agent to the box only for the snapshot update and the Claude plugin installs. A box with `git_auth = "box"` gets no agent. `ferry auth gh` creates an SSH key without a passphrase on the box and adds it to your GitHub account, so agents on the box can push. See [GitHub over SSH](#github-over-ssh).
 
 Ferry runs commands on the box with your SSH user. Use a box and an SSH user that you trust with the agents that run there.
 
