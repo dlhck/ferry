@@ -1885,6 +1885,29 @@ describe("sync with more than one box", () => {
     expect(readdirSync(join(sync.home, ".ferry"))).toEqual([]);
   });
 
+  test("without a publish, updates only the selected box to the upstream tip and still adopts", async () => {
+    const sync = fleet();
+    const commands: string[] = [];
+    const createLink = sync.dependencies.createLink!;
+    const dependencies: SyncDependencies = {
+      ...sync.dependencies,
+      createLink: (target) => {
+        const link = createLink(target);
+        return { run: (command, options) => (commands.push(command), link.run(command, options)) };
+      },
+    };
+
+    const result = await runSync({ home: sync.home, boxes: ["b"], publish: false }, dependencies);
+
+    expect(result.published).toBe(false);
+    expect(sync.events).toEqual(["b:link", "b:resolve-home", "b:update", "b:apply", "b:applied", "adopt"]);
+    expect(sync.steps).not.toContain("Publishing the snapshot");
+    expect(commands.filter((command) => command.includes("git clone"))).toEqual([
+      remoteUpdateCommand("/home/b/.ferry/store", fleetConfig.snapshotUrl, null),
+    ]);
+    expect(readdirSync(join(sync.home, ".ferry"))).toEqual([]);
+  });
+
   test("syncs the other box when one box is offline, adopts once, and names the failed box and step", async () => {
     const sync = fleet({ offline: ["b"] });
 

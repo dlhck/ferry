@@ -45,6 +45,11 @@ export type SyncInput = {
   readonly message?: string;
   /** The names from `--box`. None selects all boxes. */
   readonly boxes?: readonly string[];
+  /**
+   * False skips the publish: the boxes update to the published tip. The watch
+   * uses it for a box retry, when the snapshot already has the current identity.
+   */
+  readonly publish?: boolean;
 };
 
 export type SyncDependencies = {
@@ -188,7 +193,9 @@ export async function runSync(
   const home = input.home ?? homedir();
   const progress = dependencies.progress ?? noProgress;
   const writeLine = dependencies.writeLine ?? console.log;
-  progress.plan(input.dryRun ? 1 : 3 + BOX_STEPS);
+  // The operator steps are the read, the publish, and the adopt.
+  const operatorSteps = input.publish === false ? 2 : 3;
+  progress.plan(input.dryRun ? 1 : operatorSteps + BOX_STEPS);
   const { config, registry, seed, boxes } = await step(
     progress,
     "Reading the portable set",
@@ -210,8 +217,10 @@ export async function runSync(
     undefined,
     (source) => plural(source.seed.skills.length, "skill"),
   );
-  const planned = input.dryRun ? 1 : boxes.reduce((total, box) => total + BOX_STEPS + (box.profiles === null ? 0 : 2), 3);
-  if (planned !== (input.dryRun ? 1 : 3 + BOX_STEPS)) progress.plan(planned);
+  const planned = input.dryRun
+    ? 1
+    : boxes.reduce((total, box) => total + BOX_STEPS + (box.profiles === null ? 0 : 2), operatorSteps);
+  if (planned !== (input.dryRun ? 1 : operatorSteps + BOX_STEPS)) progress.plan(planned);
   for (const leftover of seed.leftovers) {
     const label = leftover.code === "hook-path" ? "hook" : leftover.code === "mcp-local" ? "MCP server" : null;
     if (!label) continue;
@@ -243,44 +252,47 @@ export async function runSync(
   for (const box of boxes) {
     refuseActiveSync(home, targetKey(box.host), several ? `box ${box.name} (${targetKey(box.host)})` : undefined);
   }
-  let store: SyncStore;
-  let publication: PublishResult;
-  try {
-    ({ store, publication } = await step(
-      progress,
-      "Publishing the snapshot",
-      async () => {
-        const releaseStore = await takeStoreLock(dependencies, home);
-        try {
-          const store = dependencies.openStore
-            ? await dependencies.openStore(config.snapshotUrl, seed, {
-                home,
-                harnesses: registry.harnesses,
-              })
-            : await openSnapshotStore(config.snapshotUrl, seed, {
-                home,
-                harnesses: registry.harnesses,
-              });
-          return { store, publication: await store.publish(seed, input.message) };
-        } finally {
-          releaseStore();
-        }
-      },
-      undefined,
-      ({ publication }) =>
-        publication.published ? `published ${publication.tip?.slice(0, 7) ?? ""}`.trim() : "no changes",
-    ));
-  } catch (cause) {
-    if (cause instanceof SyncError) throw cause;
-    throw new SyncError(
-      "publish-failure",
-      "git remote",
-      `failed to publish ${config.snapshotUrl}: ${messageOf(cause)}`,
-      { cause },
-    );
-  }
-  for (const update of seed.storeUpdates) {
-    writeLine(`Updated store skill ${update.name} from ${update.path}`);
+  // Without a publish, Ferry does not write the local store, and a null tip updates each box to the upstream tip.
+  let storePath = join(home, ".ferry", "store");
+  let publication: PublishResult = { published: false, tip: null };
+  if (input.publish !== false) {
+    try {
+      ({ storePath, publication } = await step(
+        progress,
+        "Publishing the snapshot",
+        async () => {
+          const releaseStore = await takeStoreLock(dependencies, home);
+          try {
+            const store = dependencies.openStore
+              ? await dependencies.openStore(config.snapshotUrl, seed, {
+                  home,
+                  harnesses: registry.harnesses,
+                })
+              : await openSnapshotStore(config.snapshotUrl, seed, {
+                  home,
+                  harnesses: registry.harnesses,
+                });
+            return { storePath: store.path, publication: await store.publish(seed, input.message) };
+          } finally {
+            releaseStore();
+          }
+        },
+        undefined,
+        ({ publication }) =>
+          publication.published ? `published ${publication.tip?.slice(0, 7) ?? ""}`.trim() : "no changes",
+      ));
+    } catch (cause) {
+      if (cause instanceof SyncError) throw cause;
+      throw new SyncError(
+        "publish-failure",
+        "git remote",
+        `failed to publish ${config.snapshotUrl}: ${messageOf(cause)}`,
+        { cause },
+      );
+    }
+    for (const update of seed.storeUpdates) {
+      writeLine(`Updated store skill ${update.name} from ${update.path}`);
+    }
   }
 
   /** Run the box steps on one box. A failure ends this box only. */
@@ -335,7 +347,7 @@ export async function runSync(
   // Adopt changes only the operator machine and needs only the publish, so it runs once, after all boxes end.
   try {
     await step(progress, "Adopting published local skills", () =>
-      (dependencies.adopt ?? adoptPublishedSkills)(home, store.path, registry.harnesses, seed),
+      (dependencies.adopt ?? adoptPublishedSkills)(home, storePath, registry.harnesses, seed),
     );
   } catch (cause) {
     const error = new SyncError(

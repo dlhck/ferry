@@ -71,6 +71,8 @@ export type WatchDependencies = {
    * `BoxesSyncError`. With one box, an error of a box step has the origin `box`.
    */
   readonly sync?: (request: WatchSyncRequest) => Promise<void>;
+  /** The sync command that the default sync runs. */
+  readonly runSync?: typeof runSync;
   /** The names of the configured boxes. The watch reads them in each cycle. */
   readonly readBoxes?: (home: string) => readonly string[];
   readonly isRetryable?: (error: unknown) => boolean;
@@ -104,9 +106,9 @@ export async function runWatch(
   const progress = dependencies.progress ?? noProgress;
   const sync = dependencies.sync ??
     (async (request: WatchSyncRequest) => {
-      await runSync(
-        { home: request.home, boxes: request.boxes },
-        request.publish ? { progress } : { progress, openStore: async () => publishedStore(request.home) },
+      await (dependencies.runSync ?? runSync)(
+        { home: request.home, boxes: request.boxes, publish: request.publish },
+        { progress },
       );
     });
   const readBoxes = dependencies.readBoxes ?? configuredBoxNames;
@@ -280,15 +282,6 @@ function boxFailures(error: unknown, boxes: readonly string[]): Map<string, unkn
   }
   if (boxes.length === 1 && error instanceof SyncError && error.origin === "box") return new Map([[boxes[0]!, error]]);
   return null;
-}
-
-/**
- * A store for a sync without a publish. The snapshot already has the current
- * identity, so Ferry does not write the store. A null tip makes each box
- * update to the upstream tip.
- */
-function publishedStore(home: string) {
-  return { path: join(home, ".ferry", "store"), publish: async () => ({ published: false, tip: null }) };
 }
 
 function configuredBoxNames(home: string): readonly string[] {
