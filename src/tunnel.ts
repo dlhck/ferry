@@ -11,7 +11,8 @@ import { quoteShell } from "./box-settings.ts";
 import { resolveLinkOptions, type OperatorHostConfig } from "./config.ts";
 import { EXPOSED_DIR } from "./expose.ts";
 import { Link, type ControlConnection, type LinkOptions, type TunnelPort } from "./link.ts";
-import { errorEvent, FerryError, type OutputEvent } from "./output.ts";
+import { FerryError } from "./errors.ts";
+import { errorEvent, type OutputEvent } from "./output.ts";
 
 export type TunnelInput = {
   /** Port specs: `<box>` or `<box>:<local>`. */

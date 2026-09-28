@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { errorInfo } from "../src/output.ts";
 import {
   existsSync,
   mkdirSync,
@@ -805,6 +806,8 @@ describe("runSync", () => {
         code: "remote-update-failure",
         origin: "box",
         message: expect.stringMatching(/ferry@box.*git@example\.test/),
+        // The Link error of the box command gives the --json code box-offline.
+        cause: expect.objectContaining({ code: "box-offline" }),
       }),
     );
     expect(applyCalls).toBe(0);
@@ -2068,9 +2071,9 @@ describe("sync with more than one box", () => {
   test("refuses an unknown box before it publishes", async () => {
     const sync = fleet();
 
-    await expect(runSync({ home: sync.home, boxes: ["c"] }, sync.dependencies)).rejects.toEqual(
-      expect.objectContaining({ code: "invalid-config", message: expect.stringContaining("unknown box c") }),
-    );
+    const error = await runSync({ home: sync.home, boxes: ["c"] }, sync.dependencies).catch((caught: unknown) => caught);
+    expect(error).toEqual(expect.objectContaining({ code: "invalid-config", message: expect.stringContaining("unknown box c") }));
+    expect(errorInfo(error).code).toBe("unknown-box");
     expect(sync.events).toEqual([]);
   });
 

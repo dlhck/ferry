@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import type { UpdateCommandInput } from "../src/update.ts";
+import { UpdateError, type UpdateCommandInput, type UpdateCommandResult } from "../src/update.ts";
+import { BoxesSyncError, SyncError } from "../src/sync.ts";
+import { FerryError } from "../src/errors.ts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1430,6 +1432,63 @@ describe("--json", () => {
     });
   });
 
+  test("a failed multi-box sync keeps the outcome of each box in result", async () => {
+    const plan = { box: "dev@box-a.example" } as SyncResult["plan"];
+    const offline = new SyncError("link-failure", "box", "failed to resolve home on box-b", {
+      cause: new FerryError("box-offline", "network/host-offline: box-b is offline"),
+    });
+    const result = await run(["sync"], {
+      runSync: async () => {
+        throw new BoxesSyncError(
+          [
+            { name: "a", plan, applyPlan: { checkout: "/c", targetHome: "/h", actions: [], unmanaged: [] }, discarded: [] },
+            { name: "b", plan, failure: { step: "Connecting to dev@box-b", error: offline } },
+          ],
+          true,
+        );
+      },
+    });
+
+    expect(result.exitCodes).toEqual([1]);
+    expect(result.json[0]).toMatchObject({
+      command: "sync",
+      ok: false,
+      error: { code: "sync-failed", message: expect.stringContaining("[b] Connecting to dev@box-b") },
+      result: {
+        dryRun: false,
+        published: true,
+        boxes: [
+          { name: "a", ok: true, applyPlan: { actions: [] }, discarded: [] },
+          {
+            name: "b",
+            ok: false,
+            step: "Connecting to dev@box-b",
+            error: { code: "box-offline", message: offline.message },
+            applyPlan: null,
+          },
+        ],
+      },
+    });
+    expect("error" in result.json[0].result.boxes[0]).toBe(false);
+  });
+
+  test("a failed update keeps the outcome of each box in result", async () => {
+    const outcome = {
+      dryRun: false,
+      boxes: [{ name: "a", ok: false, error: { code: "box-offline", message: "network/host-offline: off", hint: null }, offline: "off", plan: [], integrations: [] }],
+      operator: [],
+      updated: [],
+      failed: ["[a] box offline"],
+    } satisfies UpdateCommandResult;
+    const result = await run(["update", "--yes"], {
+      runUpdate: async () => {
+        throw new UpdateError("1 of 1 updates failed: [a] box offline", outcome);
+      },
+    });
+
+    expect(result.json[0]).toMatchObject({ ok: false, result: outcome, error: { code: "update-failed" } });
+  });
+
   test("a command that stays running prints its events, and an error event on failure", async () => {
     const watch = await run(["watch"], {
       runWatch: async (_input, dependencies) => {
@@ -1500,25 +1559,18 @@ describe("--json", () => {
       expect(result.json[0]).toMatchObject({ command: "box add", ok: false, error: refused });
     });
 
-    test("init gets no prompt, and the host keys need --yes", async () => {
-      const received: InitDependencies[] = [];
-      const key: SnapshotHostKeyApproval = { host: "github.com", keys: [{ algorithm: "ssh-ed25519", fingerprint: "SHA256:abc" }] };
-      const runInit = async (_input: InitInput, dependencies?: InitDependencies): Promise<InitResult> => {
-        received.push(dependencies!);
-        await dependencies?.approveHostKeys?.(key);
-        return { dryRun: false, leftovers: [], published: true };
-      };
-
-      const refusedInit = await run(["init"], { readConfig: () => HOST, runInit, approveHostKeys: async () => true, prompt: async () => ({}) });
-      expect(received[0]?.prompt).toBeUndefined();
-      expect(refusedInit.json[0].error).toMatchObject(refused);
-      expect(refusedInit.json[0].error.message).toContain("ssh-ed25519 SHA256:abc");
-
-      const accepted = await run(["init", "--yes"], { readConfig: () => HOST, runInit });
-      expect(accepted.json[0]).toMatchObject({ ok: true, result: { published: true } });
-      expect(accepted.stderr).toEqual([
-        "Trusting the SSH host keys for github.com on the box: ssh-ed25519 SHA256:abc",
-      ]);
+    test("init gets no prompt", async () => {
+      let received: InitDependencies | undefined;
+      await run(["init"], {
+        readConfig: () => HOST,
+        prompt: async () => ({}),
+        runInit: async (_input, dependencies) => {
+          received = dependencies;
+          return { dryRun: false, leftovers: [], published: true };
+        },
+      });
+      expect(received).toBeDefined();
+      expect(received?.prompt).toBeUndefined();
     });
 
     test("init without the values fails with missing-values", async () => {
@@ -1575,6 +1627,94 @@ describe("--json", () => {
     ]) {
       expect(help(path.split(" "))).toContain("With --json: ");
     }
+  });
+
+  describe("SSH host keys of the snapshot host", () => {
+    const key: SnapshotHostKeyApproval = { host: "github.com", keys: [{ algorithm: "ssh-ed25519", fingerprint: "SHA256:abc" }] };
+    const trusted = "Trusting the SSH host keys for github.com on the box (--accept-host-keys): ssh-ed25519 SHA256:abc";
+    /** init and box add, each with a fake run that asks for the approval of `key`. */
+    const commands = {
+      init: {
+        args: ["init"],
+        runInit: async (_input: InitInput, dependencies?: InitDependencies): Promise<InitResult> => {
+          if ((await dependencies?.approveHostKeys?.(key)) !== true) throw new Error("not trusted");
+          return { dryRun: false, leftovers: [], published: true };
+        },
+      },
+      "box add": {
+        args: ["box", "add", "c", "--ssh-destination", "dev@box-c.example"],
+        runBoxAdd: async (_input: unknown, dependencies: { approveHostKeys?: (request: SnapshotHostKeyApproval) => Promise<boolean> }) => {
+          if ((await dependencies.approveHostKeys?.(key)) !== true) throw new Error("not trusted");
+          return { name: "c", transport: "ssh" as const, destination: "dev@box-c.example", gitAuth: "agent" as const, migrated: false };
+        },
+      },
+    };
+
+    for (const [name, command] of Object.entries(commands)) {
+      const dependencies = { readConfig: () => BOXES, ...("runInit" in command ? { runInit: command.runInit } : { runBoxAdd: command.runBoxAdd }) };
+
+      test(`${name} without --accept-host-keys asks on a terminal`, async () => {
+        const asked: SnapshotHostKeyApproval[] = [];
+        const lines: string[] = [];
+        await buildProgram({
+          ...dependencies,
+          approveHostKeys: async (request) => {
+            asked.push(request);
+            return true;
+          },
+          createProgress: () => noProgress,
+          writeLine: (line) => lines.push(line),
+        }).parseAsync(command.args, { from: "user" });
+
+        expect(asked).toEqual([key]);
+        expect(lines).not.toContain(trusted);
+      });
+
+      test(`${name} --accept-host-keys trusts the keys without a prompt and logs the fingerprints`, async () => {
+        const lines: string[] = [];
+        await buildProgram({
+          ...dependencies,
+          approveHostKeys: async () => {
+            throw new Error("prompt");
+          },
+          createProgress: () => noProgress,
+          writeLine: (line) => lines.push(line),
+        }).parseAsync([...command.args, "--accept-host-keys"], { from: "user" });
+
+        expect(lines).toContain(trusted);
+      });
+
+      test(`${name} --json without --accept-host-keys fails with the keys as data, also with --yes`, async () => {
+        for (const extra of name === "box add" ? [[], ["--yes"]] : [[]]) {
+          const result = await run([...command.args, ...extra], {
+            ...dependencies,
+            approveHostKeys: async () => {
+              throw new Error("prompt");
+            },
+          });
+
+          expect(result.json[0]).toMatchObject({ command: name, ok: false });
+          expect(result.json[0].error).toEqual({
+            code: "confirmation-required",
+            message: "Trust these SSH host keys for github.com on the box: ssh-ed25519 SHA256:abc? Ferry does not ask with --json.",
+            hint: "Show the fingerprints to the operator. When the operator accepts them, add --accept-host-keys.",
+            details: { hostKeys: [{ host: "github.com", type: "ssh-ed25519", fingerprint: "SHA256:abc" }] },
+          });
+        }
+      });
+
+      test(`${name} --json --accept-host-keys trusts the keys and logs the fingerprints on stderr`, async () => {
+        const result = await run([...command.args, "--accept-host-keys"], dependencies);
+
+        expect(result.json[0]).toMatchObject({ command: name, ok: true });
+        expect(result.stderr).toContain(trusted);
+      });
+    }
+
+    test("init has no --yes", async () => {
+      const result = await run(["init", "--yes"], { runInit: commands.init.runInit });
+      expect(result.json[0].error.code).toBe("usage");
+    });
   });
 
   test("without --json, the confirmations and prompts stay", async () => {

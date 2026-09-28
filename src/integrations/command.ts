@@ -3,6 +3,7 @@
 import * as prompts from "@clack/prompts";
 import {
   completeHostConfig,
+  ConfigMissingError,
   configPath,
   readConfig,
   resolveLinkOptions,
@@ -66,7 +67,7 @@ export async function runIntegrationCommand(
   const config = resolved.readConfig();
   const target = resolveLinkOptions(config?.host);
   const host = completeHostConfig(config?.host);
-  if (!target || !host) throw new IntegrationCommandError("Ferry config has no complete host. Run ferry init.");
+  if (!target || !host) throw new ConfigMissingError("Ferry config has no complete host. Run ferry init.");
 
   const enable = input.action === "enable";
   const action: IntegrationCommandResult["action"] = enable ? "enable" : input.purge ? "purge" : "disable";

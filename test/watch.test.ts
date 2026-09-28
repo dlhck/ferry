@@ -16,7 +16,7 @@ import type { Seed } from "../src/manifest.ts";
 import { createPaseo } from "../src/integrations/paseo.ts";
 import type { Integration } from "../src/integrations/types.ts";
 import { runUpdateCommand } from "../src/update.ts";
-import { FerryError } from "../src/output.ts";
+import { FerryError } from "../src/errors.ts";
 
 function accepted(identity: string): WatchObservation {
   return { ok: true, identity };
@@ -237,7 +237,9 @@ describe("watch events", () => {
   });
 
   test("a failed box sync is an error event with the code, the box, and the retry wait", async () => {
-    const offline = new SyncError("link-failure", "box", "failed to resolve home on box: network/host-offline: box is offline");
+    const offline = new SyncError("link-failure", "box", "failed to resolve home on box: network/host-offline: box is offline", {
+      cause: new FerryError("box-offline", "network/host-offline: box is offline"),
+    });
     const watch = run([accepted("one"), accepted("two"), accepted("two"), accepted("two")], async () => {
       throw offline;
     });
@@ -260,7 +262,7 @@ describe("multi-box watch", () => {
     new BoxesSyncError([
       ...ok.map((name) => ({ name, plan: {} as SyncPlan })),
       ...failed.map((name) => ({ name, plan: {} as SyncPlan, failure: { step: "Connecting", error: offline() } })),
-    ]);
+    ], true);
 
   /**
    * Run the watch on a fake clock. Each poll advances the clock by `pollMs`.

@@ -11,13 +11,16 @@ import { planBoxFerry } from "./box-ferry.ts";
 import { resolveBoxes, type ResolvedBox } from "./boxes.ts";
 import {
   completeHostConfig,
+  ConfigMissingError,
   readConfig,
   resolveLinkOptions,
   type PartialOperatorConfig,
   type ToolsConfig,
 } from "./config.ts";
 import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
-import { BunHostAdapter, Link, type HostAdapter, type LinkOptions } from "./link.ts";
+import { BunHostAdapter, Link, type HostAdapter, type LinkError, type LinkOptions } from "./link.ts";
+import { FerryError, linkFailure } from "./errors.ts";
+import { errorInfo, type ErrorInfo } from "./output.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
 import { loadRegistry } from "./registry/load.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
@@ -70,6 +73,10 @@ export type UpdateCommandResult = {
   readonly dryRun: boolean;
   readonly boxes: readonly {
     readonly name: string;
+    /** False when the box is offline or an update of the box failed. */
+    readonly ok: boolean;
+    /** Why the box failed: `box-offline`, or `update-failed` with the failed updates. */
+    readonly error?: ErrorInfo;
     /** The Link error message when the box did not answer, else null. */
     readonly offline: string | null;
     readonly plan: readonly ToolStep[];
@@ -79,10 +86,16 @@ export type UpdateCommandResult = {
   readonly operator: readonly OperatorUpdate[];
   /** The updates that ran, such as `box gh`, `[a] box gh`, or `operator codex`. Empty for a dry run. */
   readonly updated: readonly string[];
+  /** The updates that failed or that Ferry skipped after a failed dependency, with the same names. */
+  readonly failed: readonly string[];
 };
 
+/** The update failed. `result` has the outcome of each box when the update ran. */
 export class UpdateError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly result?: UpdateCommandResult,
+  ) {
     super(message);
     this.name = "UpdateError";
   }
@@ -112,7 +125,7 @@ type BoxUpdate = {
   readonly integrations: readonly Integration[];
   readonly plan: readonly ToolStep[];
   /** The link error when the box did not answer. Ferry then skips the box. */
-  readonly offline: string | null;
+  readonly offline: LinkError | null;
 };
 
 /**
@@ -150,7 +163,7 @@ export async function runUpdateCommand(
         for (const box of selected) {
           const link = resolved.createLink(resolveLinkOptions(box.host));
           const probe = await link.run("true");
-          const offline = probe.ok ? null : probe.error.message;
+          const offline = probe.ok ? null : probe.error;
           boxes.push({
             name: box.name,
             prefix: several ? `[${box.name}] ` : "",
@@ -182,7 +195,7 @@ export async function runUpdateCommand(
   resolved.progress.plan(input.dryRun ? 1 : 1 + steps.length + integrationCount);
 
   for (const box of boxes) {
-    if (box.offline !== null) resolved.writeLine(`${box.prefix}Box offline, Ferry skips it: ${box.offline}`);
+    if (box.offline !== null) resolved.writeLine(`${box.prefix}Box offline, Ferry skips it: ${box.offline.message}`);
     for (const entry of box.plan) resolved.writeLine(`${box.prefix}Box ${entry.tool}: ${describeStep(entry)}`);
   }
   for (const entry of operator) {
@@ -202,16 +215,31 @@ export async function runUpdateCommand(
     integrationPlans.set(box.name, plans);
   }
   const updated: string[] = [];
+  const failed: string[] = [];
+  /** The failed updates of each box, as in `failed`. */
+  const failedOnBoxes = new Map(boxes.map((box) => [box.name, [] as string[]]));
+  const boxError = (box: BoxUpdate): ErrorInfo | undefined => {
+    if (box.offline !== null) return errorInfo(linkFailure(box.offline));
+    const names = failedOnBoxes.get(box.name) ?? [];
+    if (names.length === 0) return undefined;
+    return errorInfo(new FerryError("update-failed", `${plural(names.length, "update")} failed on box ${box.name}: ${names.join(", ")}`));
+  };
   const result = (): UpdateCommandResult => ({
     dryRun: input.dryRun,
-    boxes: boxes.map((box) => ({
-      name: box.name,
-      offline: box.offline,
-      plan: box.plan,
-      integrations: integrationPlans.get(box.name) ?? [],
-    })),
+    boxes: boxes.map((box) => {
+      const error = boxError(box);
+      return {
+        name: box.name,
+        ok: error === undefined,
+        ...(error !== undefined ? { error } : {}),
+        offline: box.offline?.message ?? null,
+        plan: box.plan,
+        integrations: integrationPlans.get(box.name) ?? [],
+      };
+    }),
     operator,
     updated,
+    failed,
   });
   if (input.dryRun) return result();
   if (!input.yes) {
@@ -222,15 +250,19 @@ export async function runUpdateCommand(
     }
   }
 
-  const failed: string[] = boxes.flatMap((box) => (box.offline === null ? [] : [`${box.prefix}box offline`]));
+  for (const box of boxes) if (box.offline !== null) failed.push(`${box.prefix}box offline`);
   const failedOnBox = new Map(boxes.map((box) => [box.name, new Set<string>()]));
+  const fail = (name: string, box: BoxUpdate | undefined) => {
+    failed.push(name);
+    if (box !== undefined) failedOnBoxes.get(box.name)?.push(name);
+  };
   for (const [index, step] of steps.entries()) {
     const name = `${step.box?.prefix ?? ""}${step.box === undefined ? "operator" : "box"} ${step.tool}`;
     const failedTools = step.box === undefined ? undefined : failedOnBox.get(step.box.name);
     const failedDependency = step.dependsOn.find((dependency) => failedTools?.has(dependency));
     if (failedDependency !== undefined) {
       resolved.progress.skip(`Updating ${name} (${index + 1}/${steps.length})`, `${failedDependency} failed`);
-      failed.push(name);
+      fail(name, step.box);
       failedTools?.add(step.tool);
       resolved.writeLine(`Skipped ${name}: it depends on ${failedDependency}, which failed.`);
       continue;
@@ -248,7 +280,7 @@ export async function runUpdateCommand(
       updated.push(name);
     } else {
       resolved.progress.fail(failure);
-      failed.push(name);
+      fail(name, step.box);
       failedTools?.add(step.tool);
       resolved.writeLine(`Failed to update ${name}: ${failure}`);
     }
@@ -259,7 +291,7 @@ export async function runUpdateCommand(
         for (const line of await integration.update(box.link, resolved.progress)) resolved.writeLine(`${box.prefix}${line}`);
         updated.push(`${box.prefix}box ${integration.id}`);
       } catch (error) {
-        failed.push(`${box.prefix}box ${integration.id}`);
+        fail(`${box.prefix}box ${integration.id}`, box);
         resolved.writeLine(`Failed to update ${box.prefix}box ${integration.id}: ${messageOf(error)}`);
       }
     }
@@ -279,6 +311,7 @@ export async function runUpdateCommand(
   if (failed.length > 0) {
     throw new UpdateError(
       `${failed.length} of ${steps.length + integrationCount + boxes.length - reached.length} updates failed: ${failed.join(", ")}`,
+      result(),
     );
   }
   return result();
@@ -321,10 +354,10 @@ function loadBoxes(
   try {
     config = read();
   } catch {
-    throw new UpdateError("Could not read Ferry config. Run ferry init.");
+    throw new ConfigMissingError("Could not read Ferry config. Run ferry init.");
   }
   if (!config || (!config.boxes && !completeHostConfig(config.host))) {
-    throw new UpdateError("Ferry config has no complete host. Run ferry init.");
+    throw new ConfigMissingError("Ferry config has no complete host. Run ferry init.");
   }
   return { config, boxes: resolveBoxes(config, selection) };
 }

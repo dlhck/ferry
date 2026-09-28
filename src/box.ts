@@ -3,6 +3,7 @@
 import { resolveBoxes, resolveTargetBox } from "./boxes.ts";
 import {
   ConfigError,
+  ConfigMissingError,
   isBoxName,
   resolveLinkOptions,
   withBoxes,
@@ -182,7 +183,7 @@ export function runBoxDefault(
 function readComplete(read: () => PartialOperatorConfig | null): PartialOperatorConfig {
   const config = read();
   if (config?.version !== 1 || config.publisher === undefined || config.snapshotUrl === undefined) {
-    throw new ConfigError("Ferry config is not complete. Run ferry init.");
+    throw new ConfigMissingError("Ferry config is not complete. Run ferry init.");
   }
   return config;
 }

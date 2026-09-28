@@ -11,6 +11,7 @@ import type { GitAuth } from "./config.ts";
 import type { LinkResult, RunOptions } from "./link.ts";
 import type { SeedSettings } from "./manifest.ts";
 import type { Progress } from "./progress.ts";
+import { linkFailure } from "./errors.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
 
 /** The harness whose carried keys declare plugins for the `claude` CLI. */
@@ -23,8 +24,8 @@ export type BoxSettingsLink = {
 };
 
 export class BoxSettingsError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "BoxSettingsError";
   }
 }
@@ -177,7 +178,9 @@ export async function checked(
 ): Promise<Extract<LinkResult, { ok: true }>> {
   const result = await link.run(command, options);
   if (!result.ok) {
-    throw new BoxSettingsError(`${result.error.origin}/${result.error.code}: ${result.error.message}`);
+    throw new BoxSettingsError(`${result.error.origin}/${result.error.code}: ${result.error.message}`, {
+      cause: linkFailure(result.error),
+    });
   }
   return result;
 }

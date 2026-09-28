@@ -8,6 +8,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { apply as applyStore, type ApplyPlan, type RemoteApplyInput } from "./apply.ts";
 import {
   completeHostConfig,
+  ConfigMissingError,
   readConfig as readOperatorConfig,
   resolveLinkOptions,
   type GitAuth,
@@ -35,7 +36,7 @@ import {
   refreshUnitPath,
   type AgentProfile,
 } from "./integrations/paseo.ts";
-import { denyRuleCause } from "./output.ts";
+import { denyRuleCause, linkFailure } from "./errors.ts";
 import { groupProgress, noProgress, plural, step, type Progress } from "./progress.ts";
 import { boxPathDirs, profileBlockCommand } from "./tools/path.ts";
 
@@ -167,9 +168,12 @@ export class SyncError extends Error {
   }
 }
 
-/** One or more of the selected boxes failed. `results` has the result of each box. */
+/** One or more of the selected boxes failed. `results` has the result of each box. `published` is true when the publish made a commit. */
 export class BoxesSyncError extends SyncError {
-  constructor(readonly results: readonly BoxSyncResult[]) {
+  constructor(
+    readonly results: readonly BoxSyncResult[],
+    readonly published: boolean,
+  ) {
     const failed = results.filter((result) => result.failure !== undefined);
     super(
       "box-failure",
@@ -368,7 +372,7 @@ export async function runSync(
     warn(`Warning: ${error.message}`);
   }
 
-  if (failed.length > 0) throw several ? new BoxesSyncError(results) : failed[0]!.failure!.error;
+  if (failed.length > 0) throw several ? new BoxesSyncError(results, publication.published) : failed[0]!.failure!.error;
   const first = results[0]!;
   return {
     dryRun: false,
@@ -416,6 +420,7 @@ async function applyOnBox(context: {
           "remote-update-failure",
           "box",
           `failed to update ${plan.box} from ${config.snapshotUrl}: ${result.error.origin}/${result.error.code}: ${result.error.message}`,
+          { cause: linkFailure(result.error) },
         );
       }
       return result;
@@ -515,6 +520,7 @@ async function applyOnBox(context: {
           "apply-failure",
           "box",
           `could not write the PATH block of ~/.profile on ${plan.box}: ${result.error.origin}/${result.error.code}: ${result.error.message}`,
+          { cause: linkFailure(result.error) },
         );
       }
       return result.stdout.trim() === "unchanged" ? "no changes" : "updated ~/.profile";
@@ -806,6 +812,7 @@ async function resolveRemoteHome(link: SyncLink, host: OperatorHostConfig): Prom
       "link-failure",
       result.error.origin === "operator" ? "operator" : "box",
       `failed to resolve home on ${box}: ${result.error.origin}/${result.error.code}: ${result.error.message}`,
+      { cause: linkFailure(result.error) },
     );
   }
   const remoteHome = result.stdout.replace(/\r?\n$/, "");
@@ -995,7 +1002,9 @@ function completeConfig(config: PartialOperatorConfig | null): SyncOperatorConfi
     !config.snapshotUrl ||
     (!config.boxes && !completeHostConfig(config.host))
   ) {
-    throw new SyncError("invalid-config", "operator", "Ferry config is incomplete. Run ferry init.");
+    throw new SyncError("invalid-config", "operator", "Ferry config is incomplete. Run ferry init.", {
+      cause: new ConfigMissingError("Ferry config is incomplete."),
+    });
   }
   return { version: 1, publisher: config.publisher, snapshotUrl: config.snapshotUrl };
 }

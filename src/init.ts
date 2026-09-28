@@ -24,7 +24,7 @@ import {
   type RunOptions,
 } from "./link.ts";
 import { readSeed as readManifest, type Leftover, type Seed } from "./manifest.ts";
-import { denyRuleCause, linkFailure } from "./output.ts";
+import { denyRuleCause, linkFailure } from "./errors.ts";
 import { noProgress, step, type Progress } from "./progress.ts";
 import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
 import { openStore as openSnapshotStore, type PublishResult } from "./store.ts";

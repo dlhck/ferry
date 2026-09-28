@@ -7,33 +7,10 @@
 
 import { CommanderError } from "commander";
 import { BoxRequiredError, UnknownBoxError } from "./boxes.ts";
-import { ConfigError } from "./config.ts";
-import type { LinkError, LinkErrorCode } from "./link.ts";
+import { ConfigError, ConfigMissingError } from "./config.ts";
+import { FerryError, linkCode, type ErrorCode } from "./errors.ts";
 
 export const SCHEMA_VERSION = 1;
-
-export const ERROR_CODES = [
-  "usage",
-  "config-missing",
-  "config-invalid",
-  "unknown-box",
-  "box-required",
-  "box-offline",
-  "box-command-failed",
-  "forward-failed",
-  "confirmation-required",
-  "missing-values",
-  "deny-rule-match",
-  "refused",
-  "sync-busy",
-  "sync-failed",
-  "update-failed",
-  "login-failed",
-  "command-failed",
-  "failed",
-] as const;
-
-export type ErrorCode = (typeof ERROR_CODES)[number];
 
 /** The `type` of each event. `error` is the last event of a command that stays running and fails. */
 export const EVENT_TYPES = [
@@ -84,6 +61,8 @@ export type ErrorInfo = {
   readonly code: ErrorCode;
   readonly message: string;
   readonly hint: string | null;
+  /** Data for the code, such as `hostKeys` for a host key confirmation. Only some errors have it. */
+  readonly details?: Readonly<Record<string, unknown>>;
 };
 
 export type Envelope = {
@@ -98,40 +77,13 @@ export type Envelope = {
 /** One NDJSON line of a command that stays running. An error event also has `code`, `message`, and `hint`. */
 export type OutputEvent = { readonly type: string } & Readonly<Record<string, unknown>>;
 
-/** An error with a stable code. Put it in the `cause` of another error to give that error a code. */
-export class FerryError extends Error {
-  constructor(
-    readonly code: ErrorCode,
-    message: string,
-    readonly hint?: string,
-  ) {
-    super(message);
-    this.name = "FerryError";
-  }
-}
-
-/** A step that needs a confirmation, with `--json` and without `--yes`. */
-export function confirmationRequired(question: string): FerryError {
-  return new FerryError("confirmation-required", `${question} Ferry does not ask with --json.`);
-}
-
-/** The code of a Link error, for the `cause` of a refusal that a failed box command gives. */
-export function linkFailure(error: LinkError): FerryError {
-  return new FerryError(LINK_CODES[error.code], `${error.origin}/${error.code}: ${error.message}`);
-}
-
-/** A Manifest refusal with a forbidden hit has the code `deny-rule-match`. A refusal with clashes only has none. */
-export function denyRuleCause(forbidden: readonly { readonly path: string; readonly reason: string }[]): ErrorOptions | undefined {
-  const [first] = forbidden;
-  return first ? { cause: new FerryError("deny-rule-match", `${first.reason}: ${first.path}`) } : undefined;
-}
-
 export function successEnvelope(command: string, result: unknown, warnings: readonly string[]): Envelope {
   return { schemaVersion: SCHEMA_VERSION, command, ok: true, result: result ?? null, warnings, error: null };
 }
 
-export function failureEnvelope(command: string, error: unknown, warnings: readonly string[]): Envelope {
-  return { schemaVersion: SCHEMA_VERSION, command, ok: false, result: null, warnings, error: errorInfo(error) };
+/** `result` is null, or the outcome of each box when the command ran on the boxes. */
+export function failureEnvelope(command: string, error: unknown, warnings: readonly string[], result: unknown = null): Envelope {
+  return { schemaVersion: SCHEMA_VERSION, command, ok: false, result, warnings, error: errorInfo(error) };
 }
 
 /** The error event of a command that stays running. */
@@ -139,28 +91,45 @@ export function errorEvent(type: string, error: unknown, fields: Readonly<Record
   return { type, ...fields, ...errorInfo(error) };
 }
 
-/** The stable code, the message, and a hint for an error. */
+/**
+ * The stable code, the message, and a hint for an error. The code comes from
+ * the class of the error or its `code` property, never from the message. A
+ * cause with its own code, such as the Link error of a failed box command,
+ * gives the code of the error that wraps it.
+ */
 export function errorInfo(error: unknown): ErrorInfo {
   const message = messageOf(error);
-  const coded = codedCause(error);
-  if (coded) return { code: coded.code, message, hint: coded.hint ?? HINTS[coded.code] };
-  const code = errorCode(error, message);
+  for (let current = error, depth = 0; current instanceof Error && depth < 8; current = current.cause, depth++) {
+    if (current instanceof FerryError) {
+      return {
+        code: current.code,
+        message,
+        hint: current.hint ?? HINTS[current.code],
+        ...(current.details !== undefined ? { details: current.details } : {}),
+      };
+    }
+    const code = ownCode(current);
+    if (code !== null) return { code, message, hint: HINTS[code] };
+  }
+  const code = errorCode(error);
   return { code, message, hint: HINTS[code] };
 }
 
-function errorCode(error: unknown, message: string): ErrorCode {
-  if (error instanceof CommanderError) return "usage";
+/** The code of an error class whose code wins over the code of an error that wraps it. */
+function ownCode(error: Error): ErrorCode | null {
   if (error instanceof UnknownBoxError) return "unknown-box";
   if (error instanceof BoxRequiredError) return "box-required";
-  // Each module that reads the config says this when the config is missing or incomplete.
-  if (/Run ferry init\.?$/.test(message)) return "config-missing";
+  if (error instanceof ConfigMissingError) return "config-missing";
+  return null;
+}
+
+function errorCode(error: unknown): ErrorCode {
+  if (error instanceof CommanderError) return "usage";
   // The other classes match by name, because their modules import this module.
   const name = error instanceof Error ? error.name : "";
   const code = (error as { code?: unknown } | null)?.code;
   if (name === "BoxesSyncError") return "sync-failed";
   if (name === "InstallAuthCommandError" && typeof code === "string") return installAuthCode(code);
-  const link = linkCodeIn(message);
-  if (link) return link;
   if (error instanceof ConfigError) return "config-invalid";
   switch (name) {
     case "SyncError":
@@ -190,14 +159,6 @@ function errorCode(error: unknown, message: string): ErrorCode {
   return "failed";
 }
 
-/** The first `FerryError` in the error and its causes. */
-function codedCause(error: unknown): FerryError | null {
-  for (let current = error, depth = 0; current instanceof Error && depth < 8; current = current.cause, depth++) {
-    if (current instanceof FerryError) return current;
-  }
-  return null;
-}
-
 /** `install` and `auth` codes are `<origin>/<code>`, such as `network/host-offline` or `box/login-unfinished`. */
 function installAuthCode(code: string): ErrorCode {
   const [origin, kind = ""] = code.split("/");
@@ -208,31 +169,6 @@ function installAuthCode(code: string): ErrorCode {
   if (kind === "tool-plan") return "refused";
   if (origin === "box") return "login-failed";
   return "usage";
-}
-
-const LINK_CODES: Record<LinkErrorCode, ErrorCode> = {
-  "invalid-config": "config-invalid",
-  "tailscale-status-failed": "box-offline",
-  "tailscale-status-timeout": "box-offline",
-  "tailscale-status-invalid": "box-offline",
-  "host-not-found": "box-offline",
-  "host-offline": "box-offline",
-  "ssh-start-failed": "box-offline",
-  "ssh-failed": "box-offline",
-  "command-failed": "box-command-failed",
-  "command-timeout": "box-command-failed",
-  "forward-failed": "forward-failed",
-  "forward-timeout": "forward-failed",
-};
-
-function linkCode(kind: string): ErrorCode | null {
-  return Object.hasOwn(LINK_CODES, kind) ? LINK_CODES[kind as LinkErrorCode] : null;
-}
-
-/** A Link error in a message, as `<origin>/<code>`, such as `network/host-offline`. */
-function linkCodeIn(message: string): ErrorCode | null {
-  const match = /\b(?:operator|network|box)\/([a-z-]+)/.exec(message);
-  return match?.[1] ? linkCode(match[1]) : null;
 }
 
 function messageOf(error: unknown): string {

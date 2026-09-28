@@ -356,6 +356,16 @@ describe("update command", () => {
     expect(recorder.output).toContain("Failed to update box claude: update refused");
     expect(recorder.output).toContain("Failed to update operator claude: no network");
     expect(recorder.output).toContain("Updated operator codex.");
+    const error = (await run.catch((caught: unknown) => caught)) as UpdateError;
+    expect(error.result?.failed).toEqual(["box claude", "operator claude"]);
+    expect(error.result?.boxes.map(({ name, ok, error }) => ({ name, ok, error }))).toEqual([
+      {
+        name: "default",
+        ok: false,
+        error: { code: "update-failed", message: "1 update failed on box default: box claude", hint: null },
+      },
+    ]);
+    expect(error.result?.updated).toContain("operator codex");
   });
 
   test("a failed dependency skips the tools that depend on it", async () => {
@@ -441,9 +451,15 @@ describe("update command", () => {
       }),
     });
 
-    await expect(runUpdateCommand({ yes: true, dryRun: false }, { ...deps, createLink })).rejects.toThrow(
-      "1 of 3 updates failed: box offline",
-    );
+    const run = runUpdateCommand({ yes: true, dryRun: false }, { ...deps, createLink });
+    await expect(run).rejects.toThrow("1 of 3 updates failed: box offline");
+    const error = (await run.catch((caught: unknown) => caught)) as UpdateError;
+    expect(error.result?.boxes[0]).toMatchObject({
+      name: "default",
+      ok: false,
+      offline: "the box is offline",
+      error: { code: "box-offline", message: "network/host-offline: the box is offline" },
+    });
     expect(recorder.local).toEqual(["claude update", "codex update"]);
     expect(recorder.output[0]).toBe("Box offline, Ferry skips it: the box is offline");
     expect(recorder.output.some((line) => line.startsWith("Box default:"))).toBe(false);

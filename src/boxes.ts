@@ -2,6 +2,7 @@
 
 import {
   ConfigError,
+  ConfigMissingError,
   completeHostConfig,
   type BoxConfig,
   type GitAuth,
@@ -68,7 +69,7 @@ export function resolveTargetBox(config: PartialOperatorConfig, name?: string): 
 function configuredBoxes(config: PartialOperatorConfig): readonly BoxConfig[] {
   if (config.boxes) return config.boxes;
   const host = completeHostConfig(config.host);
-  if (!host) throw new ConfigError("Ferry config has no complete box. Run ferry init.");
+  if (!host) throw new ConfigMissingError("Ferry config has no complete box. Run ferry init.");
   return [{ name: "default", host }];
 }
 
