@@ -451,7 +451,17 @@ type ScannedHostKey = {
   readonly fingerprint: string;
 };
 
+/** The SSH host of a snapshot URL. An https, file, or other non-SSH URL, or a local path, has none. */
 function snapshotSshTarget(remote: string): SnapshotSshTarget | null {
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(remote)?.[1]?.toLowerCase();
+  if (scheme !== undefined) {
+    if (scheme !== "ssh" && scheme !== "git+ssh") return null;
+    const url = URL.parse(remote);
+    if (!url?.hostname) return null;
+    return url.port
+      ? { host: url.hostname, knownHost: `[${url.hostname}]:${url.port}`, scanPort: `-p ${url.port} ` }
+      : { host: url.hostname, knownHost: url.hostname, scanPort: "" };
+  }
   const match = /^(?:[^@/:\s]+@)?([^:/\s]+):.+$/.exec(remote);
   if (!match?.[1]) return null;
   return { host: match[1], knownHost: match[1], scanPort: "" };
