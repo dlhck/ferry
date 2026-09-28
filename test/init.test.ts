@@ -939,6 +939,39 @@ describe("ferry init", () => {
       expect(targets).toEqual([{ destination: "dev@box-a.example" }]);
     });
 
+    test("checks a git_auth = box box with its deploy key and forwards no agent", async () => {
+      const home = makeHome();
+      write(
+        join(home, ".ferry/config.toml"),
+        BOXES.replace('"snapshot.git"', '"git@github.com:you/ferry-snapshot.git"').replace(
+          'destination = "dev@box-a.example"',
+          'destination = "dev@box-a.example"\ngit_auth = "box"',
+        ),
+      );
+      const { deps } = dependencies(home);
+      const calls: { command: string; options: unknown }[] = [];
+
+      await runInit(
+        { home, harnesses: BUILTIN_HARNESSES, box: "a" },
+        {
+          ...deps,
+          checkAgent: async () => ({ ok: false, message: "no agent" }),
+          createLink: () => ({
+            async run(command, options) {
+              calls.push({ command, options });
+              const stdout = command.includes("ssh-keygen -F") ? "trusted\n" : "";
+              return { ok: true, address: "box-a", stdout, stderr: "" };
+            },
+          }),
+        },
+      );
+
+      expect(calls.every((call) => call.options === undefined)).toBe(true);
+      expect(calls[0]?.command).toContain("ssh-keygen -q -t ed25519");
+      expect(calls.at(-1)?.command).toContain("git -c core.sshCommand=");
+      expect(readConfig(home)?.boxes?.[0]?.gitAuth).toBe("box");
+    });
+
     test("refuses host flags and points to ferry box add", async () => {
       const home = makeHome();
       write(join(home, ".ferry/config.toml"), BOXES);

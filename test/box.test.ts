@@ -281,6 +281,73 @@ describe("ferry box add", () => {
   });
 });
 
+describe("ferry box add --git-auth box", () => {
+  const SSH_CONFIG = BOXES_CONFIG.replace('snapshot_url = "snapshot.git"', 'snapshot_url = "git@github.com:you/ferry-snapshot.git"');
+  const PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample ferry-snapshot";
+
+  function deployKeyBox(home: string, readable: boolean) {
+    const calls: { command: string; options: unknown }[] = [];
+    const result = dependencies(home, {
+      checkAgent: async () => {
+        throw new Error("a git_auth = box box needs no operator agent");
+      },
+      createLink: () => ({
+        async run(command, options) {
+          calls.push({ command, options });
+          if (command.includes("ssh-keygen -q")) return { ok: true, address: "box-c", stdout: `${PUBLIC_KEY}\n`, stderr: "" };
+          if (command.includes("ssh-keygen -F")) return { ok: true, address: "box-c", stdout: "trusted\n", stderr: "" };
+          if (command.includes("ls-remote") && !readable) {
+            return { ok: false, error: { origin: "box", code: "command-failed", message: "git@github.com: Permission denied (publickey)." } };
+          }
+          return { ok: true, address: "box-c", stdout: "", stderr: "" };
+        },
+      }),
+    });
+    return { ...result, calls };
+  }
+
+  test("makes the deploy key on the box, reads the snapshot with it, and writes git_auth", async () => {
+    const home = makeHome(SSH_CONFIG);
+    const { deps, calls } = deployKeyBox(home, true);
+
+    await runBoxAdd({ name: "c", sshDestination: "dev@box-c.example", gitAuth: "box", yes: false }, deps);
+
+    expect(calls.every((call) => call.options === undefined)).toBe(true);
+    expect(calls[0]?.command).toContain(
+      `ssh-keygen -q -t ed25519 -N '' -C ferry-snapshot -f "$HOME/.ssh/ferry_snapshot"`,
+    );
+    expect(calls[0]?.command).toContain('[ -f "$HOME/.ssh/ferry_snapshot" ] ||');
+    expect(calls.at(-1)?.command).toBe(
+      "git -c core.sshCommand='ssh -i ~/.ssh/ferry_snapshot -o IdentitiesOnly=yes' ls-remote 'git@github.com:you/ferry-snapshot.git' HEAD",
+    );
+    expect(configText(home)).toContain('[box.c]\ntransport = "ssh"\ndestination = "dev@box-c.example"\ngit_auth = "box"\n');
+  });
+
+  test("prints the public key and the deploy key step when the box cannot read the snapshot", async () => {
+    const home = makeHome(SSH_CONFIG);
+    const { deps } = deployKeyBox(home, false);
+
+    await expect(
+      runBoxAdd({ name: "c", sshDestination: "dev@box-c.example", gitAuth: "box", yes: false }, deps),
+    ).rejects.toThrow(
+      "box: could not read git@github.com:you/ferry-snapshot.git with the box deploy key ~/.ssh/ferry_snapshot: git@github.com: Permission denied (publickey).\n" +
+        "Add this public key as a read-only deploy key on the snapshot repository. Do not give it write access. Then run the command again.\n" +
+        PUBLIC_KEY,
+    );
+    expect(configText(home)).toBe(SSH_CONFIG);
+  });
+
+  test("refuses a snapshot URL that is not SSH", async () => {
+    const home = makeHome(BOXES_CONFIG.replace('"snapshot.git"', '"https://github.com/you/ferry-snapshot.git"'));
+    const { deps, calls } = deployKeyBox(home, true);
+
+    await expect(
+      runBoxAdd({ name: "c", sshDestination: "dev@box-c.example", gitAuth: "box", yes: false }, deps),
+    ).rejects.toThrow('git_auth = "box" needs an SSH snapshot URL');
+    expect(calls).toEqual([]);
+  });
+});
+
 describe("ferry box remove", () => {
   test("removes the table and does not connect to the box", () => {
     const home = makeHome(BOXES_CONFIG.replace('default_box = "a"\n', "") + "[box.c]\ntransport = \"ssh\"\ndestination = \"dev@box-c.example\"\n");

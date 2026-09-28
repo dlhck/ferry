@@ -40,6 +40,7 @@ describe("resolveBoxes", () => {
       {
         name: "default",
         host: { tailscale: "box", sshUser: "ferry" },
+        gitAuth: "agent",
         integrations: { paseo: true },
         tools: { gh: "latest" },
       },
@@ -50,7 +51,17 @@ describe("resolveBoxes", () => {
   test("gives empty integrations and tools when the config has none", () => {
     const { integrations: _integrations, tools: _tools, ...config } = HOST_CONFIG;
 
-    expect(resolveBoxes(config)).toEqual([{ name: "default", host: { tailscale: "box", sshUser: "ferry" }, integrations: {}, tools: {} }]);
+    expect(resolveBoxes(config)).toEqual([{ name: "default", host: { tailscale: "box", sshUser: "ferry" }, gitAuth: "agent", integrations: {}, tools: {} }]);
+  });
+
+  test("gives each box its git_auth, and agent without the key", () => {
+    const boxes = { ...BOXES_CONFIG, boxes: BOXES_CONFIG.boxes!.map((box) => (box.name === "c" ? { ...box, gitAuth: "box" as const } : box)) };
+
+    expect(resolveBoxes(boxes).map((box) => [box.name, box.gitAuth])).toEqual([
+      ["a", "agent"],
+      ["b", "agent"],
+      ["c", "box"],
+    ]);
   });
 
   test("puts the box overrides on the global integrations and tool policies", () => {

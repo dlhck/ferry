@@ -62,6 +62,7 @@ function box(
   return {
     name: "default",
     host: "ferry@build-box",
+    gitAuth: "agent",
     link: {
       async probe() {
         calls.reads.push("link.probe");
@@ -168,6 +169,7 @@ describe("Status composer", () => {
         {
           name: "default",
           host: "ferry@build-box",
+          gitAuth: "agent",
           link: { online: true, address: "100.64.0.8", error: null },
           tip: "box-tip",
           remoteMatchesBox: false,

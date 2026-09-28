@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import { homedir } from "node:os";
 import * as prompts from "@clack/prompts";
 import {
@@ -35,6 +35,7 @@ import {
   readConfig,
   setIntegration,
   writeConfig,
+  type GitAuth,
   type PartialOperatorConfig,
 } from "./config.ts";
 import { resolveTargetBox, type ResolvedBox } from "./boxes.ts";
@@ -528,8 +529,14 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .option("--host <host>", "Tailscale host name or IP address")
     .option("--ssh-user <user>", "SSH user on the host")
     .option("--ssh-destination <destination>", "explicit OpenSSH destination")
+    .addOption(
+      new Option("--git-auth <mode>", "agent forwards your SSH agent to the box git; box uses a read-only deploy key on the box").choices([
+        "agent",
+        "box",
+      ]),
+    )
     .option("--yes", "change a [host] config to box tables without a confirmation prompt")
-    .action(async (name: string, options: { host?: string; sshUser?: string; sshDestination?: string; yes?: boolean }) => {
+    .action(async (name: string, options: { host?: string; sshUser?: string; sshDestination?: string; gitAuth?: GitAuth; yes?: boolean }) => {
       await withProgress((reporter, writeLine) =>
         runBoxAdd(
           {
@@ -537,6 +544,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
             host: options.host,
             sshUser: options.sshUser,
             sshDestination: options.sshDestination,
+            ...(options.gitAuth !== undefined ? { gitAuth: options.gitAuth } : {}),
             yes: options.yes === true,
           },
           boxDependencies(reporter, writeLine),

@@ -411,6 +411,33 @@ describe("box tables", () => {
     });
   });
 
+  test("reads and writes git_auth of a box", () => {
+    const home = homeWithConfig([...TOP, "", ...BOX_A, 'git_auth = "box"', "", ...BOX_B, 'git_auth = "agent"']);
+    const config = readConfig(home);
+
+    expect(config?.boxes).toEqual([
+      { name: "a", host: { transport: "ssh", destination: "dev@box-a.example" }, gitAuth: "box" },
+      { name: "b", host: { tailscale: "box-b", sshUser: "dev" }, gitAuth: "agent" },
+    ]);
+    writeConfig({ version: 1, publisher: "operator", snapshotUrl: "snapshot.git", boxes: config?.boxes ?? [] }, home);
+    expect(readFileSync(configPath(home), "utf8")).toContain(
+      '[box.a]\ntransport = "ssh"\ndestination = "dev@box-a.example"\ngit_auth = "box"\n\n',
+    );
+    expect(readConfig(home)).toEqual(config);
+  });
+
+  test("refuses an unknown git_auth value", () => {
+    const home = homeWithConfig([...TOP, "", ...BOX_A, 'git_auth = "token"']);
+
+    expect(() => readConfig(home)).toThrow('invalid git_auth in [box.a]');
+  });
+
+  test("refuses git_auth in [host]", () => {
+    const home = homeWithConfig([...BASE, 'git_auth = "box"']);
+
+    expect(() => readConfig(home)).toThrow("unknown key git_auth in [host]");
+  });
+
   test("writing a [host] config keeps [host] and writes the same text as before", () => {
     const home = homeWithConfig(BASE);
 
