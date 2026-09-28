@@ -32,6 +32,11 @@ export type ApplyInput = {
   readonly targetHome: string;
   /** The harnesses to link. Apply owns the plan, not the layout. */
   readonly harnesses: readonly HarnessDescriptor[];
+  /**
+   * The harnesses whose agent CLI is off. Apply links nothing there, and
+   * removes only its own links: the links that resolve into the checkout.
+   */
+  readonly offHarnesses?: readonly HarnessDescriptor[];
   readonly force?: boolean;
   readonly dryRun?: boolean;
   /** Fixed value for reproducible plans. The default is the current UTC time. */
@@ -62,6 +67,13 @@ export type ApplyAction =
       readonly harness: string;
       readonly path: string;
       readonly name: string;
+    }
+  | {
+      /** The instruction file or extra root link of an off harness. */
+      readonly kind: "delete-managed-link";
+      readonly harness: string;
+      readonly path: string;
+      readonly expectedTarget: string;
     };
 
 export type UnmanagedExtra = {
@@ -106,9 +118,11 @@ export function planApply(input: ApplyInput): ApplyPlan {
   const checkout = resolve(input.checkout);
   const targetHome = resolve(input.targetHome);
   const timestamp = input.timestamp ?? currentTimestamp();
-  const request = inspectionRequest(input.harnesses, checkout, targetHome, timestamp, join);
+  const off = input.offHarnesses ?? [];
+  const request = inspectionRequest([...input.harnesses, ...off], checkout, targetHome, timestamp, join);
   return planInspection(
     input.harnesses,
+    off,
     checkout,
     targetHome,
     input.force ?? false,
@@ -145,7 +159,8 @@ async function applyRemote(input: RemoteApplyInput): Promise<ApplyPlan> {
   const checkout = posix.resolve(input.checkout);
   const targetHome = posix.resolve(input.targetHome);
   const timestamp = input.timestamp ?? currentTimestamp();
-  const request = inspectionRequest(input.harnesses, checkout, targetHome, timestamp, posix.join);
+  const off = input.offHarnesses ?? [];
+  const request = inspectionRequest([...input.harnesses, ...off], checkout, targetHome, timestamp, posix.join);
   let inspection: TargetInspection;
   try {
     inspection = await inspectRemoteTarget(request, input.link);
@@ -154,6 +169,7 @@ async function applyRemote(input: RemoteApplyInput): Promise<ApplyPlan> {
   }
   const plan = planInspection(
     input.harnesses,
+    off,
     checkout,
     targetHome,
     input.force ?? false,
@@ -235,6 +251,7 @@ function nameOf(path: string): string {
 
 function planInspection(
   harnesses: readonly HarnessDescriptor[],
+  offHarnesses: readonly HarnessDescriptor[],
   checkout: string,
   targetHome: string,
   force: boolean,
@@ -313,6 +330,24 @@ function planInspection(
         inspection,
         actions,
       );
+    }
+  }
+
+  for (const harness of offHarnesses) {
+    if (harness.skillRoot) {
+      const root = joinPath(targetHome, harness.skillRoot);
+      // The other entries of an off harness are not Ferry's, so the plan does not list them as unmanaged.
+      planRemovedNames(harness.name, root, storeSkills, snapshotNames, inspection.roots.get(root) ?? [], actions, [], joinPath, true);
+    }
+    const links = [
+      ...(harness.instructionFile ? [[harness.instructionFile, joinPath(checkout, "AGENTS.md")] as const] : []),
+      ...(harness.extraRoots ?? []).map((root) => [root, joinPath(checkout, "roots", root)] as const),
+    ];
+    for (const [path, target] of links) {
+      const state = inspection.paths.get(joinPath(targetHome, path));
+      if (state?.kind === "symlink" && state.resolvedLink === target) {
+        actions.push({ kind: "delete-managed-link", harness: harness.name, path: joinPath(targetHome, path), expectedTarget: target });
+      }
     }
   }
 
@@ -397,16 +432,14 @@ function inspectLocalTarget(request: TargetInspectionRequest): TargetInspection 
       paths.set(backup, inspectLocalPath(backup));
     }
   }
-  if (existsSync(request.instructions)) {
-    for (const target of request.instructionTargets) {
-      paths.set(target.path, inspectLocalPath(target.path));
-      paths.set(target.backupPath, inspectLocalPath(target.backupPath));
-    }
+  // Each target path is read, as on a remote target, so an off harness finds its links without a source.
+  for (const target of request.instructionTargets) {
+    paths.set(target.path, inspectLocalPath(target.path));
+    paths.set(target.backupPath, inspectLocalPath(target.backupPath));
   }
   const rootSources = new Set<string>();
   for (const target of request.rootTargets) {
-    if (!isDirectory(target.source)) continue;
-    rootSources.add(target.source);
+    if (isDirectory(target.source)) rootSources.add(target.source);
     paths.set(target.path, inspectLocalPath(target.path));
     paths.set(target.backupPath, inspectLocalPath(target.backupPath));
   }
@@ -457,10 +490,11 @@ function targetAction(action: ApplyAction, inspection: TargetInspection): Target
         target: action.target,
         backupPath: action.backupPath,
       };
-    case "delete-managed-name": {
+    case "delete-managed-name":
+    case "delete-managed-link": {
       const state = inspection.paths.get(action.path);
       return {
-        kind: action.kind,
+        kind: "delete-managed-name",
         path: action.path,
         expectedLink: state?.kind === "symlink" ? state.link : "",
       };
@@ -502,6 +536,12 @@ function commitAction(action: ApplyAction, checkout: string): void {
         !lstatSync(action.path).isSymbolicLink() ||
         resolvedLink(action.path) !== join(checkout, "skills", action.name)
       ) {
+        throw new Error("managed link changed after planning");
+      }
+      unlinkSync(action.path);
+      return;
+    case "delete-managed-link":
+      if (!lstatSync(action.path).isSymbolicLink() || resolvedLink(action.path) !== action.expectedTarget) {
         throw new Error("managed link changed after planning");
       }
       unlinkSync(action.path);

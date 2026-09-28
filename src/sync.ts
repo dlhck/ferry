@@ -21,6 +21,7 @@ import { denyRules, readSeed as readManifest, type StoreUpdate } from "./manifes
 import { Link, type LinkOptions, type LinkResult, type RunOptions } from "./link.ts";
 import {
   loadRegistry as loadEffectiveRegistry,
+  offHarnesses,
   type Registry,
   type RegistryConfig,
 } from "./registry/load.ts";
@@ -113,6 +114,8 @@ export type SyncPlan = {
   readonly paseoProfiles: readonly string[] | null;
   /** The box PATH directories, relative to the home, for the `~/.profile` block and the Paseo unit. */
   readonly pathDirs: readonly string[];
+  /** The harnesses whose agent CLI is off for the box. Apply removes only Ferry's links there. */
+  readonly offHarnesses: readonly string[];
 };
 
 export type SettingsChange = { readonly harness: string; readonly keys: readonly string[] };
@@ -207,7 +210,7 @@ export async function runSync(
   // The operator steps are the read, the publish, and the adopt.
   const operatorSteps = input.publish === false ? 2 : 3;
   progress.plan(input.dryRun ? 1 : operatorSteps + BOX_STEPS);
-  const { config, registry, seed, boxes } = await step(
+  const { config, registry, harnesses, seed, boxes } = await step(
     progress,
     "Reading the portable set",
     async () => {
@@ -359,7 +362,7 @@ export async function runSync(
   // Adopt changes only the operator machine and needs only the publish, so it runs once, after all boxes end.
   try {
     await step(progress, "Adopting published local skills", () =>
-      (dependencies.adopt ?? adoptPublishedSkills)(home, storePath, registry.harnesses, seed),
+      (dependencies.adopt ?? adoptPublishedSkills)(home, storePath, harnesses, seed),
     );
   } catch (cause) {
     const error = new SyncError(
@@ -408,6 +411,11 @@ async function applyOnBox(context: {
 }): Promise<{ applyPlan: ApplyPlan; discarded: string[] }> {
   const { plan, box, link, publication, config, registry, seed, boxStep, progress, writeLine, warn } = context;
   const { profiles, pathDirs } = box;
+  // An off agent gets no links, plugins, settings, or MCP servers. Apply removes Ferry's earlier links in its harness.
+  const off = offHarnesses(registry, box.tools);
+  const harnesses = registry.harnesses.filter((harness) => !off.includes(harness));
+  const tools = registry.tools.filter((tool) => !off.some((harness) => harness.id === tool.id));
+  const settings = seed.settings.filter((entry) => harnesses.some((harness) => harness.id === entry.harness));
   const update = await boxStep(
     "Updating the box checkout",
     async () => {
@@ -443,7 +451,8 @@ async function applyOnBox(context: {
         context.apply({
           checkout: required(plan.remoteCheckout),
           targetHome: required(plan.remoteHome),
-          harnesses: registry.harnesses,
+          harnesses,
+          offHarnesses: off,
           force: context.force,
           dryRun: false,
           link,
@@ -463,15 +472,15 @@ async function applyOnBox(context: {
   try {
     const warnings = await boxStep(
       "Installing Claude plugins",
-      () => installBoxPlugins({ settings: seed.settings, link, progress, gitAuth: box.gitAuth }),
+      () => installBoxPlugins({ settings, link, progress, gitAuth: box.gitAuth }),
       (warnings) => (warnings.length > 0 ? plural(warnings.length, "warning") : undefined),
     );
     for (const warning of warnings) warn(`Box plugins: ${warning}`);
     await boxStep("Merging settings on the box", () =>
       mergeBoxSettings({
         remoteHome: required(plan.remoteHome),
-        harnesses: registry.harnesses,
-        settings: seed.settings,
+        harnesses,
+        settings,
         link,
       }),
     );
@@ -490,8 +499,8 @@ async function applyOnBox(context: {
       () =>
         registerBoxMcp({
           remoteHome: required(plan.remoteHome),
-          harnesses: registry.harnesses,
-          tools: registry.tools,
+          harnesses,
+          tools,
           mcp: seed.mcp,
           link,
           progress,
@@ -591,6 +600,8 @@ export function inspectSyncSource(
   readonly config: SyncOperatorConfig;
   readonly boxes: readonly ResolvedBox[];
   readonly registry: Registry;
+  /** The harnesses that Manifest reads on this machine: each harness that is on for at least one box of the config. */
+  readonly harnesses: readonly HarnessDescriptor[];
   readonly seed: Seed;
 } {
   const loadedConfig = loadConfig(home, dependencies.readConfig ?? readOperatorConfig);
@@ -610,9 +621,14 @@ export function inspectSyncSource(
     );
   }
   const registry = resolveRegistry(loadedConfig.source, dependencies.loadRegistry ?? loadEffectiveRegistry);
+  // The snapshot is the same for all boxes, so the selection does not change what Manifest reads.
+  const everyBox = resolveBoxes(loadedConfig.source);
+  const harnesses = registry.harnesses.filter((harness) =>
+    everyBox.some((box) => !offHarnesses(registry, box.tools).includes(harness)),
+  );
   let seed: ReturnType<typeof readManifest>;
   try {
-    seed = (dependencies.readSeed ?? readManifest)(home, registry.harnesses, { storeUpdates: true });
+    seed = (dependencies.readSeed ?? readManifest)(home, harnesses, { storeUpdates: true });
   } catch (cause) {
     throw new SyncError("manifest-failure", "operator", `Manifest could not read publisher ${config.publisher}: ${messageOf(cause)}`, { cause });
   }
@@ -628,7 +644,7 @@ export function inspectSyncSource(
       denyRuleCause(seed.forbidden),
     );
   }
-  return { config, boxes, registry, seed };
+  return { config, boxes, registry, harnesses, seed };
 }
 
 /**
@@ -676,6 +692,9 @@ function makePlan(
   seed: Seed,
 ): SyncPlan {
   const localCheckout = join(home, ".ferry", "store");
+  const off = offHarnesses(registry, box.tools);
+  const harnesses = registry.harnesses.filter((harness) => !off.includes(harness));
+  const on = (entry: { readonly harness: string }) => harnesses.some((harness) => harness.id === entry.harness);
   return {
     operator: config.publisher,
     gitRemote: config.snapshotUrl,
@@ -685,11 +704,12 @@ function makePlan(
     remoteCheckout: remoteHome ? posix.join(remoteHome, ".ferry", "store") : null,
     message: input.message ?? null,
     force: input.force === true,
-    settingsChanges: settingsChanges(localCheckout, registry.harnesses, seed),
-    mcpServers: seed.mcp.flatMap((entry) => entry.servers.map((server) => `${entry.harness}/${server.name}`)),
+    settingsChanges: settingsChanges(localCheckout, harnesses, seed),
+    mcpServers: seed.mcp.filter(on).flatMap((entry) => entry.servers.map((server) => `${entry.harness}/${server.name}`)),
     storeUpdates: seed.storeUpdates,
     paseoProfiles: box.profiles === null ? null : box.profiles.map(profileName),
     pathDirs: box.pathDirs,
+    offHarnesses: off.map((harness) => harness.id),
   };
 }
 
@@ -734,6 +754,11 @@ function printPlan(plan: SyncPlan, gitAuth: GitAuth, writeLine: (line: string) =
         ? "SSH agent forwarding: only for the box snapshot update and the Claude plugin installs"
         : "SSH agent forwarding: none (git_auth = box)",
       `Apply: ${remoteCheckout} -> ${remoteHome} (force: ${plan.force ? "yes" : "no"})`,
+      `Off harnesses: ${
+        plan.offHarnesses.length === 0
+          ? "none"
+          : `${plan.offHarnesses.join(", ")}. Apply writes nothing there and removes only its own earlier links`
+      }`,
       "Plugins: claude plugin marketplace add and install for the carried Claude declarations",
       "Settings: carried keys replace their box values; other box keys are kept",
       `Changed settings keys since the last publish: ${

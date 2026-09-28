@@ -747,8 +747,8 @@ describe("runSync", () => {
 
     expect(registryCalls).toBe(1);
     expect(manifestHarnesses?.map((harness) => harness.id)).toContain("opencode");
-    expect(storeHarnesses).toBe(manifestHarnesses);
-    expect(applyHarnesses).toBe(manifestHarnesses);
+    expect(storeHarnesses).toEqual(manifestHarnesses);
+    expect(applyHarnesses).toEqual(manifestHarnesses);
     expect(published).toBe(true);
   });
 
@@ -1861,6 +1861,88 @@ describe("sync with more than one box", () => {
     };
     return { home, events, lines, steps, dependencies };
   }
+
+  test("an off agent: Manifest reads its harness only while a box has it on, and Apply cleans it up on the box where it is off", async () => {
+    const offConfig = {
+      ...fleetConfig,
+      tools: { pi: "off" },
+      boxes: [box("a"), { ...box("b", false), tools: { pi: "latest", claude: "off" } }],
+    };
+    const { home, dependencies, lines } = fleet({ config: offConfig as typeof fleetConfig });
+    let read: readonly string[] = [];
+    let adopted: readonly string[] = [];
+    const applied = new Map<string, { harnesses: readonly string[]; off: readonly string[] }>();
+
+    const result = await runSync({ home }, {
+      ...dependencies,
+      readSeed: (_home, harnesses) => {
+        read = harnesses.map((harness) => harness.id);
+        return seed;
+      },
+      adopt: (_home, _store, harnesses) => {
+        adopted = harnesses.map((harness) => harness.id);
+      },
+      apply: async (input) => {
+        applied.set(posix.basename(input.targetHome), {
+          harnesses: input.harnesses.map((harness) => harness.id),
+          off: (input.offHarnesses ?? []).map((harness) => harness.id),
+        });
+        return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] };
+      },
+    });
+
+    expect(read).toEqual(["agents", "claude", "codex", "pi", "cursor"]);
+    expect(adopted).toEqual(read);
+    expect(applied.get("a")).toEqual({ harnesses: ["agents", "claude", "codex", "cursor"], off: ["pi"] });
+    expect(applied.get("b")).toEqual({ harnesses: ["agents", "codex", "pi", "cursor"], off: ["claude"] });
+    expect(result.boxes.map((entry) => [entry.name, entry.plan.offHarnesses])).toEqual([["a", ["pi"]], ["b", ["claude"]]]);
+    expect(lines.join("\n")).toContain("[a] Off harnesses: pi. Apply writes nothing there and removes only its own earlier links");
+    expect(lines.join("\n")).toContain("[b] Off harnesses: claude. Apply writes nothing there and removes only its own earlier links");
+  });
+
+  test("an agent that is off on every box is not read on this machine, also with --box", async () => {
+    const offConfig = { ...fleetConfig, tools: { pi: "off" } };
+    const { home, dependencies } = fleet({ config: offConfig as typeof fleetConfig });
+    let read: readonly string[] = [];
+
+    await runSync({ home, boxes: ["b"], dryRun: true }, {
+      ...dependencies,
+      readSeed: (_home, harnesses) => {
+        read = harnesses.map((harness) => harness.id);
+        return seed;
+      },
+    });
+
+    expect(read).toEqual(["agents", "claude", "codex", "cursor"]);
+  });
+
+  test("an off agent gets no plugins, settings, or MCP servers on the box", async () => {
+    const offConfig = { ...fleetConfig, tools: { claude: "off", cursor: "off" }, boxes: [box("a")] };
+    const { home, dependencies, lines } = fleet({ config: offConfig as typeof fleetConfig });
+    const commands: string[] = [];
+    const settings = { harness: "claude", bytes: new TextEncoder().encode('{"enabledPlugins":{"tdd@market":true}}') };
+    const mcp = [
+      { harness: "claude", servers: [{ name: "linear", type: "http", url: "https://mcp.linear.app/mcp" }] },
+      { harness: "cursor", servers: [{ name: "linear", type: "http", url: "https://mcp.linear.app/mcp" }] },
+    ];
+
+    await runSync({ home }, {
+      ...dependencies,
+      readSeed: () => ({ ...seed, settings: [settings], mcp } as unknown as Seed),
+      createLink: (target) => {
+        const inner = dependencies.createLink!(target);
+        return {
+          run: async (command, options) => {
+            commands.push(command);
+            return inner.run(command, options);
+          },
+        };
+      },
+    });
+
+    expect(commands.some((command) => /claude|cursor|settings\.json|mcp/.test(command))).toBe(false);
+    expect(lines.join("\n")).toContain("\nMCP servers: declare on the box, and keep the other box servers: none\n");
+  });
 
   function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
     let resolve = () => {};

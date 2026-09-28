@@ -484,6 +484,7 @@ describe("ferry --help", () => {
         storeUpdates: [],
         paseoProfiles: null,
         pathDirs: [".local/bin"],
+        offHarnesses: [],
       },
       boxes: [],
     };
@@ -558,6 +559,8 @@ describe("ferry --help", () => {
     expect(help("expose")).toContain('"command": "ferry expose -- bun run dev --port $PASEO_PORT"');
     expect(help("watch", "install")).toContain("dev.ferry.watch.plist");
     expect(help("watch", "install")).toContain("ferry-watch.service");
+    expect(help("tools")).toContain('"off" turns off gh or an agent CLI (claude, codex, pi, cursor).');
+    expect(help("tools")).toContain("Ferry does not uninstall it from the box.");
     // The command list shows the one-line summary, not the long description.
     expect(program.helpInformation()).not.toContain("paseo.json");
   });
@@ -1715,6 +1718,45 @@ describe("--json", () => {
       const result = await run(["init", "--yes"], { runInit: commands.init.runInit });
       expect(result.json[0].error.code).toBe("usage");
     });
+  });
+
+  test('ferry auth of a tool that is off for the box fails with the code refused, and a box can turn it on again', async () => {
+    const off: PartialOperatorConfig = {
+      ...BOXES,
+      tools: { codex: "off" },
+      boxes: [BOXES.boxes![0]!, { ...BOXES.boxes![1]!, tools: { codex: "latest" } }],
+    };
+
+    const refused = await run(["auth", "codex"], { readConfig: () => off });
+
+    expect(refused.json).toHaveLength(1);
+    expect(refused.json[0]).toMatchObject({ command: "auth", ok: false, error: { code: "refused" } });
+    expect(refused.json[0].error.message).toContain("The codex tool is off for this box");
+    expect(refused.exitCodes).toEqual([1]);
+
+    let started = "";
+    const onBox = await run(["auth", "codex", "--box", "b"], {
+      readConfig: () => off,
+      runAuth: async (input, dependencies) => {
+        started = `${input.provider} ${JSON.stringify(dependencies?.readConfig?.()?.tools)}`;
+        return { kind: "already-done", provider: "codex" };
+      },
+    });
+    expect(onBox.json[0]).toMatchObject({ command: "auth", ok: true });
+    expect(started).toBe('codex {"codex":"latest"}');
+  });
+
+  test("ferry tools lists the off policy of [tools] and of each box", async () => {
+    const off: PartialOperatorConfig = { ...BOXES, tools: { pi: "off" }, boxes: [BOXES.boxes![0]!, { ...BOXES.boxes![1]!, tools: { pi: "latest" } }] };
+
+    const result = await run(["tools"], { readConfig: () => off });
+
+    const pi = result.json[0].result.tools.find((tool: { id: string }) => tool.id === "pi");
+    expect(pi.policy).toEqual({ policy: "off", default: false });
+    expect(pi.boxes).toEqual([
+      { name: "a", policy: "off", default: false },
+      { name: "b", policy: "latest", default: false },
+    ]);
   });
 
   test("without --json, the confirmations and prompts stay", async () => {

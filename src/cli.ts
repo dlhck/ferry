@@ -867,9 +867,22 @@ version. The default is "latest" for an agent CLI and "operator" for a tool.
 With "operator", Ferry skips a tool that this machine does not have.
 [box.<name>.tools] sets the policy for one box.
 
+"off" turns off gh or an agent CLI (claude, codex, pi, cursor). install,
+update, and the daily watch update skip it, ferry auth refuses it, and
+ferry status shows it as off. Ferry does not uninstall it from the box. An
+off agent also turns off its harness: sync does not read it on this machine
+and does not write it on the box, and removes the links that Ferry made
+there before. Ferry never removes other files there. A box policy can turn
+the tool on again. "off" is not valid in a [tools.<id>] table. To remove
+such a tool, delete its table.
+
   [tools]
   gh = "latest"
   codex = "0.156.1"
+  pi = "off"
+
+  [box.b.tools]
+  pi = "latest"
 
   [tools.pnpm]
   version = "operator"
