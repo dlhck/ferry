@@ -95,11 +95,17 @@ const TAKEOVER_COMMAND = [
   "  echo inactive",
   "fi",
 ].join("\n");
-const START_COMMAND = [
-  "systemctl --user daemon-reload",
-  `systemctl --user enable --now ${UNIT}`,
-  'loginctl enable-linger "$USER"',
-].join(" && ");
+const START_COMMAND = ["systemctl --user daemon-reload", `systemctl --user enable --now ${UNIT}`].join(" && ");
+/**
+ * Keep the user services running after the last logout. In a container, the
+ * user often may not turn on linger without sudo, so Ferry skips the call when
+ * linger is on, and else tries `sudo -n`.
+ */
+const LINGER_COMMAND = [
+  '[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" = yes ]',
+  'loginctl enable-linger "$USER" 2>/dev/null',
+  'sudo -n loginctl enable-linger "$USER"',
+].join(" || ");
 const STATUS_COMMAND = `systemctl --user is-active --quiet ${UNIT} && paseo daemon status --json`;
 /**
  * Register each git clone under the home directory, to a depth of three
@@ -282,6 +288,7 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
         `  # write ~/${UNIT_PATH}. PATH also has the directories of the tools in the config:`,
         ...unitFile(BUILTIN_BOX_PATH_DIRS).trimEnd().split("\n").map((line) => `  #   ${line}`),
         ...indent(START_COMMAND),
+        ...indent(LINGER_COMMAND),
         ...indent(`${STATUS_COMMAND}   # repeat until localDaemon is running, for ${Math.round(startTimeoutMs / 1_000)} s`),
         ...indent(PROJECTS_COMMAND),
         "Config: set [integrations] paseo = true after the box steps succeed.",
@@ -320,6 +327,14 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
         boxRun(link, writeCommand(UNIT_PATH, unitFile(linkPathDirs(link))), `Ferry could not write ~/${UNIT_PATH}`),
       );
       await step(progress, `Starting ${UNIT}`, () => boxRun(link, START_COMMAND, `Ferry could not start ${UNIT}`));
+      await step(progress, "Turning on linger for the box user", async () => {
+        const result = await link.run(LINGER_COMMAND, {});
+        if (result.ok) return;
+        throw new PaseoError(
+          `Ferry could not turn on linger (${result.error.message}). Without linger, ${UNIT} stops when you log out of the box. ` +
+            'Run sudo loginctl enable-linger "$USER" on the box, then run ferry integrations enable paseo again.',
+        );
+      });
       const running = await step(progress, "Waiting for the Paseo daemon", () => waitForDaemon(link), undefined, (v) => v);
 
       const registered = await step(progress, "Registering the box projects", async () =>

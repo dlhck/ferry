@@ -17,7 +17,8 @@ import { BUILTIN_BOX_PATH_DIRS } from "../src/tools/path.ts";
  * A fake box. Each Link command runs in `sh` with a temporary HOME and fake
  * `systemctl`, `loginctl`, `node`, `npm`, `sudo`, `apt` and `paseo` commands.
  * Each fake command writes its arguments to the log. Files in `state` hold the
- * unit states and the Node version.
+ * unit states, the Node version, and the linger state. With `linger-denied`,
+ * only `sudo` may turn on linger, and with `sudo-denied`, `sudo -n` fails.
  */
 type FakeBox = {
   readonly home: string;
@@ -50,8 +51,15 @@ case "$1" in
   restart) touch "$STATE/active-$2" ;;
 esac
 exit 0`,
-  loginctl: 'echo "loginctl $*" >> "$LOG"',
-  sudo: '"$@"',
+  loginctl: `[ "$1" = show-user ] && { [ -e "$STATE/linger" ] && echo yes || echo no; exit 0; }
+echo "loginctl $*" >> "$LOG"
+if [ -e "$STATE/linger-denied" ] && [ -z "$FAKE_SUDO" ]; then echo "Access denied" >&2; exit 1; fi
+touch "$STATE/linger"`,
+  sudo: `if [ "$1" = -n ]; then
+  shift; echo "sudo -n $*" >> "$LOG"
+  [ -e "$STATE/sudo-denied" ] && { echo "sudo: a password is required" >&2; exit 1; }
+fi
+FAKE_SUDO=1 "$@"`,
   apt: `echo "apt $*" >> "$LOG"
 [ "$1" = install ] && [ -e "$STATE/apt-node" ] && cp "$STATE/apt-node" "$STATE/node"
 exit 0`,
@@ -178,6 +186,39 @@ describe("Paseo enable", () => {
       "Registered 2 of 2 box projects in Paseo.",
       "Paseo 0.9.2 runs on the box at 127.0.0.1:6767. The relay is off.",
     ]);
+  });
+
+  test("skips enable-linger when linger is already on", async () => {
+    const box = fakeBox();
+    writeFileSync(join(box.state, "linger"), "");
+
+    await paseoWith("0.9.2").enable(box, noProgress);
+
+    expect(box.log().filter((line) => line.includes("linger"))).toEqual([]);
+  });
+
+  test("turns on linger with sudo -n when loginctl is denied, and reports success", async () => {
+    const box = fakeBox();
+    writeFileSync(join(box.state, "linger-denied"), "");
+
+    const lines = await paseoWith("0.9.2").enable(box, noProgress);
+
+    expect(box.log().filter((line) => line.includes("linger"))).toEqual([
+      "loginctl enable-linger ploi",
+      "sudo -n loginctl enable-linger ploi",
+      "loginctl enable-linger ploi",
+    ]);
+    expect(lines.at(-1)).toBe("Paseo 0.9.2 runs on the box at 127.0.0.1:6767. The relay is off.");
+  });
+
+  test("names linger and the fix when neither loginctl nor sudo -n can turn it on", async () => {
+    const box = fakeBox();
+    writeFileSync(join(box.state, "linger-denied"), "");
+    writeFileSync(join(box.state, "sudo-denied"), "");
+
+    await expect(paseoWith("0.9.2").enable(box, noProgress)).rejects.toThrow(
+      'Ferry could not turn on linger (sudo: a password is required). Without linger, ferry-paseo.service stops when you log out of the box. Run sudo loginctl enable-linger "$USER" on the box',
+    );
   });
 
   test("the unit runs the daemon in the foreground with the Link PATH, loopback listen and no relay", () => {
@@ -467,7 +508,10 @@ describe("Paseo plan", () => {
 
     expect(lines[0]).toMatch(/^Local app: Paseo 0\.9\.2 \(/);
     expect(lines).toContain('  npm install -g --prefix "$HOME/.local" @getpaseo/cli@0.9.2');
-    expect(lines).toContain("  systemctl --user daemon-reload && systemctl --user enable --now ferry-paseo.service && loginctl enable-linger \"$USER\"");
+    expect(lines).toContain("  systemctl --user daemon-reload && systemctl --user enable --now ferry-paseo.service");
+    expect(lines).toContain(
+      '  [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" = yes ] || loginctl enable-linger "$USER" 2>/dev/null || sudo -n loginctl enable-linger "$USER"',
+    );
     expect(lines).toContain("  #   Environment=PASEO_RELAY_ENABLED=false");
     expect(lines.at(-1)).toBe("Config: set [integrations] paseo = true after the box steps succeed.");
   });
