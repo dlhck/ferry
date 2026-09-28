@@ -11,7 +11,8 @@ import {
   type WatchSyncRequest,
 } from "../src/watch.ts";
 import { StoreRefusal } from "../src/store.ts";
-import { BoxesSyncError, SyncError, type SyncPlan } from "../src/sync.ts";
+import { BoxesSyncError, runSync, SyncError, type SyncPlan } from "../src/sync.ts";
+import type { Seed } from "../src/manifest.ts";
 import { createPaseo } from "../src/integrations/paseo.ts";
 import type { Integration } from "../src/integrations/types.ts";
 import { runUpdateCommand } from "../src/update.ts";
@@ -303,6 +304,95 @@ describe("multi-box watch", () => {
     expect(third!.time - second!.time).toBeGreaterThanOrEqual(2_000);
     expect(record.lines).toContain("[b] Watch sync failed; retrying in 2000 ms: box: box-b.example is offline");
     expect(record.states.at(-1)).toEqual({ published: "two", boxes: { a: "two", b: "two" } });
+  });
+
+  test("the default sync publishes once, and a box retry applies the published tip to the retried box only", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-watch-retry-"));
+    try {
+      const seed: Seed = {
+        ok: true,
+        skills: [],
+        instructions: null,
+        roots: [],
+        settings: [],
+        mcp: [],
+        identity: "two",
+        leftovers: [],
+        storeUpdates: [],
+      };
+      const box = (name: string) => ({ name, host: { transport: "ssh" as const, destination: `dev@box-${name}.example` } });
+      const events: string[] = [];
+      let bOffline = true;
+      const controller = new AbortController();
+      let time = 0;
+      await runWatch(
+        { home, signal: controller.signal, pollMs: 100, debounceMs: 100 },
+        {
+          observe: () => accepted("two"),
+          readBoxes: () => ["a", "b"],
+          sleep: async (milliseconds) => {
+            time += milliseconds;
+            if (time > 3_000) controller.abort();
+          },
+          now: () => time,
+          readState: () => ({ published: "one", boxes: { a: "one", b: "one" } }),
+          writeState: () => {},
+          writeLine: () => {},
+          runSync: (input, dependencies) =>
+            runSync(input, {
+              ...dependencies,
+              readConfig: () => ({
+                version: 1,
+                publisher: "operator-machine",
+                snapshotUrl: "git@example.test:operator/ferry-store.git",
+                boxes: [box("a"), box("b")],
+              }),
+              publisher: () => "operator-machine",
+              readSeed: () => seed,
+              createLink: (target) => {
+                const name = /box-([a-z]+)\./.exec((target as { destination: string }).destination)![1]!;
+                return {
+                  run: async (command) => {
+                    if (command.startsWith("printf")) {
+                      if (name === "b" && bOffline) {
+                        bOffline = false;
+                        return { ok: false, error: { origin: "network", code: "host-offline", message: "no route" } };
+                      }
+                      return { ok: true, address: name, stdout: `/home/${name}\n`, stderr: "" };
+                    }
+                    if (command.includes("git clone")) events.push(`${name}:update ${/reset --quiet --hard (\S+)/.exec(command)![1]}`);
+                    return { ok: true, address: name, stdout: "", stderr: "" };
+                  },
+                };
+              },
+              openStore: async () => ({
+                path: join(home, ".ferry", "store"),
+                publish: async () => {
+                  events.push("publish");
+                  return { published: true, tip: "abc123" };
+                },
+              }),
+              apply: async (applyInput) => {
+                events.push(`${applyInput.targetHome}:apply`);
+                return { checkout: applyInput.checkout, targetHome: applyInput.targetHome, actions: [], unmanaged: [] };
+              },
+              adopt: () => {},
+              writePlan: () => {},
+              writeLine: () => {},
+            }),
+        },
+      );
+
+      expect(events).toEqual([
+        "publish",
+        "a:update 'abc123'",
+        "/home/a:apply",
+        "b:update '@{upstream}'",
+        "/home/b:apply",
+      ]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("reads the config each cycle: a new box syncs, and a removed box leaves the state", async () => {
