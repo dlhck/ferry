@@ -1,7 +1,26 @@
 import { describe, expect, test } from "bun:test";
-import type { ForwardResult, LinkOptions, LinkResult, TunnelOptions } from "../src/link.ts";
+import { quoteShell } from "../src/box-settings.ts";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type {
+  ControlConnection,
+  ForwardResult,
+  LinkFailure,
+  LinkOptions,
+  LinkResult,
+  MasterOptions,
+  TunnelOptions,
+  TunnelPort,
+} from "../src/link.ts";
 import {
+  diffEntries,
+  FOLLOW_COMMAND,
   isPortFree,
+  pickLocalPort,
+  snapshotReader,
+  type FollowEntry,
+  type FollowForward,
   LIST_COMMAND,
   parseListeners,
   parsePortSpecs,
@@ -30,6 +49,10 @@ class FakeLink {
     this.commands.push(command);
     return this.runResult;
   }
+
+  async master(_options: MasterOptions): Promise<ControlConnection | LinkFailure> {
+    throw new Error("unexpected master connection");
+  }
 }
 
 function harness(link: FakeLink, overrides: Partial<TunnelDependencies> = {}) {
@@ -49,6 +72,8 @@ function harness(link: FakeLink, overrides: Partial<TunnelDependencies> = {}) {
       };
     },
     isPortFree: async () => true,
+    controlPath: join(tmpdir(), "ferry-tunnel-test.sock"),
+    reconnectMs: 0,
     ...overrides,
   };
   return { dependencies, lines, links, interrupt: () => interrupt?.() };
@@ -286,5 +311,224 @@ describe("isPortFree", () => {
     expect(await isPortFree(port)).toBe(false);
     server.stop(true);
     expect(await isPortFree(port)).toBe(true);
+  });
+});
+
+const ok: LinkResult = { ok: true, address: "dev@lab.example", stdout: "", stderr: "" };
+
+/** A master connection whose box command output the test writes. */
+class FakeMaster implements ControlConnection {
+  readonly calls: string[] = [];
+  write: (text: string) => void = () => {};
+  readonly closed: Promise<ForwardResult>;
+  private close!: (result: ForwardResult) => void;
+  private endStream!: (result: ForwardResult) => void;
+
+  constructor() {
+    this.closed = new Promise((resolve) => {
+      this.close = resolve;
+    });
+  }
+
+  stream(command: string, onStdout: (text: string) => void, signal?: AbortSignal): Promise<ForwardResult> {
+    expect(command).toBe(`sh -c ${quoteShell(FOLLOW_COMMAND)}`);
+    this.write = onStdout;
+    return new Promise((resolve) => {
+      this.endStream = resolve;
+      signal?.addEventListener("abort", () => resolve(stopped), { once: true });
+    });
+  }
+
+  /** The box command ends, as when the connection drops. */
+  drop(message: string): void {
+    this.endStream({ ok: false, error: { code: "forward-failed", origin: "network", message } });
+  }
+
+  async forward(port: TunnelPort): Promise<LinkResult> {
+    this.calls.push(`forward ${port.localPort}:${port.remotePort}`);
+    return ok;
+  }
+
+  async cancel(port: TunnelPort): Promise<LinkResult> {
+    this.calls.push(`cancel ${port.localPort}:${port.remotePort}`);
+    return ok;
+  }
+
+  async exit(): Promise<LinkResult> {
+    this.calls.push("exit");
+    this.close(stopped);
+    return ok;
+  }
+}
+
+class FollowLink extends FakeLink {
+  readonly masters: MasterOptions[] = [];
+
+  constructor(private readonly next: () => FakeMaster | LinkFailure) {
+    super(async () => stopped);
+  }
+
+  override async master(options: MasterOptions): Promise<ControlConnection | LinkFailure> {
+    this.masters.push(options);
+    return this.next();
+  }
+}
+
+async function waitFor(check: () => boolean): Promise<void> {
+  for (let tries = 0; !check(); tries += 1) {
+    if (tries > 200) throw new Error("condition not met");
+    await Bun.sleep(5);
+  }
+}
+
+const entry = (pid: number, port: number, name: string, cwd = "/home/dev/app") =>
+  `${pid}\t${JSON.stringify({ port, name, cwd, startedAt: "2026-09-28T10:00:00.000Z" })}\n`;
+
+describe("ferry tunnel --follow", () => {
+  const followInput: TunnelInput = { ports: [], list: false, follow: true, box: BOX };
+
+  test("opens a forward for each entry, closes only the one that goes away, and Ctrl-C closes the master", async () => {
+    const master = new FakeMaster();
+    const link = new FollowLink(() => master);
+    const busy = new Set([3000]);
+    const { dependencies, lines, interrupt } = harness(link, {
+      isPortFree: async (port) => !busy.has(port),
+    });
+
+    const running = runTunnel(followInput, dependencies);
+    await waitFor(() => lines.length > 0);
+    master.write(`home\t/home/dev\n${entry(11, 3000, "web")}${entry(12, 5173, "docs", "/srv/docs").slice(0, 10)}`);
+    master.write(`${entry(12, 5173, "docs", "/srv/docs").slice(10)}.\n`);
+    await waitFor(() => master.calls.length === 2);
+
+    expect(master.calls).toEqual(["forward 3001:3000", "forward 5173:5173"]);
+    expect(lines.slice(1)).toEqual([
+      "web  http://localhost:3001 -> lab:3000 (~/app)",
+      "docs  http://localhost:5173 -> lab:5173 (/srv/docs)",
+    ]);
+
+    master.write(`${entry(12, 5173, "docs", "/srv/docs")}.\n`);
+    await waitFor(() => master.calls.length === 3);
+    expect(master.calls[2]).toBe("cancel 3001:3000");
+    expect(lines.at(-1)).toBe("web  http://localhost:3001 -> lab:3000 (~/app) closed");
+
+    interrupt();
+    await running;
+    expect(master.calls).toEqual(["forward 3001:3000", "forward 5173:5173", "cancel 3001:3000", "exit"]);
+    expect(lines.at(-1)).toBe("Tunnel closed.");
+    expect(link.masters).toHaveLength(1);
+  });
+
+  test("connects again after the connection drops, and reads the entries again", async () => {
+    const masters = [new FakeMaster(), new FakeMaster()];
+    let index = 0;
+    const link = new FollowLink(() => masters[index++]!);
+    const { dependencies, lines, interrupt } = harness(link, {
+      reconnectMs: 0,
+    });
+
+    const running = runTunnel(followInput, dependencies);
+    await waitFor(() => lines.length > 0);
+    masters[0]!.write(`${entry(11, 3000, "web")}.\n`);
+    await waitFor(() => masters[0]!.calls.length === 1);
+    masters[0]!.drop("Connection reset by peer");
+    await waitFor(() => lines.some((line) => line.startsWith("Connected again.")));
+    masters[1]!.write(`${entry(11, 3000, "web")}.\n`);
+    await waitFor(() => masters[1]!.calls.length === 1);
+    interrupt();
+    await running;
+
+    expect(lines).toContain("The connection to lab closed: Connection reset by peer. Ferry connects again in 0 s.");
+    expect(masters[1]!.calls).toEqual(["forward 3000:3000", "exit"]);
+  });
+
+  test("a master connection that does not start fails the command", async () => {
+    const link = new FollowLink(() => ({ ok: false, error: { code: "ssh-failed", origin: "network", message: "no route to host" } }));
+    const { dependencies } = harness(link);
+
+    await expect(runTunnel(followInput, dependencies)).rejects.toThrow("Could not connect to lab: no route to host");
+  });
+
+  test("--follow does not take ports or --list", async () => {
+    const { dependencies } = harness(new FollowLink(() => new FakeMaster()));
+    await expect(runTunnel({ ...followInput, ports: ["3000"] }, dependencies)).rejects.toThrow("not more than one");
+    await expect(runTunnel({ ...followInput, list: true }, dependencies)).rejects.toThrow("not more than one");
+  });
+});
+
+describe("diffEntries", () => {
+  const web: FollowEntry = { pid: 11, port: 3000, name: "web", cwd: null };
+  const docs: FollowEntry = { pid: 12, port: 5173, name: "docs", cwd: null };
+  const open = (entry: FollowEntry): [number, FollowForward] => [entry.port, { ...entry, localPort: entry.port }];
+
+  test("adds new entries and removes the forwards whose entry went away", () => {
+    expect(diffEntries(new Map([open(web)]), [docs])).toEqual({ add: [docs], remove: [{ ...web, localPort: 3000 }] });
+  });
+
+  test("keeps the forward when a new process announces the same port, and uses the first entry of a port", () => {
+    expect(diffEntries(new Map([open(web)]), [{ ...web, pid: 99 }])).toEqual({ add: [], remove: [] });
+    expect(diffEntries(new Map(), [web, { ...web, pid: 99 }])).toEqual({ add: [web], remove: [] });
+  });
+});
+
+describe("pickLocalPort", () => {
+  test("uses the box port when it is free, else the next free port that no other forward holds", async () => {
+    expect(await pickLocalPort(3000, new Set(), async () => true)).toBe(3000);
+    expect(await pickLocalPort(3000, new Set(), async (port) => port !== 3000)).toBe(3001);
+    expect(await pickLocalPort(3000, new Set([3001]), async (port) => port !== 3000)).toBe(3002);
+    expect(await pickLocalPort(65_535, new Set(), async () => false)).toBeNull();
+  });
+});
+
+describe("snapshotReader", () => {
+  test("reads the home, the entries of each snapshot, and ignores lines that are not valid entries", () => {
+    const homes: string[] = [];
+    const snapshots: FollowEntry[][] = [];
+    const read = snapshotReader((home) => homes.push(home), (entries) => snapshots.push(entries));
+
+    read("home\t/home/dev\n\n.\n");
+    read(`${entry(11, 3000, "web")}12\tnot json\n13\t{"port":0}\nx\t{"port":1}\n\n`);
+    read(`14\t{"port":4000}\n.\n`);
+
+    expect(homes).toEqual(["/home/dev"]);
+    expect(snapshots).toEqual([
+      [],
+      [
+        { pid: 11, port: 3000, name: "web", cwd: "/home/dev/app" },
+        { pid: 14, port: 4000, name: null, cwd: null },
+      ],
+    ]);
+  });
+});
+
+describe("FOLLOW_COMMAND", () => {
+  test("prints the entries whose pid runs, and a new snapshot after a change", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-follow-"));
+    const dir = join(home, ".ferry", "exposed");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${process.pid}.json`), '{"port":3000,\n"name":"web"}\n');
+    // A pid above the Linux and macOS limits never runs.
+    writeFileSync(join(dir, "99999999.json"), '{"port":4000}\n');
+    const box = Bun.spawn(["sh", "-c", FOLLOW_COMMAND], { env: { ...process.env, HOME: home }, stdout: "pipe" });
+    const snapshots: FollowEntry[][] = [];
+    const read = snapshotReader(() => {}, (entries) => snapshots.push(entries));
+    const reading = (async () => {
+      const decoder = new TextDecoder();
+      for await (const chunk of box.stdout) read(decoder.decode(chunk, { stream: true }));
+    })();
+    try {
+      await waitFor(() => snapshots.length === 1);
+      expect(snapshots[0]).toEqual([{ pid: process.pid, port: 3000, name: "web", cwd: null }]);
+
+      rmSync(join(dir, `${process.pid}.json`));
+      const started = Date.now();
+      for (let tries = 0; snapshots.length < 2 && tries < 60; tries += 1) await Bun.sleep(50);
+      expect(snapshots[1]).toEqual([]);
+      expect(Date.now() - started).toBeLessThan(2_000);
+    } finally {
+      box.kill();
+      await reading;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

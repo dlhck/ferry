@@ -380,3 +380,76 @@ describe("Link", () => {
     ]);
   });
 });
+
+/** A host whose OpenSSH master stays open until its signal aborts. */
+class MasterHost implements HostAdapter {
+  readonly commands: HostCommand[] = [];
+
+  constructor(private checkFails = 0) {}
+
+  async run(command: HostCommand): Promise<HostCommandResult> {
+    this.commands.push(command);
+    const argv = command.argv;
+    if (argv.includes("-M")) {
+      return new Promise((resolve) =>
+        command.signal?.addEventListener("abort", () => resolve(result({ exitCode: 255 })), { once: true }),
+      );
+    }
+    if (argv.includes("check") && this.checkFails > 0) {
+      this.checkFails -= 1;
+      return result({ exitCode: 255, stderr: "Control socket connect: No such file or directory" });
+    }
+    if (argv.includes("-o") && argv.includes("ControlMaster=no")) {
+      command.onStdout?.("home\t/home/dev\n");
+      return result();
+    }
+    return result();
+  }
+}
+
+describe("Link.master", () => {
+  test("opens one master connection, waits until it accepts commands, and runs forwards over its socket", async () => {
+    const host = new MasterHost(2);
+    const link = new Link({ destination: "dev@box.example" }, host);
+    const controller = new AbortController();
+
+    const master = await link.master({ controlPath: "/tmp/ferry.sock", signal: controller.signal });
+    if ("ok" in master) throw new Error(master.error.message);
+    expect(await master.forward({ localPort: 3001, remotePort: 3000 })).toMatchObject({ ok: true });
+    expect(await master.cancel({ localPort: 3001, remotePort: 3000 })).toMatchObject({ ok: true });
+    const chunks: string[] = [];
+    await master.stream("watch", (text) => chunks.push(text));
+    expect(await master.exit()).toMatchObject({ ok: true });
+    controller.abort();
+    expect(await master.closed).toMatchObject({ ok: true, stopped: true });
+
+    const argv = host.commands.map((command) => command.argv.join(" "));
+    expect(argv[0]).toBe(
+      "ssh -N -M -S /tmp/ferry.sock -o ControlPersist=no -o ServerAliveInterval=15 -o ServerAliveCountMax=3 " +
+        "-o BatchMode=yes -o ConnectTimeout=10 dev@box.example",
+    );
+    expect(argv.filter((line) => line.includes("-O check"))).toHaveLength(3);
+    expect(argv.slice(4)).toEqual([
+      "ssh -S /tmp/ferry.sock -O forward -L 127.0.0.1:3001:127.0.0.1:3000 dev@box.example",
+      "ssh -S /tmp/ferry.sock -O cancel -L 127.0.0.1:3001:127.0.0.1:3000 dev@box.example",
+      `ssh -S /tmp/ferry.sock -o ControlMaster=no -o BatchMode=yes -o ConnectTimeout=10 dev@box.example ${BOX_PATH}watch`,
+      "ssh -S /tmp/ferry.sock -O exit dev@box.example",
+    ]);
+    expect(chunks).toEqual(["home\t/home/dev\n"]);
+  });
+
+  test("a master that exits before it accepts commands returns its failure", async () => {
+    const host: HostAdapter = {
+      run: async (command) =>
+        command.argv.includes("-M")
+          ? result({ exitCode: 255, stderr: "ssh: connect to host box.example port 22: Connection refused" })
+          : result({ exitCode: 255 }),
+    };
+    const link = new Link({ destination: "dev@box.example" }, host);
+
+    expect(await link.master({ controlPath: "/tmp/ferry.sock" })).toEqual({
+      ok: false,
+      error: { code: "forward-failed", origin: "network", message: "ssh: connect to host box.example port 22: Connection refused" },
+    });
+  });
+});

@@ -10,6 +10,8 @@ export type HostCommand = {
   readonly input?: Uint8Array;
   /** The command is stopped when this signal aborts. */
   readonly signal?: AbortSignal;
+  /** Gets the standard output while the command runs. The result then has no standard output. */
+  readonly onStdout?: (text: string) => void;
 };
 
 export type HostCommandResult = {
@@ -108,7 +110,34 @@ export type TunnelOptions = {
   readonly signal?: AbortSignal;
 };
 
+export type MasterOptions = {
+  /** The path of the control socket. */
+  readonly controlPath: string;
+  /** The master connection has no timeout. It is stopped when this signal aborts. */
+  readonly signal?: AbortSignal;
+};
+
+/**
+ * One OpenSSH master connection (ControlMaster). Commands and port forwards
+ * use it, so a new forward or the removal of a forward does not touch the
+ * other forwards.
+ */
+export type ControlConnection = {
+  /** Settles when the master connection ends. */
+  readonly closed: Promise<ForwardResult>;
+  /** Run a long command on the box over the connection, until it exits or the signal aborts. */
+  stream(command: string, onStdout: (text: string) => void, signal?: AbortSignal): Promise<ForwardResult>;
+  /** Add a forward from `127.0.0.1:<localPort>` to `127.0.0.1:<remotePort>` on the box. */
+  forward(port: TunnelPort): Promise<LinkResult>;
+  /** Remove a forward that `forward` added. */
+  cancel(port: TunnelPort): Promise<LinkResult>;
+  /** Close the forwards and the master connection. */
+  exit(): Promise<LinkResult>;
+};
+
 const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
+/** The interval of the check that the master connection accepts commands. */
+const MASTER_CHECK_INTERVAL_MS = 100;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 
@@ -206,11 +235,103 @@ export class Link {
     return this.runForward(resolved.address, argv, Number.POSITIVE_INFINITY, options.signal);
   }
 
+  /**
+   * Open one master connection, and return when it accepts commands. The
+   * connection stays open until the signal aborts, `exit` runs, or the
+   * connection drops. Keepalives let OpenSSH notice a dropped connection.
+   */
+  async master(options: MasterOptions): Promise<ControlConnection | LinkFailure> {
+    const invalid = this.validateConfig();
+    if (invalid) return invalid;
+
+    const resolved = await this.resolve();
+    if (!resolved.ok) return resolved;
+
+    const { address, destination } = resolved;
+    const socket = ["-S", options.controlPath];
+    const stop = new AbortController();
+    const abort = () => stop.abort();
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) abort();
+    const closed = this.runForward(
+      address,
+      [
+        "ssh",
+        "-N",
+        "-M",
+        ...socket,
+        "-o",
+        "ControlPersist=no",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        ...this.sshOptions(),
+        destination,
+      ],
+      Number.POSITIVE_INFINITY,
+      stop.signal,
+    ).finally(() => options.signal?.removeEventListener("abort", abort));
+
+    const control = async (operation: string[]): Promise<LinkResult> => {
+      let execution: HostCommandResult;
+      try {
+        execution = await this.adapter.run({
+          argv: ["ssh", ...socket, ...operation, destination],
+          timeoutMs: this.options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+        });
+      } catch (error) {
+        return failure("ssh-start-failed", "operator", messageOf(error, "could not start OpenSSH"));
+      }
+      if (execution.timedOut) return failure("forward-timeout", "network", "the OpenSSH control command timed out");
+      if (execution.exitCode !== 0) {
+        return failure("forward-failed", "network", outputMessage(execution, "the OpenSSH control command failed"));
+      }
+      return success(address, execution);
+    };
+    const spec = (port: TunnelPort) => ["-L", `127.0.0.1:${port.localPort}:127.0.0.1:${port.remotePort}`];
+
+    let ended = false;
+    void closed.then(() => {
+      ended = true;
+    });
+    const deadline = Date.now() + (this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS) + DEFAULT_PROBE_TIMEOUT_MS;
+    for (;;) {
+      await Promise.race([closed, Bun.sleep(MASTER_CHECK_INTERVAL_MS)]);
+      if (ended) {
+        const result = await closed;
+        return result.ok ? failure("ssh-failed", "network", "the SSH master connection ended") : result;
+      }
+      if ((await control(["-O", "check"])).ok) break;
+      if (Date.now() > deadline) {
+        stop.abort();
+        await closed;
+        return failure("ssh-failed", "network", "the SSH master connection did not start in time");
+      }
+    }
+
+    return {
+      closed,
+      stream: (command, onStdout, signal) =>
+        this.runForward(
+          address,
+          ["ssh", ...socket, "-o", "ControlMaster=no", ...this.sshOptions(), destination, `${pathExport(this.pathDirs)}; ${command}`],
+          Number.POSITIVE_INFINITY,
+          signal,
+          onStdout,
+        ),
+      forward: (port) => control(["-O", "forward", ...spec(port)]),
+      cancel: (port) => control(["-O", "cancel", ...spec(port)]),
+      exit: () => control(["-O", "exit"]),
+    };
+  }
+
   private async runForward(
     address: string,
     argv: readonly string[],
     timeoutMs: number,
     signal: AbortSignal | undefined,
+    onStdout?: (text: string) => void,
   ): Promise<ForwardResult> {
     let execution: HostCommandResult;
     try {
@@ -218,6 +339,7 @@ export class Link {
         argv,
         timeoutMs,
         ...(signal ? { signal } : {}),
+        ...(onStdout ? { onStdout } : {}),
       });
     } catch (error) {
       return failure("ssh-start-failed", "operator", messageOf(error, "could not start OpenSSH"));
@@ -353,7 +475,7 @@ export class BunHostAdapter implements HostAdapter {
       stdout: "pipe",
       stderr: "pipe",
     });
-    const stdout = new Response(process.stdout).text();
+    const stdout = command.onStdout ? streamText(process.stdout, command.onStdout) : new Response(process.stdout).text();
     const stderr = new Response(process.stderr).text();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<"timeout">((resolve) => {
@@ -380,6 +502,13 @@ export class BunHostAdapter implements HostAdapter {
       timedOut: false,
     };
   }
+}
+
+/** Give each decoded chunk to `onText`. Returns an empty string, so a long stream keeps no output in memory. */
+async function streamText(stream: ReadableStream<Uint8Array>, onText: (text: string) => void): Promise<string> {
+  const decoder = new TextDecoder();
+  for await (const chunk of stream) onText(decoder.decode(chunk, { stream: true }));
+  return "";
 }
 
 type TailscalePeer = {

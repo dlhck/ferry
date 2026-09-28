@@ -23,7 +23,8 @@ export type ResolvedVersion =
   | { readonly kind: "skip"; readonly policy: ToolPolicy; readonly reason: "not on the operator machine" }
   | { readonly kind: "refused"; readonly policy: ToolPolicy; readonly reason: string };
 
-export type ToolAction = "install" | "update" | "skip-same" | "skip-not-on-operator";
+/** `skip-dev-build`: this Ferry is a development build, so Ferry puts no Ferry on the box. */
+export type ToolAction = "install" | "update" | "skip-same" | "skip-not-on-operator" | "skip-dev-build";
 
 /** One tool in the plan. `command` is set for `install` and `update`. */
 export type ToolStep = {
@@ -174,6 +175,8 @@ export function describeStep(step: ToolStep): string {
       return `skipped, the box has ${step.version} ${policy}`;
     case "skip-not-on-operator":
       return `skipped, not on the operator machine ${policy}`;
+    case "skip-dev-build":
+      return `skipped, this Ferry is a development build without a release version ${policy}`;
     default:
       return `${step.action} ${step.version ?? "latest"} ${policy}: ${step.command}`;
   }

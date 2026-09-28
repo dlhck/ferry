@@ -7,6 +7,7 @@ import {
   type AuthStatusReport,
   type McpLoginStatus,
 } from "./auth-start.ts";
+import { boxFerryStatus } from "./box-ferry.ts";
 import { BOX_SNAPSHOT_KEY, resolveBoxes, type ResolvedBox } from "./boxes.ts";
 import { readConfig, resolveLinkOptions, type OperatorHostConfig, type PartialOperatorConfig } from "./config.ts";
 import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
@@ -30,6 +31,7 @@ import { checkTools, type ToolStatus } from "./tools/check.ts";
 import { effectivePolicy } from "./tools/resolve.ts";
 import { RealGitRunner, Store, type TipReport } from "./store.ts";
 import { boxChangesCommand } from "./sync.ts";
+import { VERSION } from "./version.ts";
 
 const STORE_RELATIVE_PATH = ".ferry/store";
 /** `sudo -n` fails when sudo asks for a password. Only the answer goes to stdout. */
@@ -70,6 +72,8 @@ export type StatusCommandDependencies = {
   readonly integrations: readonly Integration[];
   readonly writeLine: (line: string) => void;
   readonly progress: Progress;
+  /** The version of this Ferry. The Ferry row compares the box install with it. */
+  readonly ferryVersion: string;
 };
 
 /** Read the selected boxes and print one report without changing any machine. */
@@ -146,7 +150,12 @@ function boxDependencies(
       },
     },
     auth: resolved.createAuthStart(link, registry.tools),
-    tools: { check: (online) => checkTools(registry.tools, box.tools, local, online ? link : null) },
+    tools: {
+      check: async (online) => [
+        ...(await checkTools(registry.tools, box.tools, local, online ? link : null)),
+        await boxFerryStatus(online ? link : null, resolved.ferryVersion),
+      ],
+    },
     integrations: resolved.integrations
       .filter((integration) => box.integrations[integration.id] === true)
       .map((integration) => ({
@@ -244,6 +253,7 @@ const defaultDependencies: StatusCommandDependencies = {
   integrations: INTEGRATIONS,
   writeLine: console.log,
   progress: noProgress,
+  ferryVersion: VERSION,
 };
 
 /** The SSH destination of a box, as the operator would type it. */
