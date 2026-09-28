@@ -109,6 +109,7 @@ import {
   type UpdateCommandResult,
 } from "./update.ts";
 import { isReleaseVersion, VERSION } from "./version.ts";
+import { offerSelfUpdate, offersSelfUpdate, runSelfUpdate, type SelfUpdateDependencies } from "./self-update.ts";
 
 const DESCRIPTION = `Ferry keeps a remote Linux agent box in the same shape as this machine.
 
@@ -144,6 +145,11 @@ type CliDependencies = {
   readonly runExpose?: (input: ExposeInput, dependencies?: Partial<ExposeDependencies>) => Promise<number>;
   /** True when this is a box install. The default is `isBoxMode`. */
   readonly isBoxMode?: () => boolean;
+  /** True when stdin and stdout are a terminal, so Ferry can ask to update itself. */
+  readonly isInteractive?: () => boolean;
+  /** Asks to update Ferry. True when the update ran and the command must stop. The default is `offerSelfUpdate`. */
+  readonly offerSelfUpdate?: () => Promise<boolean>;
+  readonly runSelfUpdate?: typeof runSelfUpdate;
   /** Sets the exit code of `ferry expose`. */
   readonly setExitCode?: (code: number) => void;
   readonly runStatus?: (
@@ -238,6 +244,7 @@ const JSON_RESULTS: Record<string, string> = {
   tools: "{ tools: [{ id, name, kind, install, policy: { policy, default }, boxes, operatorVersion }] }",
   watch: "events watch-started, synced, sync-failed, sync-refused, content-refused, config-error, update-started, update-failed, watch-stopped",
   "watch install": "{ manager, path }",
+  "self-update": "{ current, latest, updated }. The output of the installer goes to stderr",
   "box list": "{ boxes: [{ name, transport, destination, default }] }",
   "box add": "{ name, transport, destination, gitAuth, migrated }",
   "box remove": "{ name, defaultBoxRemoved }",
@@ -368,7 +375,7 @@ function createProgram(dependencies: CliDependencies): { program: Command; state
   const boxNames = (): string[] => program.opts<{ box?: string[] }>().box ?? [];
   /** The commands that accept --box. Each other command refuses it. */
   const boxCommands = new Set<Command>();
-  program.hook("preAction", (_program, action) => {
+  program.hook("preAction", async (_program, action) => {
     active = commandPath(action);
     // A box install runs only the box commands. Commander prints the version and help before this hook.
     if (action !== program && action.name() !== "expose" && (dependencies.isBoxMode ?? isBoxMode)()) {
@@ -387,6 +394,17 @@ function createProgram(dependencies: CliDependencies): { program: Command; state
     }
     if (names.length > 0 && !boxCommands.has(action)) {
       throw new FerryError("usage", `--box does not apply to ferry ${commandPath(action)}.`);
+    }
+    const offers = offersSelfUpdate({
+      json: json(),
+      // `self-update` does the check itself.
+      streaming: STREAM_COMMANDS.has(active) || active === "self-update",
+      interactive: (dependencies.isInteractive ?? isInteractive)(),
+      env: process.env,
+    });
+    // After the update, the process is still the old version. Commander ends a run with exit code 0 without an error.
+    if (offers && (await (dependencies.offerSelfUpdate ?? offerSelfUpdate)())) {
+      throw new CommanderError(0, "ferry.selfUpdated", "");
     }
   });
   /**
@@ -1016,6 +1034,26 @@ Ferry update, restart the service:
       report(result, (result) => writeLine(`Installed ${result.manager} service at ${result.path}`));
     });
 
+  program
+    .command("self-update")
+    .description(`Update Ferry on this machine to the latest release.
+
+Ferry updates in the same way as it was installed: with npm, or with the
+release installer in the directory of this binary. Then run ferry update to
+put the new version on the boxes.
+
+On a terminal, each command also asks to update when a newer release is
+there. Ferry reads the latest release at most once a day. It does not ask
+with --json, with CI set, or with FERRY_NO_UPDATE_CHECK=1.`)
+    .action(async () => {
+      const selfUpdateDependencies: Partial<SelfUpdateDependencies> = {
+        writeLine,
+        // With --json, stdout carries only JSON, so the output of the installer goes to stderr.
+        ...(json() ? { run: runToStderr } : {}),
+      };
+      report(await (dependencies.runSelfUpdate ?? runSelfUpdate)(selfUpdateDependencies));
+    });
+
   const box = program.command("box").description("List, add, and remove the boxes of the config");
   const boxDependencies = (
     reporter: Progress,
@@ -1351,6 +1389,10 @@ function commandPath(command: Command): string {
  */
 export function isBoxMode(version = VERSION, home = homedir()): boolean {
   return isReleaseVersion(version) && existsSync(join(home, BOX_MARKER));
+}
+
+function isInteractive(): boolean {
+  return process.stdin.isTTY === true && process.stdout.isTTY === true;
 }
 
 function renderError(message: string): void {

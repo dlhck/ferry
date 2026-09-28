@@ -25,7 +25,7 @@ Or with npm. Do not use `--omit=optional`, because the executable comes from an 
 npm i -g @dlhck/ferry
 ```
 
-Run the same command again to update Ferry. `install.sh` lists its environment variables, such as `FERRY_VERSION`, at the top of the file.
+To update Ferry, run `ferry self-update`. On a terminal, Ferry also asks to update when a newer release is there. It checks at most once a day, and never with `--json`, with `CI` set, or with `FERRY_NO_UPDATE_CHECK=1`. `install.sh` lists its environment variables, such as `FERRY_VERSION`, at the top of the file.
 
 You also need:
 
@@ -60,6 +60,7 @@ Use `--host <tailscale host> --ssh-user <user>` instead of `--ssh-destination` f
 | `ferry auth <tool>` | Start a login for `gh`, `claude`, `codex`, or `cursor` on the box. `--mcp <server>` logs in to an MCP server. `--mcp <tool>/<server>`, the name in `ferry status`, also works. |
 | `ferry update` | Update the agent tools on the boxes and on this machine. |
 | `ferry tools` | List the tools and their version policies. |
+| `ferry self-update` | Update Ferry on this machine to the latest release. |
 | `ferry skills add` | Install skills with `npx skills add` as a global copy, so that Ferry carries them. |
 | `ferry move <path>` | Continue a project on a box, back on this machine, or on another box. |
 | `ferry tunnel` | Open box ports on `127.0.0.1` of this machine. `ferry tunnel install` runs `--follow` for one box as a user service. |

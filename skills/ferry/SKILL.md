@@ -308,10 +308,12 @@ With `--json`, Ferry never asks:
 | `tunnel install` | `{ manager: "launchd" or "systemd", path }` |
 | `tunnel uninstall` | `{ manager, path, removed }`. `removed` is `false` when the box had no service file. |
 | `uninstall` | `{ removed, restored }` |
+| `self-update` | `{ current, latest, updated }`. `updated` is `false` when `current` is the latest release. The output of the installer goes to stderr. |
 
 ## Other commands
 
 - `ferry --version` prints the Ferry version.
+- `ferry self-update` updates Ferry on the operator machine. Then `ferry update` puts the new version on the boxes. With `--json`, Ferry never asks to update before a command.
 - On the box, `ferry expose [--port <n>] -- <command...>` runs a dev server and announces its port. The port is `--port`, else `$PASEO_PORT`. On the operator machine, `ferry tunnel --follow` opens a forward for each announced port until Ctrl-C. `ferry tunnel install [--box <name>]` runs `--follow` for one box as a user service, and `ferry tunnel uninstall [--box <name>]` removes it. `ferry tunnel install --help` names the service file and the log. Do not write to or remove files in `~/.ferry/exposed/` yourself.
 - `ferry update --dry-run` prints the update plan for the agent tools on both machines.
 - `ferry init --dry-run` prints the init plan without writing or connecting.
