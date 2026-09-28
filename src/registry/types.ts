@@ -34,7 +34,11 @@ export type HarnessDescriptor = {
    * other key leaves the machine, and the box keeps its other keys. Only a
    * builtin descriptor sets this.
    */
-  readonly settings?: { readonly file: string; readonly keys: readonly string[] };
+  readonly settings?: {
+    readonly file: string;
+    readonly format: "json" | "toml";
+    readonly keys: readonly string[];
+  };
   /**
    * The file and key where the harness declares its user-scope MCP servers.
    * Ferry carries only the remote servers from it. Only a builtin descriptor

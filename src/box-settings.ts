@@ -7,6 +7,7 @@
  */
 
 import { posix } from "node:path";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { GitAuth } from "./config.ts";
 import type { LinkResult, RunOptions } from "./link.ts";
 import type { SeedSettings } from "./manifest.ts";
@@ -30,28 +31,35 @@ export class BoxSettingsError extends Error {
   }
 }
 
-/** Replace `keys` in the box settings text with the carried values. Keep all other keys. */
+/**
+ * Replace `keys` in the box settings text with the carried values. Keep all
+ * other keys. Return `box` unchanged when it already holds the carried values,
+ * so a TOML file keeps its comments until a carried key changes.
+ */
 export function mergeSettings(
   box: string | null,
   carried: Readonly<Record<string, unknown>>,
   keys: readonly string[],
+  format: "json" | "toml",
 ): string {
   let settings: unknown = {};
   if (box !== null && box.trim() !== "") {
     try {
-      settings = JSON.parse(box);
+      settings = format === "toml" ? parseToml(box) : JSON.parse(box);
     } catch {
       settings = null;
     }
   }
   if (typeof settings !== "object" || settings === null || Array.isArray(settings)) {
-    throw new BoxSettingsError("the box settings file is not a JSON object");
+    throw new BoxSettingsError(`the box settings file is not a ${format.toUpperCase()} object`);
   }
   const merged = settings as Record<string, unknown>;
+  if (box !== null && keys.every((key) => Bun.deepEquals(merged[key], carried[key]))) return box;
   for (const key of keys) {
     if (Object.hasOwn(carried, key)) merged[key] = carried[key];
     else delete merged[key];
   }
+  if (format === "toml") return `${stringifyToml(merged).trimEnd()}\n`;
   return `${JSON.stringify(merged, null, 2)}\n`;
 }
 
@@ -72,7 +80,7 @@ export async function mergeBoxSettings(input: {
     const current = read.stdout.startsWith("F") ? read.stdout.slice(1) : null;
     let merged: string;
     try {
-      merged = mergeSettings(current, parse(entry), descriptor.keys);
+      merged = mergeSettings(current, parse(entry), descriptor.keys, descriptor.format);
     } catch (error) {
       throw new BoxSettingsError(`${path}: ${messageOf(error)}`);
     }

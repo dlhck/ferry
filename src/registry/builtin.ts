@@ -107,12 +107,23 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
     instructionFile: ".claude/CLAUDE.md",
     // Subagents and custom commands are plain markdown files.
     extraRoots: [".claude/agents", ".claude/commands"],
-    // The plugin declarations, permissions, and hooks. The box installs the
-    // plugins. Keys such as env and apiKeyHelper can hold secrets, so they
-    // stay on this machine.
+    // The plugin declarations, permissions, hooks, commit attribution, and
+    // model preferences. The box installs the plugins. Keys such as env and
+    // apiKeyHelper can hold secrets, so they stay on this machine.
     settings: {
       file: ".claude/settings.json",
-      keys: ["enabledPlugins", "extraKnownMarketplaces", "permissions", "hooks"],
+      format: "json",
+      keys: [
+        "enabledPlugins",
+        "extraKnownMarketplaces",
+        "permissions",
+        "hooks",
+        "attribution",
+        // The earlier form of attribution. Carry it, so the box loses it when the operator does.
+        "includeCoAuthoredBy",
+        "model",
+        "alwaysThinkingEnabled",
+      ],
     },
     // The same file holds account and OAuth state. Only mcpServers is read.
     mcp: { file: ".claude.json", format: "json", key: "mcpServers" },
@@ -123,6 +134,21 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
     skillRoot: ".codex/skills",
     ownSkills: false,
     instructionFile: ".codex/AGENTS.md",
+    // The model preferences and feature flags. Providers, profiles, notify,
+    // and project trust can hold headers, commands, or local paths, so they
+    // stay on this machine.
+    settings: {
+      file: ".codex/config.toml",
+      format: "toml",
+      keys: [
+        "model",
+        "model_reasoning_effort",
+        "model_reasoning_summary",
+        "model_verbosity",
+        "features",
+        "web_search",
+      ],
+    },
     mcp: { file: ".codex/config.toml", format: "toml", key: "mcp_servers" },
   },
   {

@@ -932,7 +932,10 @@ describe("carried Claude settings keys", () => {
     apiKeyHelper: "/usr/local/bin/print-key",
     permissions: { allow: ["Bash(git status)"] },
     hooks: { Stop: [{ hooks: [{ type: "command", command: "notify" }] }] },
+    statusLine: { type: "command", command: "/usr/local/bin/status-line" },
+    attribution: { commit: "", pr: "" },
     model: "opus",
+    alwaysThinkingEnabled: true,
     enabledPlugins: { "review@team": true, "old@team": false },
     extraKnownMarketplaces: {
       team: { source: { source: "github", repo: "example/claude-plugins" } },
@@ -950,9 +953,12 @@ describe("carried Claude settings keys", () => {
       extraKnownMarketplaces: settings.extraKnownMarketplaces,
       permissions: settings.permissions,
       hooks: settings.hooks,
+      attribution: settings.attribution,
+      model: settings.model,
+      alwaysThinkingEnabled: settings.alwaysThinkingEnabled,
     });
     const text = Buffer.from(seed.settings[0]?.bytes ?? []).toString();
-    for (const secret of ["env", "env-secret-value", "apiKeyHelper", "print-key", "opus"]) {
+    for (const secret of ["env", "env-secret-value", "apiKeyHelper", "print-key", "status-line"]) {
       expect(text).not.toContain(secret);
     }
   });
@@ -963,7 +969,7 @@ describe("carried Claude settings keys", () => {
 
   test("a settings file without carried keys carries an empty object", () => {
     const home = makeHome();
-    write(home, ".claude/settings.json", JSON.stringify({ model: "opus" }));
+    write(home, ".claude/settings.json", JSON.stringify({ outputStyle: "Explanatory" }));
 
     expect(carried(seedOf(home))).toEqual({});
   });
@@ -1050,7 +1056,7 @@ describe("carried Claude settings keys", () => {
     write(home, ".claude/settings.json", JSON.stringify(settings));
     const before = seedOf(home).identity;
 
-    write(home, ".claude/settings.json", JSON.stringify({ ...settings, model: "sonnet" }));
+    write(home, ".claude/settings.json", JSON.stringify({ ...settings, outputStyle: "Explanatory" }));
     expect(seedOf(home).identity).toBe(before);
 
     write(
@@ -1059,6 +1065,44 @@ describe("carried Claude settings keys", () => {
       JSON.stringify({ ...settings, enabledPlugins: { "review@team": false } }),
     );
     expect(seedOf(home).identity).not.toBe(before);
+  });
+});
+
+describe("carried Codex settings keys", () => {
+  test("only the allowlisted keys leave config.toml", () => {
+    const home = makeHome();
+    write(
+      home,
+      ".codex/config.toml",
+      [
+        'model = "gpt-5"',
+        'model_reasoning_effort = "high"',
+        'notify = ["/usr/local/bin/notify-send"]',
+        'approval_policy = "never"',
+        "",
+        "[features]",
+        "web_search_request = true",
+        "",
+        "[model_providers.proxy]",
+        'base_url = "https://proxy.example/v1"',
+        'env_key = "PROXY_API_KEY"',
+        "",
+        '[projects."/home/me/work"]',
+        'trust_level = "trusted"',
+        "",
+        "[mcp_servers.docs]",
+        'url = "https://docs.example/mcp"',
+        "",
+      ].join("\n"),
+    );
+
+    const entry = seedOf(home).settings.find((candidate) => candidate.harness === "codex");
+
+    expect(JSON.parse(Buffer.from(entry?.bytes ?? []).toString())).toEqual({
+      model: "gpt-5",
+      model_reasoning_effort: "high",
+      features: { web_search_request: true },
+    });
   });
 });
 
@@ -1334,9 +1378,13 @@ describe("carried MCP server declarations", () => {
     const home = makeHome();
     write(home, ".codex/config.toml", "[mcp_servers\nurl =");
 
-    expect(refusalOf(home).forbidden).toEqual([
-      { path: join(home, ".codex", "config.toml"), code: "invalid-settings", reason: expect.any(String) },
-    ]);
+    // The settings read and the MCP read each refuse the file.
+    const hit = {
+      path: join(home, ".codex", "config.toml"),
+      code: "invalid-settings",
+      reason: expect.any(String),
+    };
+    expect(refusalOf(home).forbidden).toEqual([hit, hit]);
   });
 
   test("the identity follows the carried MCP servers", () => {

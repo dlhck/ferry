@@ -68,7 +68,17 @@ const expectedMetadata = {
       extraRoots: [".claude/agents", ".claude/commands"],
       settings: {
         file: ".claude/settings.json",
-        keys: ["enabledPlugins", "extraKnownMarketplaces", "permissions", "hooks"],
+        format: "json",
+        keys: [
+          "enabledPlugins",
+          "extraKnownMarketplaces",
+          "permissions",
+          "hooks",
+          "attribution",
+          "includeCoAuthoredBy",
+          "model",
+          "alwaysThinkingEnabled",
+        ],
       },
     },
     {
@@ -77,6 +87,18 @@ const expectedMetadata = {
       skillRoot: ".codex/skills",
       ownSkills: false,
       instructionFile: ".codex/AGENTS.md",
+      settings: {
+        file: ".codex/config.toml",
+        format: "toml",
+        keys: [
+          "model",
+          "model_reasoning_effort",
+          "model_reasoning_summary",
+          "model_verbosity",
+          "features",
+          "web_search",
+        ],
+      },
     },
     {
       id: "pi",
