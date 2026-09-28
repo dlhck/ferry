@@ -260,7 +260,7 @@ describe("multi-box watch", () => {
     new BoxesSyncError([
       ...ok.map((name) => ({ name, plan: {} as SyncPlan })),
       ...failed.map((name) => ({ name, plan: {} as SyncPlan, failure: { step: "Connecting", error: offline() } })),
-    ]);
+    ], true);
 
   /**
    * Run the watch on a fake clock. Each poll advances the clock by `pollMs`.

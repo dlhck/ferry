@@ -167,9 +167,12 @@ export class SyncError extends Error {
   }
 }
 
-/** One or more of the selected boxes failed. `results` has the result of each box. */
+/** One or more of the selected boxes failed. `results` has the result of each box. `published` is true when the publish made a commit. */
 export class BoxesSyncError extends SyncError {
-  constructor(readonly results: readonly BoxSyncResult[]) {
+  constructor(
+    readonly results: readonly BoxSyncResult[],
+    readonly published: boolean,
+  ) {
     const failed = results.filter((result) => result.failure !== undefined);
     super(
       "box-failure",
@@ -368,7 +371,7 @@ export async function runSync(
     warn(`Warning: ${error.message}`);
   }
 
-  if (failed.length > 0) throw several ? new BoxesSyncError(results) : failed[0]!.failure!.error;
+  if (failed.length > 0) throw several ? new BoxesSyncError(results, publication.published) : failed[0]!.failure!.error;
   const first = results[0]!;
   return {
     dryRun: false,

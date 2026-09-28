@@ -209,7 +209,9 @@ A command that runs and exits prints exactly one JSON object:
 
 - `command` is the command path, such as `sync`, `box add`, or `integrations enable`.
 - `warnings` holds the warning lines of the run, also on failure.
-- On failure, `ok` is `false`, `result` is `null`, the exit code is not 0, and `error` is `{ "code", "message", "hint" }`. `hint` is a string or `null`. Some errors also have `details`, such as `details.hostKeys`.
+- On failure, `ok` is `false`, the exit code is not 0, and `error` is `{ "code", "message", "hint" }`. `hint` is a string or `null`. Some errors also have `details`, such as `details.hostKeys`.
+- `result` can be present when `ok` is `false`. A failed `sync` of more than one box and a failed `update` keep `result` with the outcome of each box. Each box then has `ok`, and a failed box has `error`. The top-level `error` names the failed boxes or updates. For the other failures, `result` is `null`.
+- `status` does not fail for an offline box. The report shows it with `link.online: false` and the box `errors`.
 - A usage error, such as an unknown option, also gives an envelope, with the code `usage`.
 - `--dry-run --json` gives the plan in `result`.
 
@@ -281,8 +283,8 @@ With `--json`, Ferry never asks:
 | `box remove` | `{ name, defaultBoxRemoved }` |
 | `box default` | `{ defaultBox }` |
 | `install` | `{ plan: [{ tool, policy, version, action, command, dependsOn }], gitIdentity: { name, email } or null }` |
-| `update` | `{ dryRun, boxes: [{ name, offline, plan, integrations: [{ id, plan }] }], operator: [{ tool, command } or { tool, reason }], updated }`. `updated` names each update that ran, such as `box gh` or `[a] box gh`. |
-| `sync` | `{ dryRun, published, boxes: [{ name, plan, applyPlan, discarded }] }`. `plan` is the sync plan of the box, `applyPlan` its link changes (`null` for a dry run), and `discarded` the box checkout changes that the sync threw away. |
+| `update` | `{ dryRun, boxes: [{ name, ok, error, offline, plan, integrations: [{ id, plan }] }], operator: [{ tool, command } or { tool, reason }], updated, failed }`. `updated` and `failed` name each update, such as `box gh`, `[a] box gh`, or `operator codex`. A box with `ok: false` has `error`: `box-offline`, or `update-failed` with its failed updates. Also on failure. |
+| `sync` | `{ dryRun, published, boxes: [{ name, ok, step, error, plan, applyPlan, discarded }] }`. `plan` is the sync plan of the box, `applyPlan` its link changes (`null` for a dry run or a failed box), and `discarded` the box checkout changes that the sync threw away. A box with `ok: false` has `step`, the step that failed, and `error`. With more than one box, also on failure. |
 | `status` | The status report. See [Read state](#read-state). |
 | `auth` | Without a tool: `{ providers: [{ id, login: "startable" or "manual" }] }`. With a tool: the last login result, `{ kind, provider, ... }`, where `kind` is `logged-in`, `already-done`, `device-url`, `printed-url`, `local-port-forward`, or `manual-ssh`. |
 | `tools` | `{ tools: [{ id, name, kind, install, policy: { policy, default }, boxes: [{ name, policy, default }], operatorVersion }] }` |

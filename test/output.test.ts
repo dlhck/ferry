@@ -97,7 +97,7 @@ describe("error codes", () => {
   });
 
   test("sync, update, init, auth, and child command failures", () => {
-    expect(code(new BoxesSyncError([{ name: "a", plan: {} as never, failure: { step: "Connecting", error: new Error("x") } }]))).toBe(
+    expect(code(new BoxesSyncError([{ name: "a", plan: {} as never, failure: { step: "Connecting", error: new Error("x") } }], true))).toBe(
       "sync-failed",
     );
     expect(code(new SyncError("concurrent-sync", "operator", "another sync is active for box"))).toBe("sync-busy");

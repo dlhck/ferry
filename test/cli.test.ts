@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import type { UpdateCommandInput } from "../src/update.ts";
+import { UpdateError, type UpdateCommandInput, type UpdateCommandResult } from "../src/update.ts";
+import { BoxesSyncError, SyncError } from "../src/sync.ts";
+import { FerryError } from "../src/output.ts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1428,6 +1430,63 @@ describe("--json", () => {
       result: { dryRun: true, published: false, boxes: [{ name: "a", plan: { box: "dev@box-a.example" }, applyPlan: null, discarded: [] }] },
       warnings: ["Box MCP: could not declare claude MCP server linear"],
     });
+  });
+
+  test("a failed multi-box sync keeps the outcome of each box in result", async () => {
+    const plan = { box: "dev@box-a.example" } as SyncResult["plan"];
+    const offline = new SyncError("link-failure", "box", "failed to resolve home on box-b", {
+      cause: new FerryError("box-offline", "network/host-offline: box-b is offline"),
+    });
+    const result = await run(["sync"], {
+      runSync: async () => {
+        throw new BoxesSyncError(
+          [
+            { name: "a", plan, applyPlan: { checkout: "/c", targetHome: "/h", actions: [], unmanaged: [] }, discarded: [] },
+            { name: "b", plan, failure: { step: "Connecting to dev@box-b", error: offline } },
+          ],
+          true,
+        );
+      },
+    });
+
+    expect(result.exitCodes).toEqual([1]);
+    expect(result.json[0]).toMatchObject({
+      command: "sync",
+      ok: false,
+      error: { code: "sync-failed", message: expect.stringContaining("[b] Connecting to dev@box-b") },
+      result: {
+        dryRun: false,
+        published: true,
+        boxes: [
+          { name: "a", ok: true, applyPlan: { actions: [] }, discarded: [] },
+          {
+            name: "b",
+            ok: false,
+            step: "Connecting to dev@box-b",
+            error: { code: "box-offline", message: offline.message },
+            applyPlan: null,
+          },
+        ],
+      },
+    });
+    expect("error" in result.json[0].result.boxes[0]).toBe(false);
+  });
+
+  test("a failed update keeps the outcome of each box in result", async () => {
+    const outcome = {
+      dryRun: false,
+      boxes: [{ name: "a", ok: false, error: { code: "box-offline", message: "network/host-offline: off", hint: null }, offline: "off", plan: [], integrations: [] }],
+      operator: [],
+      updated: [],
+      failed: ["[a] box offline"],
+    } satisfies UpdateCommandResult;
+    const result = await run(["update", "--yes"], {
+      runUpdate: async () => {
+        throw new UpdateError("1 of 1 updates failed: [a] box offline", outcome);
+      },
+    });
+
+    expect(result.json[0]).toMatchObject({ ok: false, result: outcome, error: { code: "update-failed" } });
   });
 
   test("a command that stays running prints its events, and an error event on failure", async () => {

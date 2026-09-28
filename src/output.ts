@@ -137,8 +137,9 @@ export function successEnvelope(command: string, result: unknown, warnings: read
   return { schemaVersion: SCHEMA_VERSION, command, ok: true, result: result ?? null, warnings, error: null };
 }
 
-export function failureEnvelope(command: string, error: unknown, warnings: readonly string[]): Envelope {
-  return { schemaVersion: SCHEMA_VERSION, command, ok: false, result: null, warnings, error: errorInfo(error) };
+/** `result` is null, or the outcome of each box when the command ran on the boxes. */
+export function failureEnvelope(command: string, error: unknown, warnings: readonly string[], result: unknown = null): Envelope {
+  return { schemaVersion: SCHEMA_VERSION, command, ok: false, result, warnings, error: errorInfo(error) };
 }
 
 /** The error event of a command that stays running. */
