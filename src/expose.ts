@@ -5,7 +5,7 @@
  * entries and opens a forward for each one.
  */
 
-import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { OutputEvent } from "./output.ts";
@@ -75,6 +75,7 @@ export async function runExpose(input: ExposeInput, dependencies: Partial<Expose
   const dir = join(resolved.home, EXPOSED_DIR);
   const path = join(dir, `${resolved.pid}.json`);
   mkdirSync(dir, { recursive: true });
+  removeDeadEntries(dir);
   // A rename is atomic, so the box watch never reads a part of the file.
   writeFileSync(`${path}.tmp`, `${JSON.stringify(entry)}\n`);
   renameSync(`${path}.tmp`, path);
@@ -93,6 +94,27 @@ export async function runExpose(input: ExposeInput, dependencies: Partial<Expose
   }
   resolved.emit({ type: "exited", port, exitCode });
   return exitCode;
+}
+
+/**
+ * Remove the entries whose pid does not run. SIGKILL or a crash of `ferry expose`
+ * leaves its entry. The rule is the same as `kill -0` in the follower.
+ */
+function removeDeadEntries(dir: string): void {
+  for (const file of readdirSync(dir)) {
+    const match = /^(\d+)\.json$/.exec(file);
+    if (match && !isRunning(Number(match[1]))) rmSync(join(dir, file), { force: true });
+  }
+}
+
+function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM: the process runs, but as a different user.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 /** The port of `--port`, else of `$PASEO_PORT`. */
