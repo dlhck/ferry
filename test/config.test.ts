@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { configPath, readConfig, setIntegration, writeConfig } from "../src/config.ts";
+import { resolveBoxes } from "../src/boxes.ts";
+import { configPath, readConfig, setIntegration, withBoxes, writeConfig } from "../src/config.ts";
 
 const homes: string[] = [];
 
@@ -163,7 +164,7 @@ describe("operator config", () => {
       const home = homeWithConfig([...BASE, "", "[tools]", `gh = ${value}`]);
 
       expect(() => readConfig(home)).toThrow("invalid policy for gh in [tools]");
-      expect(() => readConfig(home)).toThrow('Use "operator", "latest", or an exact version such as 1.4.2.');
+      expect(() => readConfig(home)).toThrow('Use "operator", "latest", "off", or an exact version such as 1.4.2.');
     });
   }
 
@@ -600,5 +601,67 @@ describe("setIntegration", () => {
     const home = homeWithConfig(["version = 1"]);
 
     expect(() => setIntegration("paseo", true, home)).toThrow("is not complete. Run ferry init.");
+  });
+});
+
+describe('the "off" policy', () => {
+  test("reads and writes off in [tools] and [box.<name>.tools], and a box turns a tool on again", () => {
+    const home = homeWithConfig([
+      ...TOP,
+      "",
+      "[tools]",
+      'pi = "off"',
+      'cursor = "off"',
+      "",
+      ...BOX_A,
+      "",
+      "[box.a.tools]",
+      'codex = "off"',
+      'pi = "latest"',
+      "",
+      ...BOX_B,
+    ]);
+    const config = readConfig(home);
+
+    expect(config?.tools).toEqual({ pi: "off", cursor: "off" });
+    expect(config?.boxes?.[0]?.tools).toEqual({ codex: "off", pi: "latest" });
+    const [a, b] = resolveBoxes(config!);
+    expect(a?.tools).toEqual({ pi: "latest", cursor: "off", codex: "off" });
+    expect(b?.tools).toEqual({ pi: "off", cursor: "off" });
+
+    writeConfig(withBoxes(config, config!.boxes!, undefined), home);
+    expect(readFileSync(configPath(home), "utf8")).toContain('[tools]\npi = "off"\ncursor = "off"\n');
+    expect(readFileSync(configPath(home), "utf8")).toContain('[box.a.tools]\ncodex = "off"\npi = "latest"\n');
+    expect(readConfig(home)).toEqual(config);
+  });
+
+  test("gh can be off", () => {
+    expect(readConfig(homeWithConfig([...BASE, "", "[tools]", 'gh = "off"']))?.tools).toEqual({ gh: "off" });
+  });
+
+  test("refuses off in a [tools.<id>] table", () => {
+    const home = homeWithConfig([...BASE, "", "[tools.pnpm]", 'version = "off"', 'local = "pnpm --version"', 'install = "x"']);
+
+    expect(() => readConfig(home)).toThrow('invalid policy for version in [tools.pnpm]');
+    expect(() => readConfig(home)).toThrow('"off" is only for a built-in tool. To remove the tool, delete its table.');
+  });
+
+  test("refuses off in a box for a tool that the config defines", () => {
+    const home = homeWithConfig([
+      ...TOP,
+      "",
+      "[tools.pnpm]",
+      'local = "pnpm --version"',
+      'install = "x"',
+      "",
+      ...BOX_A,
+      "",
+      "[box.a.tools]",
+      'pnpm = "off"',
+    ]);
+
+    expect(() => readConfig(home)).toThrow(
+      'invalid policy for pnpm in [box.a.tools] of ' + configPath(home) + '. "off" is only for a built-in tool. To remove the tool, delete its [tools.pnpm] table.',
+    );
   });
 });
