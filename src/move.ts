@@ -21,13 +21,13 @@ import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync 
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, posix, relative, resolve } from "node:path";
 import { BoxRequiredError, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
-import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
+import { ConfigMissingError, readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
 import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
 import { paseoSourceHint } from "./integrations/paseo.ts";
 import type { IntegrationId } from "./integrations/types.ts";
 import { Link, type LinkOptions } from "./link.ts";
 import { carriedContentHits, carriedNameHit } from "./manifest.ts";
-import { FerryError } from "./output.ts";
+import { FerryError } from "./errors.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
 
 export type MoveInput = {
@@ -792,9 +792,9 @@ function loadConfig(read: () => PartialOperatorConfig | null): PartialOperatorCo
   try {
     config = read();
   } catch {
-    throw new MoveError("Could not read Ferry config. Run ferry init.");
+    throw new ConfigMissingError("Could not read Ferry config. Run ferry init.");
   }
-  if (!config) throw new MoveError("Ferry config has no complete host. Run ferry init.");
+  if (!config) throw new ConfigMissingError("Ferry config has no complete host. Run ferry init.");
   return config;
 }
 

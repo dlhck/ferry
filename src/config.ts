@@ -151,6 +151,9 @@ export class ConfigError extends Error {
   }
 }
 
+/** There is no config, or it is not complete. The operator runs `ferry init`. */
+export class ConfigMissingError extends ConfigError {}
+
 export function configPath(home = homedir()): string {
   return join(home, CONFIG_RELATIVE_PATH);
 }
@@ -512,7 +515,7 @@ export function withBoxes(
   defaultBox: string | undefined,
 ): BoxesOperatorConfig {
   if (config?.version !== 1 || config.publisher === undefined || config.snapshotUrl === undefined) {
-    throw new ConfigError("Ferry config is not complete. Run ferry init.");
+    throw new ConfigMissingError("Ferry config is not complete. Run ferry init.");
   }
   const { host: _host, boxes: _boxes, defaultBox: _defaultBox, ...rest } = config;
   return {
@@ -542,7 +545,7 @@ export function setIntegration(id: keyof IntegrationsConfig, enabled: boolean, h
   const host = completeHostConfig(config?.host);
   const target = config?.boxes ? { boxes: config.boxes } : host ? { host } : null;
   if (config?.version !== 1 || config.publisher === undefined || config.snapshotUrl === undefined || target === null) {
-    throw new ConfigError(`Ferry config at ${configPath(home)} is not complete. Run ferry init.`);
+    throw new ConfigMissingError(`Ferry config at ${configPath(home)} is not complete. Run ferry init.`);
   }
   const { host: _host, boxes: _boxes, ...rest } = config;
   writeConfig(

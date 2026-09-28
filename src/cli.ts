@@ -34,13 +34,11 @@ import {
   type SyncResult,
 } from "./sync.ts";
 import { plainProgress, terminalProgress, type Progress } from "./progress.ts";
+import { confirmationRequired, ERROR_CODES, FerryError } from "./errors.ts";
 import {
-  confirmationRequired,
-  ERROR_CODES,
   errorEvent,
   errorInfo,
   EVENT_TYPES,
-  FerryError,
   failureEnvelope,
   successEnvelope,
   type OutputEvent,

@@ -11,6 +11,7 @@ import { planBoxFerry } from "./box-ferry.ts";
 import { resolveBoxes, type ResolvedBox } from "./boxes.ts";
 import {
   completeHostConfig,
+  ConfigMissingError,
   readConfig,
   resolveLinkOptions,
   type PartialOperatorConfig,
@@ -18,7 +19,8 @@ import {
 } from "./config.ts";
 import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
 import { BunHostAdapter, Link, type HostAdapter, type LinkError, type LinkOptions } from "./link.ts";
-import { errorInfo, FerryError, linkFailure, type ErrorInfo } from "./output.ts";
+import { FerryError, linkFailure } from "./errors.ts";
+import { errorInfo, type ErrorInfo } from "./output.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
 import { loadRegistry } from "./registry/load.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
@@ -352,10 +354,10 @@ function loadBoxes(
   try {
     config = read();
   } catch {
-    throw new UpdateError("Could not read Ferry config. Run ferry init.");
+    throw new ConfigMissingError("Could not read Ferry config. Run ferry init.");
   }
   if (!config || (!config.boxes && !completeHostConfig(config.host))) {
-    throw new UpdateError("Ferry config has no complete host. Run ferry init.");
+    throw new ConfigMissingError("Ferry config has no complete host. Run ferry init.");
   }
   return { config, boxes: resolveBoxes(config, selection) };
 }

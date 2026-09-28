@@ -1,18 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { CommanderError } from "commander";
 import { BoxRequiredError, UnknownBoxError } from "../src/boxes.ts";
-import { ConfigError } from "../src/config.ts";
+import { BoxSettingsError } from "../src/box-settings.ts";
+import { ConfigError, ConfigMissingError } from "../src/config.ts";
 import { InitRefusal } from "../src/init.ts";
 import { InstallAuthCommandError } from "../src/install-auth.ts";
-import {
-  confirmationRequired,
-  denyRuleCause,
-  errorEvent,
-  errorInfo,
-  failureEnvelope,
-  linkFailure,
-  successEnvelope,
-} from "../src/output.ts";
+import { confirmationRequired, denyRuleCause, linkFailure } from "../src/errors.ts";
+import { errorEvent, errorInfo, failureEnvelope, successEnvelope } from "../src/output.ts";
 import { MoveError } from "../src/move.ts";
 import { SkillsAddError } from "../src/skills-add.ts";
 import { BoxesSyncError, SyncError } from "../src/sync.ts";
@@ -64,7 +58,22 @@ describe("error codes", () => {
     expect(code(new UnknownBoxError("unknown box c. Known boxes: a, b."))).toBe("unknown-box");
     expect(code(new BoxRequiredError("More than one box is configured (a, b)."))).toBe("box-required");
     expect(code(new ConfigError("unknown key x in [box.a] of config.toml"))).toBe("config-invalid");
-    expect(code(new ConfigError("Ferry config is not complete. Run ferry init."))).toBe("config-missing");
+    expect(code(new ConfigMissingError("Ferry config is not complete. Run ferry init."))).toBe("config-missing");
+  });
+
+  test("the code comes from the class or the code property, never from the message", () => {
+    expect(code(new ConfigError("Ferry config is not complete. Run ferry init."))).toBe("config-invalid");
+    expect(code(new Error("network/host-offline: the box is offline"))).toBe("failed");
+    expect(code(new SyncError("link-failure", "box", "failed to resolve home on box: network/ssh-failed: no route"))).toBe("sync-failed");
+  });
+
+  test("a cause with its own code gives the code of the error that wraps it", () => {
+    expect(code(new SyncError("invalid-config", "operator", "could not read Ferry config", { cause: new UnknownBoxError("unknown box c") }))).toBe(
+      "unknown-box",
+    );
+    expect(code(new SyncError("invalid-config", "operator", "Ferry config is incomplete.", { cause: new ConfigMissingError("x") }))).toBe(
+      "config-missing",
+    );
   });
 
   test("usage errors", () => {
@@ -73,10 +82,14 @@ describe("error codes", () => {
     expect(code(new InstallAuthCommandError("operator/invalid-provider: Unknown auth provider: x.", "operator/invalid-provider"))).toBe("usage");
   });
 
-  test("Link errors, also inside the message of another error", () => {
+  test("Link errors, from the code property or a cause", () => {
     expect(code(new InstallAuthCommandError("network/host-offline: Install stopped.", "network/host-offline"))).toBe("box-offline");
-    expect(code(new SyncError("link-failure", "box", "failed to resolve home on box: network/ssh-failed: no route"))).toBe("box-offline");
-    expect(code(new SyncError("apply-failure", "box", "could not write the PATH block: box/command-failed: denied"))).toBe(
+    const ssh = linkFailure({ code: "ssh-failed", origin: "network", message: "no route" });
+    expect(code(new SyncError("link-failure", "box", "failed to resolve home on box", { cause: ssh }))).toBe("box-offline");
+    const denied = new BoxSettingsError("box/command-failed: denied", {
+      cause: linkFailure({ code: "command-failed", origin: "box", message: "denied" }),
+    });
+    expect(code(new SyncError("apply-failure", "box", "could not apply the carried settings keys", { cause: denied }))).toBe(
       "box-command-failed",
     );
     const probe = linkFailure({ code: "host-offline", origin: "network", message: "Tailscale host box is offline" });

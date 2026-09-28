@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { UpdateError, type UpdateCommandInput, type UpdateCommandResult } from "../src/update.ts";
 import { BoxesSyncError, SyncError } from "../src/sync.ts";
-import { FerryError } from "../src/output.ts";
+import { FerryError } from "../src/errors.ts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
