@@ -122,7 +122,7 @@ Do not run these commands yourself. When `auth.loginRequired` or `mcpLogins.logi
 
 ## Move a project
 
-`ferry move <path>` continues a project on the box. `ferry move --from-box <path>` brings it back to the operator machine. The path must be inside the home directory. The destination uses the same path relative to its home.
+`ferry move <path>` continues a project on the box: `default_box` or the only box. `ferry move <path> --to-box <b>` continues it on box `b`. `ferry move <path> --from-box <a>` brings it back from box `a` to the operator machine. `ferry move <path> --from-box <a> --to-box <b>` moves it from box `a` to box `b` through the operator machine. The boxes do not connect to each other, and nothing stays on the operator machine. `ferry move` does not accept `--box`. The path must be inside the home directory. The destination uses the same path relative to its home.
 
 1. Run `ferry move <path> --dry-run` first. It prints `Carry:`, `Refuse:`, `Skip:`, `Note:`, and `Problem:` lines and changes nothing.
 2. Fix each `Problem:` line before the real move. Ferry refuses a move with unpushed commits, uncommitted changes to tracked files, or an existing destination path. Push or commit only if the operator agrees.
