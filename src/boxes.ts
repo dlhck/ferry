@@ -45,7 +45,7 @@ export function resolveBoxes(config: PartialOperatorConfig, selection: readonly 
 
 /**
  * The one box of a command that changes one box on purpose (`install`,
- * `auth`, `move`, `integrations enable|disable`). Without a name, it is
+ * `auth`, `move`, `tunnel`, `integrations enable|disable`). Without a name, it is
  * `default_box` or the only box. With more than one box and no
  * `default_box`, the operator must name a box.
  */

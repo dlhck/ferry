@@ -558,7 +558,7 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
     .action((name: string) => runBoxRemove({ name }, { readConfig: config, writeConfig: (value) => writeConfig(value), writeLine }));
   box
     .command("default")
-    .description("Set default_box, the box of install, auth, move, and integrations without --box")
+    .description("Set default_box, the box of install, auth, move, tunnel, and integrations enable|disable without --box")
     .argument("<name>", "box name")
     .action((name: string) => runBoxDefault({ name }, { readConfig: config, writeConfig: (value) => writeConfig(value), writeLine }));
 

@@ -78,7 +78,7 @@ export async function runBoxAdd(input: BoxAddInput, dependencies: BoxCommandDepe
       `The config has a [host] table. Ferry moves it to [box.${MIGRATED_BOX}], adds [box.${input.name}], and sets default_box = "${MIGRATED_BOX}".`,
     );
     dependencies.writeLine(
-      "install, auth, move, and integrations enable|disable still use the old host when you give no --box.",
+      "install, auth, move, tunnel, and integrations enable|disable still use the old host when you give no --box.",
     );
     if (!input.yes) {
       dependencies.progress.pause();
@@ -121,7 +121,7 @@ export function runBoxRemove(input: { readonly name: string }, dependencies: Dep
   }
 }
 
-/** Set `default_box`, the box of `install`, `auth`, `move`, and `integrations enable|disable` without --box. */
+/** Set `default_box`, the box of `install`, `auth`, `move`, `tunnel`, and `integrations enable|disable` without --box. */
 export function runBoxDefault(input: { readonly name: string }, dependencies: Dependencies<"readConfig" | "writeConfig" | "writeLine">): void {
   const config = readComplete(dependencies.readConfig);
   const box = resolveTargetBox(config, input.name);

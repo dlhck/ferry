@@ -313,7 +313,7 @@ Other box commands:
 
 - `ferry box list` prints the name, transport, and destination of each box. The `Default` column marks the box that a command uses without `--box`.
 - `ferry box remove <name>` removes the table from the config. Ferry does not connect to the box and does not change it. Ferry does not remove the last box. If the box was the `default_box`, Ferry removes `default_box` and prints a warning.
-- `ferry box default <name>` sets `default_box`.
+- `ferry box default <name>` sets `default_box`, the box of `install`, `auth`, `move`, `tunnel`, and `integrations enable|disable` without `--box`.
 
 ### Git auth for each box
 

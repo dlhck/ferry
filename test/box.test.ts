@@ -230,7 +230,7 @@ describe("ferry box add", () => {
       expect(lines).toEqual([
         "Add box b: tailscale dev@box-b",
         "The config has a [host] table. Ferry moves it to [box.default], adds [box.b], and sets default_box = \"default\".",
-        "install, auth, move, and integrations enable|disable still use the old host when you give no --box.",
+        "install, auth, move, tunnel, and integrations enable|disable still use the old host when you give no --box.",
         "Added box b.",
       ]);
       expect(confirms).toEqual(["Change the config and add box b?"]);
