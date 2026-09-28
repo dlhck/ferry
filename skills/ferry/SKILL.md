@@ -14,10 +14,11 @@ Ferry copies the agent setup of the operator machine to a remote Linux box. The 
 3. Add `--json` to each Ferry command whose output you read. Use the error `code`, not the message text. See [JSON output](#json-output).
 4. Run `ferry sync --dry-run` before `ferry sync`. Do not pass `--force` unless the operator tells you to.
 5. Do not start `ferry auth`. It needs a person with a browser. Tell the operator the exact command to run.
-6. Do not pass `--yes` to `ferry install`, `ferry update`, `ferry uninstall`, `ferry init`, `ferry box add`, or `ferry integrations enable|disable`, and do not answer their confirmation prompts. The operator confirms. With `--json`, such a command fails with the code `confirmation-required`. Then give the operator the command to run.
-7. Never work around a refusal. Do not rename, move, split, or encode a file to get past a deny rule. Do not copy a secret, a login, or a token to the box by other means.
-8. Run `ferry move --dry-run` before `ferry move`. Add `--include-env` or `--remove` only when the operator asks for it. Never pass `--allow-secrets` or `--yes` to `ferry move` unless the operator asks for it in this conversation.
-9. Install skills with `ferry skills add`, not with a plain `npx skills add`.
+6. Do not pass `--yes` to `ferry install`, `ferry update`, `ferry uninstall`, `ferry box add`, or `ferry integrations enable|disable`, and do not answer their confirmation prompts. The operator confirms. With `--json`, such a command fails with the code `confirmation-required`. Then give the operator the command to run.
+7. Pass `--accept-host-keys` to `ferry init` or `ferry box add` only after the operator accepts the fingerprints in this conversation. When the error has `details.hostKeys`, show each host, key type, and fingerprint to the operator.
+8. Never work around a refusal. Do not rename, move, split, or encode a file to get past a deny rule. Do not copy a secret, a login, or a token to the box by other means.
+9. Run `ferry move --dry-run` before `ferry move`. Add `--include-env` or `--remove` only when the operator asks for it. Never pass `--allow-secrets` or `--yes` to `ferry move` unless the operator asks for it in this conversation.
+10. Install skills with `ferry skills add`, not with a plain `npx skills add`.
 
 ## Find out where you are
 
@@ -208,7 +209,7 @@ A command that runs and exits prints exactly one JSON object:
 
 - `command` is the command path, such as `sync`, `box add`, or `integrations enable`.
 - `warnings` holds the warning lines of the run, also on failure.
-- On failure, `ok` is `false`, `result` is `null`, the exit code is not 0, and `error` is `{ "code", "message", "hint" }`. `hint` is a string or `null`.
+- On failure, `ok` is `false`, `result` is `null`, the exit code is not 0, and `error` is `{ "code", "message", "hint" }`. `hint` is a string or `null`. Some errors also have `details`, such as `details.hostKeys`.
 - A usage error, such as an unknown option, also gives an envelope, with the code `usage`.
 - `--dry-run --json` gives the plan in `result`.
 
@@ -242,7 +243,8 @@ With `--json`, the stdout of the command of `ferry expose` goes to stderr.
 
 With `--json`, Ferry never asks:
 
-- A step that needs a confirmation fails with `confirmation-required`, unless the command has `--yes`. This applies to `install`, `update`, `uninstall`, `integrations enable|disable`, `box add` on a `[host]` config, the SSH host keys of the snapshot host in `init` and `box add`, and `.env` files with secrets in `move`. The message of the error names what needs the confirmation, such as the host key fingerprints.
+- A step that needs a confirmation fails with `confirmation-required`, unless the command has `--yes`. This applies to `install`, `update`, `uninstall`, `integrations enable|disable`, `box add` on a `[host]` config, and `.env` files with secrets in `move`. The message of the error names what needs the confirmation.
+- The SSH host keys of the snapshot host in `init` and `box add` need `--accept-host-keys`. `--yes` does not trust them. Without `--accept-host-keys`, the command fails with `confirmation-required`, and `error.details.hostKeys` is a list of `{ host, type, fingerprint }`. With `--accept-host-keys`, Ferry trusts the keys and writes the fingerprints to stderr.
 - `ferry init --json` without the values that it needs fails with `missing-values`. The message lists the missing values, such as `host, sshUser, snapshotUrl`.
 - `ferry auth <tool> --json` prints a `login` event before the envelope: `{ "type": "login", "provider", "url", "userCode", "codeRequired", "localPort", "timeoutMs" }`, and for `--mcp` also `server`. The login ends in the browser. When `codeRequired` is `true`, Ferry reads the code that the browser shows as one line on stdin. Without a line, it fails with `missing-values`.
 
@@ -258,7 +260,7 @@ With `--json`, Ferry never asks:
 | `box-offline` | Ferry cannot reach the box. |
 | `box-command-failed` | A command on the box failed or timed out. |
 | `forward-failed` | A port forward did not open or close. |
-| `confirmation-required` | The step needs a confirmation, and `--yes` is not given. |
+| `confirmation-required` | The step needs a confirmation, and `--yes` is not given. For SSH host keys, `--accept-host-keys` is not given, and `error.details.hostKeys` lists the keys. |
 | `missing-values` | A value that the command needs is missing. |
 | `deny-rule-match` | A deny rule refused a file. The message names the file, never the value. |
 | `refused` | A safety check refused the change, such as a clash, a live path, an unpushed commit, or an untrusted host key. |

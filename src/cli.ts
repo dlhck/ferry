@@ -131,6 +131,7 @@ type CliDependencies = {
     input: TunnelInput,
     dependencies?: Partial<TunnelDependencies>,
   ) => Promise<readonly Listener[] | undefined>;
+  readonly runBoxAdd?: typeof runBoxAdd;
   readonly runExpose?: (input: ExposeInput, dependencies?: Partial<ExposeDependencies>) => Promise<number>;
   /** True when this is a box install. The default checks for `~/.ferry/box.json`. */
   readonly isBoxMode?: () => boolean;
@@ -177,7 +178,9 @@ const STREAM_COMMANDS = new Set(["watch", "tunnel", "expose"]);
 const JSON_HELP = `JSON output (--json):
   stdout has only JSON. Progress and the text lines go to stderr. Ferry
   shows no prompt: a confirmation fails with confirmation-required unless
-  you give --yes. A command that runs and exits prints one envelope:
+  you give --yes. The SSH host keys of init and box add need
+  --accept-host-keys: --yes does not trust them, and error.details.hostKeys
+  lists them. A command that runs and exits prints one envelope:
     {"schemaVersion":1,"command","ok","result","warnings","error"}
   error is null, or {"code","message","hint"}. On failure, ok is false and
   the exit code is not 0. watch, tunnel, tunnel --follow, and expose print
@@ -294,16 +297,28 @@ function createProgram(dependencies: CliDependencies): { program: Command; state
     }
   };
   /**
-   * The approval of the snapshot host keys. --yes trusts them without a
-   * prompt. With --json and without --yes, the approval fails.
+   * The approval of the snapshot host keys. --accept-host-keys trusts them
+   * without a prompt. --yes does not. With --json and without
+   * --accept-host-keys, the approval fails, and the error has the keys.
    */
-  const hostKeyApproval = (yes: boolean) => async (request: SnapshotHostKeyApproval): Promise<boolean> => {
+  const hostKeyApproval = (accept: boolean) => async (request: SnapshotHostKeyApproval): Promise<boolean> => {
     const keys = request.keys.map((key) => `${key.algorithm} ${key.fingerprint}`).join(", ");
-    if (yes) {
-      writeLine(`Trusting the SSH host keys for ${request.host} on the box: ${keys}`);
+    if (accept) {
+      writeLine(`Trusting the SSH host keys for ${request.host} on the box (--accept-host-keys): ${keys}`);
       return true;
     }
-    if (json()) throw confirmationRequired(`Trust these SSH host keys for ${request.host} on the box: ${keys}?`);
+    if (json()) {
+      throw new FerryError(
+        "confirmation-required",
+        `Trust these SSH host keys for ${request.host} on the box: ${keys}? Ferry does not ask with --json.`,
+        {
+          hint: "Show the fingerprints to the operator. When the operator accepts them, add --accept-host-keys.",
+          details: {
+            hostKeys: request.keys.map((key) => ({ host: request.host, type: key.algorithm, fingerprint: key.fingerprint })),
+          },
+        },
+      );
+    }
     return (dependencies.approveHostKeys ?? approveHostKeys)(request);
   };
   const state: RunState = {
@@ -428,14 +443,14 @@ Add a custom harness in ~/.ferry/config.toml. A repeat init keeps it:
     .option("--ssh-destination <destination>", "explicit OpenSSH destination")
     .option("--snapshot-url <url>", "private snapshot git URL")
     .option("--dry-run", "print the init plan without writing or connecting")
-    .option("--yes", "trust the SSH host keys of the snapshot host on the box without a confirmation prompt")
+    .option("--accept-host-keys", "trust the SSH host keys of the snapshot host on the box without a confirmation prompt")
     .action(async (options: {
       host?: string;
       sshUser?: string;
       sshDestination?: string;
       snapshotUrl?: string;
       dryRun?: boolean;
-      yes?: boolean;
+      acceptHostKeys?: boolean;
     }) => {
       const execute = dependencies.runInit ?? runInit;
       const [box, ...others] = boxNames();
@@ -454,7 +469,7 @@ Add a custom harness in ~/.ferry/config.toml. A repeat init keeps it:
           {
             // With --json, init asks for nothing, so missing values fail with missing-values.
             ...(json() ? {} : { prompt: dependencies.prompt ?? promptForInit }),
-            approveHostKeys: hostKeyApproval(options.yes === true),
+            approveHostKeys: hostKeyApproval(options.acceptHostKeys === true),
             createLink,
             progress,
           },
@@ -918,11 +933,15 @@ Ferry update, restart the service:
     });
 
   const box = program.command("box").description("List, add, and remove the boxes of the config");
-  const boxDependencies = (reporter: Progress, writeLine: (line: string) => void, yes: boolean): BoxCommandDependencies => ({
+  const boxDependencies = (
+    reporter: Progress,
+    writeLine: (line: string) => void,
+    acceptHostKeys: boolean,
+  ): BoxCommandDependencies => ({
     readConfig: config,
     writeConfig: (value) => writeConfig(value),
     createLink,
-    approveHostKeys: hostKeyApproval(yes),
+    approveHostKeys: hostKeyApproval(acceptHostKeys),
     confirm: json()
       ? (message) => refuse(message)()
       : (dependencies.confirm ?? ((message) => prompts.confirm({ message, initialValue: false }))),
@@ -960,10 +979,14 @@ git_auth = "box" in its [box.<name>] table and run ferry init --box <name>.`)
         "box",
       ]),
     )
-    .option("--yes", "change a [host] config to box tables, and trust the SSH host keys of the snapshot host on the box, without a confirmation prompt")
-    .action(async (name: string, options: { host?: string; sshUser?: string; sshDestination?: string; gitAuth?: GitAuth; yes?: boolean }) => {
+    .option("--yes", "change a [host] config to box tables without a confirmation prompt")
+    .option("--accept-host-keys", "trust the SSH host keys of the snapshot host on the box without a confirmation prompt")
+    .action(async (
+      name: string,
+      options: { host?: string; sshUser?: string; sshDestination?: string; gitAuth?: GitAuth; yes?: boolean; acceptHostKeys?: boolean },
+    ) => {
       const result = await withProgress((reporter, writeLine) =>
-        runBoxAdd(
+        (dependencies.runBoxAdd ?? runBoxAdd)(
           {
             name,
             host: options.host,
@@ -972,7 +995,7 @@ git_auth = "box" in its [box.<name>] table and run ferry init --box <name>.`)
             ...(options.gitAuth !== undefined ? { gitAuth: options.gitAuth } : {}),
             yes: options.yes === true,
           },
-          boxDependencies(reporter, writeLine, options.yes === true),
+          boxDependencies(reporter, writeLine, options.acceptHostKeys === true),
         ),
       );
       report(result);
@@ -1217,7 +1240,9 @@ async function readStdinLine(): Promise<string> {
     if (end !== -1) return text.slice(0, end);
   }
   if (text.trim() === "") {
-    throw new FerryError("missing-values", "The login needs the code that the browser shows. Ferry read no line from stdin.", "Write the code as one line on stdin.");
+    throw new FerryError("missing-values", "The login needs the code that the browser shows. Ferry read no line from stdin.", {
+      hint: "Write the code as one line on stdin.",
+    });
   }
   return text;
 }

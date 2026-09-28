@@ -84,6 +84,8 @@ export type ErrorInfo = {
   readonly code: ErrorCode;
   readonly message: string;
   readonly hint: string | null;
+  /** Data for the code, such as `hostKeys` for a host key confirmation. Only some errors have it. */
+  readonly details?: Readonly<Record<string, unknown>>;
 };
 
 export type Envelope = {
@@ -100,13 +102,18 @@ export type OutputEvent = { readonly type: string } & Readonly<Record<string, un
 
 /** An error with a stable code. Put it in the `cause` of another error to give that error a code. */
 export class FerryError extends Error {
+  readonly hint?: string;
+  readonly details?: Readonly<Record<string, unknown>>;
+
   constructor(
     readonly code: ErrorCode,
     message: string,
-    readonly hint?: string,
+    options: { readonly hint?: string; readonly details?: Readonly<Record<string, unknown>> } = {},
   ) {
     super(message);
     this.name = "FerryError";
+    if (options.hint !== undefined) this.hint = options.hint;
+    if (options.details !== undefined) this.details = options.details;
   }
 }
 
@@ -143,7 +150,14 @@ export function errorEvent(type: string, error: unknown, fields: Readonly<Record
 export function errorInfo(error: unknown): ErrorInfo {
   const message = messageOf(error);
   const coded = codedCause(error);
-  if (coded) return { code: coded.code, message, hint: coded.hint ?? HINTS[coded.code] };
+  if (coded) {
+    return {
+      code: coded.code,
+      message,
+      hint: coded.hint ?? HINTS[coded.code],
+      ...(coded.details !== undefined ? { details: coded.details } : {}),
+    };
+  }
   const code = errorCode(error, message);
   return { code, message, hint: HINTS[code] };
 }
