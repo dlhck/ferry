@@ -1,6 +1,6 @@
 /** Install the foreground watcher under the platform user service manager. */
 
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 
@@ -26,7 +26,41 @@ export type WatchServiceResult = {
 
 type ServiceCommandResult = { readonly ok: boolean; readonly stderr: string };
 
+/** One Ferry user service: its names for launchd and systemd, and the Ferry arguments that it runs. */
+export type UserService = {
+  /** The command in messages, such as `watch`. */
+  readonly command: string;
+  /** The launchd label. The plist is `~/Library/LaunchAgents/<label>.plist`. */
+  readonly label: string;
+  /** The file name of the launchd log in `~/Library/Logs/`. */
+  readonly log: string;
+  /** The systemd unit name in `~/.config/systemd/user/`. */
+  readonly unit: string;
+  readonly description: string;
+  readonly args: readonly string[];
+  /** The systemd `Restart=` value. launchd restarts the service each time it exits. */
+  readonly restart: "on-failure" | "always";
+};
+
+const WATCH_SERVICE: UserService = {
+  command: "watch",
+  label: "dev.ferry.watch",
+  log: "ferry-watch.log",
+  unit: "ferry-watch.service",
+  description: "Ferry automatic sync",
+  args: ["watch"],
+  restart: "on-failure",
+};
+
 export async function installWatchService(
+  input: WatchServiceInput = {},
+  dependencies: WatchServiceDependencies = {},
+): Promise<WatchServiceResult> {
+  return installUserService(WATCH_SERVICE, input, dependencies);
+}
+
+export async function installUserService(
+  service: UserService,
   input: WatchServiceInput = {},
   dependencies: WatchServiceDependencies = {},
 ): Promise<WatchServiceResult> {
@@ -37,33 +71,74 @@ export async function installWatchService(
   const environmentPath = input.path ?? process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
   const sshAuthSock = input.sshAuthSock ?? process.env.SSH_AUTH_SOCK;
   const run = dependencies.run ?? runCommand;
-  requireSafeAbsolute(executable, "Ferry executable");
-  requireSafe(environmentPath, "PATH");
-  if (sshAuthSock) requireSafeAbsolute(sshAuthSock, "SSH_AUTH_SOCK");
+  requireSafeAbsolute(service, executable, "Ferry executable");
+  requireSafe(service, environmentPath, "PATH");
+  if (sshAuthSock) requireSafeAbsolute(service, sshAuthSock, "SSH_AUTH_SOCK");
 
   if (platform === "darwin") {
     if (uid === undefined) throw new Error("launchd setup needs the current user id");
-    const path = join(home, "Library", "LaunchAgents", "dev.ferry.watch.plist");
-    const log = join(home, "Library", "Logs", "ferry-watch.log");
+    const path = launchdPath(service, home);
+    const log = join(home, "Library", "Logs", service.log);
     mkdirSync(dirname(log), { recursive: true });
-    writeService(path, launchdService(executable, environmentPath, sshAuthSock, log));
-    await run(["launchctl", "bootout", `gui/${uid}/dev.ferry.watch`], true);
+    writeService(path, launchdService(service, executable, environmentPath, sshAuthSock, log));
+    await run(["launchctl", "bootout", `gui/${uid}/${service.label}`], true);
     await checked(run, ["launchctl", "bootstrap", `gui/${uid}`, path]);
     return { manager: "launchd", path };
   }
 
   if (platform === "linux") {
-    const path = join(home, ".config", "systemd", "user", "ferry-watch.service");
-    writeService(path, systemdService(executable, environmentPath, sshAuthSock));
+    const path = systemdPath(service, home);
+    writeService(path, systemdService(service, executable, environmentPath, sshAuthSock));
     await checked(run, ["systemctl", "--user", "daemon-reload"]);
-    await checked(run, ["systemctl", "--user", "enable", "--now", "ferry-watch.service"]);
+    await checked(run, ["systemctl", "--user", "enable", "--now", service.unit]);
     return { manager: "systemd", path };
   }
 
-  throw new Error(`ferry watch install does not support ${platform}`);
+  throw new Error(`ferry ${service.command} install does not support ${platform}`);
+}
+
+/** Stop the service and remove its file. `removed` is false when the file was not there. The launchd log stays. */
+export async function uninstallUserService(
+  service: UserService,
+  input: Pick<WatchServiceInput, "home" | "platform" | "uid"> = {},
+  dependencies: WatchServiceDependencies = {},
+): Promise<WatchServiceResult & { readonly removed: boolean }> {
+  const home = input.home ?? homedir();
+  const platform = input.platform ?? process.platform;
+  const uid = input.uid ?? process.getuid?.();
+  const run = dependencies.run ?? runCommand;
+
+  if (platform === "darwin") {
+    if (uid === undefined) throw new Error("launchd setup needs the current user id");
+    const path = launchdPath(service, home);
+    const removed = existsSync(path);
+    await run(["launchctl", "bootout", `gui/${uid}/${service.label}`], true);
+    rmSync(path, { force: true });
+    return { manager: "launchd", path, removed };
+  }
+
+  if (platform === "linux") {
+    const path = systemdPath(service, home);
+    const removed = existsSync(path);
+    await run(["systemctl", "--user", "disable", "--now", service.unit], true);
+    rmSync(path, { force: true });
+    await checked(run, ["systemctl", "--user", "daemon-reload"]);
+    return { manager: "systemd", path, removed };
+  }
+
+  throw new Error(`ferry ${service.command} uninstall does not support ${platform}`);
+}
+
+function launchdPath(service: UserService, home: string): string {
+  return join(home, "Library", "LaunchAgents", `${service.label}.plist`);
+}
+
+function systemdPath(service: UserService, home: string): string {
+  return join(home, ".config", "systemd", "user", service.unit);
 }
 
 function launchdService(
+  service: UserService,
   executable: string,
   environmentPath: string,
   sshAuthSock: string | undefined,
@@ -72,16 +147,16 @@ function launchdService(
   const socket = sshAuthSock
     ? `\n    <key>SSH_AUTH_SOCK</key>\n    <string>${xml(sshAuthSock)}</string>`
     : "";
+  const args = service.args.map((arg) => `\n    <string>${xml(arg)}</string>`).join("");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>dev.ferry.watch</string>
+  <string>${xml(service.label)}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${xml(executable)}</string>
-    <string>watch</string>
+    <string>${xml(executable)}</string>${args}
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -102,19 +177,21 @@ function launchdService(
 }
 
 function systemdService(
+  service: UserService,
   executable: string,
   environmentPath: string,
   sshAuthSock: string | undefined,
 ): string {
   const socket = sshAuthSock ? `Environment="SSH_AUTH_SOCK=${systemd(sshAuthSock)}"\n` : "";
+  // The arguments are fixed words and box names, so they need no quotes.
   return `[Unit]
-Description=Ferry automatic sync
+Description=${service.description}
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart="${systemd(executable)}" watch
-Restart=on-failure
+ExecStart="${systemd(executable)}" ${service.args.join(" ")}
+Restart=${service.restart}
 RestartSec=5
 Environment="PATH=${systemd(environmentPath)}"
 ${socket}
@@ -146,13 +223,13 @@ async function runCommand(command: ServiceCommand, allowFailure = false): Promis
   return result;
 }
 
-function requireSafeAbsolute(value: string, name: string): void {
-  requireSafe(value, name);
-  if (!isAbsolute(value)) throw new Error(`watch service needs an absolute ${name} path: ${value}`);
+function requireSafeAbsolute(service: UserService, value: string, name: string): void {
+  requireSafe(service, value, name);
+  if (!isAbsolute(value)) throw new Error(`${service.command} service needs an absolute ${name} path: ${value}`);
 }
 
-function requireSafe(value: string, name: string): void {
-  if (/\r|\n|\0/.test(value)) throw new Error(`watch service refused invalid ${name}`);
+function requireSafe(service: UserService, value: string, name: string): void {
+  if (/\r|\n|\0/.test(value)) throw new Error(`${service.command} service refused invalid ${name}`);
 }
 
 function xml(value: string): string {

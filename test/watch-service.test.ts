@@ -67,6 +67,62 @@ describe("watch service installer", () => {
     ]);
   });
 
+  test("keeps the file names and the content of the watch service", async () => {
+    const sourceHome = home();
+    const run = async () => ({ ok: true, stderr: "" });
+    const input = { home: sourceHome, executable: "/usr/local/bin/ferry", uid: 501, path: "/usr/bin:/bin", sshAuthSock: "/tmp/agent.sock" };
+
+    const launchd = await installWatchService({ ...input, platform: "darwin" }, { run });
+    const systemd = await installWatchService({ ...input, platform: "linux" }, { run });
+
+    expect(launchd.path).toBe(join(sourceHome, "Library/LaunchAgents/dev.ferry.watch.plist"));
+    expect(readFileSync(launchd.path, "utf8")).toBe(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.ferry.watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/ferry</string>
+    <string>watch</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${sourceHome}/Library/Logs/ferry-watch.log</string>
+  <key>StandardErrorPath</key>
+  <string>${sourceHome}/Library/Logs/ferry-watch.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin</string>
+    <key>SSH_AUTH_SOCK</key>
+    <string>/tmp/agent.sock</string>
+  </dict>
+</dict>
+</plist>
+`);
+    expect(systemd.path).toBe(join(sourceHome, ".config/systemd/user/ferry-watch.service"));
+    expect(readFileSync(systemd.path, "utf8")).toBe(`[Unit]
+Description=Ferry automatic sync
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart="/usr/local/bin/ferry" watch
+Restart=on-failure
+RestartSec=5
+Environment="PATH=/usr/bin:/bin"
+Environment="SSH_AUTH_SOCK=/tmp/agent.sock"
+
+[Install]
+WantedBy=default.target
+`);
+  });
+
   test("refuses a relative executable path before writing", async () => {
     const sourceHome = home();
 
