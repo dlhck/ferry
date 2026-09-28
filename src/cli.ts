@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -37,6 +37,7 @@ import {
   readConfig,
   setIntegration,
   writeConfig,
+  type GitAuth,
   type PartialOperatorConfig,
 } from "./config.ts";
 import { BOX_MARKER } from "./box-ferry.ts";
@@ -571,8 +572,14 @@ command and exits with its exit code. Put the command after --.`)
     .option("--host <host>", "Tailscale host name or IP address")
     .option("--ssh-user <user>", "SSH user on the host")
     .option("--ssh-destination <destination>", "explicit OpenSSH destination")
+    .addOption(
+      new Option("--git-auth <mode>", "agent forwards your SSH agent to the box git; box uses a read-only deploy key on the box").choices([
+        "agent",
+        "box",
+      ]),
+    )
     .option("--yes", "change a [host] config to box tables without a confirmation prompt")
-    .action(async (name: string, options: { host?: string; sshUser?: string; sshDestination?: string; yes?: boolean }) => {
+    .action(async (name: string, options: { host?: string; sshUser?: string; sshDestination?: string; gitAuth?: GitAuth; yes?: boolean }) => {
       await withProgress((reporter, writeLine) =>
         runBoxAdd(
           {
@@ -580,6 +587,7 @@ command and exits with its exit code. Put the command after --.`)
             host: options.host,
             sshUser: options.sshUser,
             sshDestination: options.sshDestination,
+            ...(options.gitAuth !== undefined ? { gitAuth: options.gitAuth } : {}),
             yes: options.yes === true,
           },
           boxDependencies(reporter, writeLine),
@@ -593,7 +601,7 @@ command and exits with its exit code. Put the command after --.`)
     .action((name: string) => runBoxRemove({ name }, { readConfig: config, writeConfig: (value) => writeConfig(value), writeLine }));
   box
     .command("default")
-    .description("Set default_box, the box of install, auth, move, and integrations without --box")
+    .description("Set default_box, the box of install, auth, move, tunnel, and integrations enable|disable without --box")
     .argument("<name>", "box name")
     .action((name: string) => runBoxDefault({ name }, { readConfig: config, writeConfig: (value) => writeConfig(value), writeLine }));
 

@@ -75,6 +75,7 @@ Run `ferry status --json` on the operator machine. It changes nothing. Its stdou
 | Field | Meaning |
 | --- | --- |
 | `link.online`, `link.address` | The box answers over SSH or Tailscale, and its address. |
+| `gitAuth` | `agent`: Ferry forwards the operator SSH agent to the box git commands. `box`: the box reads the snapshot with its own deploy key, `~/.ssh/ferry_snapshot`, and gets no agent. |
 | `store.local`, `store.remote`, `store.box` | The snapshot commit on the operator machine, the git remote, and the box. `null` means unknown. |
 | `store.localMatchesRemote`, `store.remoteMatchesBox`, `store.allMatch` | Tip comparisons. `allMatch: false` usually means a sync is due. |
 | `boxCheckout.dirty`, `boxCheckout.changes` | Local changes in the box checkout, as paths. The next sync discards them. |

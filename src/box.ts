@@ -8,6 +8,7 @@ import {
   withBoxes,
   type BoxConfig,
   type BoxesOperatorConfig,
+  type GitAuth,
   type OperatorHostConfig,
   type PartialOperatorConfig,
 } from "./config.ts";
@@ -31,6 +32,8 @@ export type BoxAddInput = {
   readonly host?: string;
   readonly sshUser?: string;
   readonly sshDestination?: string;
+  /** `git_auth` of the new box. Without it, the box forwards the operator agent. */
+  readonly gitAuth?: GitAuth;
   /** Change a `[host]` config to box tables without a question. */
   readonly yes: boolean;
 };
@@ -75,7 +78,7 @@ export async function runBoxAdd(input: BoxAddInput, dependencies: BoxCommandDepe
       `The config has a [host] table. Ferry moves it to [box.${MIGRATED_BOX}], adds [box.${input.name}], and sets default_box = "${MIGRATED_BOX}".`,
     );
     dependencies.writeLine(
-      "install, auth, move, and integrations enable|disable still use the old host when you give no --box.",
+      "install, auth, move, tunnel, and integrations enable|disable still use the old host when you give no --box.",
     );
     if (!input.yes) {
       dependencies.progress.pause();
@@ -87,10 +90,13 @@ export async function runBoxAdd(input: BoxAddInput, dependencies: BoxCommandDepe
   }
 
   const snapshotUrl = config.snapshotUrl as string;
-  dependencies.progress.plan(boxCheckSteps(snapshotUrl));
-  await checkBoxAccess(dependencies.createLink(resolveLinkOptions(host)), snapshotUrl, dependencies);
+  dependencies.progress.plan(boxCheckSteps(snapshotUrl, input.gitAuth));
+  await checkBoxAccess(dependencies.createLink(resolveLinkOptions(host)), snapshotUrl, dependencies, input.gitAuth);
 
-  const boxes: BoxConfig[] = [...(config.boxes ?? existing.map(({ name, host }) => ({ name, host }))), { name: input.name, host }];
+  const boxes: BoxConfig[] = [
+    ...(config.boxes ?? existing.map(({ name, host }) => ({ name, host }))),
+    { name: input.name, host, ...(input.gitAuth !== undefined ? { gitAuth: input.gitAuth } : {}) },
+  ];
   dependencies.writeConfig(withBoxes(config, boxes, migrate ? MIGRATED_BOX : config.defaultBox));
   dependencies.writeLine(`Added box ${input.name}.`);
 }
@@ -115,7 +121,7 @@ export function runBoxRemove(input: { readonly name: string }, dependencies: Dep
   }
 }
 
-/** Set `default_box`, the box of `install`, `auth`, `move`, and `integrations enable|disable` without --box. */
+/** Set `default_box`, the box of `install`, `auth`, `move`, `tunnel`, and `integrations enable|disable` without --box. */
 export function runBoxDefault(input: { readonly name: string }, dependencies: Dependencies<"readConfig" | "writeConfig" | "writeLine">): void {
   const config = readComplete(dependencies.readConfig);
   const box = resolveTargetBox(config, input.name);

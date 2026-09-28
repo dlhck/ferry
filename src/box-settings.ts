@@ -7,6 +7,7 @@
  */
 
 import { posix } from "node:path";
+import type { GitAuth } from "./config.ts";
 import type { LinkResult, RunOptions } from "./link.ts";
 import type { SeedSettings } from "./manifest.ts";
 import type { Progress } from "./progress.ts";
@@ -92,6 +93,8 @@ export async function installBoxPlugins(input: {
   readonly settings: readonly SeedSettings[];
   readonly link: BoxSettingsLink;
   readonly progress?: Pick<Progress, "count">;
+  /** With `"box"`, the plugin git commands get no forwarded agent. */
+  readonly gitAuth?: GitAuth;
 }): Promise<readonly string[]> {
   const entry = input.settings.find((candidate) => candidate.harness === CLAUDE_HARNESS);
   if (!entry) return [];
@@ -124,7 +127,7 @@ export async function installBoxPlugins(input: {
     input.progress?.count(index + 1, steps.length);
     const script = ["command -v claude >/dev/null 2>&1 || { printf 'C\\n'; exit 0; }", command].join("\n");
     const result = await checked(input.link, `sh -c ${quoteShell(script)}`, {
-      agentForwarding: "git",
+      ...(input.gitAuth === "box" ? {} : { agentForwarding: "git" as const }),
       timeoutMs: PLUGIN_TIMEOUT_MS,
     });
 
