@@ -236,7 +236,7 @@ export async function runSync(
     return {
       progress: several ? groupProgress(progress, box.name) : progress,
       writeLine: boxLine,
-      writePlan: dependencies.writePlan ?? ((plan: SyncPlan) => printPlan(plan, boxLine)),
+      writePlan: dependencies.writePlan ?? ((plan: SyncPlan) => printPlan(plan, box.gitAuth, boxLine)),
     };
   };
 
@@ -699,7 +699,7 @@ function settingsChanges(
   return changes;
 }
 
-function printPlan(plan: SyncPlan, writeLine: (line: string) => void): void {
+function printPlan(plan: SyncPlan, gitAuth: GitAuth, writeLine: (line: string) => void): void {
   const remoteCheckout = plan.remoteCheckout ?? "$HOME/.ferry/store";
   const remoteHome = plan.remoteHome ?? "$HOME";
   writeLine(
@@ -710,7 +710,9 @@ function printPlan(plan: SyncPlan, writeLine: (line: string) => void): void {
       `Box: ${plan.box}`,
       `Publish: ${plan.localCheckout} (${plan.message ?? "Store default message"})`,
       `Update: ${remoteCheckout} with git clone, or fetch and reset --hard to the pushed commit (box changes are discarded)`,
-      "SSH agent forwarding is limited to the box git update.",
+      gitAuth === "agent"
+        ? "SSH agent forwarding: only for the box snapshot update and the Claude plugin installs"
+        : "SSH agent forwarding: none (git_auth = box)",
       `Apply: ${remoteCheckout} -> ${remoteHome} (force: ${plan.force ? "yes" : "no"})`,
       "Plugins: claude plugin marketplace add and install for the carried Claude declarations",
       "Settings: carried keys replace their box values; other box keys are kept",
