@@ -162,7 +162,7 @@ function fakeStack(
       reads.push("apply.inspect");
       if (input.dryRun !== true) mutations.push("apply.commit");
       expect(input.dryRun).toBe(true);
-      expect(input.harnesses).toBe(registry.harnesses);
+      expect(input.harnesses).toEqual(registry.harnesses);
       return {
         checkout: input.checkout,
         targetHome: input.targetHome,
@@ -178,7 +178,7 @@ function fakeStack(
       };
     },
     createAuthStart: (_link: unknown, tools: readonly ToolDescriptor[]) => {
-      expect(tools).toBe(registry.tools);
+      expect(tools).toEqual(registry.tools);
       return {
         async status() {
           reads.push("auth.status");
@@ -221,6 +221,35 @@ async function status(
 }
 
 describe("ferry status command", () => {
+  test("an off agent has the state off, no login check, and only the clean-up of its harness, in text and JSON", async () => {
+    const stack = fakeStack();
+    let applyInput: RemoteApplyInput | undefined;
+    let authTools: readonly ToolDescriptor[] = [];
+    const dependencies: Partial<StatusCommandDependencies> = {
+      ...stack.dependencies,
+      readConfig: () => ({ version: 1, host: { tailscale: "box", sshUser: "ferry" }, harness: [{ id: "custom" }], tools: { codex: "off" } }),
+      inspectApply: async (input) => {
+        applyInput = input;
+        return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] };
+      },
+      createAuthStart: (_link, tools) => {
+        authTools = tools;
+        return { status: async () => ({ providers: [] }), mcpStatus: async () => [] };
+      },
+    };
+
+    const report = await status(stack, false, dependencies);
+
+    expect(applyInput?.harnesses).toEqual([]);
+    expect(applyInput?.offHarnesses).toEqual(registry.harnesses);
+    expect(authTools.map((tool) => tool.id)).toEqual(["gh", "pi"]);
+    const codex = report.boxes[0]?.tools?.find((tool) => tool.id === "codex");
+    expect(codex).toMatchObject({ policy: "off", target: null, state: "off", reason: "Ferry does not manage it" });
+    expect(JSON.parse(JSON.stringify(report)).boxes[0].tools[1].state).toBe("off");
+    expect(stack.output[0]).toContain("  codex  off       operator -          target -  box -  off (Ferry does not manage it)\n");
+    expect(stack.output[0]).not.toContain("WARNING: codex");
+  });
+
   test("prints the human report from a read-only fake stack", async () => {
     const stack = fakeStack();
 

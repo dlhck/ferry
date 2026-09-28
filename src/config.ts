@@ -33,7 +33,10 @@ export type BoxConfig = {
   /** How the box git reads the snapshot remote. A missing key means `"agent"`. */
   readonly gitAuth?: GitAuth;
   readonly integrations?: IntegrationsConfig;
-  /** Policies by tool id. A policy replaces the `[tools]` policy or the `version` of a `[tools.<id>]` table. */
+  /**
+   * Policies by tool id. A policy replaces the `[tools]` policy or the `version` of a `[tools.<id>]` table.
+   * `"off"` is valid only for a built-in tool.
+   */
   readonly tools?: { readonly [id: string]: ToolPolicy };
 };
 
@@ -53,8 +56,8 @@ export function isBoxName(name: string): boolean {
 }
 
 /**
- * The `[tools]` table, by tool id. A string sets the policy of a builtin tool.
- * A `[tools.<id>]` table defines a tool. A tool without a policy uses the
+ * The `[tools]` table, by tool id. A string sets the policy of a builtin tool,
+ * which can be `"off"`. A `[tools.<id>]` table defines a tool. A tool without a policy uses the
  * default of its kind.
  */
 export type ToolsConfig = { readonly [id: string]: ToolPolicy | ToolDefinition };
@@ -286,7 +289,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
 
     if (section === "[tools]") {
       if (config.tools?.[key] !== undefined) throw new ConfigError(`duplicate tool ${key} in [tools] of ${path}`);
-      config.tools = { ...config.tools, [key]: parsePolicy(encoded, `${key} in [tools]`, path) };
+      config.tools = { ...config.tools, [key]: parsePolicy(encoded, `${key} in [tools]`, path, true) };
       continue;
     }
 
@@ -335,6 +338,14 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     if (unknown !== undefined) {
       throw new ConfigError(`unknown tool ${unknown} in [box.${entry.name}.tools] of ${path}. Known tools: ${toolIds.join(", ")}.`);
     }
+    const defined = Object.entries(entry.tools ?? {}).find(
+      ([id, policy]) => policy === "off" && !BUILTIN_TOOLS.some((known) => known.id === id),
+    );
+    if (defined !== undefined) {
+      throw new ConfigError(
+        `invalid policy for ${defined[0]} in [box.${entry.name}.tools] of ${path}. "off" is only for a built-in tool. To remove the tool, delete its [tools.${defined[0]}] table.`,
+      );
+    }
     return {
       name: entry.name,
       host,
@@ -366,7 +377,7 @@ type ParsedBox = {
 function readBoxKey(entry: ParsedBox, part: BoxPart, key: string, encoded: string, section: string, path: string): void {
   if (part === "tools") {
     if (entry.tools?.[key] !== undefined) throw new ConfigError(`duplicate tool ${key} in ${section} of ${path}`);
-    entry.tools = { ...entry.tools, [key]: parsePolicy(encoded, `${key} in ${section}`, path) };
+    entry.tools = { ...entry.tools, [key]: parsePolicy(encoded, `${key} in ${section}`, path, true) };
     return;
   }
   if (part === "host" && key === "git_auth") {
@@ -398,7 +409,7 @@ function readToolKey(tool: Record<string, unknown>, key: string, encoded: string
     throw new ConfigError(`unknown key ${key} in ${section} of ${path}. Known keys: ${TOOL_KEYS.join(", ")}`);
   }
   if (key === "version") {
-    tool.version = parsePolicy(encoded, `version in ${section}`, path);
+    tool.version = parsePolicy(encoded, `version in ${section}`, path, false);
     return;
   }
   if (key === "path" || key === "depends") {
@@ -423,11 +434,16 @@ function readToolKey(tool: Record<string, unknown>, key: string, encoded: string
   tool[key] = value;
 }
 
-function parsePolicy(encoded: string, label: string, path: string): ToolPolicy {
+/** `off` is valid only where the key can name a built-in tool: `[tools]` and `[box.<name>.tools]`. */
+function parsePolicy(encoded: string, label: string, path: string, allowOff: boolean): ToolPolicy {
   const policy = /^"[^"]*"$/.test(encoded) ? parseString(encoded, path) : "";
+  if (policy === "off") {
+    if (allowOff) return policy;
+    throw new ConfigError(`invalid policy for ${label} of ${path}. "off" is only for a built-in tool. To remove the tool, delete its table.`);
+  }
   if (policy !== "operator" && policy !== "latest" && !EXACT_VERSION.test(policy)) {
     throw new ConfigError(
-      `invalid policy for ${label} of ${path}. Use "operator", "latest", or an exact version such as 1.4.2.`,
+      `invalid policy for ${label} of ${path}. Use "operator", "latest", ${allowOff ? '"off", ' : ""}or an exact version such as 1.4.2.`,
     );
   }
   return policy;

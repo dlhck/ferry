@@ -16,13 +16,14 @@ import {
   type GitIdentity,
 } from "./git-identity.ts";
 import { Install, outputLines, type InstallProgress, type InstallResult } from "./install.ts";
+import { FerryError } from "./errors.ts";
 import { Link, type LinkError, type LinkOptions } from "./link.ts";
 import type { OutputEvent } from "./output.ts";
 import { noProgress, step, type Progress } from "./progress.ts";
 import { BUILTIN_TOOLS } from "./registry/builtin.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
 import { RealGitRunner } from "./store.ts";
-import { describeStep, ToolPlanError, type ToolStep } from "./tools/resolve.ts";
+import { describeStep, effectivePolicy, ToolPlanError, type ToolStep } from "./tools/resolve.ts";
 import { VERSION } from "./version.ts";
 
 const STORE_RELATIVE_PATH = ".ferry/store";
@@ -95,8 +96,9 @@ export class InstallAuthCommandError extends Error {
     message: string,
     /** `<origin>/<code>`, such as `network/host-offline` or `box/login-unfinished`. */
     readonly code: string,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = "InstallAuthCommandError";
   }
 }
@@ -210,7 +212,8 @@ export async function runAuthCommand(
         resolved.writeLine,
       );
     }
-    const { target } = loadTarget(resolved.readConfig, resolved.writeLine);
+    const { target, config } = loadTarget(resolved.readConfig, resolved.writeLine);
+    refuseOff(input.provider, resolved.tools, config, resolved.writeLine);
     const auth = resolved.createAuthStart(resolved.createLink(target), resolved.tools);
     const { provider, mcp } = input;
     const started = await step(
@@ -241,7 +244,8 @@ export async function runAuthCommand(
     );
   }
 
-  const { target } = loadTarget(resolved.readConfig, resolved.writeLine);
+  const { target, config } = loadTarget(resolved.readConfig, resolved.writeLine);
+  refuseOff(input.provider, resolved.tools, config, resolved.writeLine);
   const auth = resolved.createAuthStart(resolved.createLink(target), resolved.tools);
   const provider = input.provider;
   const started = await step(
@@ -387,6 +391,19 @@ function loadTarget(
   return { target, config };
 }
 
+/** A tool with the policy `off` gets no login. The JSON code is `refused`. */
+function refuseOff(
+  provider: string,
+  tools: readonly ToolDescriptor[],
+  config: PartialOperatorConfig | null,
+  writeLine: (line: string) => void,
+): void {
+  const tool = tools.find((candidate) => candidate.id === provider);
+  if (tool === undefined || effectivePolicy(tool, config?.tools) !== "off") return;
+  const message = `The ${provider} tool is off for this box, so Ferry does not log it in. Set another policy for ${provider} in [tools] or [box.<name>.tools] to turn it on.`;
+  fail("operator/tool-off", message, writeLine, new FerryError("refused", message));
+}
+
 function authFailed(result: AuthStartResult): boolean {
   return result.kind === "link-failure" || result.kind === "failed" || result.kind === "refused";
 }
@@ -442,8 +459,9 @@ function failLink(
   );
 }
 
-function fail(code: string, message: string, writeLine: (line: string) => void): never {
+/** A `FerryError` in `cause` gives the JSON code. */
+function fail(code: string, message: string, writeLine: (line: string) => void, cause?: FerryError): never {
   const safeMessage = `${code}: ${message}`;
   writeLine(safeMessage);
-  throw new InstallAuthCommandError(safeMessage, code);
+  throw new InstallAuthCommandError(safeMessage, code, cause ? { cause } : undefined);
 }

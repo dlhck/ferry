@@ -21,6 +21,7 @@ import { denyRules, type DenyRuleDescription } from "./manifest.ts";
 import { noProgress, type Progress } from "./progress.ts";
 import {
   loadRegistry,
+  offHarnesses,
   type Registry,
   type RegistryConfig,
   type RegistryResult,
@@ -108,6 +109,9 @@ function boxDependencies(
 ): BoxStatusDependencies {
   const link = resolved.createLink(resolveLinkOptions(box.host));
   let boxHome: string | null = null;
+  const off = offHarnesses(registry, box.tools);
+  // An off tool gets no login check, and its harness gets only the clean-up of Ferry's links.
+  const tools = registry.tools.filter((tool) => effectivePolicy(tool, box.tools) !== "off");
   return {
     name: box.name,
     host: destination(box.host),
@@ -140,13 +144,14 @@ function boxDependencies(
         return resolved.inspectApply({
           checkout: posix.join(remoteHome, STORE_RELATIVE_PATH),
           targetHome: remoteHome,
-          harnesses: registry.harnesses,
+          harnesses: registry.harnesses.filter((harness) => !off.includes(harness)),
+          offHarnesses: off,
           dryRun: true,
           link,
         });
       },
     },
-    auth: resolved.createAuthStart(link, registry.tools),
+    auth: resolved.createAuthStart(link, tools),
     tools: {
       check: async (online) => [
         ...(await checkTools(registry.tools, box.tools, local, online ? link : null)),
@@ -397,6 +402,7 @@ function toolState(tool: ToolStatus): string {
     case "ok":
       return "ok";
     case "skipped":
+    case "off":
     case "unknown":
       return `${tool.state} (${tool.reason})`;
     default:

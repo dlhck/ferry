@@ -13,7 +13,7 @@
 
 import { isAbsolute } from "node:path";
 import { quoteShell } from "../box-settings.ts";
-import type { ToolDefinition, ToolsConfig } from "../config.ts";
+import { toolPolicy, type ToolDefinition, type ToolsConfig } from "../config.ts";
 import { deniedSegment } from "../manifest.ts";
 import { BUILTIN_HARNESSES, BUILTIN_TOOLS } from "./builtin.ts";
 import type { HarnessDescriptor, ToolDescriptor } from "./types.ts";
@@ -46,6 +46,17 @@ export type RegistryProblem = {
 export type RegistryResult =
   | ({ readonly ok: true } & Registry)
   | { readonly ok: false; readonly problems: readonly RegistryProblem[] };
+
+/**
+ * The harnesses whose agent CLI has the policy `"off"` in `tools`. Only a
+ * builtin tool can be off, so the shared `agents` harness and an operator
+ * harness are never off.
+ */
+export function offHarnesses(registry: Registry, tools: ToolsConfig | undefined): HarnessDescriptor[] {
+  return registry.harnesses.filter((harness) =>
+    registry.tools.some((tool) => tool.id === harness.id && (tool.kind ?? "agent") === "agent" && toolPolicy(tools, tool.id) === "off"),
+  );
+}
 
 /** Merge the config into the builtin registry, or refuse and name every problem. */
 export function loadRegistry(config: RegistryConfig = {}): RegistryResult {

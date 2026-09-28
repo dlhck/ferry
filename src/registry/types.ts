@@ -149,8 +149,9 @@ export type ToolInstallMode = "always" | "mirror";
 
 /**
  * The version policy of a tool in the config. `operator` is the version on
- * the operator machine, `latest` follows the vendor, and any other value is an
- * exact version that the config parser validated.
+ * the operator machine, `latest` follows the vendor, `off` turns off a builtin
+ * tool and the harness with the same id, and any other value is an exact
+ * version that the config parser validated.
  */
 export type ToolPolicy = string;
 

@@ -293,3 +293,87 @@ describe("remote apply of Claude subagent and command roots", () => {
     expect(existsSync(join(home, ".claude", "commands"))).toBe(false);
   });
 });
+
+describe("remote apply of an off harness", () => {
+  const withoutHarness = (id: string) => BUILTIN_HARNESSES.filter((harness) => harness.id !== id);
+  const harness = (id: string) => BUILTIN_HARNESSES.filter((entry) => entry.id === id);
+
+  test("removes Ferry's earlier links in .pi/agent and keeps the other files", async () => {
+    const root = makeRoot("remote-off-pi");
+    const checkout = makeCheckout(root);
+    const home = join(root, "home");
+    mkdirSync(home);
+    const link = new ShellLink(root);
+    await apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES, link });
+    // An earlier Ferry linked store skills into .pi/agent/skills.
+    const piSkill = join(home, ".pi", "agent", "skills", "tdd");
+    mkdirSync(dirname(piSkill), { recursive: true });
+    symlinkSync(join(checkout, "skills", "tdd"), piSkill);
+    write(join(home, ".pi", "agent", "settings.json"), "{}");
+    write(join(home, ".pi", "agent", "skills", "mine", "SKILL.md"), "own skill");
+    const elsewhere = join(root, "elsewhere");
+    mkdirSync(elsewhere);
+    symlinkSync(elsewhere, join(home, ".pi", "agent", "skills", "other"));
+    expect(realpathSync(join(home, ".pi", "agent", "AGENTS.md"))).toBe(realpathSync(join(checkout, "AGENTS.md")));
+
+    const input = { checkout, targetHome: home, harnesses: withoutHarness("pi"), offHarnesses: harness("pi") };
+    const local = planApply(input);
+    const remote = await apply({ ...input, link });
+
+    expect(remote).toEqual(local);
+    expect(remote.actions).toEqual([
+      { kind: "delete-managed-name", harness: "Pi", path: piSkill, name: "tdd" },
+      {
+        kind: "delete-managed-link",
+        harness: "Pi",
+        path: join(home, ".pi", "agent", "AGENTS.md"),
+        expectedTarget: join(checkout, "AGENTS.md"),
+      },
+    ]);
+    expect(remote.unmanaged).toEqual([]);
+    expect(existsSync(piSkill)).toBe(false);
+    expect(existsSync(join(home, ".pi", "agent", "AGENTS.md"))).toBe(false);
+    expect(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8")).toBe("{}");
+    expect(readFileSync(join(home, ".pi", "agent", "skills", "mine", "SKILL.md"), "utf8")).toBe("own skill");
+    expect(realpathSync(join(home, ".pi", "agent", "skills", "other"))).toBe(realpathSync(elsewhere));
+    expect(realpathSync(join(home, ".codex", "AGENTS.md"))).toBe(realpathSync(join(checkout, "AGENTS.md")));
+
+    // A second sync finds nothing more to remove.
+    expect((await apply({ ...input, link })).actions).toEqual([]);
+  });
+
+  test("removes the Claude skill, instruction, and root links, and keeps a live root and a link that points elsewhere", async () => {
+    const root = makeRoot("remote-off-claude");
+    const checkout = makeCheckout(root, ["unslop"]);
+    write(join(checkout, "roots", ".claude", "agents", "reviewer.md"), "review agent");
+    const home = join(root, "home");
+    mkdirSync(home);
+    const link = new ShellLink(root);
+    await apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES, link });
+    write(join(home, ".claude", "commands", "mine.md"), "own command");
+    write(join(home, ".claude", "settings.json"), '{"permissions":{}}');
+
+    const plan = await apply({ checkout, targetHome: home, harnesses: withoutHarness("claude"), offHarnesses: harness("claude"), link });
+
+    expect(plan.actions.map((action) => [action.kind, action.path])).toEqual([
+      ["delete-managed-name", join(home, ".claude", "skills", "unslop")],
+      ["delete-managed-link", join(home, ".claude", "CLAUDE.md")],
+      ["delete-managed-link", join(home, ".claude", "agents")],
+    ]);
+    expect(existsSync(join(home, ".claude", "skills", "unslop"))).toBe(false);
+    expect(existsSync(join(home, ".claude", "CLAUDE.md"))).toBe(false);
+    expect(existsSync(join(home, ".claude", "agents"))).toBe(false);
+    expect(existsSync(join(checkout, "roots", ".claude", "agents", "reviewer.md"))).toBe(true);
+    expect(readFileSync(join(home, ".claude", "commands", "mine.md"), "utf8")).toBe("own command");
+    expect(readFileSync(join(home, ".claude", "settings.json"), "utf8")).toBe('{"permissions":{}}');
+    expect(realpathSync(join(home, ".agents", "skills", "unslop"))).toBe(realpathSync(join(checkout, "skills", "unslop")));
+
+    // A link that the operator made to another file is not Ferry's.
+    const own = join(root, "own-claude.md");
+    write(own, "own instructions");
+    symlinkSync(own, join(home, ".claude", "CLAUDE.md"));
+    const again = await apply({ checkout, targetHome: home, harnesses: withoutHarness("claude"), offHarnesses: harness("claude"), link });
+    expect(again.actions).toEqual([]);
+    expect(readFileSync(join(home, ".claude", "CLAUDE.md"), "utf8")).toBe("own instructions");
+  });
+});

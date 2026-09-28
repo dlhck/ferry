@@ -302,3 +302,32 @@ describe("Claude subagent and command roots", () => {
     expect(realpathSync(live)).toBe(join(checkout, "roots", ".claude", "commands"));
   });
 });
+
+describe("off harnesses", () => {
+  test("a local apply removes the links into the checkout and keeps the other files", () => {
+    const checkout = makeCheckout(["tdd"]);
+    const home = makeRoot("home");
+    apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES });
+    write(join(home, ".pi", "agent", "settings.json"), "{}");
+
+    const pi = BUILTIN_HARNESSES.filter((harness) => harness.id === "pi");
+    const plan = apply({
+      checkout,
+      targetHome: home,
+      harnesses: BUILTIN_HARNESSES.filter((harness) => harness.id !== "pi"),
+      offHarnesses: pi,
+    });
+
+    expect(plan.actions).toEqual([
+      {
+        kind: "delete-managed-link",
+        harness: "Pi",
+        path: join(home, ".pi", "agent", "AGENTS.md"),
+        expectedTarget: join(checkout, "AGENTS.md"),
+      },
+    ]);
+    expect(existsSync(join(home, ".pi", "agent", "AGENTS.md"))).toBe(false);
+    expect(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8")).toBe("{}");
+    expect(realpathSync(join(home, ".codex", "AGENTS.md"))).toBe(join(checkout, "AGENTS.md"));
+  });
+});
