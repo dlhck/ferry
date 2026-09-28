@@ -17,6 +17,7 @@ import {
 } from "./git-identity.ts";
 import { Install, outputLines, type InstallProgress, type InstallResult } from "./install.ts";
 import { Link, type LinkError, type LinkOptions } from "./link.ts";
+import type { OutputEvent } from "./output.ts";
 import { noProgress, step, type Progress } from "./progress.ts";
 import { BUILTIN_TOOLS } from "./registry/builtin.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
@@ -74,19 +75,37 @@ export type AuthCommandDependencies = {
   readonly progress: Progress;
   /** Calls `stop` when the operator presses Ctrl-C. Returns a function that removes the handler. */
   readonly onInterrupt: (stop: () => void) => () => void;
+  /** With --json, prints the `login` event when the login waits for the browser. */
+  readonly emit?: (event: OutputEvent) => void;
 };
 
+/** The plan of `ferry install`, and the git identity that it set on the box. */
+export type InstallCommandResult = {
+  readonly plan: readonly ToolStep[];
+  readonly gitIdentity: { readonly name: string; readonly email: string } | null;
+};
+
+/** The auth tools without a provider, else the last login result. */
+export type AuthCommandResult =
+  | { readonly providers: readonly { readonly id: string; readonly login: "startable" | "manual" }[] }
+  | Exclude<AuthStartResult, { readonly kind: "link-failure" | "failed" | "refused" }>;
+
 export class InstallAuthCommandError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /** `<origin>/<code>`, such as `network/host-offline` or `box/login-unfinished`. */
+    readonly code: string,
+  ) {
     super(message);
     this.name = "InstallAuthCommandError";
   }
 }
 
+/** Returns null when the operator does not confirm. */
 export async function runInstallCommand(
   input: InstallCommandInput,
   dependencies: Partial<InstallCommandDependencies> = {},
-): Promise<void> {
+): Promise<InstallCommandResult | null> {
   const resolved = { ...defaultInstallDependencies, ...dependencies };
   const { target, config } = loadTarget(resolved.readConfig, resolved.writeLine);
   const link = resolved.createLink(target);
@@ -119,7 +138,7 @@ export async function runInstallCommand(
   if (!input.yes) {
     resolved.progress.pause();
     const confirmed = await resolved.confirm();
-    if (confirmed !== true) return;
+    if (confirmed !== true) return null;
   }
 
   const progress = resolved.progress;
@@ -163,19 +182,24 @@ export async function runInstallCommand(
     );
     if (!identity.ok) failLink("Install", identity.error, resolved.writeLine);
   }
+  return { plan, gitIdentity: identityCommand && name !== null && email !== null ? { name, email } : null };
 }
 
+/** Returns null when the operator gives no login code. */
 export async function runAuthCommand(
   input: AuthCommandInput,
   dependencies: Partial<AuthCommandDependencies> = {},
-): Promise<void> {
+): Promise<AuthCommandResult | null> {
   const resolved = { ...defaultAuthDependencies, ...dependencies };
   if (input.provider === undefined) {
-    for (const tool of authTools(resolved.tools)) {
-      const manual = tool.auth.completion.kind === "manual";
-      resolved.writeLine(`${tool.id}: ${manual ? "manual SSH flow" : "startable"}`);
+    const providers = authTools(resolved.tools).map((tool) => ({
+      id: tool.id,
+      login: tool.auth.completion.kind === "manual" ? ("manual" as const) : ("startable" as const),
+    }));
+    for (const provider of providers) {
+      resolved.writeLine(`${provider.id}: ${provider.login === "manual" ? "manual SSH flow" : "startable"}`);
     }
-    return;
+    return { providers };
   }
 
   if (input.mcp !== undefined) {
@@ -196,6 +220,7 @@ export async function runAuthCommand(
       authFailed,
     );
     if (started.kind !== "local-port-forward") return reportAuth(started, resolved.writeLine);
+    resolved.emit?.(loginEvent(started, { server: mcp }));
     resolved.writeLine(`URL: ${started.url}`);
     resolved.writeLine("Open the URL in a browser on this machine.");
     resolved.writeLine(forwardLine(started));
@@ -205,8 +230,7 @@ export async function runAuthCommand(
       () => untilInterrupt(resolved.onInterrupt, (signal) => auth.finishMcp(started, signal)),
       authFailed,
     );
-    reportAuth(result, resolved.writeLine);
-    return;
+    return reportAuth(result, resolved.writeLine);
   }
 
   if (!isAuthProvider(input.provider, resolved.tools)) {
@@ -242,6 +266,7 @@ export async function runAuthCommand(
     started.kind === "printed-url" ||
     started.kind === "local-port-forward"
   ) {
+    resolved.emit?.(loginEvent(started));
     resolved.writeLine(`URL: ${started.url}`);
     if (started.kind === "device-url" && started.userCode) {
       resolved.writeLine(`Code: ${started.userCode}`);
@@ -256,7 +281,7 @@ export async function runAuthCommand(
       // The prompt runs between steps, and pause() clears the progress line first.
       resolved.progress.pause();
       const answer = await resolved.readLoginCode();
-      if (typeof answer !== "string") return;
+      if (typeof answer !== "string") return null;
       code = answer.trim();
     } else {
       resolved.writeLine("Open the URL in a browser on this machine.");
@@ -274,7 +299,7 @@ export async function runAuthCommand(
         : auth.finish(started, code),
     authFailed,
   );
-  reportAuth(result, resolved.writeLine);
+  return reportAuth(result, resolved.writeLine);
 }
 
 const defaultInstallDependencies: InstallCommandDependencies = {
@@ -303,6 +328,24 @@ const defaultAuthDependencies: AuthCommandDependencies = {
     return () => process.off("SIGINT", stop);
   },
 };
+
+/** The `login` event: the URL to open, and the code to enter or to write on stdin. */
+function loginEvent(
+  started: Extract<AuthStartResult, { kind: "device-url" | "printed-url" | "local-port-forward" }>,
+  fields: { readonly server?: string } = {},
+): OutputEvent {
+  return {
+    type: "login",
+    provider: started.provider,
+    ...fields,
+    url: started.url,
+    userCode: started.kind === "device-url" ? (started.userCode ?? null) : null,
+    // The login waits for the code that the browser shows, as one line on stdin.
+    codeRequired: started.kind === "printed-url" && started.codeInput !== undefined,
+    localPort: started.kind === "local-port-forward" ? started.localPort : null,
+    timeoutMs: started.kind === "local-port-forward" ? started.timeoutMs : null,
+  };
+}
 
 function waitingStep(limitSeconds: number): string {
   return `Waiting for you to finish the login in the browser (up to ${Math.ceil(limitSeconds / 60)} min)`;
@@ -352,32 +395,32 @@ function isAuthProvider(provider: string, tools: readonly ToolDescriptor[]): boo
   return tools.some((tool) => tool.id === provider && tool.auth);
 }
 
-function reportAuth(result: AuthStartResult, writeLine: (line: string) => void): void {
+function reportAuth(result: AuthStartResult, writeLine: (line: string) => void): AuthCommandResult {
   switch (result.kind) {
     case "already-done":
       writeLine(`${result.provider}: already authenticated`);
       for (const note of result.notes ?? []) writeLine(note);
-      return;
+      return result;
     case "logged-in":
       writeLine(`${result.provider}: logged in`);
       for (const note of result.notes ?? []) writeLine(note);
-      return;
+      return result;
     case "device-url":
       writeLine(`URL: ${result.url}`);
       if (result.userCode) writeLine(`Code: ${result.userCode}`);
-      return;
+      return result;
     case "printed-url":
       writeLine(`URL: ${result.url}`);
-      return;
+      return result;
     case "local-port-forward":
       writeLine(`URL: ${result.url}`);
       writeLine(`Local port: ${result.localPort}`);
       writeLine(`Timeout: ${result.timeoutMs} ms`);
-      return;
+      return result;
     case "manual-ssh":
       writeLine("pi: manual SSH flow");
       writeLine(result.instruction);
-      return;
+      return result;
     case "link-failure":
       failLink("AuthStart", result.result.error, writeLine);
     case "failed":
@@ -402,5 +445,5 @@ function failLink(
 function fail(code: string, message: string, writeLine: (line: string) => void): never {
   const safeMessage = `${code}: ${message}`;
   writeLine(safeMessage);
-  throw new InstallAuthCommandError(safeMessage);
+  throw new InstallAuthCommandError(safeMessage, code);
 }

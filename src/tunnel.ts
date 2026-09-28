@@ -11,6 +11,7 @@ import { quoteShell } from "./box-settings.ts";
 import { resolveLinkOptions, type OperatorHostConfig } from "./config.ts";
 import { EXPOSED_DIR } from "./expose.ts";
 import { Link, type ControlConnection, type LinkOptions, type TunnelPort } from "./link.ts";
+import { errorEvent, FerryError, type OutputEvent } from "./output.ts";
 
 export type TunnelInput = {
   /** Port specs: `<box>` or `<box>:<local>`. */
@@ -33,6 +34,8 @@ export type TunnelDependencies = {
   readonly controlPath: string;
   /** The wait before `--follow` connects again after the connection drops. */
   readonly reconnectMs: number;
+  /** With --json, prints one event for each forward change. */
+  readonly emit: (event: OutputEvent) => void;
 };
 
 /** A live entry of `~/.ferry/exposed/` on the box. */
@@ -92,11 +95,16 @@ export const FOLLOW_COMMAND = [
 /** OpenSSH gets the SIGINT of Ctrl-C too, and can exit before Ferry sees the interrupt. */
 const INTERRUPT_GRACE_MS = 200;
 
-export async function runTunnel(input: TunnelInput, dependencies: Partial<TunnelDependencies> = {}): Promise<void> {
+/** Returns the listeners of `--list`. A tunnel returns nothing when Ctrl-C closes it. */
+export async function runTunnel(
+  input: TunnelInput,
+  dependencies: Partial<TunnelDependencies> = {},
+): Promise<readonly Listener[] | undefined> {
   const resolved = { ...defaultDependencies, ...dependencies };
   if (input.follow === true) {
     if (input.ports.length > 0 || input.list) throw new Error("Give box ports, --list, or --follow, not more than one.");
-    return follow(input.box, resolved);
+    await follow(input.box, resolved);
+    return undefined;
   }
   if (input.list) {
     if (input.ports.length > 0) throw new Error("Give box ports or --list, not both.");
@@ -118,6 +126,7 @@ export async function runTunnel(input: TunnelInput, dependencies: Partial<Tunnel
 
   const link = resolved.createLink(resolveLinkOptions(input.box.host));
   for (const port of ports) {
+    resolved.emit({ type: "forward-opened", name: null, localPort: port.localPort, box: input.box.name, remotePort: port.remotePort });
     resolved.writeLine(`http://localhost:${port.localPort} -> ${input.box.name}:127.0.0.1:${port.remotePort}`);
   }
   resolved.writeLine("Press Ctrl-C to close the tunnel.");
@@ -132,6 +141,7 @@ export async function runTunnel(input: TunnelInput, dependencies: Partial<Tunnel
     stopListening();
   }
   if (controller.signal.aborted) {
+    resolved.emit({ type: "tunnel-closed", box: input.box.name });
     resolved.writeLine("Tunnel closed.");
     return;
   }
@@ -156,6 +166,12 @@ async function follow(box: TunnelInput["box"], resolved: TunnelDependencies): Pr
       if (controller.signal.aborted) break;
       if (!ended.connected && !connected) throw new Error(`Could not connect to ${box.name}: ${ended.reason}`);
       connected ||= ended.connected;
+      resolved.emit(
+        errorEvent("connection-lost", new FerryError("box-offline", `The connection to ${box.name} closed: ${ended.reason}`), {
+          box: box.name,
+          retryInMs: resolved.reconnectMs,
+        }),
+      );
       resolved.writeLine(`The connection to ${box.name} closed: ${ended.reason}. Ferry connects again in ${resolved.reconnectMs / 1_000} s.`);
       await abortableSleep(resolved.reconnectMs, controller.signal);
       if (controller.signal.aborted) break;
@@ -163,6 +179,7 @@ async function follow(box: TunnelInput["box"], resolved: TunnelDependencies): Pr
   } finally {
     stopListening();
   }
+  resolved.emit({ type: "tunnel-closed", box: box.name });
   resolved.writeLine("Tunnel closed.");
 }
 
@@ -186,6 +203,7 @@ async function followSession(
   const close = () => void master.exit().finally(() => session.abort());
   signal.addEventListener("abort", close, { once: true });
   if (signal.aborted) close();
+  resolved.emit({ type: "following", box: boxName, reconnected: reconnect });
   resolved.writeLine(
     `${reconnect ? "Connected again. " : ""}Following the ports that ferry expose announces on ${boxName}. Press Ctrl-C to close the tunnel.`,
   );
@@ -230,18 +248,35 @@ async function reconcile(
     forwards.delete(forward.port);
     const result = await master.cancel({ localPort: forward.localPort, remotePort: forward.port });
     const line = followLine(forward, forward.localPort, boxName, home());
+    const fields = forwardFields(forward, forward.localPort, boxName);
+    resolved.emit(
+      result.ok
+        ? { type: "forward-closed", ...fields }
+        : errorEvent("forward-failed", new FerryError("forward-failed", `${line} could not close: ${result.error.message}`), fields),
+    );
     resolved.writeLine(result.ok ? `${line} closed` : `${line} could not close: ${result.error.message}`);
   }
   for (const entry of add) {
     const taken = new Set([...forwards.values()].map((forward) => forward.localPort));
     const localPort = await pickLocalPort(entry.port, taken, resolved.isPortFree);
     if (localPort === null) {
-      resolved.writeLine(`${followLine(entry, null, boxName, home())} has no free local port from ${entry.port}`);
+      const line = `${followLine(entry, null, boxName, home())} has no free local port from ${entry.port}`;
+      resolved.emit(errorEvent("forward-failed", new FerryError("forward-failed", line), forwardFields(entry, null, boxName)));
+      resolved.writeLine(line);
       continue;
     }
     const forward = { ...entry, localPort };
     const result = await master.forward({ localPort, remotePort: entry.port });
     if (result.ok) forwards.set(entry.port, forward);
+    resolved.emit(
+      result.ok
+        ? { type: "forward-opened", ...forwardFields(entry, localPort, boxName) }
+        : errorEvent(
+            "forward-failed",
+            new FerryError("forward-failed", `${followLine(entry, localPort, boxName, home())} could not open: ${result.error.message}`),
+            forwardFields(entry, localPort, boxName),
+          ),
+    );
     resolved.writeLine(
       result.ok
         ? followLine(entry, localPort, boxName, home())
@@ -331,6 +366,11 @@ function parseEntry(pid: string, json: string): FollowEntry | null {
 }
 
 /** `web  http://localhost:3000 -> box:3000 (~/app)`. */
+/** The fields of a forward event of `--follow`. */
+function forwardFields(entry: FollowEntry, localPort: number | null, boxName: string) {
+  return { name: entry.name, localPort, box: boxName, remotePort: entry.port, pid: entry.pid, cwd: entry.cwd };
+}
+
 function followLine(entry: FollowEntry, localPort: number | null, boxName: string, home: string | null): string {
   const name = entry.name ?? `pid ${entry.pid}`;
   const local = localPort === null ? "" : `http://localhost:${localPort} -> `;
@@ -395,13 +435,13 @@ export function parseListeners(output: string): Listener[] {
   return listeners.sort((a, b) => a.port - b.port);
 }
 
-async function listPorts(box: TunnelInput["box"], resolved: TunnelDependencies): Promise<void> {
+async function listPorts(box: TunnelInput["box"], resolved: TunnelDependencies): Promise<readonly Listener[]> {
   const result = await resolved.createLink(resolveLinkOptions(box.host)).run(LIST_COMMAND);
   if (!result.ok) throw new Error(`Could not list the ports on ${box.name}: ${result.error.message}`);
   const listeners = parseListeners(result.stdout);
   if (listeners.length === 0) {
     resolved.writeLine(`No TCP port listens on loopback or all interfaces on ${box.name}.`);
-    return;
+    return listeners;
   }
   const rows = [["PORT", "ADDRESS", "PROCESS"], ...listeners.map((entry) => [String(entry.port), entry.address, entry.process])];
   const portWidth = Math.max(...rows.map((row) => row[0]!.length)) + 2;
@@ -409,6 +449,7 @@ async function listPorts(box: TunnelInput["box"], resolved: TunnelDependencies):
   for (const [port, address, process] of rows) {
     resolved.writeLine(`${port!.padEnd(portWidth)}${address!.padEnd(addressWidth)}${process}`);
   }
+  return listeners;
 }
 
 /** `LISTEN 0 511 127.0.0.1:3000 0.0.0.0:* users:(("node",pid=812,fd=21))` */
@@ -495,4 +536,5 @@ const defaultDependencies: TunnelDependencies = {
   isPortFree,
   controlPath: join(tmpdir(), `ferry-tunnel-${process.pid}.sock`),
   reconnectMs: 5_000,
+  emit: () => {},
 };

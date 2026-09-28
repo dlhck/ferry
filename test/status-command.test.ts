@@ -11,6 +11,7 @@ import type { Registry } from "../src/registry/load.ts";
 import type { ToolDescriptor } from "../src/registry/types.ts";
 import type { TipReport } from "../src/store.ts";
 import {
+  formatStatus,
   runStatusCommand,
   type StatusCommandDependencies,
 } from "../src/status-command.ts";
@@ -196,7 +197,6 @@ function fakeStack(
       reads.push("manifest.denyRules");
       return [{ code: "dotenv", description: "environment file", behavior: "refuse" as const }];
     },
-    writeLine: (line: string) => output.push(line),
     writeConfig: () => mutations.push("config.write"),
     acquireSyncLock: () => mutations.push("sync.lock"),
   };
@@ -209,11 +209,22 @@ function fakeStack(
   };
 }
 
+/** Run the status command and record the report as the CLI prints it: text, or with `json`, the report JSON. */
+async function status(
+  stack: { readonly output: string[]; readonly dependencies: Partial<StatusCommandDependencies> },
+  json = false,
+  dependencies: Partial<StatusCommandDependencies> = stack.dependencies,
+) {
+  const report = await runStatusCommand({}, dependencies);
+  stack.output.push(json ? JSON.stringify(report) : formatStatus(report));
+  return report;
+}
+
 describe("ferry status command", () => {
   test("prints the human report from a read-only fake stack", async () => {
     const stack = fakeStack();
 
-    await runStatusCommand({ json: false }, stack.dependencies);
+    await status(stack);
 
     expect(stack.output).toHaveLength(1);
     expect(stack.output[0]).toContain("Host: ONLINE");
@@ -270,7 +281,7 @@ describe("ferry status command", () => {
   test("prints the exact report as JSON without human text", async () => {
     const stack = fakeStack();
 
-    const report = await runStatusCommand({ json: true }, stack.dependencies);
+    const report = await status(stack, true);
 
     expect(stack.output).toEqual([JSON.stringify(report)]);
     expect(JSON.parse(stack.output[0]!)).toEqual(report);
@@ -283,8 +294,8 @@ describe("ferry status command", () => {
     const text = fakeStack(true, changes);
     const json = fakeStack(true, changes);
 
-    await runStatusCommand({ json: false }, text.dependencies);
-    await runStatusCommand({ json: true }, json.dependencies);
+    await status(text);
+    await status(json, true);
 
     expect(text.output[0]).toContain(
       "Box checkout: DIRTY (2), the next sync discards these changes\n  - skills/scratch/SKILL.md\n  - skills/tdd/SKILL.md",
@@ -306,9 +317,9 @@ describe("ferry status command", () => {
     const different = fakeStack(true, "", "user.name Box Agent\nuser.email box@example.com\n");
     const json = fakeStack(true, "", "");
 
-    await runStatusCommand({ json: false }, missing.dependencies);
-    await runStatusCommand({ json: false }, different.dependencies);
-    await runStatusCommand({ json: true }, json.dependencies);
+    await status(missing);
+    await status(different);
+    await status(json, true);
 
     expect(missing.output[0]).toContain(
       "Box git identity: MISSING user.name and user.email, run ferry install",
@@ -336,10 +347,10 @@ describe("ferry status command", () => {
     const passwordlessJson = fakeStack();
     const passwordJson = fakeStack(true, "", undefined, "no\n");
 
-    await runStatusCommand({ json: false }, passwordless.dependencies);
-    await runStatusCommand({ json: false }, password.dependencies);
-    await runStatusCommand({ json: true }, passwordlessJson.dependencies);
-    await runStatusCommand({ json: true }, passwordJson.dependencies);
+    await status(passwordless);
+    await status(password);
+    await status(passwordlessJson, true);
+    await status(passwordJson, true);
 
     expect(passwordless.output[0]).toContain("Box sudo: PASSWORDLESS");
     expect(passwordless.reads).toContain(
@@ -366,10 +377,10 @@ describe("ferry status command", () => {
     const passwordless = fakeStack(true, "", undefined, "yes\n", true, "latest");
     const json = fakeStack(true, "", undefined, "no\n", true, "latest");
 
-    await runStatusCommand({ json: false }, watchOn.dependencies);
-    await runStatusCommand({ json: false }, watchOff.dependencies);
-    await runStatusCommand({ json: false }, passwordless.dependencies);
-    await runStatusCommand({ json: true }, json.dependencies);
+    await status(watchOn);
+    await status(watchOff);
+    await status(passwordless);
+    await status(json, true);
 
     const warning =
       'Box sudo: PASSWORD REQUIRED\n  WARNING: [update] watch = true and the gh policy is "latest", but the watch cannot update gh because sudo on the box asks for a password. See the sudoers rule in the README.';
@@ -389,8 +400,8 @@ describe("ferry status command", () => {
       const text = fakeStack(true, "", undefined, "no\n", true, ghPolicy);
       const json = fakeStack(true, "", undefined, "no\n", true, ghPolicy);
 
-      await runStatusCommand({ json: false }, text.dependencies);
-      await runStatusCommand({ json: true }, json.dependencies);
+      await status(text);
+      await status(json, true);
 
       expect(text.output[0]).toContain("Box sudo: PASSWORD REQUIRED");
       expect(text.output[0]).not.toContain("WARNING");
@@ -414,7 +425,7 @@ describe("ferry status command", () => {
       },
     };
 
-    await runStatusCommand({ json: false }, dependencies);
+    await runStatusCommand({}, dependencies);
 
     expect(linkOptions).toEqual({ destination: "user@box.example" });
   });
@@ -423,8 +434,8 @@ describe("ferry status command", () => {
     const stack = fakeStack(false, "", undefined, "no\n", true);
     const json = fakeStack(false, "", undefined, "no\n", true);
 
-    await runStatusCommand({ json: false }, stack.dependencies);
-    await runStatusCommand({ json: true }, json.dependencies);
+    await status(stack);
+    await status(json, true);
 
     expect(stack.output[0]).toContain("Host: OFFLINE");
     expect(stack.output[0]).toContain("Managed links: unavailable while host is offline");
@@ -449,7 +460,7 @@ describe("ferry status progress", () => {
     const stack = fakeStack();
     const progress = recordProgress();
 
-    await runStatusCommand({ json: false }, { ...stack.dependencies, progress });
+    await status(stack, false, { ...stack.dependencies, progress });
 
     expect(progress.events).toEqual([
       "start:Comparing the store tips",
@@ -479,7 +490,7 @@ describe("ferry status progress", () => {
     const stack = fakeStack(false);
     const progress = recordProgress();
 
-    await runStatusCommand({ json: false }, { ...stack.dependencies, progress });
+    await status(stack, false, { ...stack.dependencies, progress });
 
     expect(progress.events).toEqual([
       "start:Comparing the store tips",
@@ -500,13 +511,8 @@ describe("ferry status progress", () => {
   test("prints a summary table with the failed probe and the skipped box steps, then the report", async () => {
     const stack = fakeStack(false);
     const terminal = fakeTerminal();
-    const lines: string[] = [];
 
-    await runStatusCommand(
-      { json: false },
-      { ...stack.dependencies, progress: terminal.progress, writeLine: terminal.progress.hold((line) => lines.push(line)) },
-    );
-    expect(lines).toEqual([]);
+    const report = await runStatusCommand({}, { ...stack.dependencies, progress: terminal.progress });
     terminal.progress.finish();
 
     expect(terminal.table()).toEqual([
@@ -522,16 +528,16 @@ describe("ferry status progress", () => {
       "Checking MCP logins on the box     – skipped  host offline",
       "Checking tools on the box          – skipped  host offline",
     ]);
-    expect(lines[0]).toStartWith("Store tips:");
-    expect(lines[0]).toContain("Box default (ferry@box)\nHost: OFFLINE");
+    expect(formatStatus(report)).toStartWith("Store tips:");
+    expect(formatStatus(report)).toContain("Box default (ferry@box)\nHost: OFFLINE");
   });
 
   test("progress does not change the JSON output", async () => {
     const plain = fakeStack();
     const tracked = fakeStack();
 
-    await runStatusCommand({ json: true }, plain.dependencies);
-    await runStatusCommand({ json: true }, { ...tracked.dependencies, progress: recordProgress() });
+    await status(plain, true);
+    await status(tracked, true, { ...tracked.dependencies, progress: recordProgress() });
 
     expect(tracked.output).toEqual(plain.output);
   });
@@ -565,7 +571,7 @@ describe("ferry status progress", () => {
     test("prints an Integrations section with the health lines and warnings", async () => {
       const { stack, calls, dependencies } = enabled();
 
-      await runStatusCommand({ json: false }, dependencies);
+      await status(stack, false, dependencies);
 
       expect(calls).toHaveLength(1);
       expect(stack.output.join("\n")).toContain(
@@ -585,7 +591,7 @@ describe("ferry status progress", () => {
     test("adds integrations.paseo to the JSON report", async () => {
       const { stack, dependencies } = enabled();
 
-      const report = await runStatusCommand({ json: true }, dependencies);
+      const report = await status(stack, true, dependencies);
 
       expect(JSON.parse(stack.output[0]!).boxes[0].integrations).toEqual({
         paseo: { name: "Paseo", lines: health.lines, warnings: health.warnings, state: health.json },
@@ -597,7 +603,7 @@ describe("ferry status progress", () => {
       const { dependencies } = enabled();
       const terminal = fakeTerminal();
 
-      await runStatusCommand({ json: false }, { ...dependencies, progress: terminal.progress });
+      await runStatusCommand({}, { ...dependencies, progress: terminal.progress });
       terminal.progress.finish();
 
       expect(terminal.table().at(-1)).toMatch(/^Checking Paseo on the box\s+✔ done\s+1 warning\s+0\.1s$/);
@@ -607,7 +613,7 @@ describe("ferry status progress", () => {
       const { stack, calls, dependencies } = enabled(false);
       const progress = recordProgress();
 
-      const report = await runStatusCommand({ json: false }, { ...dependencies, progress });
+      const report = await status(stack, false, { ...dependencies, progress });
 
       expect(calls).toEqual([]);
       expect(progress.events).toContain("skip:Checking Paseo on the box");
@@ -624,7 +630,7 @@ describe("ferry status progress", () => {
   test("adds no integrations key when no integration is enabled", async () => {
     const stack = fakeStack();
 
-    const report = await runStatusCommand({ json: true }, stack.dependencies);
+    const report = await status(stack, true);
 
     expect("integrations" in report.boxes[0]!).toBe(false);
     expect(stack.output[0]).not.toContain("integrations");
@@ -682,7 +688,7 @@ describe("ferry status with more than one box", () => {
   test("prints the shared block, then one block per box with its header", async () => {
     const stack = twoBoxes();
 
-    await runStatusCommand({ json: false }, stack.dependencies);
+    await status(stack);
 
     const text = stack.output[0]!;
     expect(text).toStartWith(
@@ -718,7 +724,7 @@ describe("ferry status with more than one box", () => {
   test("shows Paseo only for the box that has the integration on", async () => {
     const stack = twoBoxes();
 
-    await runStatusCommand({ json: false }, stack.dependencies);
+    await status(stack);
 
     const [a, b] = stack.output[0]!.split(/\n\nBox b /);
     expect(a).toContain("Integrations:\n  Paseo:\n    Daemon: running, reachable");
@@ -729,7 +735,7 @@ describe("ferry status with more than one box", () => {
   test("prints JSON v2 with one entry per box, in config order, and the offline box has its own errors", async () => {
     const stack = twoBoxes();
 
-    const report = await runStatusCommand({ json: true }, stack.dependencies);
+    const report = await status(stack, true);
 
     const json = JSON.parse(stack.output[0]!);
     expect(json).toEqual(report);
@@ -752,7 +758,7 @@ describe("ferry status with more than one box", () => {
   test("a selection inspects only the named boxes", async () => {
     const stack = twoBoxes();
 
-    const report = await runStatusCommand({ json: true, selection: ["b"] }, stack.dependencies);
+    const report = await runStatusCommand({ selection: ["b"] }, stack.dependencies);
 
     expect(report.boxes.map((box) => box.name)).toEqual(["b"]);
     expect(stack.linkOptions).toEqual([{ host: "box-b", user: "dev" }]);
@@ -761,7 +767,7 @@ describe("ferry status with more than one box", () => {
   test("refuses an unknown box in the selection", async () => {
     const stack = twoBoxes();
 
-    expect(runStatusCommand({ json: true, selection: ["c"] }, stack.dependencies)).rejects.toThrow(
+    expect(runStatusCommand({ selection: ["c"] }, stack.dependencies)).rejects.toThrow(
       "unknown box c. Known boxes: a, b.",
     );
   });
@@ -770,7 +776,7 @@ describe("ferry status with more than one box", () => {
     const stack = twoBoxes();
     const terminal = fakeTerminal(100);
 
-    await runStatusCommand({ json: false }, { ...stack.dependencies, progress: terminal.progress });
+    await status(stack, false, { ...stack.dependencies, progress: terminal.progress });
     terminal.progress.finish();
 
     const steps = terminal.table().slice(1).map((row) => row.split(/\s{2,}/)[0]);
@@ -803,7 +809,7 @@ describe("ferry status with one box", () => {
   test("adds only the box header to the text of one box", async () => {
     const stack = fakeStack();
 
-    await runStatusCommand({ json: false }, stack.dependencies);
+    await status(stack);
 
     expect(stack.output[0]).toContain("\n\nBox default (ferry@box)\nHost: ONLINE\nAddress: 100.64.0.8\n");
     expect(stack.output[0]!.match(/^Box \S+ \(/gm)).toHaveLength(1);
@@ -910,7 +916,7 @@ describe("ferry status tools", () => {
   test("prints one row for each tool with ok, drift, missing, hidden, skipped, and unknown, and a warning for each tool to fix", async () => {
     const stack = sixStates();
 
-    await runStatusCommand({ json: false }, stack.dependencies);
+    await status(stack);
 
     expect(stack.output[0]).toContain(
       [
@@ -935,7 +941,7 @@ describe("ferry status tools", () => {
   test("puts the rows in the box entry of the JSON report", async () => {
     const stack = sixStates();
 
-    await runStatusCommand({ json: true }, stack.dependencies);
+    await status(stack, true);
 
     expect(JSON.parse(stack.output[0]!).boxes[0].tools).toEqual([
       { id: "bun", mode: "mirror", policy: "operator", operator: "1.4.2", target: "1.4.2", box: "1.4.2", state: "ok" },
@@ -978,7 +984,7 @@ describe("ferry status tools", () => {
   test("reads all box versions with one box command", async () => {
     const stack = sixStates();
 
-    await runStatusCommand({ json: false }, stack.dependencies);
+    await status(stack);
 
     expect(stack.toolCalls).toEqual(["box"]);
   });
@@ -991,7 +997,7 @@ describe("ferry status tools", () => {
       online: false,
     });
 
-    const report = await runStatusCommand({ json: false }, stack.dependencies);
+    const report = await status(stack);
 
     expect(stack.toolCalls).toEqual([]);
     expect(report.boxes[0]!.tools).toEqual([
@@ -1018,7 +1024,7 @@ describe("ferry status tools", () => {
       },
     });
 
-    const report = await runStatusCommand({ json: false }, stack.dependencies);
+    const report = await status(stack);
 
     expect(report.boxes.map((box) => box.tools?.map((tool) => [tool.policy, tool.target, tool.state]))).toEqual([
       [["operator", "1.4.2", "ok"], ["operator", "1.2.3", "ok"]],
@@ -1038,7 +1044,7 @@ describe("ferry status tools", () => {
       },
     });
 
-    await runStatusCommand({ json: false }, stack.dependencies);
+    await status(stack);
 
     const text = stack.output[0]!;
     const tools = text.slice(text.indexOf("Tools:"), text.indexOf("\n\nAuthentication:")).split("\n");

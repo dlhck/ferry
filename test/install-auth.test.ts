@@ -7,6 +7,7 @@ import {
   type InstallCommandDependencies,
 } from "../src/install-auth.ts";
 import type { GitIdentity } from "../src/git-identity.ts";
+import type { OutputEvent } from "../src/output.ts";
 import { Install, type InstallProgress, type InstallResult } from "../src/install.ts";
 import type { ToolDescriptor } from "../src/registry/types.ts";
 import type { LinkResult } from "../src/link.ts";
@@ -281,7 +282,7 @@ describe("install command", () => {
     let runs = 0;
     let confirmed: boolean | undefined;
 
-    await runInstallCommand(
+    const result = await runInstallCommand(
       { yes: true },
       installDependencies({
         plan,
@@ -300,6 +301,14 @@ describe("install command", () => {
     expect(prompts).toBe(0);
     expect(runs).toBe(1);
     expect(confirmed).toBe(true);
+    expect(result?.plan.map((entry) => `${entry.tool} ${entry.action}`)).toEqual([
+      "gh install",
+      "codex install",
+      "node skip-same",
+      "bun skip-not-on-operator",
+      "ferry skip-dev-build",
+    ]);
+    expect(result?.gitIdentity).not.toBeNull();
   });
 
   test("shows one progress step for each tool and for the box git identity", async () => {
@@ -368,7 +377,7 @@ describe("auth command", () => {
     const output: string[] = [];
     let links = 0;
 
-    await runAuthCommand(
+    const result = await runAuthCommand(
       {},
       authDependencies({
         output,
@@ -387,6 +396,15 @@ describe("auth command", () => {
       "pi: manual SSH flow",
     ]);
     expect(links).toBe(0);
+    expect(result).toEqual({
+      providers: [
+        { id: "gh", login: "startable" },
+        { id: "claude", login: "startable" },
+        { id: "codex", login: "startable" },
+        { id: "cursor", login: "startable" },
+        { id: "pi", login: "manual" },
+      ],
+    });
   });
 
   test("constructs Link from config and calls start once", async () => {
@@ -539,6 +557,54 @@ describe("auth command", () => {
       "start:Waiting for you to finish the login in the browser (up to 15 min)",
       "done",
     ]);
+  });
+
+  test("with --json, prints the login event with the URL and the device code, and returns the login result", async () => {
+    const events: unknown[] = [];
+    const result = await runAuthCommand(
+      { provider: "gh" },
+      authDependencies({
+        output: [],
+        emit: (event) => events.push(event),
+        createAuthStart: () => ({
+          ...noMcp,
+          start: async () => ({ kind: "device-url", provider: "gh", url: "https://github.com/login/device", userCode: "A1B2-C3D4" }),
+          finish: async () => ({ kind: "logged-in", provider: "gh" }),
+        }),
+      }),
+    );
+
+    expect(events).toEqual([
+      {
+        type: "login",
+        provider: "gh",
+        url: "https://github.com/login/device",
+        userCode: "A1B2-C3D4",
+        codeRequired: false,
+        localPort: null,
+        timeoutMs: null,
+      },
+    ]);
+    expect(result).toEqual({ kind: "logged-in", provider: "gh" });
+  });
+
+  test("the login event says when the login waits for the code from the browser", async () => {
+    const events: OutputEvent[] = [];
+    await runAuthCommand(
+      { provider: "claude" },
+      authDependencies({
+        output: [],
+        emit: (event) => events.push(event),
+        readLoginCode: async () => "code",
+        createAuthStart: () => ({
+          ...noMcp,
+          start: async () => ({ kind: "printed-url", provider: "claude", url: "https://claude.com/x", codeInput: "/tmp/in" }),
+          finish: async () => ({ kind: "logged-in", provider: "claude" }),
+        }),
+      }),
+    );
+
+    expect(events.map((event) => event.codeRequired)).toEqual([true]);
   });
 
   test("runs the setup of an already authenticated tool as its own step", async () => {
@@ -877,6 +943,7 @@ function authDependencies(overrides: {
   readonly progress?: AuthCommandDependencies["progress"];
   readonly readLoginCode?: AuthCommandDependencies["readLoginCode"];
   readonly onInterrupt?: AuthCommandDependencies["onInterrupt"];
+  readonly emit?: AuthCommandDependencies["emit"];
 } = {}): AuthCommandDependencies {
   return {
     tools: BUILTIN_TOOLS,
@@ -892,6 +959,7 @@ function authDependencies(overrides: {
     writeLine: (line) => overrides.output?.push(line),
     progress: overrides.progress ?? recordProgress(),
     onInterrupt: overrides.onInterrupt ?? (() => () => {}),
+    ...(overrides.emit ? { emit: overrides.emit } : {}),
   };
 }
 

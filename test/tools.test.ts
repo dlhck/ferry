@@ -4,7 +4,7 @@ import type { PartialOperatorConfig } from "../src/config.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 import { loadRegistry } from "../src/registry/load.ts";
 import type { ToolDescriptor } from "../src/registry/types.ts";
-import { runToolsCommand } from "../src/tools/command.ts";
+import { runToolsCommand, toolsLines } from "../src/tools/command.ts";
 import { parseVersion, readLocalVersion } from "../src/tools/version.ts";
 
 /**
@@ -122,12 +122,11 @@ describe("ferry tools", () => {
   test("lists the builtin tools and the config tools with kind, install mode, policy, and the operator version", async () => {
     const lines: string[] = [];
 
-    await runToolsCommand({
+    lines.push(...toolsLines(await runToolsCommand({
       readConfig: () => CONFIG,
       tools: toolsOf(CONFIG),
       local: fakeHost(OPERATOR),
-      writeLine: (line) => lines.push(line),
-    });
+    })));
 
     expect(lines).toEqual([
       "Tools",
@@ -155,12 +154,11 @@ describe("ferry tools", () => {
   test("with box tables, adds the effective policy of each box", async () => {
     const lines: string[] = [];
 
-    await runToolsCommand({
+    lines.push(...toolsLines(await runToolsCommand({
       readConfig: () => BOXES,
       tools: toolsOf(BOXES),
       local: fakeHost(OPERATOR),
-      writeLine: (line) => lines.push(line),
-    });
+    })));
 
     expect(lines).toEqual([
       "Tools",
@@ -181,13 +179,12 @@ describe("ferry tools", () => {
   test("the box selection narrows the box columns", async () => {
     const lines: string[] = [];
 
-    await runToolsCommand({
+    lines.push(...toolsLines(await runToolsCommand({
       readConfig: () => BOXES,
       tools: toolsOf(BOXES),
       local: fakeHost(OPERATOR),
-      writeLine: (line) => lines.push(line),
       boxes: ["b"],
-    });
+    })));
 
     expect(lines[1]).toBe("  TOOL    KIND   INSTALL  POLICY              BOX b               OPERATOR  VERSION  NAME");
     expect(lines[4]).toContain("latest (default)    0.150.0  ");
@@ -196,12 +193,11 @@ describe("ferry tools", () => {
   test("runs without a config and lists only the builtin tools", async () => {
     const lines: string[] = [];
 
-    await runToolsCommand({
+    lines.push(...toolsLines(await runToolsCommand({
       readConfig: () => null,
       tools: BUILTIN_TOOLS,
       local: fakeHost({}),
-      writeLine: (line) => lines.push(line),
-    });
+    })));
 
     expect(lines.slice(1, -2).map((line) => line.trim().split(/\s+/)[0])).toEqual(["TOOL", "gh", "claude", "codex", "pi", "cursor"]);
     expect(lines.join("\n")).not.toContain("project");

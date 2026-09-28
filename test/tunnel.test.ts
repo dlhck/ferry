@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { quoteShell } from "../src/box-settings.ts";
+import type { OutputEvent } from "../src/output.ts";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -57,6 +58,7 @@ class FakeLink {
 
 function harness(link: FakeLink, overrides: Partial<TunnelDependencies> = {}) {
   const lines: string[] = [];
+  const events: OutputEvent[] = [];
   const links: LinkOptions[] = [];
   let interrupt: (() => void) | undefined;
   const dependencies: TunnelDependencies = {
@@ -74,9 +76,10 @@ function harness(link: FakeLink, overrides: Partial<TunnelDependencies> = {}) {
     isPortFree: async () => true,
     controlPath: join(tmpdir(), "ferry-tunnel-test.sock"),
     reconnectMs: 0,
+    emit: (event) => events.push(event),
     ...overrides,
   };
-  return { dependencies, lines, links, interrupt: () => interrupt?.() };
+  return { dependencies, lines, events, links, interrupt: () => interrupt?.() };
 }
 
 const stopped: ForwardResult = { ok: true, stopped: true, address: "dev@lab.example", stdout: "", stderr: "" };
@@ -133,6 +136,11 @@ describe("runTunnel", () => {
       "http://localhost:4000 -> lab:127.0.0.1:5173",
       "Press Ctrl-C to close the tunnel.",
       "Tunnel closed.",
+    ]);
+    expect(run.events).toEqual([
+      { type: "forward-opened", name: null, localPort: 3000, box: "lab", remotePort: 3000 },
+      { type: "forward-opened", name: null, localPort: 4000, box: "lab", remotePort: 5173 },
+      { type: "tunnel-closed", box: "lab" },
     ]);
   });
 
@@ -212,11 +220,16 @@ LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*
     });
     const run = harness(link);
 
-    await runTunnel({ ports: [], list: true, box: BOX }, run.dependencies);
+    const listeners = await runTunnel({ ports: [], list: true, box: BOX }, run.dependencies);
 
     expect(link.commands).toEqual([LIST_COMMAND]);
     expect(link.tunnels).toEqual([]);
     expect(run.lines).toEqual(["PORT  ADDRESS    PROCESS", "22    0.0.0.0    -", "3000  127.0.0.1  next-server"]);
+    expect(listeners).toEqual([
+      { port: 22, address: "0.0.0.0", process: "-" },
+      { port: 3000, address: "127.0.0.1", process: "next-server" },
+    ]);
+    expect(run.events).toEqual([]);
   });
 
   test("--list reports a failed box command", async () => {
@@ -391,7 +404,7 @@ describe("ferry tunnel --follow", () => {
     const master = new FakeMaster();
     const link = new FollowLink(() => master);
     const busy = new Set([3000]);
-    const { dependencies, lines, interrupt } = harness(link, {
+    const { dependencies, lines, events, interrupt } = harness(link, {
       isPortFree: async (port) => !busy.has(port),
     });
 
@@ -417,13 +430,21 @@ describe("ferry tunnel --follow", () => {
     expect(master.calls).toEqual(["forward 3001:3000", "forward 5173:5173", "cancel 3001:3000", "exit"]);
     expect(lines.at(-1)).toBe("Tunnel closed.");
     expect(link.masters).toHaveLength(1);
+    const web = { name: "web", localPort: 3001, box: "lab", remotePort: 3000, pid: 11, cwd: "/home/dev/app" };
+    expect(events).toEqual([
+      { type: "following", box: "lab", reconnected: false },
+      { type: "forward-opened", ...web },
+      { type: "forward-opened", name: "docs", localPort: 5173, box: "lab", remotePort: 5173, pid: 12, cwd: "/srv/docs" },
+      { type: "forward-closed", ...web },
+      { type: "tunnel-closed", box: "lab" },
+    ]);
   });
 
   test("connects again after the connection drops, and reads the entries again", async () => {
     const masters = [new FakeMaster(), new FakeMaster()];
     let index = 0;
     const link = new FollowLink(() => masters[index++]!);
-    const { dependencies, lines, interrupt } = harness(link, {
+    const { dependencies, lines, events, interrupt } = harness(link, {
       reconnectMs: 0,
     });
 
@@ -439,6 +460,15 @@ describe("ferry tunnel --follow", () => {
     await running;
 
     expect(lines).toContain("The connection to lab closed: Connection reset by peer. Ferry connects again in 0 s.");
+    expect(events).toContainEqual({
+      type: "connection-lost",
+      box: "lab",
+      retryInMs: 0,
+      code: "box-offline",
+      message: "The connection to lab closed: Connection reset by peer",
+      hint: expect.any(String),
+    });
+    expect(events).toContainEqual({ type: "following", box: "lab", reconnected: true });
     expect(masters[1]!.calls).toEqual(["forward 3000:3000", "exit"]);
   });
 

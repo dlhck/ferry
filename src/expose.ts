@@ -8,6 +8,7 @@
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { OutputEvent } from "./output.ts";
 
 /** The directory of the entries, relative to the home. */
 export const EXPOSED_DIR = ".ferry/exposed";
@@ -39,8 +40,12 @@ export type ExposeDependencies = {
   readonly cwd: string;
   readonly pid: number;
   readonly now: () => Date;
-  /** Starts the command with the standard streams of Ferry. */
-  readonly spawn: (argv: readonly string[]) => ExposeChild;
+  /** Starts the command with the standard streams of Ferry. With `stdout: "stderr"`, the stdout of the command goes to stderr. */
+  readonly spawn: (argv: readonly string[], stdout: "inherit" | "stderr") => ExposeChild;
+  /** With --json, stdout carries only the events, so the output of the command goes to stderr. */
+  readonly stdout: "inherit" | "stderr";
+  /** With --json, prints the `exposed` and `exited` events. */
+  readonly emit: (event: OutputEvent) => void;
   /** Calls `handler` for SIGINT and SIGTERM. Returns a function that removes the handlers. */
   readonly onSignal: (handler: (signal: NodeJS.Signals) => void) => () => void;
 };
@@ -73,17 +78,21 @@ export async function runExpose(input: ExposeInput, dependencies: Partial<Expose
   // A rename is atomic, so the box watch never reads a part of the file.
   writeFileSync(`${path}.tmp`, `${JSON.stringify(entry)}\n`);
   renameSync(`${path}.tmp`, path);
+  let exitCode: number;
   try {
-    const child = resolved.spawn(input.command);
+    const child = resolved.spawn(input.command, resolved.stdout);
+    resolved.emit({ type: "exposed", port, name: entry.name ?? null, cwd: entry.cwd, pid: resolved.pid });
     const stopForwarding = resolved.onSignal((signal) => child.kill(signal));
     try {
-      return await child.exited;
+      exitCode = await child.exited;
     } finally {
       stopForwarding();
     }
   } finally {
     rmSync(path, { force: true });
   }
+  resolved.emit({ type: "exited", port, exitCode });
+  return exitCode;
 }
 
 /** The port of `--port`, else of `$PASEO_PORT`. */
@@ -106,10 +115,12 @@ function defaultDependencies(): ExposeDependencies {
     cwd: process.cwd(),
     pid: process.pid,
     now: () => new Date(),
-    spawn: (argv) => {
-      const child = Bun.spawn([...argv], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+    spawn: (argv, stdout) => {
+      const child = Bun.spawn([...argv], { stdin: "inherit", stdout: stdout === "stderr" ? 2 : "inherit", stderr: "inherit" });
       return { exited: child.exited, kill: (signal) => child.kill(signal) };
     },
+    stdout: "inherit",
+    emit: () => {},
     onSignal: (handler) => {
       const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
       for (const signal of signals) process.on(signal, handler);

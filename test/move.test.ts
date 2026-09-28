@@ -15,7 +15,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Link, LinkResult, RunOptions } from "../src/link.ts";
-import { runMove, type MoveDependencies, type MoveInput } from "../src/move.ts";
+import { runMove, type MoveDependencies, type MoveInput, type MoveResult } from "../src/move.ts";
+import { errorInfo } from "../src/output.ts";
 import { recordProgress } from "./fake-progress.ts";
 
 const roots: string[] = [];
@@ -103,8 +104,9 @@ async function move(w: World, input: Partial<MoveInput> & { path: string }, over
   const lines: string[] = [];
   const progress = recordProgress();
   let error: unknown = null;
+  let value: MoveResult | null = null;
   try {
-    await runMove(
+    value = await runMove(
       { dryRun: false, remove: false, includeEnv: false, allowSecrets: false, yes: false, ...input },
       {
         readConfig: () => ({ host: { transport: "ssh", destination: "user@box.example" } }),
@@ -122,7 +124,7 @@ async function move(w: World, input: Partial<MoveInput> & { path: string }, over
   } catch (caught) {
     error = caught;
   }
-  return { lines, events: progress.events, error: error as Error | null };
+  return { lines, events: progress.events, error: error as Error | null, value };
 }
 
 function commit(repo: string, path: string, body: string, message: string): string {
@@ -405,6 +407,14 @@ describe("ferry move to the box", () => {
     expect(result.lines).toContain("Carry: AGENTS.md");
     expect(result.lines).toContain("Carry: .env.local");
     expect({ operator: listTree(w.operator), box: listTree(w.box) }).toEqual(before);
+    expect(result.value).toMatchObject({
+      path: "~/Developer/app",
+      source: "this machine",
+      destination: "the box",
+      dryRun: true,
+      trash: null,
+    });
+    expect(result.value?.carry.map((file) => file.path)).toEqual(expect.arrayContaining(["AGENTS.md", ".env.local"]));
   });
 
   test("refuses a path outside the home and an existing destination", async () => {
@@ -681,6 +691,7 @@ describe("ferry move --allow-secrets", () => {
     );
 
     expect(result.error?.message).toBe("Ferry found 1 file with secrets. Without a terminal, add --yes to carry them.");
+    expect(errorInfo(result.error).code).toBe("confirmation-required");
     expect(asked).toBe(0);
     expect(existsSync(join(w.box, "Developer"))).toBe(false);
     expect(w.commands.some(({ command }) => command.includes("git clone") || command.startsWith("tar -xf"))).toBe(false);

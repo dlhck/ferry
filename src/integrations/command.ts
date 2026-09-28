@@ -31,6 +31,20 @@ export type IntegrationCommandDependencies = {
   readonly progress: Progress;
 };
 
+/** What `integrations enable|disable` did. `enabled` is the new config value, or null for a dry run. */
+export type IntegrationCommandResult = {
+  readonly integration: IntegrationId;
+  readonly action: "enable" | "disable" | "purge";
+  readonly dryRun: boolean;
+  /** The plan lines, with the box commands. */
+  readonly plan: readonly string[];
+  /** The output lines of the box steps. */
+  readonly output: readonly string[];
+  readonly enabled: boolean | null;
+  /** The steps to connect the local app to the box, after an enable. */
+  readonly connectSteps: readonly string[];
+};
+
 export class IntegrationCommandError extends Error {
   constructor(message: string) {
     super(message);
@@ -41,7 +55,7 @@ export class IntegrationCommandError extends Error {
 export async function runIntegrationCommand(
   input: IntegrationCommandInput,
   dependencies: Partial<IntegrationCommandDependencies> = {},
-): Promise<void> {
+): Promise<IntegrationCommandResult | null> {
   const resolved = { ...defaultDependencies, ...dependencies };
   const integration = resolved.integrations.find((candidate) => candidate.id === input.name);
   if (!integration) {
@@ -55,18 +69,20 @@ export async function runIntegrationCommand(
   if (!target || !host) throw new IntegrationCommandError("Ferry config has no complete host. Run ferry init.");
 
   const enable = input.action === "enable";
-  const action = enable ? "enable" : input.purge ? "purge" : "disable";
+  const action: IntegrationCommandResult["action"] = enable ? "enable" : input.purge ? "purge" : "disable";
   resolved.writeLine(`${enable ? "Enable" : "Disable"} ${integration.name}:`);
-  for (const line of await integration.plan(action)) resolved.writeLine(line);
+  const plan = await integration.plan(action);
+  for (const line of plan) resolved.writeLine(line);
+  const result = { integration: integration.id, action, plan };
   if (enable && input.dryRun) {
     resolved.writeLine("Dry run: Ferry made no changes.");
-    return;
+    return { ...result, dryRun: true, output: [], enabled: null, connectSteps: [] };
   }
   if (!input.yes) {
     resolved.progress.pause();
     if ((await resolved.confirm(`${enable ? "Enable" : "Disable"} ${integration.name} on the box?`)) !== true) {
       resolved.writeLine(`${enable ? "Enable" : "Disable"} cancelled.`);
-      return;
+      return null;
     }
   }
 
@@ -79,10 +95,13 @@ export async function runIntegrationCommand(
   resolved.setIntegration(integration.id, enable);
   const table = resolved.box === undefined ? "integrations" : `box.${resolved.box}.integrations`;
   resolved.writeLine(`Set [${table}] ${integration.id} = ${enable} in ${configPath()}.`);
-  if (!enable) return;
+  const done = { ...result, dryRun: false, output: lines, enabled: enable };
+  if (!enable) return { ...done, connectSteps: [] };
   resolved.writeLine(`Connect ${integration.name} to the box:`);
   const destination = host.transport === "ssh" ? host.destination : `${host.sshUser}@${host.tailscale}`;
-  for (const step of integration.connectSteps(destination)) resolved.writeLine(`  ${step}`);
+  const connectSteps = integration.connectSteps(destination);
+  for (const step of connectSteps) resolved.writeLine(`  ${step}`);
+  return { ...done, connectSteps };
 }
 
 const defaultDependencies: IntegrationCommandDependencies = {

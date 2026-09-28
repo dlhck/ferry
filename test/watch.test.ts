@@ -16,6 +16,7 @@ import type { Seed } from "../src/manifest.ts";
 import { createPaseo } from "../src/integrations/paseo.ts";
 import type { Integration } from "../src/integrations/types.ts";
 import { runUpdateCommand } from "../src/update.ts";
+import { FerryError } from "../src/output.ts";
 
 function accepted(identity: string): WatchObservation {
   return { ok: true, identity };
@@ -182,6 +183,74 @@ describe("watch", () => {
 
     expect(isRetryableWatchError(conflict)).toBe(false);
     expect(isRetryableWatchError(new SyncError("publish-failure", "git remote", "offline"))).toBe(true);
+  });
+});
+
+describe("watch events", () => {
+  function run(observations: WatchObservation[], sync: (request: WatchSyncRequest) => Promise<void>) {
+    const controller = new AbortController();
+    const events: unknown[] = [];
+    const lines: string[] = [];
+    let index = 0;
+    const done = runWatch(
+      { signal: controller.signal, pollMs: 1, debounceMs: 1 },
+      {
+        observe: () => {
+          const value = observations[Math.min(index++, observations.length - 1)]!;
+          if (index >= observations.length) controller.abort();
+          return value;
+        },
+        sync,
+        sleep: async () => {},
+        now: () => 0,
+        readBoxes: () => ["default"],
+        readState: () => null,
+        writeState: () => {},
+        writeLine: (line) => lines.push(line),
+        emit: (event) => events.push(event),
+      },
+    );
+    return { done, events, lines };
+  }
+
+  test("prints one event for each watch line: start, sync, refused content, and stop", async () => {
+    const refusal = new SyncError("manifest-refusal", "operator", "Manifest refused publisher me: environment file: /home/me/.env", {
+      cause: new FerryError("deny-rule-match", "environment file: /home/me/.env"),
+    });
+    const watch = run(
+      [accepted("one"), accepted("two"), accepted("two"), { ok: false, signature: "env", message: refusal.message, error: refusal }],
+      async () => {},
+    );
+    await watch.done;
+
+    expect(watch.events).toEqual([
+      { type: "watch-started", boxes: ["default"] },
+      { type: "synced", box: "default", manifest: "two" },
+      { type: "content-refused", code: "deny-rule-match", message: refusal.message, hint: expect.any(String) },
+      { type: "watch-stopped" },
+    ]);
+    expect(watch.lines).toEqual([
+      "Ferry watch is running.",
+      "Synced Manifest two.",
+      `Watch refused content: ${refusal.message}`,
+    ]);
+  });
+
+  test("a failed box sync is an error event with the code, the box, and the retry wait", async () => {
+    const offline = new SyncError("link-failure", "box", "failed to resolve home on box: network/host-offline: box is offline");
+    const watch = run([accepted("one"), accepted("two"), accepted("two"), accepted("two")], async () => {
+      throw offline;
+    });
+    await watch.done;
+
+    expect(watch.events).toContainEqual({
+      type: "sync-failed",
+      box: "default",
+      retryInMs: 1_000,
+      code: "box-offline",
+      message: offline.message,
+      hint: expect.any(String),
+    });
   });
 });
 

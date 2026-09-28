@@ -260,10 +260,15 @@ describe("update command", () => {
       },
     });
 
-    await runUpdateCommand({ yes: false, dryRun: true }, deps);
+    const result = await runUpdateCommand({ yes: false, dryRun: true }, deps);
 
     expect(recorder.output).toEqual(PLAN);
     expect(prompts).toBe(0);
+    expect(result?.dryRun).toBe(true);
+    expect(result?.updated).toEqual([]);
+    expect(result?.boxes.map((box) => [box.name, box.offline, box.plan.map((entry) => `${entry.tool} ${entry.action}`)])).toEqual([
+      ["default", null, expect.arrayContaining(["gh update", "claude update"])],
+    ]);
     expect(recorder.box).toEqual([]);
     expect(recorder.local).toEqual([]);
   });
@@ -271,9 +276,10 @@ describe("update command", () => {
   test("runs the box and operator updates after confirmation", async () => {
     const { recorder, deps } = dependencies();
 
-    await runUpdateCommand({ yes: false, dryRun: false }, deps);
+    const result = await runUpdateCommand({ yes: false, dryRun: false }, deps);
 
     expect(recorder.box).toEqual(["sudo apt install gh -y", "claude update", "codex update", "install pnpm '11.17.0'"]);
+    expect(result?.updated).toEqual(["box gh", "box claude", "box codex", "box pnpm", "operator claude", "operator codex"]);
     expect(recorder.local).toEqual(["claude update", "codex update"]);
   });
 

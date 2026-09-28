@@ -65,6 +65,22 @@ export type UpdateCommandDependencies = {
   readonly ferryVersion: string;
 };
 
+/** The plan of each box and of the operator machine, and the updates that ran. */
+export type UpdateCommandResult = {
+  readonly dryRun: boolean;
+  readonly boxes: readonly {
+    readonly name: string;
+    /** The Link error message when the box did not answer, else null. */
+    readonly offline: string | null;
+    readonly plan: readonly ToolStep[];
+    /** The plan lines of each enabled integration. */
+    readonly integrations: readonly { readonly id: string; readonly plan: readonly string[] }[];
+  }[];
+  readonly operator: readonly OperatorUpdate[];
+  /** The updates that ran, such as `box gh`, `[a] box gh`, or `operator codex`. Empty for a dry run. */
+  readonly updated: readonly string[];
+};
+
 export class UpdateError extends Error {
   constructor(message: string) {
     super(message);
@@ -108,7 +124,7 @@ type BoxUpdate = {
 export async function runUpdateCommand(
   input: UpdateCommandInput,
   dependencies: Partial<UpdateCommandDependencies> = {},
-): Promise<void> {
+): Promise<UpdateCommandResult | null> {
   const resolved = { ...defaultDependencies, ...dependencies };
   const { config, boxes: selected } = loadBoxes(resolved.readConfig, input.boxes ?? []);
   const registered = resolved.tools ?? registryTools(config);
@@ -174,18 +190,35 @@ export async function runUpdateCommand(
       "command" in entry ? `Operator ${entry.tool}: ${entry.command}` : `Operator ${entry.tool}: skipped, ${entry.reason}`,
     );
   }
+  const integrationPlans = new Map<string, { id: string; plan: readonly string[] }[]>();
   for (const box of reached) {
+    const plans: { id: string; plan: readonly string[] }[] = [];
     for (const integration of box.integrations) {
       resolved.writeLine(`${box.prefix}Box ${integration.id}:`);
-      for (const line of await integration.plan("update", box.link)) resolved.writeLine(`${box.prefix}  ${line}`);
+      const plan = await integration.plan("update", box.link);
+      plans.push({ id: integration.id, plan });
+      for (const line of plan) resolved.writeLine(`${box.prefix}  ${line}`);
     }
+    integrationPlans.set(box.name, plans);
   }
-  if (input.dryRun) return;
+  const updated: string[] = [];
+  const result = (): UpdateCommandResult => ({
+    dryRun: input.dryRun,
+    boxes: boxes.map((box) => ({
+      name: box.name,
+      offline: box.offline,
+      plan: box.plan,
+      integrations: integrationPlans.get(box.name) ?? [],
+    })),
+    operator,
+    updated,
+  });
+  if (input.dryRun) return result();
   if (!input.yes) {
     resolved.progress.pause();
     if ((await resolved.confirm()) !== true) {
       resolved.writeLine("Update cancelled.");
-      return;
+      return null;
     }
   }
 
@@ -212,6 +245,7 @@ export async function runUpdateCommand(
       // The update output can hold a warning, such as the gh fallback to the latest version.
       for (const line of outputLines(stdout)) resolved.writeLine(`  ${line}`);
       resolved.writeLine(`Updated ${name}.`);
+      updated.push(name);
     } else {
       resolved.progress.fail(failure);
       failed.push(name);
@@ -223,6 +257,7 @@ export async function runUpdateCommand(
     for (const integration of box.integrations) {
       try {
         for (const line of await integration.update(box.link, resolved.progress)) resolved.writeLine(`${box.prefix}${line}`);
+        updated.push(`${box.prefix}box ${integration.id}`);
       } catch (error) {
         failed.push(`${box.prefix}box ${integration.id}`);
         resolved.writeLine(`Failed to update ${box.prefix}box ${integration.id}: ${messageOf(error)}`);
@@ -246,6 +281,7 @@ export async function runUpdateCommand(
       `${failed.length} of ${steps.length + integrationCount + boxes.length - reached.length} updates failed: ${failed.join(", ")}`,
     );
   }
+  return result();
 }
 
 /** The commands to run: the box changes of each box in `depends` order, then the operator updates. */

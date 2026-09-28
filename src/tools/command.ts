@@ -17,14 +17,30 @@ export type ToolsCommandDependencies = {
   readonly tools: readonly ToolDescriptor[];
   /** Runs the version commands on the operator machine. Tests inject a fake. */
   readonly local: HostAdapter;
-  readonly writeLine: (line: string) => void;
   /** The --box selection. */
   readonly boxes?: readonly string[];
 };
 
+/** A version policy. `default` is true when the config sets none, so the default of the tool kind applies. */
+export type ToolPolicyEntry = { readonly policy: string; readonly default: boolean };
+
+export type ToolsReport = {
+  readonly tools: readonly {
+    readonly id: string;
+    readonly name: string;
+    readonly kind: string;
+    readonly install: string;
+    readonly policy: ToolPolicyEntry;
+    /** The policy of each box, with box tables or a box selection. */
+    readonly boxes: readonly ({ readonly name: string } & ToolPolicyEntry)[];
+    /** The version on this machine, or null when this machine does not have the tool. */
+    readonly operatorVersion: string | null;
+  }[];
+};
+
 export async function runToolsCommand(
   dependencies: Pick<ToolsCommandDependencies, "tools"> & Partial<ToolsCommandDependencies>,
-): Promise<void> {
+): Promise<ToolsReport> {
   const resolved = { ...defaultDependencies, ...dependencies };
   const operatorConfig = resolved.readConfig();
   const config = operatorConfig?.tools;
@@ -32,40 +48,53 @@ export async function runToolsCommand(
   const boxes = operatorConfig?.boxes || selection.length > 0 ? resolveBoxes(operatorConfig ?? {}, selection) : [];
   const versions = await Promise.all(resolved.tools.map((tool) => readLocalVersion(tool, resolved.local)));
 
-  const rows = resolved.tools.map((tool, index) => {
-    const defaults = toolDefaults(tool);
-    const policy = (tools: typeof config) => toolPolicy(tools, tool.id) ?? `${defaults.policy} (default)`;
-    const version = versions[index] ?? null;
-    return [
-      tool.id,
-      tool.kind ?? "agent",
-      defaults.mode,
-      policy(config),
-      ...boxes.map((box) => policy(box.tools)),
-      version === null ? "no" : "yes",
-      version ?? "-",
-      tool.name ?? tool.id,
-    ];
-  });
-  resolved.writeLine("Tools");
-  const header = ["TOOL", "KIND", "INSTALL", "POLICY", ...boxes.map((box) => `BOX ${box.name}`), "OPERATOR", "VERSION", "NAME"];
-  for (const line of table([header, ...rows])) {
-    resolved.writeLine(`  ${line}`);
-  }
+  return {
+    tools: resolved.tools.map((tool, index) => {
+      const defaults = toolDefaults(tool);
+      const policy = (tools: typeof config): ToolPolicyEntry => {
+        const set = toolPolicy(tools, tool.id);
+        return set === undefined ? { policy: defaults.policy, default: true } : { policy: set, default: false };
+      };
+      return {
+        id: tool.id,
+        name: tool.name ?? tool.id,
+        kind: tool.kind ?? "agent",
+        install: defaults.mode,
+        policy: policy(config),
+        boxes: boxes.map((box) => ({ name: box.name, ...policy(box.tools) })),
+        operatorVersion: versions[index] ?? null,
+      };
+    }),
+  };
+}
 
-  resolved.writeLine("");
-  if (boxes.length === 0) {
-    resolved.writeLine("ferry tools reads this machine only. It does not connect to the box.");
-    return;
-  }
-  resolved.writeLine("A BOX column shows the version policy of that box, not the version on the box.");
-  resolved.writeLine("ferry tools reads this machine only. It does not connect to a box.");
+/** The `ferry tools` table and its notes. */
+export function toolsLines(report: ToolsReport): string[] {
+  const boxes = report.tools[0]?.boxes.map((box) => box.name) ?? [];
+  const policy = (entry: ToolPolicyEntry) => (entry.default ? `${entry.policy} (default)` : entry.policy);
+  const rows = report.tools.map((tool) => [
+    tool.id,
+    tool.kind,
+    tool.install,
+    policy(tool.policy),
+    ...tool.boxes.map(policy),
+    tool.operatorVersion === null ? "no" : "yes",
+    tool.operatorVersion ?? "-",
+    tool.name,
+  ]);
+  const header = ["TOOL", "KIND", "INSTALL", "POLICY", ...boxes.map((box) => `BOX ${box}`), "OPERATOR", "VERSION", "NAME"];
+  const lines = ["Tools", ...table([header, ...rows]).map((line) => `  ${line}`), ""];
+  if (boxes.length === 0) return [...lines, "ferry tools reads this machine only. It does not connect to the box."];
+  return [
+    ...lines,
+    "A BOX column shows the version policy of that box, not the version on the box.",
+    "ferry tools reads this machine only. It does not connect to a box.",
+  ];
 }
 
 const defaultDependencies: Omit<ToolsCommandDependencies, "tools"> = {
   readConfig,
   local: new BunHostAdapter(),
-  writeLine: console.log,
 };
 
 /** Pad each column to its widest cell. The last column is not padded. */
