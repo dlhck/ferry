@@ -2105,4 +2105,16 @@ describe("sync with more than one box", () => {
     ]);
     expect(result.boxes.map((entry) => entry.plan)).toEqual(plans);
   });
+
+  test("the plan of each box names its SSH agent forwarding", async () => {
+    const config = { ...fleetConfig, boxes: [box("a"), { ...box("b", false), gitAuth: "box" as const }] };
+    const sync = fleet({ config });
+
+    await runSync({ home: sync.home, dryRun: true }, sync.dependencies);
+
+    expect(sync.lines.flatMap((line) => line.split("\n")).filter((line) => line.includes("SSH agent forwarding"))).toEqual([
+      "[a] SSH agent forwarding: only for the box snapshot update and the Claude plugin installs",
+      "[b] SSH agent forwarding: none (git_auth = box)",
+    ]);
+  });
 });
