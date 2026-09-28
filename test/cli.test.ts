@@ -1182,11 +1182,81 @@ describe("ferry tunnel", () => {
     });
   });
 
-  test("refuses more than one box and an unknown box", async () => {
+  test("refuses more than one box and an unknown box, with a message for the tunnel", async () => {
     await expect(tunnelInput(BOXES, ["tunnel", "3000", "--box", "a", "--box", "lab"])).rejects.toThrow(
-      "ferry tunnel changes one box. Give --box once.",
+      "ferry tunnel opens the ports of one box. Give --box once.",
     );
-    await expect(tunnelInput({ ...BOXES, defaultBox: undefined }, ["tunnel", "3000"])).rejects.toThrow("Add --box <name>");
+    await expect(tunnelInput({ ...BOXES, defaultBox: undefined }, ["tunnel", "3000"])).rejects.toThrow(
+      "ferry tunnel opens the ports of one box, and 2 boxes are configured (a, lab). Add --box <name>, or set default_box in the config.",
+    );
     await expect(tunnelInput(BOXES, ["tunnel", "3000", "--box", "c"])).rejects.toThrow("unknown box c.");
+  });
+
+  test("passes --follow with the selected box", async () => {
+    expect(await tunnelInput(BOXES, ["tunnel", "--follow", "--box", "lab"])).toEqual({
+      ports: [],
+      list: false,
+      follow: true,
+      box: { name: "lab", host: { tailscale: "lab", sshUser: "dev" } },
+    });
+  });
+});
+
+describe("ferry expose", () => {
+  test("passes the command after -- and --port, and sets the exit code of the command", async () => {
+    let received: unknown;
+    const codes: number[] = [];
+    await buildProgram({
+      runExpose: async (input) => {
+        received = input;
+        return 3;
+      },
+      setExitCode: (code) => codes.push(code),
+      isBoxMode: () => true,
+    }).parseAsync(["expose", "--port", "5173", "--", "bun", "run", "dev", "--port", "5173"], { from: "user" });
+
+    expect(received).toEqual({ port: "5173", command: ["bun", "run", "dev", "--port", "5173"] });
+    expect(codes).toEqual([3]);
+  });
+});
+
+describe("box mode", () => {
+  test("a box install refuses the operator commands and names the box install", async () => {
+    for (const args of [
+      ["sync"],
+      ["install", "--yes"],
+      ["tunnel", "3000"],
+      ["status"],
+      ["box", "list"],
+      ["watch", "install"],
+      ["move", "Developer/app"],
+      ["move", "Developer/app", "--from-box", "a"],
+      ["move", "Developer/app", "--to-box", "lab"],
+      ["move", "Developer/app", "--from-box", "a", "--to-box", "lab"],
+    ]) {
+      const errors: string[] = [];
+      await runCli(
+        args,
+        {
+          isBoxMode: () => true,
+          runSync: async () => { throw new Error("sync ran"); },
+          runMove: async () => { throw new Error("move ran"); },
+        },
+        { renderError: (message) => errors.push(message), setExitCode: () => {} },
+      );
+      expect(errors).toEqual([
+        `This is a box install of Ferry (~/.ferry/box.json). Only ferry expose runs here. Run ferry ${args[0] === "box" || args[0] === "watch" ? args.join(" ") : args[0]} on the operator machine.`,
+      ]);
+    }
+  });
+
+  test("a box install still prints the version and the help", async () => {
+    const out: string[] = [];
+    const program = buildProgram({ isBoxMode: () => true }).exitOverride();
+    program.configureOutput({ writeOut: (text) => out.push(text), writeErr: () => {} });
+    expect(() => program.parse(["--version"], { from: "user" })).toThrow();
+    expect(out.join("")).toBe("0.0.0-dev\n");
+    await program.parseAsync([], { from: "user" });
+    expect(out.join("")).toContain("Usage: ferry");
   });
 });

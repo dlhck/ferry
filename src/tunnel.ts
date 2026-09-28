@@ -1,16 +1,27 @@
-/** `ferry tunnel` opens box ports on the operator machine, or lists the ports that listen on the box. */
+/**
+ * `ferry tunnel` opens box ports on the operator machine, lists the ports that
+ * listen on the box, or with `--follow` opens a forward for each port that
+ * `ferry expose` announces on the box.
+ */
 
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { quoteShell } from "./box-settings.ts";
 import { resolveLinkOptions, type OperatorHostConfig } from "./config.ts";
-import { Link, type LinkOptions, type TunnelPort } from "./link.ts";
+import { EXPOSED_DIR } from "./expose.ts";
+import { Link, type ControlConnection, type LinkOptions, type TunnelPort } from "./link.ts";
 
 export type TunnelInput = {
   /** Port specs: `<box>` or `<box>:<local>`. */
   readonly ports: readonly string[];
   readonly list: boolean;
+  /** Follow the entries of `ferry expose` on the box. */
+  readonly follow?: boolean;
   readonly box: { readonly name: string; readonly host: OperatorHostConfig };
 };
 
-type TunnelLink = Pick<Link, "run" | "tunnel">;
+type TunnelLink = Pick<Link, "run" | "tunnel" | "master">;
 
 export type TunnelDependencies = {
   readonly createLink: (options: LinkOptions) => TunnelLink;
@@ -18,7 +29,22 @@ export type TunnelDependencies = {
   /** Calls `stop` when the operator presses Ctrl-C. Returns a function that removes the handler. */
   readonly onInterrupt: (stop: () => void) => () => void;
   readonly isPortFree: (port: number) => Promise<boolean>;
+  /** The control socket of the master connection of `--follow`. */
+  readonly controlPath: string;
+  /** The wait before `--follow` connects again after the connection drops. */
+  readonly reconnectMs: number;
 };
+
+/** A live entry of `~/.ferry/exposed/` on the box. */
+export type FollowEntry = {
+  readonly pid: number;
+  readonly port: number;
+  readonly name: string | null;
+  readonly cwd: string | null;
+};
+
+/** An open forward of `--follow`. */
+export type FollowForward = FollowEntry & { readonly localPort: number };
 
 export type Listener = { readonly port: number; readonly address: string; readonly process: string };
 
@@ -31,11 +57,47 @@ export const LIST_COMMAND =
   "elif command -v netstat >/dev/null 2>&1; then echo '# netstat'; netstat -ltnp 2>/dev/null; " +
   "else echo '# proc'; cat /proc/net/tcp /proc/net/tcp6 2>/dev/null || true; fi";
 
+/**
+ * The long command of `--follow` on the box. It prints the box home once, then
+ * a snapshot of the live entries each time they change: one line
+ * `<pid> TAB <entry JSON>` for each entry whose pid runs, then a line `.`. It
+ * waits with inotifywait when the box has it, else it polls each second. The
+ * wait has a limit, so an entry whose process stopped without removing its
+ * file goes away too. An empty line every 30 s or so lets the command notice
+ * a closed connection.
+ */
+export const FOLLOW_COMMAND = [
+  `dir="$HOME/${EXPOSED_DIR}"`,
+  "printf 'home\\t%s\\n' \"$HOME\"",
+  "last=; first=1; beat=0",
+  "while :; do",
+  "  now=$(for f in \"$dir\"/*.json; do",
+  "    [ -f \"$f\" ] || continue",
+  "    pid=${f##*/}; pid=${pid%.json}",
+  "    case \"$pid\" in (''|*[!0-9]*) continue ;; esac",
+  "    kill -0 \"$pid\" 2>/dev/null || continue",
+  "    printf '%s\\t' \"$pid\"; tr -d '\\n' < \"$f\"; echo",
+  "  done)",
+  "  if [ -n \"$first\" ] || [ \"$now\" != \"$last\" ]; then printf '%s\\n.\\n' \"$now\" || exit 0; last=$now; first=; beat=0; fi",
+  "  beat=$((beat + 1)); if [ \"$beat\" -ge 30 ]; then echo || exit 0; beat=0; fi",
+  "  if [ -d \"$dir\" ] && command -v inotifywait >/dev/null 2>&1; then",
+  "    inotifywait -qq -t 1 -e create,delete,moved_to,close_write \"$dir\" >/dev/null 2>&1",
+  "    [ $? -eq 1 ] && sleep 1",
+  "  else",
+  "    sleep 1",
+  "  fi",
+  "done",
+].join("\n");
+
 /** OpenSSH gets the SIGINT of Ctrl-C too, and can exit before Ferry sees the interrupt. */
 const INTERRUPT_GRACE_MS = 200;
 
 export async function runTunnel(input: TunnelInput, dependencies: Partial<TunnelDependencies> = {}): Promise<void> {
   const resolved = { ...defaultDependencies, ...dependencies };
+  if (input.follow === true) {
+    if (input.ports.length > 0 || input.list) throw new Error("Give box ports, --list, or --follow, not more than one.");
+    return follow(input.box, resolved);
+  }
   if (input.list) {
     if (input.ports.length > 0) throw new Error("Give box ports or --list, not both.");
     return listPorts(input.box, resolved);
@@ -75,6 +137,217 @@ export async function runTunnel(input: TunnelInput, dependencies: Partial<Tunnel
   }
   const reason = result.ok ? "the SSH connection ended" : result.error.message;
   throw new Error(`The tunnel to ${input.box.name} closed: ${reason}`);
+}
+
+/**
+ * Follow the entries of `ferry expose` on the box until Ctrl-C. When the
+ * connection drops after it was open, Ferry connects again and reads the
+ * entries again.
+ */
+async function follow(box: TunnelInput["box"], resolved: TunnelDependencies): Promise<void> {
+  const link = resolved.createLink(resolveLinkOptions(box.host));
+  const controller = new AbortController();
+  const stopListening = resolved.onInterrupt(() => controller.abort());
+  try {
+    let connected = false;
+    for (;;) {
+      const ended = await followSession(link, box.name, resolved, controller.signal, connected);
+      if (!controller.signal.aborted) await Bun.sleep(INTERRUPT_GRACE_MS);
+      if (controller.signal.aborted) break;
+      if (!ended.connected && !connected) throw new Error(`Could not connect to ${box.name}: ${ended.reason}`);
+      connected ||= ended.connected;
+      resolved.writeLine(`The connection to ${box.name} closed: ${ended.reason}. Ferry connects again in ${resolved.reconnectMs / 1_000} s.`);
+      await abortableSleep(resolved.reconnectMs, controller.signal);
+      if (controller.signal.aborted) break;
+    }
+  } finally {
+    stopListening();
+  }
+  resolved.writeLine("Tunnel closed.");
+}
+
+/** One master connection and its forwards, until the connection ends or the signal aborts. */
+async function followSession(
+  link: TunnelLink,
+  boxName: string,
+  resolved: TunnelDependencies,
+  signal: AbortSignal,
+  reconnect: boolean,
+): Promise<{ readonly connected: boolean; readonly reason: string }> {
+  // A socket from a stopped run makes the new master fail.
+  rmSync(resolved.controlPath, { force: true });
+  const session = new AbortController();
+  const master = await link.master({ controlPath: resolved.controlPath, signal: session.signal });
+  if ("ok" in master) {
+    session.abort();
+    return { connected: false, reason: master.error.message };
+  }
+  // Close the forwards and the master connection first, then stop the box command.
+  const close = () => void master.exit().finally(() => session.abort());
+  signal.addEventListener("abort", close, { once: true });
+  if (signal.aborted) close();
+  resolved.writeLine(
+    `${reconnect ? "Connected again. " : ""}Following the ports that ferry expose announces on ${boxName}. Press Ctrl-C to close the tunnel.`,
+  );
+
+  const forwards = new Map<number, FollowForward>();
+  let home: string | null = null;
+  let queue = Promise.resolve();
+  const onLine = snapshotReader(
+    (value) => {
+      home = value;
+    },
+    (entries) => {
+      queue = queue.then(() => reconcile(master, forwards, entries, boxName, () => home, resolved, signal));
+    },
+  );
+  // The login shell of the box can be another shell, so the script runs in sh.
+  const watching = master.stream(`sh -c ${quoteShell(FOLLOW_COMMAND)}`, onLine, session.signal);
+  const ended = await Promise.race([master.closed, watching]);
+  signal.removeEventListener("abort", close);
+  await queue;
+  if (!signal.aborted) {
+    await master.exit();
+    session.abort();
+  }
+  await master.closed;
+  return { connected: true, reason: ended.ok ? "the SSH connection ended" : ended.error.message };
+}
+
+/** Open and close forwards so they match the entries. Each change prints one line. */
+async function reconcile(
+  master: ControlConnection,
+  forwards: Map<number, FollowForward>,
+  entries: readonly FollowEntry[],
+  boxName: string,
+  home: () => string | null,
+  resolved: TunnelDependencies,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) return;
+  const { add, remove } = diffEntries(forwards, entries);
+  for (const forward of remove) {
+    forwards.delete(forward.port);
+    const result = await master.cancel({ localPort: forward.localPort, remotePort: forward.port });
+    const line = followLine(forward, forward.localPort, boxName, home());
+    resolved.writeLine(result.ok ? `${line} closed` : `${line} could not close: ${result.error.message}`);
+  }
+  for (const entry of add) {
+    const taken = new Set([...forwards.values()].map((forward) => forward.localPort));
+    const localPort = await pickLocalPort(entry.port, taken, resolved.isPortFree);
+    if (localPort === null) {
+      resolved.writeLine(`${followLine(entry, null, boxName, home())} has no free local port from ${entry.port}`);
+      continue;
+    }
+    const forward = { ...entry, localPort };
+    const result = await master.forward({ localPort, remotePort: entry.port });
+    if (result.ok) forwards.set(entry.port, forward);
+    resolved.writeLine(
+      result.ok
+        ? followLine(entry, localPort, boxName, home())
+        : `${followLine(entry, localPort, boxName, home())} could not open: ${result.error.message}`,
+    );
+  }
+}
+
+/**
+ * The forwards to close and the entries to open. A box port is the key, so an
+ * entry that a new process of the same port replaces keeps its forward.
+ */
+export function diffEntries(
+  forwards: ReadonlyMap<number, FollowForward>,
+  entries: readonly FollowEntry[],
+): { readonly add: FollowEntry[]; readonly remove: FollowForward[] } {
+  const next = new Map<number, FollowEntry>();
+  for (const entry of entries) if (!next.has(entry.port)) next.set(entry.port, entry);
+  return {
+    add: [...next.values()].filter((entry) => !forwards.has(entry.port)),
+    remove: [...forwards.values()].filter((forward) => !next.has(forward.port)),
+  };
+}
+
+/** The box port when it is free on this machine, else the next free port. Null when no port is free. */
+export async function pickLocalPort(
+  port: number,
+  taken: ReadonlySet<number>,
+  isFree: (port: number) => Promise<boolean>,
+): Promise<number | null> {
+  for (let candidate = port; candidate <= 65_535; candidate += 1) {
+    if (!taken.has(candidate) && (await isFree(candidate))) return candidate;
+  }
+  return null;
+}
+
+/**
+ * A reader for the output of FOLLOW_COMMAND. It gets text chunks, and calls
+ * `onHome` for the home line and `onSnapshot` with the entries of each
+ * snapshot. A line that is not a valid entry is ignored.
+ */
+export function snapshotReader(
+  onHome: (home: string) => void,
+  onSnapshot: (entries: FollowEntry[]) => void,
+): (text: string) => void {
+  let buffer = "";
+  let entries: FollowEntry[] = [];
+  return (text) => {
+    buffer += text;
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (line === ".") {
+        onSnapshot(entries);
+        entries = [];
+        continue;
+      }
+      const tab = line.indexOf("\t");
+      if (tab === -1) continue;
+      const key = line.slice(0, tab);
+      const value = line.slice(tab + 1);
+      if (key === "home") onHome(value);
+      else {
+        const entry = parseEntry(key, value);
+        if (entry) entries.push(entry);
+      }
+    }
+  };
+}
+
+function parseEntry(pid: string, json: string): FollowEntry | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (!/^\d+$/.test(pid) || typeof value !== "object" || value === null) return null;
+  const { port, name, cwd } = value as Record<string, unknown>;
+  if (typeof port !== "number" || !validPort(port)) return null;
+  return {
+    pid: Number(pid),
+    port,
+    name: typeof name === "string" && name !== "" ? name : null,
+    cwd: typeof cwd === "string" && cwd !== "" ? cwd : null,
+  };
+}
+
+/** `web  http://localhost:3000 -> box:3000 (~/app)`. */
+function followLine(entry: FollowEntry, localPort: number | null, boxName: string, home: string | null): string {
+  const name = entry.name ?? `pid ${entry.pid}`;
+  const local = localPort === null ? "" : `http://localhost:${localPort} -> `;
+  const cwd = entry.cwd === null ? "" : ` (${home !== null && (entry.cwd === home || entry.cwd.startsWith(`${home}/`)) ? `~${entry.cwd.slice(home.length)}` : entry.cwd})`;
+  return `${name}  ${local}${boxName}:${entry.port}${cwd}`;
+}
+
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    }
+    signal.addEventListener("abort", done, { once: true });
+  });
 }
 
 /** Parse `<box>` and `<box>:<local>` port specs. Two specs cannot use the same local port. */
@@ -220,4 +493,6 @@ const defaultDependencies: TunnelDependencies = {
     return () => process.off("SIGINT", stop);
   },
   isPortFree,
+  controlPath: join(tmpdir(), `ferry-tunnel-${process.pid}.sock`),
+  reconnectMs: 5_000,
 };

@@ -139,8 +139,8 @@ function readHarness(
 
 /**
  * Read one harness path in its plain form. A harness path stays inside the
- * home and clear of the deny set, so an absolute path, a `..` escape, and a
- * segment a deny rule covers are all refused. `null` means refused, and
+ * home and clear of the deny set, so an absolute path, a `..` escape, a path
+ * inside `.ferry`, and a segment a deny rule covers are all refused. `null` means refused, and
  * `undefined` means the entry left the field out.
  */
 function readPath(
@@ -161,6 +161,11 @@ function readPath(
   const plain = plainPath(path);
   if (plain === "" || plain.split("/").some((segment) => segment === "..")) {
     problems.push({ code: "unsafe-path", reason: `${label} ${key} ${path} leaves the home` });
+    return null;
+  }
+  // Ferry keeps its own state there: the store, the config, backups, and on the box `box.json` and `exposed/`.
+  if (plain.split("/")[0] === ".ferry") {
+    problems.push({ code: "unsafe-path", reason: `${label} ${key} ${path} is inside ~/.ferry, which holds the state of Ferry` });
     return null;
   }
   const denied = deniedSegment(plain, leaf);

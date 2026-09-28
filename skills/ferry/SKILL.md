@@ -21,7 +21,7 @@ Ferry copies the agent setup of the operator machine to a remote Linux box. The 
 ## Find out where you are
 
 - The operator machine has `~/.ferry/config.toml` and the `ferry` command.
-- The box has `~/.ferry/store` but no `~/.ferry/config.toml`. On the box, you cannot run `ferry`.
+- The box has `~/.ferry/store` and `~/.ferry/box.json`, but no `~/.ferry/config.toml`. On the box, `ferry` is a box install: only `ferry expose`, `ferry --version`, and the help run.
 
 ## What Ferry manages
 
@@ -187,6 +187,7 @@ When Paseo is enabled for a box, its `ferry status` block has an `Integrations` 
 ## Other commands
 
 - `ferry --version` prints the Ferry version.
+- On the box, `ferry expose [--port <n>] -- <command...>` runs a dev server and announces its port. The port is `--port`, else `$PASEO_PORT`. On the operator machine, `ferry tunnel --follow` opens a forward for each announced port until Ctrl-C. Do not write to or remove files in `~/.ferry/exposed/` yourself.
 - `ferry update --dry-run` prints the update plan for the agent tools on both machines.
 - `ferry init --dry-run` prints the init plan without writing or connecting.
 - `ferry watch` syncs accepted changes in the foreground. `ferry watch install` installs it as a user service.

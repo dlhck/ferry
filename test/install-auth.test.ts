@@ -51,6 +51,7 @@ describe("install command", () => {
       "codex: install latest (policy latest): install codex",
       "node: skipped, the box has 24.16.0 (policy operator)",
       "bun: skipped, not on the operator machine (policy operator)",
+      "ferry: skipped, this Ferry is a development build without a release version (policy operator)",
       `git identity: ${identityCommand}`,
     ]);
   });
@@ -79,7 +80,10 @@ describe("install command", () => {
     );
 
     expect(received).toEqual(tools);
-    expect(ran).toBe(plan);
+    expect(ran).toEqual([
+      ...plan,
+      { tool: "ferry", policy: "operator", version: null, action: "skip-dev-build", dependsOn: [] },
+    ]);
   });
 
   test("prints the output of an installer after its step, such as the gh fallback warning", async () => {
@@ -161,6 +165,7 @@ describe("install command", () => {
       "gh: install 2.92.0 (policy operator): (type -p wget >/dev/null || (sudo apt update && sudo apt install wget -y)) \\",
       "claude: install latest (policy latest): curl -fsSL https://claude.ai/install.sh | bash",
       "bun: skipped, the box has 1.4.2 (policy operator)",
+      "ferry: skipped, this Ferry is a development build without a release version (policy operator)",
       `git identity: ${identityCommand}`,
     ]);
   });
@@ -835,6 +840,7 @@ function installDependencies(overrides: {
   ) => Promise<InstallResult>;
 }): InstallCommandDependencies {
   return {
+    ferryVersion: "0.0.0-dev",
     tools: BUILTIN_TOOLS,
     readConfig: () => config,
     createLink: () => ({

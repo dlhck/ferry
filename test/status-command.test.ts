@@ -1,3 +1,4 @@
+import { BOX_FERRY_VERSION_COMMAND } from "../src/box-ferry.ts";
 import { describe, expect, test } from "bun:test";
 import type { ApplyPlan, RemoteApplyInput } from "../src/apply.ts";
 import type { AuthStatusReport } from "../src/auth-start.ts";
@@ -849,6 +850,7 @@ describe("ferry status tools", () => {
     const localCalls: string[] = [];
     const dependencies: Partial<StatusCommandDependencies> = {
       ...base.dependencies,
+      ferryVersion: "1.2.3",
       readConfig: () => ({ ...readConfig(), ...options.config }),
       loadRegistry: () => ({ ok: true as const, harnesses: registry.harnesses, tools: options.tools }),
       createAuthStart: () => ({
@@ -865,6 +867,9 @@ describe("ferry status tools", () => {
         return {
           ...baseLink,
           async run(command: string) {
+            if (command === BOX_FERRY_VERSION_COMMAND && options.online !== false) {
+              return { ok: true, address: "100.64.0.8", stdout: "1.2.3\n", stderr: "" };
+            }
             if (!command.includes("ferry_tool()")) return baseLink.run(command);
             toolCalls.push(name);
             if (options.online === false) return baseLink.run(command);
@@ -916,6 +921,7 @@ describe("ferry status tools", () => {
         "  uv      operator  operator 0.9.2    target 0.9.2    box 0.9.2    HIDDEN",
         "  go      operator  operator -        target -        box 1.22.7   skipped (not on the operator machine)",
         "  docker  operator  operator 29.4.0   target 29.4.0   box -        unknown (no box version command)",
+        "  ferry   operator  operator 1.2.3    target 1.2.3    box 1.2.3    ok",
         "  WARNING: node is 22.22.1 on the box, and the target is 24.16.0. Run ferry update.",
         "  WARNING: pnpm is not on the box. Run ferry install.",
         "  WARNING: uv: the login shell PATH does not find it. Run ferry sync to write the PATH block of ~/.profile.",
@@ -965,6 +971,7 @@ describe("ferry status tools", () => {
         state: "unknown",
         reason: "no box version command",
       },
+      { id: "ferry", mode: "always", policy: "operator", operator: "1.2.3", target: "1.2.3", box: "1.2.3", state: "ok" },
     ]);
   });
 
@@ -989,8 +996,9 @@ describe("ferry status tools", () => {
     expect(stack.toolCalls).toEqual([]);
     expect(report.boxes[0]!.tools).toEqual([
       { id: "bun", mode: "mirror", policy: "operator", operator: "1.4.2", target: "1.4.2", box: null, state: "unknown", reason: "host offline" },
+      { id: "ferry", mode: "always", policy: "operator", operator: "1.2.3", target: "1.2.3", box: null, state: "unknown", reason: "host offline" },
     ]);
-    expect(stack.output[0]).toContain("  bun  operator  operator 1.4.2  target 1.4.2  box -  unknown (host offline)");
+    expect(stack.output[0]).toContain("  bun    operator  operator 1.4.2  target 1.4.2  box -  unknown (host offline)");
   });
 
   test("two boxes use their own policies, share the operator version read, and each get one tools command", async () => {
@@ -1013,8 +1021,8 @@ describe("ferry status tools", () => {
     const report = await runStatusCommand({ json: false }, stack.dependencies);
 
     expect(report.boxes.map((box) => box.tools?.map((tool) => [tool.policy, tool.target, tool.state]))).toEqual([
-      [["operator", "1.4.2", "ok"]],
-      [["1.3.9", "1.3.9", "drift"]],
+      [["operator", "1.4.2", "ok"], ["operator", "1.2.3", "ok"]],
+      [["1.3.9", "1.3.9", "drift"], ["operator", "1.2.3", "ok"]],
     ]);
     expect(stack.toolCalls.sort()).toEqual(["dev@box-a.example", "dev@box-b.example"]);
     expect(stack.localCalls.filter((call) => call.endsWith("bun --version"))).toHaveLength(1);
@@ -1041,6 +1049,7 @@ describe("ferry status tools", () => {
       "  codex   latest    operator -       target latest  box 0.50.0  ok",
       "  pi      latest    operator -       target latest  box 0.60.0  ok",
       "  cursor  latest    operator -       target latest  box -       MISSING",
+      "  ferry   operator  operator 1.2.3   target 1.2.3   box 1.2.3   ok",
       "  WARNING: cursor is not on the box. Run ferry install.",
     ]);
     expect(text).not.toMatch(/paseo|project/i);

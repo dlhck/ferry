@@ -7,6 +7,7 @@
  */
 
 import * as prompts from "@clack/prompts";
+import { planBoxFerry } from "./box-ferry.ts";
 import { resolveBoxes, type ResolvedBox } from "./boxes.ts";
 import {
   completeHostConfig,
@@ -22,6 +23,7 @@ import { loadRegistry } from "./registry/load.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
 import { outputLines } from "./install.ts";
 import { describeStep, effectivePolicy, planTools, ToolPlanError, type ToolStep } from "./tools/resolve.ts";
+import { VERSION } from "./version.ts";
 
 const UPDATE_COMMAND_TIMEOUT_MS = 30 * 60 * 1_000;
 const PROBE_TIMEOUT_MS = 10_000;
@@ -59,6 +61,8 @@ export type UpdateCommandDependencies = {
   readonly confirm: () => Promise<boolean | symbol | undefined>;
   readonly writeLine: (line: string) => void;
   readonly progress: Progress;
+  /** The Ferry version to keep on each box: the version of this Ferry. */
+  readonly ferryVersion: string;
 };
 
 export class UpdateError extends Error {
@@ -113,6 +117,11 @@ export async function runUpdateCommand(
       ? registered.filter((tool) => effectivePolicy(tool, policies) === "latest")
       : registered;
   const several = selected.length > 1;
+  // Ferry on the box follows this Ferry, like an `operator` policy, so only `ferry update` changes it.
+  const planBox = async (box: ResolvedBox, link: Pick<Link, "run">): Promise<ToolStep[]> => [
+    ...(await planTools("update", selectTools(box.tools), box.tools, resolved.local, link)),
+    ...(input.latestOnly === true ? [] : [await planBoxFerry("update", link, resolved.ferryVersion)]),
+  ];
 
   let boxes: BoxUpdate[];
   let operator: OperatorUpdate[];
@@ -133,7 +142,7 @@ export async function runUpdateCommand(
             integrations: input.includeIntegrations === true
               ? resolved.integrations.filter((integration) => box.integrations[integration.id] === true)
               : [],
-            plan: offline === null ? await planTools("update", selectTools(box.tools), box.tools, resolved.local, link) : [],
+            plan: offline === null ? await planBox(box, link) : [],
             offline,
           });
         }
@@ -265,6 +274,7 @@ const defaultDependencies: UpdateCommandDependencies = {
   confirm: () => prompts.confirm({ message: "Run these updates?" }),
   writeLine: console.log,
   progress: noProgress,
+  ferryVersion: VERSION,
 };
 
 function loadBoxes(

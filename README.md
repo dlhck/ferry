@@ -44,7 +44,7 @@ Ferry never copies logins. OAuth sessions stay on the machine that created them.
 ## Requirements
 
 - An operator machine with macOS or Linux. Ferry runs here. Windows is not supported.
-- A Linux box that you can reach with SSH. The box does not run Ferry. `ferry install` and `ferry update` use `apt` for `gh`, so Debian or Ubuntu is the tested target.
+- A Linux box that you can reach with SSH, with `curl` or `wget`. `ferry install` puts a box install of Ferry on it, for `ferry expose` only. See [Ferry on the box](#ferry-on-the-box). `ferry install` and `ferry update` use `apt` for `gh`, so Debian or Ubuntu is the tested target.
 - Tailscale on both machines, or one OpenSSH destination such as `user@box.example`.
 - An empty private git repository for the snapshot, for example `git@github.com:you/ferry-snapshot.git`. Ferry does not create it.
 - For an SSH snapshot URL, an SSH agent on the operator machine with a loaded key that can read and push the snapshot repository.
@@ -76,7 +76,7 @@ npm i -g @dlhck/ferry
 
 The package runs a prebuilt executable for macOS or Linux on arm64 or x64. You do not need bun. npm installs only the executable for your platform, from the optional dependency `@dlhck/ferry-<os>-<arch>`. Do not install with `--omit=optional`.
 
-To update Ferry itself, run `npm i -g @dlhck/ferry@latest`. `ferry update` updates the agent tools, not Ferry. The watch service keeps the same executable path, so restart it after an update: `launchctl kickstart -k gui/$(id -u)/dev.ferry.watch` on macOS, or `systemctl --user restart ferry-watch.service` on Linux.
+To update Ferry itself, run `npm i -g @dlhck/ferry@latest`. `ferry update` updates the agent tools, and the Ferry of each box to the version of this machine. It does not update Ferry on this machine. The watch service keeps the same executable path, so restart it after an update: `launchctl kickstart -k gui/$(id -u)/dev.ferry.watch` on macOS, or `systemctl --user restart ferry-watch.service` on Linux.
 
 From source:
 
@@ -100,7 +100,7 @@ mv ferry-darwin-arm64 ~/.local/bin/ferry
 
 ```sh
 ferry init          # record the box and the snapshot URL, seed the snapshot, link this machine
-ferry install       # install gh, the agent CLIs, and the tools that you define on the box
+ferry install       # install gh, the agent CLIs, the tools that you define, and Ferry on the box
 ferry sync          # publish the snapshot and apply it on the box
 ferry auth gh       # start a login on the box, finish it in a browser here
 ferry auth claude
@@ -267,10 +267,13 @@ Tools:
   uv      operator  operator 0.9.2    target 0.9.2    box 0.9.2    HIDDEN
   go      operator  operator -        target -        box 1.22.7   skipped (not on the operator machine)
   docker  operator  operator 29.4.0   target 29.4.0   box -        unknown (no box version command)
+  ferry   operator  operator 1.2.3    target 1.2.3    box 1.2.3    ok
   WARNING: node is 22.22.1 on the box, and the target is 24.16.0. Run ferry update.
   WARNING: pnpm is not on the box. Run ferry install.
   WARNING: uv: the login shell PATH does not find it. Run ferry sync to write the PATH block of ~/.profile.
 ```
+
+The last row is Ferry on the box. Its target is always the version of this Ferry. A development build of Ferry has no target, so the row is `skipped`.
 
 The target comes from the policy, with the same rules as `ferry install`. Ferry reads the version on this machine one time and uses it for all boxes. The states are:
 
@@ -292,7 +295,7 @@ When the second run prints another version or no version, the state is `hidden`.
 
 For the `latest` policy, `ferry status` does not run the `latest` command of a tool. That command asks the vendor server and can take many seconds, so the target shows `latest`. The row is `ok` when the box has the tool. `ferry update` and the daily update of `ferry watch` install the newest version.
 
-`ferry status --json` has the rows in `tools` of each box entry, with `id`, `mode`, `policy`, `operator`, `target`, `box`, `state`, and `reason` for `hidden`, `skipped`, and `unknown`. When the tools check fails, `tools` is empty and the error is in `errors` of the box.
+`ferry status --json` has the rows in `tools` of each box entry, with Ferry last as `id` `ferry`, with `id`, `mode`, `policy`, `operator`, `target`, `box`, `state`, and `reason` for `hidden`, `skipped`, and `unknown`. When the tools check fails, `tools` is empty and the error is in `errors` of the box.
 
 ## Several boxes
 
@@ -353,7 +356,7 @@ Select a box with the `--box <name>` option:
 
 - `install`, `auth`, and `integrations enable|disable` change one box. They use the box of `--box`, else `default_box`, else the only box. If there is more than one box and no `default_box`, they stop and ask for `--box`. They accept one `--box` only.
 - `move` does not accept `--box`. It names its boxes with `--from-box <name>` and `--to-box <name>`. Without either option, it uses `default_box`, else the only box. See [Move a project](#move-a-project).
-- `tunnel` uses one box, with the same rules. See [Open a box port locally](#open-a-box-port-locally).
+- `tunnel` uses one box, with the same rules. See [Open a box port locally](#open-a-box-port-locally). `tunnel --follow` also uses one box.
 - With box tables, `integrations enable|disable` writes the key to `[box.<name>.integrations]` of that box. The command prints the name of the table that it changed.
 - `status` works on all boxes, or on the boxes of `--box`. Give `--box` more than one time to select more boxes. See [Status](#status).
 - `update` works on all boxes, or on the boxes of `--box`. Ferry updates the boxes one after the other. Each box gets the tool versions of its own policy, and the Paseo update only if Paseo is on for that box. The agent CLI updates on this machine run one time, not one time for each box. If a box is offline or an update on a box fails, Ferry continues with the other boxes. At the end, Ferry prints one result line for each box and exits with code 1 if a box failed. With more than one box, each box line starts with `[<name>]`.
@@ -691,6 +694,54 @@ Tunnel closed.
 - All ports use one SSH connection with `ssh -N`. If the connection drops, Ferry prints the SSH error and exits with a non-zero code. Ferry does not reconnect, and it has no background mode.
 - `--list` runs one read-only command on the box: `ss -ltnpH`. If the box has no `ss`, Ferry uses `netstat -ltnp`, then `/proc/net/tcp`. The list shows the ports that listen on loopback or on all interfaces. Without root, the box can hide the process names of other users. The list shows `-` for them.
 - The box is `--box`, then `default_box`, then the only box.
+
+### Follow the dev servers of the box
+
+`ferry expose` on the box announces the port of a command. `ferry tunnel --follow` on this machine opens a forward for each announced port, and closes it when the command stops. Wrap the dev server command, for example in a Paseo `service` script:
+
+```json
+"web": { "type": "service", "command": "ferry expose -- bun run dev --port $PASEO_PORT" }
+```
+
+`ferry expose [--port <n>] -- <command...>`:
+
+- The port is `--port`, else `$PASEO_PORT`. Without a port, `ferry expose` stops with an error before the command starts.
+- Before the command starts, Ferry writes `~/.ferry/exposed/<pid>.json` with the port, the name (`$PASEO_SCRIPTNAME` when it is set), the working directory, and the start time. `<pid>` is the process of `ferry expose`.
+- Ferry forwards SIGINT and SIGTERM to the command, exits with the exit code of the command, and removes the file when the command exits.
+- Put the command after `--`, so Ferry does not read its options.
+
+Then run this on this machine:
+
+```sh
+ferry tunnel --follow             # the default box
+ferry tunnel --follow --box lab   # another box
+```
+
+```text
+Following the ports that ferry expose announces on lab. Press Ctrl-C to close the tunnel.
+web  http://localhost:3000 -> lab:3000 (~/app)
+docs  http://localhost:5174 -> lab:5173 (~/docs)
+web  http://localhost:3000 -> lab:3000 (~/app) closed
+Tunnel closed.
+```
+
+- Ferry opens one SSH master connection (`ssh -M -S <socket>`) and runs one command on the box over it. That command prints the entries each time they change. It waits with `inotifywait` when the box has it, else it reads the directory each second. The wait stays on the box, so it adds no SSH round trips.
+- Ferry adds each forward with `ssh -O forward` and removes it with `ssh -O cancel`. A change to one forward does not stop the other forwards.
+- An entry whose process does not run gets no forward, for example after `kill -9` of `ferry expose`.
+- The local port is the box port when it is free. Else Ferry uses the next free port and prints the mapping.
+- Ferry reads the entries at start, so it finds the commands that started before it. When the connection drops, Ferry connects again after 5 seconds and reads the entries again.
+- Ctrl-C closes the forwards and the master connection.
+- `--follow` does not take ports or `--list`. Plain `ferry tunnel <port>` does not change.
+
+## Ferry on the box
+
+`ferry install` puts the Ferry version of this machine on each box. It downloads `install.sh` of the release tag `v<version>` and runs it with `FERRY_VERSION=v<version>` and `FERRY_INSTALL_DIR=~/.local/bin`. The box needs `curl` or `wget`, and no Node. `ferry update` puts the box back to the version of this machine when the two differ. The daily update of `ferry watch` does not change Ferry on the box.
+
+After the install, Ferry writes the box-mode marker `~/.ferry/box.json`, for example `{"mode":"box","version":"1.2.3"}`. A Ferry that finds this file runs only `ferry expose`, `ferry --version`, and the help. Each other command stops with an error that says this is a box install. Ferry checks only that the file is there. It does not read the contents. `ferry install` and `ferry update` also treat a box without the marker as a box without Ferry.
+
+A development build of Ferry, such as `bun run build` or a run from source, has no release. `ferry install` and `ferry update` then print `ferry: skipped, this Ferry is a development build without a release version` and do not change Ferry on the box.
+
+Ferry sync never writes to, or removes from, `~/.ferry/box.json` and `~/.ferry/exposed/`. Sync changes only the managed paths, `~/.ferry/store`, and `~/.ferry/backups`. A harness path in the config that is inside `~/.ferry` is refused.
 
 ## What Ferry carries
 
