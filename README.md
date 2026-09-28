@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Latest release](https://img.shields.io/github/v/release/dlhck/ferry)](https://github.com/dlhck/ferry/releases)
 
-Ferry keeps the agent setup of your machine in sync with one or more Linux boxes where remote agents run. Your machine is the source of truth. Ferry publishes your skills, `~/AGENTS.md`, Claude subagents and commands, some Claude settings, and remote MCP servers to a private git repository, the snapshot. Each box clones the snapshot and links its harness directories to it. Ferry also installs and updates the agent CLIs and your tools on each box, and starts logins there, but it never copies a login.
+Ferry keeps the agent setup of your machine in sync with one or more Linux boxes where remote agents run. Your machine is the source of truth. Ferry publishes your skills, `~/AGENTS.md`, Claude subagents and commands, some Claude and Codex settings, and remote MCP servers to a private git repository, the snapshot. Each box clones the snapshot and links its harness directories to it. Ferry also installs and updates the agent CLIs and your tools on each box, and starts logins there, but it never copies a login.
 
 ```
 your machine ── ferry sync ──> private snapshot repo ──> box a, box b, ...

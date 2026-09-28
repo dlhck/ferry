@@ -1,6 +1,6 @@
 ---
 name: ferry
-description: Rules for working with Ferry, the CLI that keeps a remote Linux agent box in the same shape as the operator machine. Load it for any task about the Ferry box, `ferry sync`, `ferry status`, `ferry move`, `ferry auth`, installing skills with `ferry skills add`, or files under `~/.ferry`. Load it before you edit a skill, `AGENTS.md`, `CLAUDE.md`, `.claude/agents`, `.claude/commands`, or Claude settings on a machine that Ferry manages.
+description: Rules for working with Ferry, the CLI that keeps a remote Linux agent box in the same shape as the operator machine. Load it for any task about the Ferry box, `ferry sync`, `ferry status`, `ferry move`, `ferry auth`, installing skills with `ferry skills add`, or files under `~/.ferry`. Load it before you edit a skill, `AGENTS.md`, `CLAUDE.md`, `.claude/agents`, `.claude/commands`, or Claude or Codex settings on a machine that Ferry manages.
 ---
 
 # Ferry
@@ -9,7 +9,7 @@ Ferry copies the agent setup of the operator machine to a remote Linux box. The 
 
 ## Rules
 
-1. On the box, do not edit a Ferry-managed file: a skill, an instruction file such as `AGENTS.md`, `~/.claude/agents`, `~/.claude/commands`, a carried Claude settings key, or a carried MCP declaration. Each sync resets the box checkout with `git reset --hard` and writes the carried keys again, so your change is lost. Tell the operator what to change on the operator machine instead.
+1. On the box, do not edit a Ferry-managed file: a skill, an instruction file such as `AGENTS.md`, `~/.claude/agents`, `~/.claude/commands`, a carried Claude or Codex settings key, or a carried MCP declaration. Each sync resets the box checkout with `git reset --hard` and writes the carried keys again, so your change is lost. Tell the operator what to change on the operator machine instead.
 2. Read state with `ferry status --json` before you change anything.
 3. Add `--json` to each Ferry command whose output you read. Use the error `code`, not the message text. See [JSON output](#json-output).
 4. Run `ferry sync --dry-run` before `ferry sync`. Do not pass `--force` unless the operator tells you to.
@@ -39,7 +39,9 @@ Ferry does not manage the `.system` directory in a skill root. Codex owns it on 
 
 These items are not symlinks. Sync writes them into box files:
 
-- Carried Claude settings keys: `enabledPlugins`, `extraKnownMarketplaces`, `permissions`, and `hooks` in `~/.claude/settings.json`. Sync replaces these keys on the box. A key that the operator machine does not have is removed from the box. The box keeps its other keys.
+- Carried Claude settings keys: `enabledPlugins`, `extraKnownMarketplaces`, `permissions`, `hooks`, `attribution`, `includeCoAuthoredBy`, `model`, and `alwaysThinkingEnabled` in `~/.claude/settings.json`.
+- Carried Codex settings keys: `model`, `model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`, `features`, and `web_search` in `~/.codex/config.toml`.
+- For both files, sync replaces the carried keys on the box. A key that the operator machine does not have is removed from the box. The box keeps its other keys. When a carried Codex key changes, sync writes `config.toml` again, and the comments in that file are lost.
 - Remote MCP servers: the name and HTTPS URL of each server in `mcpServers` of `~/.claude.json`, `[mcp_servers]` of `~/.codex/config.toml`, and `mcpServers` of `~/.cursor/mcp.json`. Sync declares them on the box. It replaces a box declaration with a different URL. It never removes a box server.
 
 Ferry never carries logins, credential files, tokens, request headers, `.env` files, session history, caches, databases, or whole settings files.

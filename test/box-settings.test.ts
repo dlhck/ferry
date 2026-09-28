@@ -81,7 +81,7 @@ describe("mergeSettings", () => {
       enabledPlugins: { "stale@team": true },
     });
 
-    const merged = mergeSettings(box, { enabledPlugins: { "review@team": true } }, KEYS);
+    const merged = mergeSettings(box, { enabledPlugins: { "review@team": true } }, KEYS, "json");
 
     expect(JSON.parse(merged)).toEqual({
       env: { TOKEN: "box-only" },
@@ -93,18 +93,55 @@ describe("mergeSettings", () => {
   test("removes a carried key the operator no longer has", () => {
     const box = JSON.stringify({ model: "opus", extraKnownMarketplaces: { old: {} } });
 
-    expect(JSON.parse(mergeSettings(box, {}, KEYS))).toEqual({ model: "opus" });
+    expect(JSON.parse(mergeSettings(box, {}, KEYS, "json"))).toEqual({ model: "opus" });
   });
 
   test("a missing box settings file becomes the carried keys", () => {
-    expect(JSON.parse(mergeSettings(null, { enabledPlugins: { "review@team": true } }, KEYS))).toEqual({
+    const merged = mergeSettings(null, { enabledPlugins: { "review@team": true } }, KEYS, "json");
+    expect(JSON.parse(merged)).toEqual({
       enabledPlugins: { "review@team": true },
     });
   });
 
   test("refuses a box settings file that is not a JSON object", () => {
-    expect(() => mergeSettings("[1, 2]", {}, KEYS)).toThrow(BoxSettingsError);
-    expect(() => mergeSettings("{ not json", {}, KEYS)).toThrow(BoxSettingsError);
+    expect(() => mergeSettings("[1, 2]", {}, KEYS, "json")).toThrow(BoxSettingsError);
+    expect(() => mergeSettings("{ not json", {}, KEYS, "json")).toThrow(BoxSettingsError);
+  });
+
+  test("replaces the carried keys in TOML and keeps the other tables", () => {
+    const box = [
+      'model = "o3"',
+      'approval_policy = "never"',
+      "",
+      "[features]",
+      "old_flag = true",
+      "",
+      "[mcp_servers.docs]",
+      'url = "https://docs.example/mcp"',
+      "",
+    ].join("\n");
+
+    const carried = { model: "gpt-5", features: { new_flag: true } };
+    const merged = mergeSettings(box, carried, ["model", "features", "model_verbosity"], "toml");
+
+    expect(Bun.TOML.parse(merged)).toEqual({
+      model: "gpt-5",
+      approval_policy: "never",
+      features: { new_flag: true },
+      mcp_servers: { docs: { url: "https://docs.example/mcp" } },
+    });
+  });
+
+  test("keeps the TOML text and its comments when the carried keys match", () => {
+    const box = '# box notes\nmodel = "gpt-5" # pinned\n\n[features]\nnew_flag = true\n';
+
+    const carried = { model: "gpt-5", features: { new_flag: true } };
+
+    expect(mergeSettings(box, carried, ["model", "features"], "toml")).toBe(box);
+  });
+
+  test("refuses a box settings file that is not TOML", () => {
+    expect(() => mergeSettings("[features\nx =", {}, ["model"], "toml")).toThrow(BoxSettingsError);
   });
 });
 
@@ -117,7 +154,7 @@ describe("mergeBoxSettings", () => {
       JSON.stringify({
         env: { TOKEN: "box-only" },
         apiKeyHelper: "/usr/local/bin/box-key",
-        model: "opus",
+        outputStyle: "Explanatory",
         permissions: { allow: ["Bash(rm -rf /tmp/box)"] },
         hooks: { Stop: [] },
       }),
@@ -139,7 +176,7 @@ describe("mergeBoxSettings", () => {
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
       env: { TOKEN: "box-only" },
       apiKeyHelper: "/usr/local/bin/box-key",
-      model: "opus",
+      outputStyle: "Explanatory",
       permissions: { allow: ["Bash(git status)"] },
       hooks,
       enabledPlugins: { "review@team": true },
@@ -149,7 +186,10 @@ describe("mergeBoxSettings", () => {
   test("removes a box-only permission or hook when the operator has none", async () => {
     const home = makeRoot();
     const path = join(home, ".claude", "settings.json");
-    write(path, JSON.stringify({ model: "opus", permissions: { allow: ["Bash(ls)"] }, hooks: { Stop: [] } }));
+    write(
+      path,
+      JSON.stringify({ outputStyle: "Explanatory", permissions: { allow: ["Bash(ls)"] }, hooks: { Stop: [] } }),
+    );
 
     await mergeBoxSettings({
       remoteHome: home,
@@ -159,7 +199,7 @@ describe("mergeBoxSettings", () => {
     });
 
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
-      model: "opus",
+      outputStyle: "Explanatory",
       enabledPlugins: { "review@team": true },
     });
   });
@@ -194,6 +234,25 @@ describe("mergeBoxSettings", () => {
 
     expect(written).toEqual([]);
     expect(link.calls).toHaveLength(1);
+  });
+
+  test("merges the carried Codex keys into config.toml", async () => {
+    const home = makeRoot();
+    const path = join(home, ".codex", "config.toml");
+    write(path, 'model = "o3"\n\n[mcp_servers.docs]\nurl = "https://docs.example/mcp"\n');
+
+    const written = await mergeBoxSettings({
+      remoteHome: home,
+      harnesses: BUILTIN_HARNESSES,
+      settings: [{ harness: "codex", bytes: Buffer.from(JSON.stringify({ model: "gpt-5" })) }],
+      link: new ShellLink(),
+    });
+
+    expect(written).toEqual([path]);
+    expect(Bun.TOML.parse(readFileSync(path, "utf8"))).toEqual({
+      model: "gpt-5",
+      mcp_servers: { docs: { url: "https://docs.example/mcp" } },
+    });
   });
 
   test("refuses and keeps a box settings file that is not JSON", async () => {

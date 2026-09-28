@@ -667,13 +667,13 @@ function denyRuleFor(entryName: string, isDirectory: boolean): DenyRule | null {
 }
 
 /**
- * Read only the listed keys from a JSON settings file. The file itself never
+ * Read only the listed keys from a JSON or TOML settings file. The file itself never
  * leaves the machine. `null` means the file is missing or refused. A hook entry
  * that refers to an unmanaged home path is left out and noted in `leftovers`.
  */
 function readSettings(
   home: string,
-  settings: { readonly file: string; readonly keys: readonly string[] },
+  settings: NonNullable<HarnessDescriptor["settings"]>,
   harnesses: readonly HarnessDescriptor[],
   forbidden: ForbiddenHit[],
   leftovers: Leftover[],
@@ -687,7 +687,7 @@ function readSettings(
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    parsed = settings.format === "toml" ? Bun.TOML.parse(text) : JSON.parse(text);
   } catch {
     parsed = null;
   }
