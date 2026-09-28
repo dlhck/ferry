@@ -62,7 +62,7 @@ Use `--host <tailscale host> --ssh-user <user>` instead of `--ssh-destination` f
 | `ferry tools` | List the tools and their version policies. |
 | `ferry skills add` | Install skills with `npx skills add` as a global copy, so that Ferry carries them. |
 | `ferry move <path>` | Continue a project on a box, back on this machine, or on another box. |
-| `ferry tunnel` | Open box ports on `127.0.0.1` of this machine. |
+| `ferry tunnel` | Open box ports on `127.0.0.1` of this machine. `ferry tunnel install` runs `--follow` for one box as a user service. |
 | `ferry expose` | On the box: run a dev server and announce its port to `ferry tunnel --follow`. |
 | `ferry integrations` | List, enable, or disable the Paseo integration of a box. |
 | `ferry uninstall` | Remove Ferry from this machine and restore the paths that `init` changed. |
