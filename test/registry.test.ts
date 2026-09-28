@@ -237,6 +237,8 @@ describe("registered paths cannot widen the deny set", () => {
     ["an absolute skill root", { skillRoot: "/etc/skills" }, "unsafe-path"],
     ["a skill root that climbs out", { skillRoot: "../other-home/skills" }, "unsafe-path"],
     ["a skill root inside a denied directory", { skillRoot: ".git/skills" }, "denied-path"],
+    ["a skill root inside the Ferry state", { skillRoot: ".ferry/exposed" }, "unsafe-path"],
+    ["an instruction file inside the Ferry state", { instructionFile: "./.ferry/box.json" }, "unsafe-path"],
     [
       "an instruction file the deny set covers",
       { instructionFile: "credentials.json" },
