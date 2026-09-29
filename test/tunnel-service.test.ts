@@ -108,6 +108,24 @@ WantedBy=default.target
     ]);
   });
 
+  test("runs the Ferry script with bun in a systemd user unit", async () => {
+    const sourceHome = home();
+    const fake = recorder();
+
+    const result = await installTunnelService(
+      {
+        ...linux(sourceHome, "lab"),
+        executable: "/home/user/.bun/bin/bun",
+        scriptPath: "/home/user/ferry/src/cli.ts",
+      },
+      fake,
+    );
+
+    expect(readFileSync(result.path, "utf8")).toContain(
+      'ExecStart="/home/user/.bun/bin/bun" "/home/user/ferry/src/cli.ts" tunnel --follow --box lab',
+    );
+  });
+
   test("refuses a relative executable path before writing", async () => {
     const sourceHome = home();
 

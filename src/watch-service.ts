@@ -2,7 +2,7 @@
 
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 
 export type ServiceCommand = readonly string[];
 
@@ -10,6 +10,7 @@ export type WatchServiceInput = {
   readonly home?: string;
   readonly platform?: NodeJS.Platform;
   readonly executable?: string;
+  readonly scriptPath?: string;
   readonly uid?: number;
   readonly path?: string;
   readonly sshAuthSock?: string;
@@ -67,11 +68,18 @@ export async function installUserService(
   const home = input.home ?? homedir();
   const platform = input.platform ?? process.platform;
   const executable = input.executable ?? process.execPath;
+  const scriptPath = input.scriptPath ?? process.argv[1];
   const uid = input.uid ?? process.getuid?.();
   const environmentPath = input.path ?? process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
   const sshAuthSock = input.sshAuthSock ?? process.env.SSH_AUTH_SOCK;
   const run = dependencies.run ?? runCommand;
   requireSafeAbsolute(service, executable, "Ferry executable");
+  const command = [executable];
+  if (basename(executable) === "bun") {
+    if (scriptPath === undefined) throw new Error(`${service.command} service needs the Ferry script path`);
+    requireSafeAbsolute(service, scriptPath, "Ferry script");
+    command.push(scriptPath);
+  }
   requireSafe(service, environmentPath, "PATH");
   if (sshAuthSock) requireSafeAbsolute(service, sshAuthSock, "SSH_AUTH_SOCK");
 
@@ -80,7 +88,7 @@ export async function installUserService(
     const path = launchdPath(service, home);
     const log = join(home, "Library", "Logs", service.log);
     mkdirSync(dirname(log), { recursive: true });
-    writeService(path, launchdService(service, executable, environmentPath, sshAuthSock, log));
+    writeService(path, launchdService(service, command, environmentPath, sshAuthSock, log));
     await run(["launchctl", "bootout", `gui/${uid}/${service.label}`], true);
     await checked(run, ["launchctl", "bootstrap", `gui/${uid}`, path]);
     return { manager: "launchd", path };
@@ -88,7 +96,7 @@ export async function installUserService(
 
   if (platform === "linux") {
     const path = systemdPath(service, home);
-    writeService(path, systemdService(service, executable, environmentPath, sshAuthSock));
+    writeService(path, systemdService(service, command, environmentPath, sshAuthSock));
     await checked(run, ["systemctl", "--user", "daemon-reload"]);
     await checked(run, ["systemctl", "--user", "enable", "--now", service.unit]);
     return { manager: "systemd", path };
@@ -139,7 +147,7 @@ function systemdPath(service: UserService, home: string): string {
 
 function launchdService(
   service: UserService,
-  executable: string,
+  command: readonly string[],
   environmentPath: string,
   sshAuthSock: string | undefined,
   log: string,
@@ -147,7 +155,7 @@ function launchdService(
   const socket = sshAuthSock
     ? `\n    <key>SSH_AUTH_SOCK</key>\n    <string>${xml(sshAuthSock)}</string>`
     : "";
-  const args = service.args.map((arg) => `\n    <string>${xml(arg)}</string>`).join("");
+  const args = [...command, ...service.args].map((arg) => `\n    <string>${xml(arg)}</string>`).join("");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -155,8 +163,7 @@ function launchdService(
   <key>Label</key>
   <string>${xml(service.label)}</string>
   <key>ProgramArguments</key>
-  <array>
-    <string>${xml(executable)}</string>${args}
+  <array>${args}
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -178,19 +185,20 @@ function launchdService(
 
 function systemdService(
   service: UserService,
-  executable: string,
+  command: readonly string[],
   environmentPath: string,
   sshAuthSock: string | undefined,
 ): string {
   const socket = sshAuthSock ? `Environment="SSH_AUTH_SOCK=${systemd(sshAuthSock)}"\n` : "";
   // The arguments are fixed words and box names, so they need no quotes.
+  const commandLine = command.map((arg) => `"${systemd(arg)}"`).join(" ");
   return `[Unit]
 Description=${service.description}
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart="${systemd(executable)}" ${service.args.join(" ")}
+ExecStart=${commandLine} ${service.args.join(" ")}
 Restart=${service.restart}
 RestartSec=5
 Environment="PATH=${systemd(environmentPath)}"
