@@ -193,7 +193,7 @@ function boxDependencies(
       .map((integration) => ({
         id: integration.id,
         name: integration.name,
-        health: () => integration.health(link),
+        health: () => integration.health(link, box.integrations),
       })),
   };
 }

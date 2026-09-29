@@ -92,8 +92,11 @@ export function toolPolicy(tools: ToolsConfig | undefined, id: string): ToolPoli
   return typeof entry === "string" ? entry : entry?.version;
 }
 
-/** Each key turns on one integration. A missing key means that the integration is off. */
-export type IntegrationsConfig = { readonly paseo?: boolean };
+/** Paseo and its relay are off unless their keys are true. */
+export type IntegrationsConfig = {
+  readonly paseo?: boolean;
+  readonly paseo_relay?: boolean;
+};
 
 /** `watch` turns on the daily tool update in `ferry watch`. */
 export type UpdateConfig = { readonly watch?: boolean };
@@ -142,7 +145,7 @@ const SECTION_KEYS: Record<string, readonly string[]> = {
   "[host]": ["transport", "tailscale", "ssh_user", "destination"],
   "[[harness]]": Object.keys(HARNESS_KEYS),
   "[update]": ["watch"],
-  "[integrations]": ["paseo"],
+  "[integrations]": ["paseo", "paseo_relay"],
   "[tools]": BUILTIN_TOOLS.map((tool) => tool.id),
 };
 
@@ -197,7 +200,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     };
     harness: Record<string, string>[];
     update?: { watch?: boolean };
-    integrations?: { paseo?: boolean };
+    integrations?: IntegrationsConfig;
     tools?: Record<string, ToolPolicy | Record<string, unknown>>;
   } = { host: {}, harness: [] };
   let section = "";
@@ -302,7 +305,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
         throw new ConfigError(`invalid boolean for ${key} in ${section} of ${path}`);
       }
       if (section === "[update]") config.update = { watch: encoded === "true" };
-      else config.integrations = { paseo: encoded === "true" };
+      else config.integrations = { ...config.integrations, [key]: encoded === "true" };
       continue;
     }
 
@@ -499,15 +502,18 @@ export function writeConfig(config: OperatorConfig | BoxesOperatorConfig, home =
       ...(config.update?.watch !== undefined
         ? ["[update]", `watch = ${config.update.watch}`, ""]
         : []),
-      ...(config.integrations?.paseo !== undefined
-        ? ["[integrations]", `paseo = ${config.integrations.paseo}`, ""]
-        : []),
+      ...integrationLines(config.integrations, "integrations"),
       ...toolLines(config.tools ?? {}),
       ...("boxes" in config ? config.boxes.flatMap(boxLines) : []),
     ].join("\n"),
     { mode: 0o600 },
   );
   renameSync(temporaryPath, path);
+}
+
+function integrationLines(config: IntegrationsConfig | undefined, table: string): string[] {
+  const lines = Object.entries(config ?? {}).flatMap(([key, value]) => value === undefined ? [] : [`${key} = ${value}`]);
+  return lines.length === 0 ? [] : [`[${table}]`, ...lines, ""];
 }
 
 function hostLines(host: OperatorHostConfig): string[] {
@@ -524,9 +530,7 @@ function boxLines(box: BoxConfig): string[] {
     ...hostLines(box.host),
     ...(box.gitAuth !== undefined ? [`git_auth = ${JSON.stringify(box.gitAuth)}`] : []),
     "",
-    ...(box.integrations?.paseo !== undefined
-      ? [`[box.${box.name}.integrations]`, `paseo = ${box.integrations.paseo}`, ""]
-      : []),
+    ...integrationLines(box.integrations, `box.${box.name}.integrations`),
     ...(tools.length > 0
       ? [`[box.${box.name}.tools]`, ...tools.map(([id, policy]) => `${id} = ${JSON.stringify(policy)}`), ""]
       : []),
@@ -575,7 +579,7 @@ export function withBoxes(
  * complete. With `box`, the key goes into `[box.<box>.integrations]` of a
  * config with box tables. Else it goes into `[integrations]`.
  */
-export function setIntegration(id: keyof IntegrationsConfig, enabled: boolean, home = homedir(), box?: string): void {
+export function setIntegration(id: "paseo", enabled: boolean, home = homedir(), box?: string): void {
   const config = readConfig(home);
   if (box !== undefined && config?.boxes) {
     const boxes = config.boxes.map((entry) =>
