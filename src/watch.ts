@@ -2,6 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { readPaseoPlugins } from "./integrations/paseo-plugins.ts";
+import { readPaseoPreferences } from "./integrations/paseo.ts";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -364,10 +365,12 @@ async function settle(
 async function observeSource(home: string): Promise<WatchObservation> {
   try {
     const source = inspectSyncSource(home);
-    const plugins = source.boxes.some((box) => box.integrations.paseo === true) ? readPaseoPlugins(home) : null;
-    const identity = plugins === null ? source.seed.identity : createHash("sha256")
-      .update(source.seed.identity).update(JSON.stringify(plugins)).digest("hex");
-    return { ok: true, identity };
+    if (!source.boxes.some((box) => box.integrations.paseo === true)) return { ok: true, identity: source.seed.identity };
+    const hash = createHash("sha256").update(source.seed.identity).update(JSON.stringify(readPaseoPlugins(home)));
+    // Only set preferences change the identity, so an existing identity stays the same without them.
+    const preferences = readPaseoPreferences(home);
+    if (Object.keys(preferences).length > 0) hash.update(JSON.stringify(preferences));
+    return { ok: true, identity: hash.digest("hex") };
   } catch (error) {
     const message = messageOf(error);
     return { ok: false, signature: message, message, error };

@@ -586,6 +586,165 @@ function mergeAgentProfiles(box: string | null, profiles: readonly AgentProfile[
   return `${JSON.stringify(merged, null, 2)}\n`;
 }
 
+/** One entry of `agents.metadataGeneration.providers`, in the strict Paseo schema. */
+export type MetadataProvider = {
+  readonly provider: string;
+  readonly model?: string;
+  readonly thinkingOptionId?: string;
+};
+
+/** The portable Paseo host preferences. A field that the local config does not set is absent. */
+export type PaseoPreferences = {
+  /** `agents.metadataGeneration.providers`. */
+  readonly metadataProviders?: readonly MetadataProvider[];
+  /** `daemon.appendSystemPrompt`. */
+  readonly appendSystemPrompt?: string;
+};
+
+const METADATA_PROVIDERS = "agents.metadataGeneration.providers";
+const APPEND_SYSTEM_PROMPT = "daemon.appendSystemPrompt";
+
+/**
+ * Read the metadata providers and the shared instructions from the local Paseo
+ * config. A missing file or key gives an absent field. Throw a PaseoError for a
+ * value that the Paseo schema rejects, or that holds a token or a secret. The
+ * error never holds the instruction text or a value.
+ */
+export function readPaseoPreferences(home: string): PaseoPreferences {
+  const path = join(home, CONFIG_FILE);
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return {};
+  }
+  let config: unknown;
+  try {
+    config = JSON.parse(text);
+  } catch {
+    throw new PaseoError(`${path} is not valid JSON, so Ferry cannot read the Paseo preferences`);
+  }
+  if (!isObject(config)) throw new PaseoError(`${path} is not a JSON object`);
+  for (const key of ["agents", "daemon"]) {
+    if (config[key] !== undefined && !isObject(config[key])) throw new PaseoError(`${key} in ${path} is not an object`);
+  }
+  const agents = config.agents as Record<string, unknown> | undefined;
+  const daemon = config.daemon as Record<string, unknown> | undefined;
+  const generation = agents?.metadataGeneration;
+  if (generation !== undefined && !isObject(generation)) {
+    throw new PaseoError(`agents.metadataGeneration in ${path} is not an object`);
+  }
+  const providers = generation?.providers;
+  const prompt = daemon?.appendSystemPrompt;
+  if (providers !== undefined && (!Array.isArray(providers) || !providers.every(isMetadataProvider))) {
+    throw new PaseoError(`${METADATA_PROVIDERS} in ${path} is not a list of provider entries with a provider, an optional model, and an optional thinkingOptionId`);
+  }
+  if (prompt !== undefined && typeof prompt !== "string") {
+    throw new PaseoError(`${APPEND_SYSTEM_PROMPT} in ${path} is not a string`);
+  }
+  const refused = (field: string, hits: readonly { readonly reason: string }[]) => {
+    if (hits.length > 0) {
+      throw new PaseoError(`Ferry refused to carry ${field} in ${path}: ${[...new Set(hits.map((hit) => hit.reason))].join("; ")}`);
+    }
+  };
+  if (providers !== undefined) refused(METADATA_PROVIDERS, carriedContentHits(path, Buffer.from(JSON.stringify(providers))));
+  // The `.env` name adds the `key: value` line check to the token check, since the text is not JSON.
+  if (prompt !== undefined) refused(APPEND_SYSTEM_PROMPT, carriedContentHits(".env", Buffer.from(prompt)));
+  return {
+    ...(providers === undefined ? {} : { metadataProviders: providers as MetadataProvider[] }),
+    ...(prompt === undefined ? {} : { appendSystemPrompt: prompt }),
+  };
+}
+
+function isMetadataProvider(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  const text = (key: string) => typeof value[key] === "string" && value[key] !== "";
+  return text("provider") &&
+    Object.keys(value).every((key) => ["provider", "model", "thinkingOptionId"].includes(key) && text(key));
+}
+
+export type PreferenceCarry = {
+  /** One line for each value that Ferry did not carry. */
+  readonly warnings: readonly string[];
+  /** True when Ferry wrote the box config and reloaded the daemon. */
+  readonly changed: boolean;
+};
+
+/**
+ * Put the set preferences into the box Paseo config, and keep all other box
+ * keys. Skip each metadata provider that is not available on the box. When no
+ * local provider is available, keep the box list. Paseo reloads both fields
+ * without a restart. With no set field, it runs no box command.
+ */
+export async function carryPaseoPreferences(link: IntegrationLink, preferences: PaseoPreferences): Promise<PreferenceCarry> {
+  const { metadataProviders, appendSystemPrompt } = preferences;
+  if (metadataProviders === undefined && appendSystemPrompt === undefined) return { warnings: [], changed: false };
+
+  const warnings: string[] = [];
+  let providers = metadataProviders;
+  if (providers !== undefined && providers.length > 0) {
+    const status = await link.run(STATUS_COMMAND, { timeoutMs: BOX_TIMEOUT_MS });
+    const daemon = status.ok ? parseDaemonStatus(status.stdout) : null;
+    if (daemon === null || daemon.localDaemon !== "running") {
+      throw new PaseoError(
+        `Ferry cannot read the providers from paseo daemon status --json, because ${UNIT} or the daemon does not run on the box`,
+      );
+    }
+    const available = new Set(daemon.providers.filter((entry) => entry.available).map((entry) => entry.provider));
+    const kept = providers.filter((entry) => available.has(entry.provider));
+    for (const entry of providers) {
+      if (!available.has(entry.provider)) {
+        warnings.push(`Paseo metadata provider ${entry.provider} was not carried: it is not available on the box.`);
+      }
+    }
+    if (kept.length === 0) {
+      warnings.push(`Ferry kept the box ${METADATA_PROVIDERS}, because no local metadata provider is available on the box.`);
+    }
+    providers = kept.length === 0 ? undefined : kept;
+  }
+  if (providers === undefined && appendSystemPrompt === undefined) return { warnings, changed: false };
+
+  const current = await boxRun(link, readCommand(CONFIG_FILE), `Ferry could not read ~/${CONFIG_FILE} on the box`);
+  const text = current.startsWith("F") ? current.slice(1) : null;
+  const merged = mergePreferences(text, providers, appendSystemPrompt);
+  if (merged === text) return { warnings, changed: false };
+  await boxRun(link, writeCommand(CONFIG_FILE, merged), `Ferry could not write ~/${CONFIG_FILE} on the box`);
+  await boxRun(link, RELOAD_COMMAND, "paseo daemon reload failed on the box");
+  return { warnings, changed: true };
+}
+
+/** Set the given preferences in the box config text. Keep all other keys. */
+function mergePreferences(
+  box: string | null,
+  providers: readonly MetadataProvider[] | undefined,
+  prompt: string | undefined,
+): string {
+  let config: unknown = {};
+  if (box !== null && box.trim() !== "") {
+    try {
+      config = JSON.parse(box);
+    } catch {
+      config = null;
+    }
+  }
+  const agents = isObject(config) ? config.agents : undefined;
+  if (!isObject(config) || (config.daemon !== undefined && !isObject(config.daemon)) ||
+      (agents !== undefined && (!isObject(agents) || (agents.metadataGeneration !== undefined && !isObject(agents.metadataGeneration))))) {
+    throw new PaseoError(`~/${CONFIG_FILE} on the box is not a JSON object with daemon, agents, and agents.metadataGeneration objects`);
+  }
+  const merged = {
+    ...config,
+    ...(prompt === undefined ? {} : { daemon: { ...(config.daemon as object | undefined), appendSystemPrompt: prompt } }),
+    ...(providers === undefined ? {} : {
+      agents: {
+        ...(agents as Record<string, unknown> | undefined),
+        metadataGeneration: { ...((agents as Record<string, unknown> | undefined)?.metadataGeneration as object | undefined), providers },
+      },
+    }),
+  };
+  return `${JSON.stringify(merged, null, 2)}\n`;
+}
+
 /** The profile name for people: its `name`, else its `id`, else its position. */
 export function profileName(profile: unknown, index: number): string {
   if (isObject(profile)) {
