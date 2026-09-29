@@ -769,13 +769,32 @@ reconnect. With --follow, the local port is the box port when it is free, else
 the next free port, and Ferry connects again 5 seconds after a drop. Run
 ferry tunnel install to run --follow as a user service.
 
+Put a host before the box port to forward to a host that the box can reach,
+such as a database that accepts connections only from the box network. A
+numeric first part is a box port. The box resolves the host name. Put an IPv6
+address in brackets. Ferry first checks that the box can connect to the host,
+and stops with an error when it cannot.
+
+  5432                   127.0.0.1:5432 on the box, local port 5432
+  5432:15432             127.0.0.1:5432 on the box, local port 15432
+  db.example:5432        db.example:5432 from the box, local port 5432
+  db.example:5432:15432  db.example:5432 from the box, local port 15432
+  [fd00::1]:5432         [fd00::1]:5432 from the box, local port 5432
+
+A plain tunnel works as the child process of another program. It never
+prompts: OpenSSH runs in batch mode. The local port accepts connections after
+the SSH connection is ready. SIGTERM closes the tunnel with exit code 0.
+
 --follow writes its forwards to ~/.ferry/tunnels/<box>.json when it connects,
 after each change, and when the connection drops. The menu bar app reads the
 file. Fields: schemaVersion (1), box, pid, connected (false after a drop, with
 no forwards), updatedAt, and forwards: [{ name, cwd, boxPort, localPort }].
 name and cwd are missing when the entry of ferry expose has none. Ferry
 removes the file when --follow stops on Ctrl-C or SIGTERM.`)
-    .argument("[ports...]", "box port, or box:local to pick another local port, such as 3000 or 3000:4000")
+    .argument(
+      "[ports...]",
+      "box port, box:local to pick another local port, or host:port[:local] for a host that the box can reach, such as 3000, 3000:4000, or db.example:5432",
+    )
     .option("--list", "list the TCP ports that listen on the box, with process names")
     .option("--follow", "open a forward for each port that ferry expose announces on the box, and close it when the port goes away")
     .action(async (ports: string[], options: { list?: boolean; follow?: boolean }) => {

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { quoteShell } from "../src/box-settings.ts";
 import type { OutputEvent } from "../src/output.ts";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -36,11 +36,18 @@ const BOX: TunnelInput["box"] = { name: "lab", host: { transport: "ssh", destina
 class FakeLink {
   readonly tunnels: TunnelOptions[] = [];
   readonly commands: string[] = [];
+  readonly reached: { host: string; port: number }[] = [];
 
   constructor(
     private readonly tunnelResult: (options: TunnelOptions) => Promise<ForwardResult>,
     private readonly runResult: LinkResult = { ok: true, address: "dev@lab.example", stdout: "", stderr: "" },
+    private readonly reachResult: LinkResult = { ok: true, address: "dev@lab.example", stdout: "", stderr: "" },
   ) {}
+
+  async reach(target: { host: string; port: number }): Promise<LinkResult> {
+    this.reached.push(target);
+    return this.reachResult;
+  }
 
   tunnel(options: TunnelOptions): Promise<ForwardResult> {
     this.tunnels.push(options);
@@ -103,8 +110,50 @@ describe("parsePortSpecs", () => {
     ]);
   });
 
+  test("a host before the box port forwards to that host from the box", () => {
+    expect(
+      parsePortSpecs([
+        "5432",
+        "5433:15433",
+        "db.abc.eu-central-1.rds.amazonaws.com:5434",
+        "db.abc.eu-central-1.rds.amazonaws.com:5435:15435",
+        "[fd00::1]:5436",
+        "[fd00::1]:5437:15437",
+        "10.0.0.5:5438",
+      ]),
+    ).toEqual([
+      { remotePort: 5432, localPort: 5432 },
+      { remotePort: 5433, localPort: 15433 },
+      { remoteHost: "db.abc.eu-central-1.rds.amazonaws.com", remotePort: 5434, localPort: 5434 },
+      { remoteHost: "db.abc.eu-central-1.rds.amazonaws.com", remotePort: 5435, localPort: 15435 },
+      { remoteHost: "fd00::1", remotePort: 5436, localPort: 5436 },
+      { remoteHost: "fd00::1", remotePort: 5437, localPort: 15437 },
+      { remoteHost: "10.0.0.5", remotePort: 5438, localPort: 5438 },
+    ]);
+  });
+
   test("invalid port specs are refused", () => {
-    for (const spec of ["0", "65536", "abc", "30a0", "3000:", ":3000", "3000:0", "1:2:3", "-1", "3000.5"]) {
+    for (const spec of [
+      "0",
+      "65536",
+      "abc",
+      "30a0",
+      "3000:",
+      ":3000",
+      "3000:0",
+      "1:2:3",
+      "-1",
+      "3000.5",
+      "db.example",
+      "db.example:",
+      "db.example:0",
+      "db.example:5432:",
+      "db.example:5432:15432:1",
+      "-oProxyCommand=x:5432",
+      "fd00::1:5432",
+      "[fd00::1]",
+      "[db.example]:5432",
+    ]) {
       expect(() => parsePortSpecs([spec])).toThrow(`invalid port ${spec}`);
     }
   });
@@ -147,6 +196,62 @@ describe("runTunnel", () => {
       { type: "forward-opened", name: null, localPort: 4000, box: "lab", remotePort: 5173 },
       { type: "tunnel-closed", box: "lab" },
     ]);
+  });
+
+  test("a host that the box reaches opens a forward to that host", async () => {
+    const link = new FakeLink(untilAborted);
+    const run = harness(link);
+
+    const done = runTunnel(
+      { ports: ["db.example:5432:15432", "[fd00::1]:6379", "3000"], list: false, box: BOX },
+      run.dependencies,
+    );
+    await Bun.sleep(0);
+    run.interrupt();
+    await done;
+
+    expect(link.reached).toEqual([
+      { host: "db.example", port: 5432 },
+      { host: "fd00::1", port: 6379 },
+    ]);
+    expect(link.tunnels[0]?.ports).toEqual([
+      { remoteHost: "db.example", remotePort: 5432, localPort: 15432 },
+      { remoteHost: "fd00::1", remotePort: 6379, localPort: 6379 },
+      { remotePort: 3000, localPort: 3000 },
+    ]);
+    expect(run.lines).toEqual([
+      "http://localhost:15432 -> lab:db.example:5432",
+      "http://localhost:6379 -> lab:[fd00::1]:6379",
+      "http://localhost:3000 -> lab:127.0.0.1:3000",
+      "Press Ctrl-C to close the tunnel.",
+      "Tunnel closed.",
+    ]);
+  });
+
+  test("a host that the box cannot reach fails with the host and the box before the tunnel opens", async () => {
+    const link = new FakeLink(untilAborted, undefined, {
+      ok: false,
+      error: { code: "forward-failed", origin: "box", message: "connect failed: Name or service not known" },
+    });
+    const run = harness(link);
+
+    await expect(runTunnel({ ports: ["db.example:5432:15432"], list: false, box: BOX }, run.dependencies)).rejects.toThrow(
+      "lab cannot reach db.example:5432: connect failed: Name or service not known",
+    );
+    expect(link.tunnels).toEqual([]);
+    expect(run.events).toEqual([]);
+  });
+
+  test("a failed connection to the box during the host check names the box", async () => {
+    const link = new FakeLink(untilAborted, undefined, {
+      ok: false,
+      error: { code: "ssh-failed", origin: "network", message: "ssh: connect to host lab.example port 22: Connection refused" },
+    });
+
+    await expect(runTunnel({ ports: ["db.example:5432"], list: false, box: BOX }, harness(link).dependencies)).rejects.toThrow(
+      "Could not connect to lab: ssh: connect to host lab.example port 22: Connection refused",
+    );
+    expect(link.tunnels).toEqual([]);
   });
 
   test("a dropped connection prints the SSH error and fails", async () => {
@@ -647,4 +752,101 @@ describe("FOLLOW_COMMAND", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+});
+
+describe("ferry tunnel as a child process", () => {
+  /** A fake `ssh` that logs its arguments, fails `-W` for unreachable.example, and else waits for SIGTERM. */
+  const FAKE_SSH = `#!/bin/sh
+printf '%s\\n' "$*" >> "$FAKE_SSH_LOG"
+case "$*" in
+  *"-W unreachable.example:"*) echo "channel 0: open failed: connect failed: Name or service not known" >&2; echo "stdio forwarding failed" >&2; exit 255 ;;
+  *"-W "*) exit 0 ;;
+esac
+[ -t 0 ] && echo "stdin is a terminal" >> "$FAKE_SSH_LOG"
+trap 'echo stopped >> "$FAKE_SSH_LOG"; exit 0' TERM
+touch "$FAKE_SSH_LOG.ready"
+while :; do sleep 0.05; done
+`;
+
+  function setup() {
+    const root = mkdtempSync(join(tmpdir(), "ferry-tunnel-child-"));
+    const home = join(root, "home");
+    const bin = join(root, "bin");
+    mkdirSync(join(home, ".ferry"), { recursive: true });
+    mkdirSync(bin);
+    writeFileSync(join(bin, "ssh"), FAKE_SSH);
+    chmodSync(join(bin, "ssh"), 0o755);
+    writeFileSync(
+      join(home, ".ferry", "config.toml"),
+      [
+        "version = 1",
+        'publisher = "operator@example.com"',
+        'snapshot_url = "git@github.com:you/ferry-snapshot.git"',
+        "",
+        "[box.lab]",
+        'transport = "ssh"',
+        'destination = "user@box.example"',
+        "",
+      ].join("\n"),
+    );
+    const log = join(root, "ssh.log");
+    const spawn = (args: string[]) =>
+      // A pipe on stdin: no terminal, and no input.
+      Bun.spawn([process.execPath, join(import.meta.dir, "..", "src", "cli.ts"), ...args], {
+        env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, FAKE_SSH_LOG: log },
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+    return { root, log, spawn, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  }
+
+  async function freePort(): Promise<number> {
+    const server = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+    const port = server.port;
+    server.stop(true);
+    return port;
+  }
+
+  test("runs without a terminal and without prompts, and SIGTERM closes it with exit code 0", async () => {
+    const env = setup();
+    try {
+      const port = await freePort();
+      const child = env.spawn(["tunnel", "--box", "lab", `db.example:5432:${port}`]);
+      const deadline = Date.now() + 10_000;
+      while (!existsSync(`${env.log}.ready`) && Date.now() < deadline) await Bun.sleep(20);
+      expect(existsSync(`${env.log}.ready`)).toBe(true);
+
+      child.kill("SIGTERM");
+      const [exitCode, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain(`http://localhost:${port} -> lab:db.example:5432`);
+      expect(stdout.trim().split("\n").at(-1)).toBe("Tunnel closed.");
+      const [check, tunnel, ...rest] = readFileSync(env.log, "utf8").trim().split("\n");
+      expect(check).toContain("-o BatchMode=yes");
+      expect(check).toContain("-W db.example:5432 user@box.example");
+      expect(tunnel).toContain("-o BatchMode=yes");
+      expect(tunnel).toContain(`-L 127.0.0.1:${port}:db.example:5432 user@box.example`);
+      // OpenSSH got no terminal, and Ferry stopped it.
+      expect(rest).toEqual(["stopped"]);
+    } finally {
+      env.cleanup();
+    }
+  }, 20_000);
+
+  test("a host that the box cannot reach exits with an error that names the host and the box", async () => {
+    const env = setup();
+    try {
+      const child = env.spawn(["tunnel", "--box", "lab", "unreachable.example:5432"]);
+      // The error renderer of the CLI writes to stdout.
+      const [exitCode, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+
+      expect(exitCode).toBe(1);
+      expect(stdout).toContain("lab cannot reach unreachable.example:5432: connect failed: Name or service not known");
+      expect(existsSync(`${env.log}.ready`)).toBe(false);
+    } finally {
+      env.cleanup();
+    }
+  }, 20_000);
 });
