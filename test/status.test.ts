@@ -760,6 +760,7 @@ describe("brief status", () => {
               { kind: "command-missing", harness: "cursor", server: "docs", command: "uvx" },
               { kind: "env-missing", harness: "codex", server: "github", keys: ["GITHUB_TOKEN"], file: ".codex/config.toml" },
               { kind: "env-missing", harness: "cursor", server: "db", keys: ["DB_URL", "DB_PASSWORD"], file: ".cursor/mcp.json" },
+              { kind: "env-unchecked", harness: "claude", server: "github", keys: ["GITHUB_TOKEN"] },
             ],
           },
         }),
@@ -795,6 +796,13 @@ describe("brief status", () => {
         state: "env-missing",
         message: "cursor/db needs DB_URL, DB_PASSWORD on the box. Set them in the env of db in ~/.cursor/mcp.json on the box.",
         command: null,
+      },
+      {
+        kind: "mcp-server",
+        name: "claude/github",
+        state: "env-unchecked",
+        message: "Ferry cannot check GITHUB_TOKEN of claude/github, because jq is not on the box.",
+        command: "ferry update --box default",
       },
     ]);
   });

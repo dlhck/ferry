@@ -232,6 +232,19 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
     },
   },
   {
+    id: "jq",
+    kind: "tool",
+    name: "jq",
+    // Ferry merges the box MCP entries with jq on the box, so each box gets it.
+    defaults: { mode: "always", policy: "latest" },
+    binary: "jq",
+    localVersion: "jq --version",
+    boxVersion: "jq --version",
+    install: { command: "sudo apt update && sudo apt install jq -y" },
+    // An apt command works only on the box, so ferry does not update jq on the operator machine.
+    update: { command: "sudo apt update && sudo apt install jq -y" },
+  },
+  {
     id: "claude",
     kind: "agent",
     name: "Claude Code",
@@ -306,6 +319,8 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
         remove: "codex mcp remove {name}",
         // Add writes the config, then starts a login that waits for a callback.
         add: "timeout 20 codex mcp add {name} --url {url}",
+        addStdio: "timeout 20 codex mcp add {name} -- {command}",
+        getJson: "codex mcp get {name} --json",
       },
       list: "codex mcp list",
       loginRequired: "^(\\S+)\\s+https://\\S+\\s.*\\bNot logged in\\s*$",

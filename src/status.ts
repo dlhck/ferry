@@ -171,7 +171,7 @@ export type StatusReport = {
  * One item of a box that needs action. `login`: a provider login. `mcp-login`:
  * an MCP server login, with the name `tool/server`. `mcp-server`: a carried
  * stdio MCP server, with the name `harness/server`, in the state `env-missing`,
- * `command-missing`, or `not-portable`. `tool`: a tool with the state `drift`,
+ * `env-unchecked`, `command-missing`, or `not-portable`. `tool`: a tool with the state `drift`,
  * `missing`, or `hidden`. `hook`: a hook command that refers to a home file
  * Ferry does not carry, with the name of that path. `check-failed`: Ferry
  * cannot read a part of the box.
@@ -294,7 +294,7 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
     const servers = box.mcpServers;
     try {
       for (const issue of await step(progress, "Checking MCP servers on the box", () => servers.check())) {
-        issues.push(mcpServerIssue(issue));
+        issues.push(mcpServerIssue(issue, flag));
       }
     } catch (cause) {
       failed("MCP servers", cause);
@@ -328,7 +328,7 @@ function hookIssue(hook: UncarriedHookPath): BriefIssue {
   };
 }
 
-function mcpServerIssue(issue: BoxMcpIssue): BriefIssue {
+function mcpServerIssue(issue: BoxMcpIssue, flag: string): BriefIssue {
   const name = `${issue.harness}/${issue.server}`;
   const base = { kind: "mcp-server", name, state: issue.kind, command: null } as const;
   switch (issue.kind) {
@@ -336,6 +336,12 @@ function mcpServerIssue(issue: BoxMcpIssue): BriefIssue {
       return {
         ...base,
         message: `${name} needs ${issue.keys.join(", ")} on the box. Set ${issue.keys.length === 1 ? "it" : "them"} in the env of ${issue.server} in ~/${issue.file} on the box.`,
+      };
+    case "env-unchecked":
+      return {
+        ...base,
+        message: `Ferry cannot check ${issue.keys.join(", ")} of ${name}, because jq is not on the box.`,
+        command: `ferry update ${flag}`,
       };
     case "command-missing":
       return {

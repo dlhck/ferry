@@ -72,16 +72,17 @@ describe("operator entries", () => {
       "pi",
       "cursor",
     ]);
-    expect(registry.tools.map((tool) => tool.id)).toEqual(["gh", "claude", "codex", "pi", "cursor"]);
+    expect(registry.tools.map((tool) => tool.id)).toEqual(["gh", "jq", "claude", "codex", "pi", "cursor"]);
   });
 
-  test("the builtin tools are the agent CLIs and gh, and the kind sets the install mode and default policy", () => {
+  test("the builtin tools are the agent CLIs, gh, and jq, and the kind or the tool defaults set the install mode and default policy", () => {
     const defaults = Object.fromEntries(
       BUILTIN_TOOLS.map((tool) => [tool.id, `${tool.kind} ${toolDefaults(tool).mode} ${toolDefaults(tool).policy}`]),
     );
 
     expect(defaults).toEqual({
       gh: "tool mirror operator",
+      jq: "tool always latest",
       claude: "agent always latest",
       codex: "agent always latest",
       pi: "agent always latest",
@@ -103,7 +104,7 @@ describe("operator entries", () => {
     const registry = registryOf({ tools: { gh: "latest", node: NODE, pnpm: PNPM } });
     const pnpm = registry.tools.find((tool) => tool.id === "pnpm");
 
-    expect(registry.tools.map((tool) => tool.id)).toEqual(["gh", "claude", "codex", "pi", "cursor", "node", "pnpm"]);
+    expect(registry.tools.map((tool) => tool.id)).toEqual(["gh", "jq", "claude", "codex", "pi", "cursor", "node", "pnpm"]);
     expect(pnpm).toMatchObject({
       id: "pnpm",
       kind: "tool",

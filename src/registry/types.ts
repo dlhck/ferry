@@ -154,21 +154,29 @@ export type ToolUpdate = {
 /**
  * How ferry declares, lists, and logs in MCP servers with the CLI of a
  * harness. The tool id is the harness id. In a command, `{name}`, `{url}`,
- * `{type}`, and `{json}` are replaced with shell-quoted values.
+ * and `{type}` are replaced with shell-quoted values. The box fills in
+ * `{json}` and `{command}` itself.
  */
 export type ToolMcp = {
   /**
    * Commands that register one remote server. `get` prints the server URL
-   * when the server is declared. Without them, ferry merges the server into
-   * the MCP file of the harness. `addJson` adds one stdio server from its
-   * declaration in `{json}`. Without it, ferry merges stdio servers into the
-   * MCP file of the harness.
+   * when the server is declared, and fails when it is not. Without them,
+   * ferry merges the server into the MCP file of the harness.
+   *
+   * For a stdio server: `addJson` adds one server from its JSON declaration
+   * in `{json}`. `addStdio` adds one server that runs `{command}`, the
+   * command and its arguments. `getJson` prints one server as JSON, with
+   * `command`, `args`, and `env` at the top or under `transport`. Without
+   * `addJson` and `addStdio`, ferry merges stdio servers into the JSON MCP
+   * file of the harness.
    */
   readonly register?: {
     readonly get: string;
     readonly remove: string;
     readonly add: string;
     readonly addJson?: string;
+    readonly addStdio?: string;
+    readonly getJson?: string;
   };
   /** Lists the declared servers and their login state. */
   readonly list: string;
@@ -214,6 +222,8 @@ export type ToolDescriptor = {
   readonly id: string;
   /** The registry sets it on each tool. A descriptor without a kind counts as `agent`. */
   readonly kind?: ToolKind;
+  /** The install mode and default policy, when they differ from those of the kind. */
+  readonly defaults?: (typeof TOOL_KIND_DEFAULTS)[ToolKind];
   /** The label that `ferry tools` prints. */
   readonly name?: string;
   /** The executable on `PATH`, when the tool has one. */
@@ -254,5 +264,5 @@ export type ToolDescriptor = {
 
 /** The install mode and default policy of a tool, from its kind. */
 export function toolDefaults(tool: ToolDescriptor): (typeof TOOL_KIND_DEFAULTS)[ToolKind] {
-  return TOOL_KIND_DEFAULTS[tool.kind ?? "agent"];
+  return tool.defaults ?? TOOL_KIND_DEFAULTS[tool.kind ?? "agent"];
 }

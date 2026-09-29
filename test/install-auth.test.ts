@@ -143,7 +143,7 @@ describe("install command", () => {
       { yes: false },
       {
         ...installDependencies({ plan, output, confirm: async () => false }),
-        tools: [BUILTIN_TOOLS[0]!, BUILTIN_TOOLS[1]!, bun],
+        tools: [BUILTIN_TOOLS[0]!, BUILTIN_TOOLS[2]!, bun],
         createLink: () => ({
           ...fakeLink(),
           run: async (command) => {
@@ -179,7 +179,7 @@ describe("install command", () => {
       { yes: true },
       {
         ...installDependencies({ plan, output }),
-        tools: [BUILTIN_TOOLS[0]!, BUILTIN_TOOLS[1]!],
+        tools: [BUILTIN_TOOLS[0]!, BUILTIN_TOOLS[2]!],
         readConfig: () => ({ ...config, tools: { gh: "off", claude: "off" } }),
         createLink: () => ({
           ...fakeLink(),

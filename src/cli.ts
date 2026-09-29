@@ -552,10 +552,10 @@ Add a custom harness in ~/.ferry/config.toml. A repeat init keeps it:
   program
     .command("install")
     .summary("Install the supported agent tools on the configured box")
-    .description(`Install gh, the agent CLIs, the tools of the config, and Ferry on the box.
+    .description(`Install gh, jq, the agent CLIs, the tools of the config, and Ferry on the box.
 
 Ferry prints the plan for each tool and asks before it runs a command on the
-box. gh comes from apt, so Debian or Ubuntu is the tested target. Ferry on the
+box. gh and jq come from apt, so Debian or Ubuntu is the tested target. Ferry on the
 box is the version of this machine. It is a box install that runs only
 ferry expose. Run ferry tools --help for the tool config.`)
     .option("--yes", "run without a confirmation prompt")

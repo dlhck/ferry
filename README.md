@@ -40,7 +40,7 @@ You also need:
 ```sh
 ferry init --ssh-destination user@box.example \
   --snapshot-url git@github.com:you/ferry-snapshot.git
-ferry install        # gh, the agent CLIs, your tools, and Ferry on the box
+ferry install        # gh, jq, the agent CLIs, your tools, and Ferry on the box
 ferry sync           # publish the snapshot and apply it on the box
 ferry auth claude    # start a login on the box, finish it in a browser here
 ferry watch install  # sync each change automatically, as a user service
@@ -55,7 +55,7 @@ Use `--host <tailscale host> --ssh-user <user>` instead of `--ssh-destination` f
 | --- | --- |
 | `ferry init` | Record the first box and the snapshot URL, seed the snapshot, and link this machine. |
 | `ferry box list\|add\|remove\|default` | Manage several boxes and the default box. |
-| `ferry install` | Install gh, the agent CLIs, the tools of the config, and Ferry on a box. |
+| `ferry install` | Install gh, jq, the agent CLIs, the tools of the config, and Ferry on a box. |
 | `ferry sync` | Publish the snapshot and apply it on all boxes, or on the boxes of `--box`. |
 | `ferry history` | List the last 20 snapshot commits and the paths each one changed. |
 | `ferry revert <commit>` | Undo one snapshot commit on this machine, including the carried settings keys, then sync all boxes. `--no-sync` skips the sync. `--dry-run` shows the plan. |
@@ -82,7 +82,7 @@ Add `--json` to any command for scripts and agents: stdout then has only JSON, a
 
 - Logins, credential files, tokens, API keys, `.env` files, and whole settings files never leave the machine that has them. A login starts on the box, and its token stays there.
 - Before each publish, Ferry checks the carried files against deny rules: secret file names, private keys, token content, secret keys in JSON, YAML, and TOML, and executable binaries (ELF, Mach-O, and PE). Scripts, such as hook scripts, pass and keep their executable bit. A match stops the sync. The error names the file, never the value.
-- For a stdio MCP server, Ferry carries the command, the arguments, and the names of the `env` keys, never their values. Set the values in the `env` of the server on the box. Ferry keeps them. An argument that looks like a token or secret stops the sync. The error names the server and the rule. Ferry does not carry a server whose command or arguments refer to a path in your home, and it never installs a command. `ferry status --brief` names each missing env key, each command that is not on the box, and each server that Ferry did not carry.
+- For a stdio MCP server, Ferry carries the command, the arguments, and the names of the `env` keys, never their values. Set the values in the `env` of the server on the box. Ferry keeps them: the box merges its own entry with jq or the agent CLI, and sends back only a status or key names, never a value. An argument that looks like a token or secret stops the sync. The error names the server and the rule. Ferry does not carry a server whose command or arguments refer to a path in your home, and it never installs a command. `ferry status --brief` names each missing env key, each command that is not on the box, and each server that Ferry did not carry.
 - Ferry forwards your SSH agent to a box only for the snapshot checks and updates and for the Claude plugin installs. A box with `git_auth = "box"` gets no agent and reads the snapshot with its own read-only deploy key. See `ferry box add --help`.
 - Boxes do not trust each other. Ferry connects to each box from your machine. `ferry move` between two boxes goes through your machine, with the same deny rules.
 - Ferry opens no public port and never turns off SSH host-key checks. It runs commands with your SSH user, so use a box and a user that you trust with the agents that run there.
