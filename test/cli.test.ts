@@ -1334,6 +1334,48 @@ describe("ferry expose", () => {
   });
 });
 
+describe("ferry menubar", () => {
+  const APP = "/Users/me/Applications/Ferry Menu Bar.app";
+  const PLIST = "/Users/me/Library/LaunchAgents/dev.ferry.menubar.plist";
+
+  test("install passes --app and prints the app and the agent, uninstall prints the app", async () => {
+    const inputs: unknown[] = [];
+    const output: string[] = [];
+    const program = () =>
+      buildProgram({
+        installMenuBar: async (input) => {
+          inputs.push(input);
+          return { app: APP, path: PLIST, version: null, ferryPath: "/Users/me/.bun/bin/ferry" };
+        },
+        uninstallMenuBar: async () => ({ app: APP, path: PLIST, removed: false }),
+        writeLine: (line) => output.push(line),
+      });
+
+    await program().parseAsync(["menubar", "install", "--app", "dist/Ferry Menu Bar.app"], { from: "user" });
+    await program().parseAsync(["menubar", "install"], { from: "user" });
+    await program().parseAsync(["menubar", "uninstall"], { from: "user" });
+
+    expect(inputs).toEqual([{ app: "dist/Ferry Menu Bar.app" }, {}]);
+    expect(output).toEqual([
+      `Installed ${APP}. It starts at login with ${PLIST}.`,
+      `Installed ${APP}. It starts at login with ${PLIST}.`,
+      `No menu bar app at ${APP}`,
+    ]);
+  });
+
+  test("install --help names --app, macos/build.sh, and the agent", () => {
+    const install = buildProgram()
+      .commands.find((command) => command.name() === "menubar")!
+      .commands.find((command) => command.name() === "install")!;
+    let text = "";
+    install.configureOutput({ writeOut: (value) => (text += value) });
+    install.outputHelp();
+    expect(text).toContain("--app <path>");
+    expect(text).toContain("macos/build.sh");
+    expect(text).toContain("~/Library/LaunchAgents/dev.ferry.menubar.plist");
+  });
+});
+
 describe("box mode", () => {
   test("a box install refuses the operator commands and names the box install", async () => {
     for (const args of [
@@ -1610,6 +1652,51 @@ describe("--json", () => {
     expect(failed.exitCodes).toEqual([1]);
   });
 
+  test("menubar install and uninstall print one envelope", async () => {
+    const install = await run(["menubar", "install"], {
+      installMenuBar: async () => ({
+        app: "/Users/me/Applications/Ferry Menu Bar.app",
+        path: "/Users/me/Library/LaunchAgents/dev.ferry.menubar.plist",
+        version: "1.2.0",
+        ferryPath: "/Users/me/.local/bin/ferry",
+      }),
+    });
+    expect(install.json).toEqual([
+      {
+        schemaVersion: 1,
+        command: "menubar install",
+        ok: true,
+        result: {
+          app: "/Users/me/Applications/Ferry Menu Bar.app",
+          path: "/Users/me/Library/LaunchAgents/dev.ferry.menubar.plist",
+          version: "1.2.0",
+          ferryPath: "/Users/me/.local/bin/ferry",
+        },
+        warnings: [],
+        error: null,
+      },
+    ]);
+
+    const uninstall = await run(["menubar", "uninstall"], {
+      uninstallMenuBar: async () => ({
+        app: "/Users/me/Applications/Ferry Menu Bar.app",
+        path: "/Users/me/Library/LaunchAgents/dev.ferry.menubar.plist",
+        removed: true,
+      }),
+    });
+    expect(uninstall.json[0]).toMatchObject({ command: "menubar uninstall", ok: true, result: { removed: true } });
+
+    const failed = await run(["menubar", "install"], {
+      installMenuBar: async () => {
+        throw new FerryError("usage", "ferry menubar install runs only on macOS. This machine runs linux.");
+      },
+    });
+    expect(failed.json).toEqual([
+      expect.objectContaining({ command: "menubar install", ok: false, error: expect.objectContaining({ code: "usage" }) }),
+    ]);
+    expect(failed.exitCodes).toEqual([1]);
+  });
+
   test("tunnel --list prints the listeners in the envelope", async () => {
     const result = await run(["tunnel", "--list"], {
       runTunnel: async () => [{ port: 3000, address: "127.0.0.1", process: "node" }],
@@ -1726,7 +1813,7 @@ describe("--json", () => {
     for (const path of [
       "init", "box list", "box add", "box remove", "box default", "install", "sync", "watch", "watch install", "status",
       "auth", "update", "tools", "skills add", "move", "tunnel", "tunnel install", "tunnel uninstall", "expose", "integrations", "integrations enable",
-      "integrations disable", "uninstall",
+      "integrations disable", "uninstall", "menubar install", "menubar uninstall",
     ]) {
       expect(help(path.split(" "))).toContain("With --json: ");
     }

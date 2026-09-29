@@ -83,6 +83,13 @@ import { runToolsCommand, toolsLines, type ToolsCommandDependencies, type ToolsR
 import { boxPathDirs } from "./tools/path.ts";
 import { runWatch, type WatchDependencies, type WatchInput } from "./watch.ts";
 import {
+  installMenuBar,
+  uninstallMenuBar,
+  type MenuBarInput,
+  type MenuBarInstallResult,
+  type MenuBarUninstallResult,
+} from "./menubar.ts";
+import {
   installWatchService,
   type WatchServiceDependencies,
   type WatchServiceInput,
@@ -168,6 +175,8 @@ type CliDependencies = {
     input?: WatchServiceInput,
     dependencies?: WatchServiceDependencies,
   ) => Promise<WatchServiceResult>;
+  readonly installMenuBar?: (input: MenuBarInput) => Promise<MenuBarInstallResult>;
+  readonly uninstallMenuBar?: () => Promise<MenuBarUninstallResult>;
   readonly runIntegration?: (
     input: IntegrationCommandInput,
     dependencies?: Partial<IntegrationCommandDependencies>,
@@ -252,6 +261,8 @@ const JSON_RESULTS: Record<string, string> = {
   watch:
     "events watch-started, synced, sync-failed, sync-refused, content-refused, config-error, update-started, update-failed, status-failed, watch-stopped",
   "watch install": "{ manager, path }",
+  "menubar install": "{ app, path, version, ferryPath }. version is null with --app",
+  "menubar uninstall": "{ app, path, removed }",
   "self-update": "{ current, latest, updated }. The output of the installer goes to stderr",
   "box list": "{ boxes: [{ name, transport, destination, default }] }",
   "box add": "{ name, transport, destination, gitAuth, migrated }",
@@ -1077,6 +1088,44 @@ Ferry update, restart the service:
     .action(async () => {
       const result = await (dependencies.installWatchService ?? installWatchService)();
       report(result, (result) => writeLine(`Installed ${result.manager} service at ${result.path}`));
+    });
+
+  const menubar = program
+    .command("menubar")
+    .description("Install or remove the macOS menu bar app that shows what needs action on the boxes");
+  menubar
+    .command("install")
+    .summary("Install and start the macOS menu bar app")
+    .description(`Install and start the macOS menu bar app.
+
+The app shows the report of ~/.ferry/status.json: offline boxes, logins, MCP
+logins, and tool drift. ferry watch writes the file, so run ferry watch
+install too. Click an item with a Ferry command to run it in Terminal.
+
+Ferry downloads ferry-menubar-macos.zip of the release of this Ferry,
+verifies it against SHA256SUMS of the release, and unpacks it to
+~/Applications/Ferry Menu Bar.app. --app installs a local build of
+macos/build.sh, a .app directory or its zip, without a checksum. A
+development build of Ferry needs --app.
+
+The app starts at login with ~/Library/LaunchAgents/dev.ferry.menubar.plist.
+It records the path of this Ferry as FERRY_PATH and the current PATH. Run the
+command again after you move Ferry or update it.`)
+    .option("--app <path>", "install a local build of macos/build.sh: a .app directory or its zip")
+    .action(async (options: { app?: string }) => {
+      const result = await (dependencies.installMenuBar ?? installMenuBar)(options.app === undefined ? {} : { app: options.app });
+      report(result, (result) => writeLine(`Installed ${result.app}. It starts at login with ${result.path}.`));
+    });
+  menubar
+    .command("uninstall")
+    .summary("Stop and remove the macOS menu bar app")
+    .description(`Stop and remove the macOS menu bar app.
+
+Ferry stops the app, and removes ~/Library/LaunchAgents/dev.ferry.menubar.plist
+and ~/Applications/Ferry Menu Bar.app. The log stays.`)
+    .action(async () => {
+      const result = await (dependencies.uninstallMenuBar ?? uninstallMenuBar)();
+      report(result, (result) => writeLine(result.removed ? `Removed ${result.app}` : `No menu bar app at ${result.app}`));
     });
 
   program
