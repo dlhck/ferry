@@ -540,6 +540,46 @@ describe("ferry --help", () => {
     ]);
   });
 
+  test("history --json puts the commits in the envelope", async () => {
+    const commits = [{ commit: "a".repeat(40), date: "2026-09-29T10:00:00Z", subject: "chore: update ferry snapshot", paths: ["AGENTS.md"] }];
+    const received: unknown[] = [];
+    const lines: string[] = [];
+    const program = buildProgram({
+      readConfig: () => null,
+      runHistory: async (input) => {
+        received.push(input);
+        return commits;
+      },
+      writeLine: (line) => lines.push(line),
+      writeError: () => {},
+    });
+
+    await program.parseAsync(["history", "--limit", "5", "--json"], { from: "user" });
+
+    expect(received).toEqual([{ limit: 5 }]);
+    expect(JSON.parse(lines[0] as string)).toMatchObject({ command: "history", ok: true, result: { commits } });
+  });
+
+  test("wires ferry revert with --dry-run and --no-sync", async () => {
+    const received: unknown[] = [];
+    const program = buildProgram({
+      readConfig: () => null,
+      runRevert: async (input) => {
+        received.push(input);
+        return { dryRun: true, commit: "a".repeat(40), subject: "s", tip: null, paths: [], settings: [], sync: null };
+      },
+      writeLine: () => {},
+    });
+
+    await program.parseAsync(["revert", "abc1234", "--dry-run"], { from: "user" });
+    await program.parseAsync(["revert", "abc1234", "--no-sync"], { from: "user" });
+
+    expect(received).toEqual([
+      { commit: "abc1234", dryRun: true, sync: true },
+      { commit: "abc1234", dryRun: false, sync: false },
+    ]);
+  });
+
   test("the program help lists the json flag", () => {
     expect(buildProgram().helpInformation()).toContain("--json");
   });
