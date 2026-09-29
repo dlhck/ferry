@@ -691,6 +691,7 @@ describe("ferry --help", () => {
         "--dry-run",
         "--remove",
         "--include-env",
+        "--no-sessions",
         "--allow-secrets",
         "--yes",
       ],
@@ -704,6 +705,7 @@ describe("ferry --help", () => {
       dryRun: true,
       remove: true,
       includeEnv: true,
+      sessions: false,
       allowSecrets: true,
       yes: true,
     });

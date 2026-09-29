@@ -332,8 +332,9 @@ describe("runSync", () => {
             Stop: [
               {
                 hooks: [
-                  { type: "command", command: "~/.claude/hooks/notify.sh" },
-                  { type: "command", command: "jq ." },
+                  { type: "command", command: "~/bin/notify.sh" },
+                  { type: "command", command: "~/.claude/hooks/format.sh" },
+                  { type: "command", command: "paseo hooks claude stop" },
                 ],
               },
             ],
@@ -355,7 +356,7 @@ describe("runSync", () => {
 
       expect(result.dryRun).toBe(true);
       expect(lines).toEqual([
-        `Skipped hook: hook hooks.Stop[0].hooks[0].command refers to ~/.claude/hooks/notify.sh, outside the managed set: ${join(home, ".claude", "settings.json")}`,
+        `Skipped hook: hook hooks.Stop[0].hooks[0].command refers to ~/bin/notify.sh, outside the managed set: ${join(home, ".claude", "settings.json")}`,
       ]);
     } finally {
       rmSync(home, { recursive: true, force: true });

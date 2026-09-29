@@ -105,8 +105,9 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
     name: "Claude",
     skillRoot: ".claude/skills",
     instructionFile: ".claude/CLAUDE.md",
-    // Subagents and custom commands are plain markdown files.
-    extraRoots: [".claude/agents", ".claude/commands"],
+    // Subagents and custom commands are plain markdown files. Hook scripts
+    // keep their executable bit, and the deny rules apply to them.
+    extraRoots: [".claude/agents", ".claude/commands", ".claude/hooks"],
     // The plugin declarations, permissions, hooks, commit attribution, and
     // model preferences. The box installs the plugins. Keys such as env and
     // apiKeyHelper can hold secrets, so they stay on this machine.
@@ -127,6 +128,7 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
     },
     // The same file holds account and OAuth state. Only mcpServers is read.
     mcp: { file: ".claude.json", format: "json", key: "mcpServers" },
+    sessions: { layout: "project-directory", root: ".claude/projects", memory: "memory" },
   },
   {
     id: "codex",
@@ -150,6 +152,7 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
       ],
     },
     mcp: { file: ".codex/config.toml", format: "toml", key: "mcp_servers" },
+    sessions: { layout: "first-line-cwd", root: ".codex/sessions", files: "rollout-*.jsonl" },
   },
   {
     id: "pi",

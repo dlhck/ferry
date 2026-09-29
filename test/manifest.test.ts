@@ -1205,6 +1205,7 @@ describe("carried Claude hook commands", () => {
     "~/.claude/skills/lint/run.sh",
     "bash $HOME/.agents/skills/lint/run.sh",
     "sh ${HOME}/.claude/agents/review.sh",
+    "~/.claude/hooks/guard.sh",
     "cat ~/AGENTS.md",
     "/usr/local/bin/notify --title done",
   ])("passes a hook that calls a PATH program, a project path, or a managed path: %s", (command) => {
@@ -1215,7 +1216,7 @@ describe("carried Claude hook commands", () => {
   });
 
   test.each([
-    ["~/.claude/hooks/guard.sh", "~/.claude/hooks/guard.sh"],
+    ["~/bin/guard.sh", "~/bin/guard.sh"],
     ['bash "$HOME/bin/guard"', "$HOME/bin/guard"],
     ["node ${HOME}/scripts/guard.js --strict", "${HOME}/scripts/guard.js"],
     ["~/.claude/skills/../../.ssh/run.sh", "~/.claude/skills/../../.ssh/run.sh"],

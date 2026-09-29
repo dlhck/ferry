@@ -11,6 +11,11 @@
  * the destination. With `remove`, the source copy goes to a trash directory.
  * Ferry never deletes it.
  *
+ * With `sessions`, Ferry also carries the agent sessions of the project from
+ * the session stores of the harness descriptors, with the same deny rules.
+ * A session file on the destination stays, unless the source has the same
+ * file. Ferry never removes a source session.
+ *
  * Every source and destination step is a `sh` command string. The operator
  * machine runs it with `sh -c`. The box runs it through Link.
  */
@@ -24,11 +29,14 @@ import { BoxRequiredError, resolveBoxes, resolveTargetBox, type ResolvedBox } fr
 import { ConfigMissingError, readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
 import { hasBoxPart, INTEGRATIONS, type Integration } from "./integrations/index.ts";
 import { paseoSourceHint } from "./integrations/paseo.ts";
-import type { IntegrationId } from "./integrations/types.ts";
+import type { IntegrationId, MovedSession } from "./integrations/types.ts";
 import { Link, type LinkOptions } from "./link.ts";
 import { carriedContentHits, carriedNameHit } from "./manifest.ts";
 import { FerryError } from "./errors.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
+import { BUILTIN_HARNESSES } from "./registry/builtin.ts";
+import type { HarnessDescriptor } from "./registry/types.ts";
+import { stageSessions } from "./sessions.ts";
 
 export type MoveInput = {
   /** The project path on the operator machine, or the same path for the source box with `fromBox`. */
@@ -43,7 +51,12 @@ export type MoveInput = {
   readonly dryRun: boolean;
   readonly remove: boolean;
   readonly includeEnv: boolean;
-  /** Also carry an environment file that fails the token or secret-field rules. Needs `includeEnv`. */
+  /** Also carry the agent sessions and the project memory of the project. */
+  readonly sessions: boolean;
+  /**
+   * Also carry a session, and with `includeEnv` an environment file, that fails the token or secret-field
+   * rules.
+   */
   readonly allowSecrets: boolean;
   /** Carry the files with secrets without a question. Without a terminal, Ferry refuses them without it. */
   readonly yes: boolean;
@@ -62,6 +75,8 @@ export type MoveDependencies = {
   /** Records a warning for the --json envelope. The warning line also goes to `writeLine`. */
   readonly warn?: (line: string) => void;
   readonly progress: Progress;
+  /** The harnesses whose session stores Move reads. */
+  readonly harnesses: readonly HarnessDescriptor[];
   /** All built-in integrations. Move uses the ones that the config enables. */
   readonly integrations: readonly Integration[];
   /** True when Ferry can ask a question on a terminal. */
@@ -70,7 +85,7 @@ export type MoveDependencies = {
 };
 
 /** The line for `--remove`. Ferry never removes the source project from an integration. */
-const SOURCE_HINTS: Record<IntegrationId, (path: string, side: string) => string> = { paseo: paseoSourceHint };
+const SOURCE_HINTS: Partial<Record<IntegrationId, (path: string, side: string) => string>> = { paseo: paseoSourceHint };
 
 export class MoveError extends Error {
   constructor(message: string) {
@@ -96,6 +111,11 @@ export type MoveResult = {
   readonly notes: readonly string[];
   /** The trash path of the source copy, after --remove. */
   readonly trash: string | null;
+  /** The carried sessions and the refused session files. A memory file is a session with a null `id`. */
+  readonly sessions: {
+    readonly carry: readonly { harness: string; id: string | null; files: readonly string[]; secrets: readonly string[] }[];
+    readonly refused: readonly Hit[];
+  };
 };
 
 /**
@@ -155,6 +175,24 @@ type GitSource = {
   readonly branch: string | null;
 };
 
+/** A session or memory file to carry. The file paths are relative to the destination home. */
+type CarriedSession = {
+  readonly harness: string;
+  readonly id: string | null;
+  readonly files: readonly Carried[];
+  readonly secrets: readonly string[];
+};
+
+type SessionPlan = {
+  readonly carry: readonly CarriedSession[];
+  /** The paths are relative to the home, as `~/<path>`. */
+  readonly refused: readonly Hit[];
+  /** One line for each refused file. */
+  readonly warnings: readonly string[];
+  /** The local directory that holds the session files at their destination paths, or null without sessions. */
+  readonly stage: string | null;
+};
+
 type Plan = {
   readonly git: GitSource | null;
   readonly carry: readonly Carried[];
@@ -177,8 +215,8 @@ const ALWAYS_REFUSED = new Set(["private-key", "executable"]);
 /** Returns null when the operator does not confirm. */
 export async function runMove(input: MoveInput, overrides: Partial<MoveDependencies> = {}): Promise<MoveResult | null> {
   const dependencies: MoveDependencies = { ...defaultDependencies(), ...overrides };
-  if (input.allowSecrets && !input.includeEnv) {
-    throw new MoveError("--allow-secrets works only together with --include-env.");
+  if (input.allowSecrets && !input.includeEnv && !input.sessions) {
+    throw new MoveError("--allow-secrets needs --include-env or the sessions. Add --include-env, or leave out --no-sessions.");
   }
   const fromBox = input.fromBox !== undefined;
   const home = realpathSync(dependencies.home);
@@ -205,22 +243,35 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
   const writeLine = dependencies.writeLine;
   const progress = dependencies.progress;
 
-  progress.plan(input.dryRun ? 1 : (input.remove ? 5 : 4) + registered.length);
+  progress.plan(input.dryRun ? 1 : (input.remove ? 5 : 4) + (input.sessions ? 1 : 0) + registered.length);
   const plan = await step(
     progress,
     "Preflight",
-    () => preflight(input, rel, source, sourcePath, destination, destinationPath, fromBox ? null : join(home, rel)),
+    async () => {
+      const plan = await preflight(input, rel, source, sourcePath, destination, destinationPath, fromBox ? null : join(home, rel));
+      try {
+        const sessions = input.sessions
+          ? await sessionPreflight(input, rel, source, destination, dependencies.harnesses)
+          : { carry: [], refused: [], warnings: [], stage: null };
+        return { ...plan, sessions };
+      } catch (error) {
+        if (fromBox) rmSync(plan.stage, { recursive: true, force: true });
+        throw error;
+      }
+    },
     undefined,
     (plan) =>
       [
         `carry ${plan.carry.length}`,
         `refuse ${plan.refused.length}`,
         `skip ${plan.skipped.length}`,
+        input.sessions && plural(plan.sessions.carry.length, "session"),
         plan.problems.length > 0 && plural(plan.problems.length, "problem"),
       ]
         .filter(Boolean)
         .join(", "),
   );
+  const warnings: string[] = [];
   try {
     writeLine(input.dryRun ? "Move plan (no changes will be made):" : "Move plan:");
     writeLine(`Source: ${source.label} ~/${rel}`);
@@ -239,6 +290,21 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
     for (const hit of plan.skipped) writeLine(`Skip: ${hit.path} (${hit.reason})`);
     for (const note of plan.notes) writeLine(`Note: ${note}`);
     for (const problem of plan.problems) writeLine(`Problem: ${problem}`);
+    const counts = new Map<string, number>();
+    for (const session of plan.sessions.carry) {
+      const key = session.id === null ? `${session.harness} memory files` : session.harness;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    if (counts.size > 0) writeLine(`Carry sessions: ${[...counts].map(([key, count]) => `${key} ${count}`).join(", ")}`);
+    for (const session of plan.sessions.carry) {
+      if (session.secrets.length > 0) {
+        writeLine(`Carry session with secrets: ~/${session.files[0]!.path} (${session.secrets.join("; ")})`);
+      }
+    }
+    for (const warning of plan.sessions.warnings) {
+      dependencies.warn?.(warning);
+      writeLine(warning);
+    }
     if (plan.problems.length > 0) {
       throw new MoveError(
         `Ferry refused to move ~/${rel}: ${plan.problems.length} ${plan.problems.length === 1 ? "problem" : "problems"}.`,
@@ -254,10 +320,20 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       refused: plan.refused,
       skipped: plan.skipped,
       notes: plan.notes,
+      sessions: {
+        carry: plan.sessions.carry.map((session) => ({
+          harness: session.harness,
+          id: session.id,
+          files: session.files.map((file) => `~/${file.path}`),
+          secrets: session.secrets,
+        })),
+        refused: plan.sessions.refused,
+      },
     };
     if (input.dryRun) return { ...result, trash: null };
 
-    const secrets = plan.carry.filter((file) => file.secrets.length > 0);
+    const secretSessions = plan.sessions.carry.filter((session) => session.secrets.length > 0);
+    const secrets = [...plan.carry.filter((file) => file.secrets.length > 0), ...secretSessions.flatMap((session) => session.files)];
     if (secrets.length > 0 && !input.yes) {
       if (!dependencies.interactive) {
         throw new FerryError(
@@ -309,6 +385,22 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       });
     }
 
+    let moved: MovedSession[] = [];
+    if (input.sessions && plan.sessions.carry.length === 0) progress.skip("Carrying sessions", "no sessions");
+    else if (input.sessions) {
+      const carry = plan.sessions.carry;
+      progress.start(`Carrying ${plural(carry.flatMap((session) => session.files).length, "session file")}`);
+      try {
+        await carrySessions(destination, plan.sessions.stage!, carry);
+        progress.done();
+        moved = carry.flatMap((session) => (session.id === null ? [] : [{ provider: session.harness, id: session.id }]));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        progress.fail(message);
+        warnings.push(`WARNING: Ferry could not carry the sessions: ${message}. The move of the project is complete.`);
+      }
+    }
+
     let trash: string | null = null;
     if (input.remove) {
       const name = `${posix.basename(rel)}-${timestamp(dependencies.now())}`;
@@ -329,11 +421,10 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       trash = `${source.trash.replace(source.home, "~")}/${name}`;
     }
 
-    const warnings: string[] = [];
     for (const { integration, link } of registered) {
       progress.start(`Registering the project in ${integration.name}`);
       try {
-        await integration.box.onProjectMoved(link, `~/${rel}`);
+        await integration.box.onProjectMoved(link, `~/${rel}`, moved);
         progress.done();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -348,16 +439,21 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
     writeLine(
       `Moved ~/${rel}${relay ? ` from ${source.label}` : ""} to ${destination.label}: carried ${plan.carry.length}, refused ${plan.refused.length}, skipped ${plan.skipped.length}.`,
     );
+    if (moved.length > 0) writeLine(`Carried ${plural(moved.length, "session")}. Resume them in ~/${rel} on ${destination.label}.`);
     for (const warning of warnings) {
       dependencies.warn?.(warning);
       writeLine(warning);
     }
     if (input.remove) {
-      for (const integration of enabled(sourceBox ?? destinationBox)) writeLine(SOURCE_HINTS[integration.id](`~/${rel}`, source.label));
+      for (const integration of enabled(sourceBox ?? destinationBox)) {
+        const hint = SOURCE_HINTS[integration.id];
+        if (hint) writeLine(hint(`~/${rel}`, source.label));
+      }
     }
     return { ...result, trash };
   } finally {
     if (fromBox) rmSync(plan.stage, { recursive: true, force: true });
+    if (plan.sessions.stage) rmSync(plan.sessions.stage, { recursive: true, force: true });
   }
 }
 
@@ -470,6 +566,72 @@ async function preflight(
     );
   }
   return { git, carry, refused, skipped, notes, problems, stage };
+}
+
+/**
+ * Stage the sessions of the project and apply the deny rules to each file. A
+ * hit refuses the whole session. With `allowSecrets`, a session whose files
+ * fail only the token or secret-field rules is carried.
+ */
+async function sessionPreflight(
+  input: MoveInput,
+  rel: string,
+  source: Side,
+  destination: Side,
+  harnesses: readonly HarnessDescriptor[],
+): Promise<SessionPlan> {
+  const homeOf = async (side: Side) =>
+    must(side.run(`printf '%s' ${side.home}`, { timeoutMs: PROBE_TIMEOUT_MS }), `Ferry could not read the home on ${side.label}`);
+  const staged = await stageSessions({
+    harnesses,
+    sourceProject: `${await homeOf(source)}/${rel}`,
+    targetProject: `${await homeOf(destination)}/${rel}`,
+    run: (command) =>
+      must(source.run(`cd ${source.home} && ${command}`, { timeoutMs: PROBE_TIMEOUT_MS }), `Ferry could not list the sessions on ${source.label}`),
+    fetch: (paths) => fetchFiles(source, source.home, paths),
+  });
+  const carry: CarriedSession[] = [];
+  const refused: Hit[] = [];
+  const warnings: string[] = [];
+  for (const session of staged.sessions) {
+    const files: Carried[] = [];
+    const hits: Hit[] = [];
+    // A name rule, a private key, or an executable refuses the session also with allowSecrets.
+    let blocked = false;
+    for (const file of session.files) {
+      const bytes = readFileSync(join(staged.stage!, file.target));
+      const path = `~/${file.source}`;
+      const nameHit = carriedNameHit(file.source);
+      const found = nameHit ? [nameHit] : carriedContentHits(file.source, bytes);
+      if (nameHit || found.some((hit) => ALWAYS_REFUSED.has(hit.code))) blocked = true;
+      hits.push(...found.map((hit) => ({ ...hit, path })));
+      files.push({ path: file.target, sha256: createHash("sha256").update(bytes).digest("hex"), secrets: [] });
+    }
+    if (hits.length === 0 || (input.allowSecrets && !blocked)) {
+      carry.push({ harness: session.harness, id: session.id, files, secrets: [...new Set(hits.map((hit) => hit.reason))] });
+      continue;
+    }
+    refused.push(...hits);
+    const hint = input.allowSecrets || blocked ? "" : " Add --allow-secrets to carry it.";
+    const what = session.id === null ? "the memory file" : "the session of";
+    for (const hit of hits) warnings.push(`WARNING: Ferry skips ${what} ${hit.path} (${hit.reason}).${hint}`);
+  }
+  return { carry, refused, warnings, stage: staged.stage };
+}
+
+/** Write the session files into the destination home and verify each one. A file there with the same path gets the source bytes. */
+async function carrySessions(destination: Side, stage: string, carry: readonly CarriedSession[]): Promise<void> {
+  const files = carry.flatMap((session) => session.files);
+  const secret = carry.filter((session) => session.secrets.length > 0).flatMap((session) => session.files);
+  const archive = await createArchive(stage, files.map((file) => file.path));
+  const chmod =
+    secret.length > 0 ? ` && cd ${destination.home} && chmod 600 ${secret.map((file) => quoteShell(`./${file.path}`)).join(" ")}` : "";
+  await must(
+    destination.run(`tar -xf - -C ${destination.home}${chmod}`, { input: archive, timeoutMs: TRANSFER_TIMEOUT_MS }),
+    `Ferry could not write the session files on ${destination.label}`,
+  );
+  const mismatched = await verify(destination, destination.home, files);
+  if (mismatched.length > 0) throw new MoveError(`the checksum of ~/${mismatched.join(", ~/")} does not match`);
 }
 
 async function gitPreflight(source: Side, path: string, problems: string[], notes: string[]): Promise<GitSource | null> {
@@ -819,6 +981,7 @@ function defaultDependencies(): MoveDependencies {
     now: () => new Date(),
     writeLine: console.log,
     progress: noProgress,
+    harnesses: BUILTIN_HARNESSES,
     integrations: INTEGRATIONS,
     interactive: process.stdin.isTTY === true && process.stdout.isTTY === true,
     confirm: (message) => prompts.confirm({ message, initialValue: false }),

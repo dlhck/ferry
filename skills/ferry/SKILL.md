@@ -121,7 +121,7 @@ Each entry of `boxes` has these fields:
 
 Each section also has an `error` field. A `null` value with an error means Ferry could not read it. It does not mean false.
 
-`ferry status --brief --json` checks only the link, the logins, the MCP logins, the carried stdio MCP servers, and the tools. Its `result` is `{ schemaVersion: 1, checkedAt, boxes }`. Each box has `name`, `host`, `online`, `error` (why the box is offline), and `issues`. Each issue has `kind` (`login`, `mcp-login`, `mcp-server`, `tool`, or `check-failed`), `name`, `state`, `message`, and `command`, the Ferry command that fixes it, or `null` when a person must act on the box. `ferry watch` writes the same report to `~/.ferry/status.json` at the start, every 5 minutes, and after each sync. Read that file when it is recent, and run the command when it is old or missing.
+`ferry status --brief --json` checks only the link, the logins, the MCP logins, the carried stdio MCP servers, the tools, and the hooks that run a home file Ferry does not carry. Its `result` is `{ schemaVersion: 1, checkedAt, boxes }`. Each box has `name`, `host`, `online`, `error` (why the box is offline), and `issues`. Each issue has `kind` (`login`, `mcp-login`, `mcp-server`, `tool`, `hook`, or `check-failed`), `name`, `state`, `message`, and `command`, the Ferry command that fixes it, or `null` when a person must act on the box. `ferry watch` writes the same report to `~/.ferry/status.json` at the start, every 5 minutes, and after each sync. Read that file when it is recent, and run the command when it is old or missing.
 
 ## Sync
 
@@ -168,6 +168,9 @@ Do not run these commands yourself. When `auth.loginRequired` or `mcpLogins.logi
    - On a terminal, Ferry asks before the transfer. Without a terminal, Ferry stops before any change unless `--yes` is set. Do not add `--yes` to get past this stop. Give the operator the command to run instead.
    - The destination gets these files with mode 600.
 6. Add `--remove` only when the operator asks. Ferry refuses `--remove` if it refuses any local-only file. After verification, Ferry moves the source copy to `~/.Trash` on macOS or to `~/.ferry/trash` on Linux and on the box. It does not delete it.
+7. Ferry also carries the Claude and Codex sessions of the project and the Claude project memory in `~/.claude/projects/<encoded path>/memory`. The dry run prints a `Carry sessions:` line. After the move, `claude --resume` and `codex resume` in the project on the destination list them. `--no-sessions` turns this off.
+   - A session file that is only on the destination stays. A session on both machines gets the source copy. The source keeps its sessions.
+   - Ferry applies the deny rules to each session and memory file. A `WARNING: Ferry skips the session of <file> (<rule>)` line names a session that stays on the source. Ferry carries it with `--allow-secrets` only, with the same rules as step 5, and never with a private key.
 
 ## Install skills
 
@@ -181,7 +184,7 @@ ferry skills add dlhck/ferry --skill ferry
 
 ## Integrations
 
-An integration runs one extra service on the box. Paseo is the only integration. It is off by default. When it is off, Ferry prints nothing about it.
+An integration adds a service on the box, commands on the operator machine, or both. Paseo runs a service on the box. Sherlock adds commands on the operator machine. Each one is off by default. When it is off, Ferry prints nothing about it.
 
 - `ferry integrations` lists each integration, shows if it is enabled, and shows the local app version that the box gets. It changes nothing.
 - `ferry integrations enable paseo`, `ferry integrations disable paseo`, and the Paseo step of `ferry update` need the operator. Run them with `--dry-run` only, and tell the operator the command. An update restarts the Paseo daemon and stops the agents that run on the box.
@@ -204,6 +207,16 @@ When Paseo is enabled for a box, its `ferry status` block has an `Integrations` 
 | `Listen:`, `state.listen`, `state.relay` | The daemon must listen on `127.0.0.1:6767` with the relay off. |
 | `Providers:`, `state.providers` | The agent providers on the box. Sync skips a profile whose provider is `unavailable`. |
 | `WARNING` lines, `warnings` | A problem that the operator must fix, such as a version difference or a daemon that is not running. Tell the operator. |
+
+### Sherlock
+
+[Sherlock](https://github.com/michaelbromley/sherlock) is a read-only database query CLI on the operator machine. `ferry sherlock` exists only when `[integrations] sherlock = true` and `sherlock` is on the PATH. Without `sherlock`, `ferry integrations enable sherlock` stops and prints the install command.
+
+- `ferry sherlock add <name> [--box <box>] --target <target> --type <type> [--database <name>] [--username <user>] [--ssl <mode>] [--password-stdin | --password-env <var>] [--force]` runs `sherlock connection add` with `--tunnel-command "ferry tunnel --box <box> <target>:{{port}}"`. The target is a box port, such as `5432`, or a host and port that the box can reach, such as `db.example:5432`.
+- Do not type a password into a command. On a terminal, Ferry asks for it. Else tell the operator to run the command, or use `--password-env`.
+- Then query with `sherlock -c <name> ...`. Sherlock opens the tunnel on the first query and closes it when idle.
+- Ferry records `{ name, box, target }` in `~/.ferry/sherlock.json`. Do not edit it.
+- Full `ferry status` has `Integrations on this machine:` with one line `<name>  <box>:<target>  <state>` for each recorded connection that `sherlock connection list` still has. `ferry status --json` has `integrations.sherlock.state.connections: [{ name, box, target, state, error }]`. `state` is `reachable`, `unreachable` (the box cannot connect to the target), `box-offline`, or `unknown-box`. `--brief` does not check Sherlock.
 
 ## JSON output
 
@@ -263,7 +276,7 @@ With `--json`, the stdout of the command of `ferry expose` goes to stderr.
 
 With `--json`, Ferry never asks:
 
-- A step that needs a confirmation fails with `confirmation-required`, unless the command has `--yes`. This applies to `install`, `update`, `uninstall`, `integrations enable|disable`, `box add` on a `[host]` config, and `.env` files with secrets in `move`. The message of the error names what needs the confirmation.
+- A step that needs a confirmation fails with `confirmation-required`, unless the command has `--yes`. This applies to `install`, `update`, `uninstall`, `integrations enable|disable`, `box add` on a `[host]` config, and `.env` files and sessions with secrets in `move`. The message of the error names what needs the confirmation.
 - The SSH host keys of the snapshot host in `init` and `box add` need `--accept-host-keys`. `--yes` does not trust them. Without `--accept-host-keys`, the command fails with `confirmation-required`, and `error.details.hostKeys` is a list of `{ host, type, fingerprint }`. With `--accept-host-keys`, Ferry trusts the keys and writes the fingerprints to stderr.
 - `ferry init --json` without the values that it needs fails with `missing-values`. The message lists the missing values, such as `host, sshUser, snapshotUrl`.
 - `ferry auth <tool> --json` prints a `login` event before the envelope: `{ "type": "login", "provider", "url", "userCode", "codeRequired", "localPort", "timeoutMs" }`, and for `--mcp` also `server`. The login ends in the browser. When `codeRequired` is `true`, Ferry reads the code that the browser shows as one line on stdin. Without a line, it fails with `missing-values`.
@@ -307,10 +320,11 @@ With `--json`, Ferry never asks:
 | `auth` | Without a tool: `{ providers: [{ id, login: "startable", "manual", or "off" }] }`. With a tool: the last login result, `{ kind, provider, ... }`, where `kind` is `logged-in`, `already-done`, `device-url`, `printed-url`, `local-port-forward`, or `manual-ssh`. |
 | `tools` | `{ tools: [{ id, name, kind, install, policy: { policy, default }, boxes: [{ name, policy, default }], operatorVersion }] }` |
 | `skills add` | `{ argv }`, the `npx skills add` command that ran. |
-| `move` | `{ path, source, destination, dryRun, git: { url, branch } or null, carry: [{ path, sha256, secrets }], refused: [{ path, code, reason }], skipped, notes, trash }` |
+| `move` | `{ path, source, destination, dryRun, git: { url, branch } or null, carry: [{ path, sha256, secrets }], refused: [{ path, code, reason }], skipped, notes, trash, sessions: { carry: [{ harness, id, files, secrets }], refused: [{ path, code, reason }] } }`. A memory file is a session with `id` null. |
 | `tunnel --list` | `{ box, listeners: [{ port, address, process }] }` |
 | `integrations` | `{ boxes: [{ name, destination, integrations: [{ id, description, enabled, localVersion, localSource, connectSteps }] }] }`. `name` is `null` for a `[host]` config. |
 | `integrations enable`, `integrations disable` | `{ integration, action, dryRun, plan, output, enabled, connectSteps }`. `enabled` is the new config value, or `null` for a dry run. |
+| `sherlock add` | `{ name, box, target, tunnelCommand }`. With `--json`, it needs `--password-stdin` or `--password-env`. |
 | `watch install` | `{ manager: "launchd" or "systemd", path }` |
 | `tunnel install` | `{ manager: "launchd" or "systemd", path }` |
 | `tunnel uninstall` | `{ manager, path, removed }`. `removed` is `false` when the box had no service file. |

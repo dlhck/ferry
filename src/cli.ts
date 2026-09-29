@@ -61,6 +61,7 @@ import {
   runBoxRemove,
   type BoxCommandDependencies,
 } from "./box.ts";
+import type { IntegrationId } from "./integrations/types.ts";
 import { INTEGRATIONS, integrationLines, listIntegrations, operatorIntegrations, type Integration } from "./integrations/index.ts";
 import {
   runIntegrationCommand,
@@ -261,7 +262,7 @@ const JSON_RESULTS: Record<string, string> = {
   history: "{ commits: [{ commit, date, subject, paths }] }, newest first",
   revert:
     "{ dryRun, commit, subject, tip, paths, settings: [{ file, keys }], sync }. sync is the sync result, or null with --dry-run or --no-sync",
-  move: "{ path, source, destination, dryRun, git, carry, refused, skipped, notes, trash }",
+  move: "{ path, source, destination, dryRun, git, carry, refused, skipped, notes, trash, sessions }",
   tunnel:
     "events forward-opened, forward-closed, forward-failed, following, connection-lost, tunnel-closed. " +
     "With --list, one envelope: { box, listeners: [{ port, address, process }] }",
@@ -481,7 +482,7 @@ function createProgram(dependencies: CliDependencies): { program: Command; state
     ...boxConfig(selected),
     ...(selected?.config.boxes
       ? {
-          setIntegration: (id: "paseo", enabled: boolean) => setIntegration(id, enabled, homedir(), selected.box.name),
+          setIntegration: (id: IntegrationId, enabled: boolean) => setIntegration(id, enabled, homedir(), selected.box.name),
           box: selected.box.name,
         }
       : {}),
@@ -779,14 +780,21 @@ carries the untracked and ignored files that pass the deny rules, skips build
 output such as node_modules and dist, and checks each file with SHA-256.
 Between two boxes, the files go through a temporary directory on this machine,
 and nothing stays here. With --remove, the source copy goes to ~/.Trash on
-macOS, else to ~/.ferry/trash. Run --dry-run first.`)
+macOS, else to ~/.ferry/trash. Run --dry-run first.
+
+Ferry also carries the Claude and Codex sessions of the project and the Claude
+project memory, so claude --resume and codex resume find them on the
+destination. A session file there stays, unless the source has the same file.
+Ferry skips a session that fails the deny rules and names the file and the
+rule. The source keeps its sessions.`)
     .argument("<path>", "project folder inside the home directory")
     .option("--from-box <name>", "move the project from this box. Without --to-box, the destination is this machine")
     .option("--to-box <name>", "move the project to this box. Without it and --from-box, Ferry uses default_box or the only box")
     .option("--dry-run", "print what Ferry would carry, refuse, and skip without changes")
     .option("--remove", "after verification, move the source copy to a trash directory")
     .option("--include-env", "also carry .env files that pass the token and secret rules")
-    .option("--allow-secrets", "with --include-env, also carry .env files that hold tokens or secrets")
+    .option("--no-sessions", "do not carry the agent sessions and the project memory")
+    .option("--allow-secrets", "also carry sessions, and with --include-env .env files, that hold tokens or secrets")
     .option("--yes", "carry .env files with secrets without a confirmation prompt")
     .action(
       async (
@@ -797,6 +805,7 @@ macOS, else to ~/.ferry/trash. Run --dry-run first.`)
           dryRun?: boolean;
           remove?: boolean;
           includeEnv?: boolean;
+          sessions?: boolean;
           allowSecrets?: boolean;
           yes?: boolean;
         },
@@ -813,6 +822,7 @@ macOS, else to ~/.ferry/trash. Run --dry-run first.`)
               dryRun: options.dryRun === true,
               remove: options.remove === true,
               includeEnv: options.includeEnv === true,
+              sessions: options.sessions !== false,
               allowSecrets: options.allowSecrets === true,
               yes: options.yes === true,
             },
@@ -977,9 +987,10 @@ status report, schema version 2. The ferry agent skill describes its fields.
 Install the skill with ferry skills add dlhck/ferry --skill ferry.
 
 --brief checks only the link, the logins, the MCP logins, the carried stdio MCP
-servers, and the tools of each box. It prints one line for each item that needs action, with the Ferry
-command that fixes it. ferry watch writes the same report to
-~/.ferry/status.json.`)
+servers, and the tools of each box, and the hooks of this machine that run a
+home file Ferry does not carry. It prints one line for each item that needs
+action, with the Ferry command that fixes it. ferry watch writes the same
+report to ~/.ferry/status.json.`)
     .option("--brief", "check only the link, the logins, the MCP logins, and the tools, and print what needs action")
     .action(async (options: { brief?: boolean }) => {
       await withProgress(async (progress, writeLine) => {
@@ -1064,7 +1075,10 @@ To carry daemon.autoArchiveAfterMerge, set paseo_auto_archive = true in
 override it. Sync applies it with paseo daemon reload, without a restart.
 
 An integration without a box part runs only on this machine. For it, Ferry
-changes only the config and adds its commands when it can run here.`)
+changes only the config and adds its commands when it can run here.
+
+sherlock: needs the sherlock executable on this machine. Ferry adds ferry
+sherlock add, and ferry status checks each connection that it added.`)
     .argument("<name>", "integration name, such as paseo")
     .option("--dry-run", "print the box commands without connecting or writing")
     .option("--yes", "run without a confirmation prompt")
@@ -1118,8 +1132,16 @@ changes only the config.`)
   } catch {
     // The commands that read the config report the error.
   }
+  // The commands of an integration accept --box.
+  const addBoxCommand = (command: Command) => {
+    boxCommands.add(command);
+    command.commands.forEach(addBoxCommand);
+  };
   for (const integration of operatorIntegrations(current, dependencies.integrations ?? INTEGRATIONS)) {
-    if (integration.operator.available()) integration.operator.registerCommands?.(program);
+    if (!integration.operator.available()) continue;
+    const known = new Set(program.commands);
+    integration.operator.registerCommands?.(program, { json, writeLine, report });
+    for (const command of program.commands) if (!known.has(command)) addBoxCommand(command);
   }
 
   program

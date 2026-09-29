@@ -9,7 +9,7 @@ import type { IntegrationsConfig } from "../config.ts";
 import type { Link } from "../link.ts";
 import type { Progress } from "../progress.ts";
 
-export type IntegrationId = "paseo";
+export type IntegrationId = "paseo" | "sherlock";
 
 /** The box commands of an integration need only `run`. Tests inject a fake. */
 export type IntegrationLink = Pick<Link, "run">;
@@ -18,6 +18,9 @@ export type IntegrationLink = Pick<Link, "run">;
 export type LocalVersion =
   | { readonly version: string; readonly source: string }
   | { readonly version: null; readonly source: null };
+
+/** A session that `ferry move` carried. `provider` is the harness id, such as `claude` or `codex`. */
+export type MovedSession = { readonly provider: string; readonly id: string };
 
 /** The work that `plan` describes. `purge` is disable with `--purge`. */
 export type IntegrationAction = "enable" | "disable" | "purge" | "update";
@@ -66,18 +69,30 @@ export interface IntegrationBoxPart {
   update(link: IntegrationLink, progress: Progress): Promise<readonly string[]>;
   /** Read the state of the service on the box without changes. */
   health(link: IntegrationLink, config?: IntegrationsConfig): Promise<IntegrationHealth>;
-  /** Tell the service about a project that `ferry move` put at `path` on the box. */
-  onProjectMoved(link: IntegrationLink, path: string): Promise<void>;
+  /** Tell the service about a project that `ferry move` put at `path` on the box, and the sessions it carried. */
+  onProjectMoved(link: IntegrationLink, path: string, sessions: readonly MovedSession[]): Promise<void>;
   /** The steps that the operator does on this machine to connect to the box at `destination`. */
   connectSteps(destination: string): readonly string[];
 }
+
+/** The output of the Ferry CLI for the commands of an integration. */
+export type IntegrationCommandContext = {
+  /** True with --json. Then a command asks nothing. */
+  json(): boolean;
+  /** Writes a text line: to stdout, or to stderr with --json. */
+  writeLine(line: string): void;
+  /** Prints the result: the --json envelope, or else the text of `text`. */
+  report<T>(result: T, text?: (result: T) => void): void;
+};
 
 /** The commands and checks of an integration on the operator machine. */
 export interface IntegrationOperatorPart {
   /** True when the integration can run on this machine, for example when its executable is on the PATH. */
   available(): boolean;
+  /** The command that installs the integration on this machine. `ferry integrations enable` stops with it when `available()` is false. */
+  readonly install?: string;
   /** Add the commands of the integration to the Ferry CLI. Ferry calls it only when the integration is enabled and available. */
-  registerCommands?(program: Command): void;
+  registerCommands?(program: Command, context: IntegrationCommandContext): void;
   /** Check the integration on this machine for `ferry status`. Ferry calls it only when the integration is enabled and available. */
   health?(): Promise<IntegrationHealth>;
 }

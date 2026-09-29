@@ -131,8 +131,8 @@ describe("Paseo local version", () => {
 });
 
 describe("Paseo integration", () => {
-  test("the registry has Paseo only", () => {
-    expect(INTEGRATIONS.map((integration) => integration.id)).toEqual(["paseo"]);
+  test("the registry has Paseo and Sherlock", () => {
+    expect(INTEGRATIONS.map((integration) => integration.id)).toEqual(["paseo", "sherlock"]);
   });
 
   test("connect steps name the Desktop settings and the box destination", () => {
@@ -375,7 +375,7 @@ describe("Paseo project move", () => {
       },
     };
 
-    await createPaseo().box.onProjectMoved(link, "~/Developer/it's");
+    await createPaseo().box.onProjectMoved(link, "~/Developer/it's", []);
 
     expect(commands).toEqual([`paseo project create "$HOME"/'Developer/it'"'"'s' >/dev/null`]);
   });
@@ -387,7 +387,7 @@ describe("Paseo project move", () => {
       },
     };
 
-    await expect(createPaseo().box.onProjectMoved(link, "~/app")).rejects.toThrow(
+    await expect(createPaseo().box.onProjectMoved(link, "~/app", [])).rejects.toThrow(
       "paseo project create failed: directory_not_found",
     );
   });

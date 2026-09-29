@@ -11,6 +11,7 @@ import { boxFerryStatus } from "./box-ferry.ts";
 import { checkBoxMcp } from "./box-mcp.ts";
 import { BOX_SNAPSHOT_KEY, resolveBoxes, type ResolvedBox } from "./boxes.ts";
 import { readConfig, resolveLinkOptions, type OperatorHostConfig, type PartialOperatorConfig } from "./config.ts";
+import { uncarriedHookPaths } from "./hook-paths.ts";
 import { hasBoxPart, INTEGRATIONS, operatorIntegrations, type Integration, type OperatorIntegration } from "./integrations/index.ts";
 import { BunHostAdapter, Link, type HostAdapter, type HostCommandResult, type LinkOptions } from "./link.ts";
 import {
@@ -206,6 +207,7 @@ function boxDependencies(
         await boxFerryStatus(online ? link : null, resolved.ferryVersion),
       ],
     },
+    hookPaths: () => uncarriedHookPaths(resolved.home(), registry.harnesses.filter((harness) => !off.includes(harness))),
     integrations: resolved.integrations
       .filter(hasBoxPart)
       .filter((integration) => box.integrations[integration.id] === true)

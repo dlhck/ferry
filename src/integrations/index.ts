@@ -3,11 +3,12 @@
 import { resolveBoxes } from "../boxes.ts";
 import { completeHostConfig, type IntegrationsConfig, type PartialOperatorConfig } from "../config.ts";
 import { paseo } from "./paseo.ts";
+import { sherlock } from "./sherlock.ts";
 import type { BoxIntegration, Integration, IntegrationId, LocalVersion, OperatorIntegration } from "./types.ts";
 
 export type { BoxIntegration, Integration, OperatorIntegration } from "./types.ts";
 
-export const INTEGRATIONS: readonly Integration[] = [paseo];
+export const INTEGRATIONS: readonly Integration[] = [paseo, sherlock];
 
 export function hasBoxPart(integration: Integration): integration is BoxIntegration {
   return integration.box !== undefined;
