@@ -21,6 +21,7 @@ function directory(): string {
 function fakeRun(commands: ServiceCommand[], fail?: string) {
   return async (command: ServiceCommand) => {
     commands.push(command);
+    if (command[1] === "print") return { ok: false, stderr: "Could not find service" };
     return command[0] === fail ? { ok: false, stderr: "denied" } : { ok: true, stderr: "" };
   };
 }

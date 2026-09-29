@@ -120,7 +120,7 @@ export async function installMenuBar(
       // The app runs no SSH command.
       sshAuthSock: "",
     },
-    { run },
+    { ...dependencies, run },
   );
   return { app, path: service.path, version: source === null ? version : null, ferryPath };
 }
