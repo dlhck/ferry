@@ -192,6 +192,8 @@ export type ToolDescriptor = {
   readonly id: string;
   /** The registry sets it on each tool. A descriptor without a kind counts as `agent`. */
   readonly kind?: ToolKind;
+  /** The install mode and default policy, when they differ from those of the kind. */
+  readonly defaults?: (typeof TOOL_KIND_DEFAULTS)[ToolKind];
   /** The label that `ferry tools` prints. */
   readonly name?: string;
   /** The executable on `PATH`, when the tool has one. */
@@ -232,5 +234,5 @@ export type ToolDescriptor = {
 
 /** The install mode and default policy of a tool, from its kind. */
 export function toolDefaults(tool: ToolDescriptor): (typeof TOOL_KIND_DEFAULTS)[ToolKind] {
-  return TOOL_KIND_DEFAULTS[tool.kind ?? "agent"];
+  return tool.defaults ?? TOOL_KIND_DEFAULTS[tool.kind ?? "agent"];
 }

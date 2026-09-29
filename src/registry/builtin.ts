@@ -229,6 +229,19 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
     },
   },
   {
+    id: "jq",
+    kind: "tool",
+    name: "jq",
+    // Ferry merges the box MCP entries with jq on the box, so each box gets it.
+    defaults: { mode: "always", policy: "latest" },
+    binary: "jq",
+    localVersion: "jq --version",
+    boxVersion: "jq --version",
+    install: { command: "sudo apt update && sudo apt install jq -y" },
+    // An apt command works only on the box, so ferry does not update jq on the operator machine.
+    update: { command: "sudo apt update && sudo apt install jq -y" },
+  },
+  {
     id: "claude",
     kind: "agent",
     name: "Claude Code",

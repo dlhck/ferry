@@ -199,6 +199,7 @@ describe("update plan", () => {
   test("the builtin tools carry the verified vendor update commands", () => {
     expect(Object.fromEntries(BUILTIN_TOOLS.map((tool) => [tool.id, tool.update]))).toEqual({
       gh: { command: "sudo apt update && sudo apt install gh -y" },
+      jq: { command: "sudo apt update && sudo apt install jq -y" },
       claude: { command: "claude update", binary: "claude" },
       codex: {
         command: "codex update",

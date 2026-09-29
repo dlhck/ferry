@@ -1133,11 +1133,13 @@ describe("ferry status tools", () => {
     expect(tools).toEqual([
       "Tools:",
       "  gh      operator  operator 2.92.0  target 2.92.0  box 2.92.0  ok",
+      "  jq      latest    operator -       target latest  box -       MISSING",
       "  claude  latest    operator 2.1.0   target latest  box 2.1.0   ok",
       "  codex   latest    operator -       target latest  box 0.50.0  ok",
       "  pi      latest    operator -       target latest  box 0.60.0  ok",
       "  cursor  latest    operator -       target latest  box -       MISSING",
       "  ferry   operator  operator 1.2.3   target 1.2.3   box 1.2.3   ok",
+      "  WARNING: jq is not on the box. Run ferry install.",
       "  WARNING: cursor is not on the box. Run ferry install.",
     ]);
     expect(text).not.toMatch(/paseo|project/i);

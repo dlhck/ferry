@@ -185,7 +185,7 @@ describe("operator config", () => {
     const home = homeWithConfig([...BASE, "", "[tools]", 'pnpm = "operator"']);
 
     expect(() => readConfig(home)).toThrow("unknown tool pnpm in [tools]");
-    expect(() => readConfig(home)).toThrow("Known tools: gh, claude, codex, pi, cursor.");
+    expect(() => readConfig(home)).toThrow("Known tools: gh, jq, claude, codex, pi, cursor.");
     expect(() => readConfig(home)).toThrow("To define a tool, add a [tools.pnpm] table.");
   });
 
@@ -560,7 +560,7 @@ describe("box tables", () => {
   test("names the known tools for an unknown tool in a box", () => {
     const home = homeWithConfig([...TOP, "", ...BOX_A, "", "[box.a.tools]", 'pnpm = "latest"']);
 
-    expect(() => readConfig(home)).toThrow("Known tools: gh, claude, codex, pi, cursor.");
+    expect(() => readConfig(home)).toThrow("Known tools: gh, jq, claude, codex, pi, cursor.");
   });
 
   test("refuses a box without complete transport values", () => {

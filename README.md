@@ -40,7 +40,7 @@ You also need:
 ```sh
 ferry init --ssh-destination user@box.example \
   --snapshot-url git@github.com:you/ferry-snapshot.git
-ferry install        # gh, the agent CLIs, your tools, and Ferry on the box
+ferry install        # gh, jq, the agent CLIs, your tools, and Ferry on the box
 ferry sync           # publish the snapshot and apply it on the box
 ferry auth claude    # start a login on the box, finish it in a browser here
 ferry watch install  # sync each change automatically, as a user service
@@ -55,7 +55,7 @@ Use `--host <tailscale host> --ssh-user <user>` instead of `--ssh-destination` f
 | --- | --- |
 | `ferry init` | Record the first box and the snapshot URL, seed the snapshot, and link this machine. |
 | `ferry box list\|add\|remove\|default` | Manage several boxes and the default box. |
-| `ferry install` | Install gh, the agent CLIs, the tools of the config, and Ferry on a box. |
+| `ferry install` | Install gh, jq, the agent CLIs, the tools of the config, and Ferry on a box. |
 | `ferry sync` | Publish the snapshot and apply it on all boxes, or on the boxes of `--box`. |
 | `ferry history` | List the last 20 snapshot commits and the paths each one changed. |
 | `ferry revert <commit>` | Undo one snapshot commit on this machine, including the carried settings keys, then sync all boxes. `--no-sync` skips the sync. `--dry-run` shows the plan. |

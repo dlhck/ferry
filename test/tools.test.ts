@@ -132,6 +132,7 @@ describe("ferry tools", () => {
       "Tools",
       "  TOOL    KIND   INSTALL  POLICY              OPERATOR  VERSION  NAME",
       "  gh      tool   mirror   operator (default)  yes       2.92.0   GitHub CLI",
+      "  jq      tool   always   latest (default)    no        -        jq",
       "  claude  agent  always   operator            yes       2.1.281  Claude Code",
       "  codex   agent  always   latest (default)    no        -        Codex",
       "  pi      agent  always   latest (default)    no        -        Pi",
@@ -164,6 +165,7 @@ describe("ferry tools", () => {
       "Tools",
       "  TOOL    KIND   INSTALL  POLICY              BOX a               BOX b               OPERATOR  VERSION  NAME",
       "  gh      tool   mirror   operator (default)  operator (default)  operator (default)  yes       2.92.0   GitHub CLI",
+      "  jq      tool   always   latest (default)    latest (default)    latest (default)    no        -        jq",
       "  claude  agent  always   operator            operator            operator            yes       2.1.281  Claude Code",
       "  codex   agent  always   latest (default)    latest (default)    0.150.0             no        -        Codex",
       "  pi      agent  always   latest (default)    latest (default)    latest (default)    no        -        Pi",
@@ -190,9 +192,10 @@ describe("ferry tools", () => {
     expect(pi?.policy).toEqual({ policy: "off", default: false });
     expect(pi?.boxes).toEqual([{ name: "a", policy: "latest", default: false }]);
     expect(report.tools.find((tool) => tool.id === "codex")?.boxes).toEqual([{ name: "a", policy: "off", default: false }]);
-    expect(toolsLines(report).slice(1, 6)).toEqual([
+    expect(toolsLines(report).slice(1, 7)).toEqual([
       "  TOOL    KIND   INSTALL  POLICY            BOX a             OPERATOR  VERSION  NAME",
       "  gh      tool   mirror   off               off               yes       2.92.0   GitHub CLI",
+      "  jq      tool   always   latest (default)  latest (default)  no        -        jq",
       "  claude  agent  always   latest (default)  latest (default)  yes       2.1.281  Claude Code",
       "  codex   agent  always   latest (default)  off               no        -        Codex",
       "  pi      agent  always   off               latest            no        -        Pi",
@@ -210,7 +213,7 @@ describe("ferry tools", () => {
     })));
 
     expect(lines[1]).toBe("  TOOL    KIND   INSTALL  POLICY              BOX b               OPERATOR  VERSION  NAME");
-    expect(lines[4]).toContain("latest (default)    0.150.0  ");
+    expect(lines[5]).toContain("latest (default)    0.150.0  ");
   });
 
   test("runs without a config and lists only the builtin tools", async () => {
@@ -222,7 +225,7 @@ describe("ferry tools", () => {
       local: fakeHost({}),
     })));
 
-    expect(lines.slice(1, -2).map((line) => line.trim().split(/\s+/)[0])).toEqual(["TOOL", "gh", "claude", "codex", "pi", "cursor"]);
+    expect(lines.slice(1, -2).map((line) => line.trim().split(/\s+/)[0])).toEqual(["TOOL", "gh", "jq", "claude", "codex", "pi", "cursor"]);
     expect(lines.join("\n")).not.toContain("project");
   });
 });

@@ -96,13 +96,14 @@ const PNPM = {
 };
 
 describe("Install plan", () => {
-  test("installs gh at the operator version with its recipe and the agent CLIs at latest", async () => {
+  test("installs gh at the operator version with its recipe, and jq and the agent CLIs at latest", async () => {
     const install = new Install(new FakeBox(), BUILTIN_TOOLS, undefined, fakeLocal({ "gh --version": "gh version 2.92.0" }));
 
     const plan = await install.plan();
 
     expect(plan.map(({ tool, policy, version, action, command }) => ({ tool, policy, version, action, command }))).toEqual([
       { tool: "gh", policy: "operator", version: "2.92.0", action: "install", command: GH_RECIPE_INSTALL },
+      { tool: "jq", policy: "latest", version: null, action: "install", command: "sudo apt update && sudo apt install jq -y" },
       ...Object.entries(AGENT_INSTALLS).map(([tool, command]) => ({
         tool,
         policy: "latest",
@@ -133,6 +134,7 @@ describe("Install plan", () => {
     const plan = await install.plan();
 
     expect(plan.map(({ tool, action, command }) => [tool, action, command])).toEqual([
+      ["jq", "install", "sudo apt update && sudo apt install jq -y"],
       ["node", "skip-same", undefined],
       ["pnpm", "install", "npm install -g pnpm@'11.17.0'"],
     ]);
