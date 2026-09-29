@@ -158,12 +158,35 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
     skillRoot: ".pi/agent/skills",
     ownSkills: false,
     instructionFile: ".pi/agent/AGENTS.md",
+    // The model preferences and the skill command flag. Packages, resource
+    // paths, the shell path, and the npm and shell commands can hold URLs,
+    // commands, or local paths, so they stay on this machine.
+    settings: {
+      file: ".pi/agent/settings.json",
+      format: "json",
+      keys: [
+        "defaultProvider",
+        "defaultModel",
+        "defaultThinkingLevel",
+        "enabledModels",
+        "thinkingBudgets",
+        "enableSkillCommands",
+      ],
+    },
   },
   {
     id: "cursor",
     name: "Cursor Agent",
     skillRoot: ".cursor/skills",
     ownSkills: false,
+    // The model preferences and the commit and PR attribution flags. The
+    // permissions, the status line, and the login state can hold commands,
+    // local paths, or account data, so they stay on this machine.
+    settings: {
+      file: ".cursor/cli-config.json",
+      format: "json",
+      keys: ["model", "maxMode", "hasChangedDefaultModel", "attribution"],
+    },
     mcp: { file: ".cursor/mcp.json", format: "json", key: "mcpServers" },
   },
 ];
