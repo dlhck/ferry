@@ -32,3 +32,14 @@ jobs:
 
       - name: Compile executable
         run: bun run build
+
+  menubar:
+    name: Build the macOS menu bar app
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Build app
+        run: macos/build.sh
