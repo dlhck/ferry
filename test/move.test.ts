@@ -15,7 +15,9 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Link, LinkResult, RunOptions } from "../src/link.ts";
+import type { Integration, MovedSession } from "../src/integrations/types.ts";
 import { runMove, type MoveDependencies, type MoveInput, type MoveResult } from "../src/move.ts";
+import { projectDirectoryName } from "../src/sessions.ts";
 import { errorInfo } from "../src/output.ts";
 import { recordProgress } from "./fake-progress.ts";
 
@@ -107,7 +109,7 @@ async function move(w: World, input: Partial<MoveInput> & { path: string }, over
   let value: MoveResult | null = null;
   try {
     value = await runMove(
-      { dryRun: false, remove: false, includeEnv: false, allowSecrets: false, yes: false, ...input },
+      { dryRun: false, remove: false, includeEnv: false, sessions: true, allowSecrets: false, yes: false, ...input },
       {
         readConfig: () => ({ host: { transport: "ssh", destination: "user@box.example" } }),
         createLink: () => w.link,
@@ -210,6 +212,7 @@ describe("ferry move to the box", () => {
       "done",
       "start:Verifying",
       "done",
+      "skip:Carrying sessions",
     ]);
   });
 
@@ -562,13 +565,15 @@ describe("ferry move --allow-secrets", () => {
     expect(result.error?.message).toContain("The checksum of .env.local on the box does not match");
   });
 
-  test("--allow-secrets without --include-env is refused before any change", async () => {
+  test("--allow-secrets without --include-env and with --no-sessions is refused before any change", async () => {
     const w = world();
     secretApp(w);
 
-    const result = await move(w, { path: "Developer/app", allowSecrets: true });
+    const result = await move(w, { path: "Developer/app", allowSecrets: true, sessions: false });
 
-    expect(result.error?.message).toBe("--allow-secrets works only together with --include-env.");
+    expect(result.error?.message).toBe(
+      "--allow-secrets needs --include-env or the sessions. Add --include-env, or leave out --no-sessions.",
+    );
     expect(w.commands).toEqual([]);
     expect(existsSync(join(w.box, "Developer"))).toBe(false);
   });
@@ -1099,5 +1104,221 @@ describe("ferry move --from-box --to-box", () => {
     expect(toThisMachine.error).toBeNull();
     expect(readFileSync(join(t.w.operator, "Developer/app/notes.md"), "utf8")).toBe("notes\n");
     expect(t.targets).toEqual(["user@c.example", "user@b.example", "user@a.example"]);
+  });
+});
+
+describe("ferry move sessions", () => {
+  // A fake token, built at runtime so that no secret scanner flags this file.
+  const GITHUB_TOKEN = "gh" + "p_" + "b".repeat(36);
+
+  /** A Claude session of the project `project` in `home`, with a subagent file next to it. */
+  function claudeSession(home: string, project: string, id: string, text = "hello"): string {
+    const directory = join(home, ".claude/projects", projectDirectoryName(project));
+    write(join(directory, `${id}.jsonl`), `${JSON.stringify({ type: "user", sessionId: id, cwd: project, message: text })}\n`);
+    write(join(directory, id, "subagents/agent-1.jsonl"), `${JSON.stringify({ type: "user", message: "sub" })}\n`);
+    chmodSync(join(directory, `${id}.jsonl`), 0o600);
+    return directory;
+  }
+
+  /** A Codex session whose first line records `cwd`. Returns the path relative to the home. */
+  function codexSession(home: string, cwd: string, id: string, text = "hello"): string {
+    const path = `.codex/sessions/2026/09/20/rollout-2026-09-20T10-00-00-${id}.jsonl`;
+    const meta = { timestamp: "2026-09-20T10:00:00.000Z", type: "session_meta", payload: { id, cwd, cli_version: "0.0.0" } };
+    const message = { timestamp: "2026-09-20T10:00:01.000Z", type: "event_msg", payload: { type: "user_message", message: text } };
+    write(join(home, path), `${JSON.stringify(meta)}\n${JSON.stringify(message)}\n`);
+    return path;
+  }
+
+  function firstLine(path: string): { payload: { cwd: string } } {
+    return JSON.parse(readFileSync(path, "utf8").split("\n")[0]!);
+  }
+
+  test("projectDirectoryName changes each character that is not a letter or a digit, and shortens a long name", () => {
+    expect(projectDirectoryName("/home/user/Developer/my_app.v2")).toBe("-home-user-Developer-my-app-v2");
+    const long = projectDirectoryName(`/home/user/${"a".repeat(300)}`);
+    expect(long).toMatch(/^-home-user-a{189}-[0-9a-z]+$/);
+  });
+
+  test("carries the Claude sessions, the Claude memory, and the Codex sessions of the project to the box", async () => {
+    const w = world();
+    const app = project(w, w.operator);
+    const source = claudeSession(w.operator, app, "11111111-aaaa");
+    write(join(source, "memory/MEMORY.md"), "- note\n");
+    claudeSession(w.operator, join(w.operator, "Developer/other"), "22222222-bbbb");
+    const codex = codexSession(w.operator, app, "33333333-cccc");
+    const otherCodex = codexSession(w.operator, join(w.operator, "Developer/other"), "44444444-dddd");
+
+    const result = await move(w, { path: "Developer/app" });
+
+    expect(result.error).toBeNull();
+    const boxApp = join(w.box, "Developer/app");
+    const target = join(w.box, ".claude/projects", projectDirectoryName(boxApp));
+    expect(readFileSync(join(target, "11111111-aaaa.jsonl"), "utf8")).toBe(readFileSync(join(source, "11111111-aaaa.jsonl"), "utf8"));
+    expect(statSync(join(target, "11111111-aaaa.jsonl")).mode & 0o777).toBe(0o600);
+    expect(existsSync(join(target, "11111111-aaaa/subagents/agent-1.jsonl"))).toBe(true);
+    expect(readFileSync(join(target, "memory/MEMORY.md"), "utf8")).toBe("- note\n");
+    expect(existsSync(join(w.box, ".claude/projects", projectDirectoryName(join(w.box, "Developer/other"))))).toBe(false);
+    expect(firstLine(join(w.box, codex)).payload.cwd).toBe(boxApp);
+    expect(readFileSync(join(w.box, codex), "utf8").split("\n")[1]).toBe(readFileSync(join(w.operator, codex), "utf8").split("\n")[1]);
+    expect(existsSync(join(w.box, otherCodex))).toBe(false);
+    // The source keeps its sessions, and its Codex session keeps its project path.
+    expect(existsSync(join(source, "11111111-aaaa.jsonl"))).toBe(true);
+    expect(firstLine(join(w.operator, codex)).payload.cwd).toBe(app);
+    expect(result.lines).toContain("Carry sessions: claude 1, claude memory files 1, codex 1");
+    expect(result.lines.at(-1)).toBe("Carried 2 sessions. Resume them in ~/Developer/app on the box.");
+    expect(result.events.slice(-2)).toEqual(["start:Carrying 4 session files", "done"]);
+    expect(result.value?.sessions.carry.map((session) => [session.harness, session.id])).toEqual([
+      ["claude", "11111111-aaaa"],
+      ["claude", null],
+      ["codex", "33333333-cccc"],
+    ]);
+  });
+
+  test("--no-sessions carries no session and does not read the session stores", async () => {
+    const w = world();
+    const app = project(w, w.operator);
+    claudeSession(w.operator, app, "11111111-aaaa");
+    codexSession(w.operator, app, "33333333-cccc");
+
+    const result = await move(w, { path: "Developer/app", sessions: false });
+
+    expect(result.error).toBeNull();
+    expect(existsSync(join(w.box, ".claude"))).toBe(false);
+    expect(existsSync(join(w.box, ".codex"))).toBe(false);
+    expect(result.events.join("\n")).not.toContain("session");
+  });
+
+  test("a move back keeps the sessions only on the destination and takes the source copy of a session on both sides", async () => {
+    const w = world();
+    const boxApp = project(w, w.box);
+    const app = join(w.operator, "Developer/app");
+    claudeSession(w.box, boxApp, "both", "from the box");
+    const codex = codexSession(w.box, boxApp, "codex-both", "from the box");
+    const local = claudeSession(w.operator, app, "both", "old on this machine");
+    claudeSession(w.operator, app, "only-here", "only on this machine");
+    codexSession(w.operator, app, "codex-both", "old on this machine");
+
+    const result = await move(w, { path: "Developer/app", fromBox: "default" });
+
+    expect(result.error).toBeNull();
+    expect(readFileSync(join(local, "both.jsonl"), "utf8")).toContain("from the box");
+    expect(readFileSync(join(local, "only-here.jsonl"), "utf8")).toContain("only on this machine");
+    expect(readFileSync(join(w.operator, codex), "utf8")).toContain("from the box");
+    expect(firstLine(join(w.operator, codex)).payload.cwd).toBe(app);
+  });
+
+  test("skips a session with a token, names the file and the rule, and carries the other sessions", async () => {
+    const w = world();
+    const app = project(w, w.operator);
+    const source = claudeSession(w.operator, app, "clean");
+    claudeSession(w.operator, app, "leaky", `use ${GITHUB_TOKEN}`);
+    const codex = codexSession(w.operator, app, "codex-leaky", `token ${GITHUB_TOKEN}`);
+    const warnings: string[] = [];
+
+    const result = await move(w, { path: "Developer/app" }, { warn: (line) => warnings.push(line) });
+
+    expect(result.error).toBeNull();
+    const target = join(w.box, ".claude/projects", projectDirectoryName(join(w.box, "Developer/app")));
+    expect(existsSync(join(target, "clean.jsonl"))).toBe(true);
+    expect(existsSync(join(target, "leaky.jsonl"))).toBe(false);
+    expect(existsSync(join(target, "leaky"))).toBe(false);
+    expect(existsSync(join(w.box, codex))).toBe(false);
+    const leaky = `~/${join(source, "leaky.jsonl").slice(w.operator.length + 1)}`;
+    expect(warnings).toEqual([
+      `WARNING: Ferry skips the session of ${leaky} (GitHub token in file content). Add --allow-secrets to carry it.`,
+      `WARNING: Ferry skips the session of ~/${codex} (GitHub token in file content). Add --allow-secrets to carry it.`,
+    ]);
+    expect(result.lines).toEqual(expect.arrayContaining(warnings));
+    expect(result.value?.sessions.refused.map((hit) => hit.path)).toEqual([leaky, `~/${codex}`]);
+    expect([...result.lines, ...result.events, ...warnings].join("\n")).not.toContain(GITHUB_TOKEN);
+  });
+
+  test("--allow-secrets carries a session with a token with mode 600, after the question", async () => {
+    const w = world();
+    const app = project(w, w.operator);
+    const source = claudeSession(w.operator, app, "leaky", `use ${GITHUB_TOKEN}`);
+    chmodSync(join(source, "leaky.jsonl"), 0o644);
+
+    const refused = await move(w, { path: "Developer/app", allowSecrets: true });
+    expect(refused.error?.message).toContain("with secrets. Without a terminal, add --yes to carry them.");
+
+    rmSync(join(w.box, "Developer"), { recursive: true, force: true });
+    const result = await move(w, { path: "Developer/app", allowSecrets: true, yes: true });
+
+    expect(result.error).toBeNull();
+    const target = join(w.box, ".claude/projects", projectDirectoryName(join(w.box, "Developer/app")));
+    expect(readFileSync(join(target, "leaky.jsonl"), "utf8")).toContain(GITHUB_TOKEN);
+    expect(statSync(join(target, "leaky.jsonl")).mode & 0o777).toBe(0o600);
+    expect(result.lines.some((line) => line.startsWith("Carry session with secrets: ") && line.includes("(GitHub token in file content)"))).toBe(true);
+    expect(result.lines.join("\n")).not.toContain(GITHUB_TOKEN);
+  });
+
+  test("passes the carried sessions to an enabled integration, and calls none without one", async () => {
+    const calls: { path: string; sessions: readonly MovedSession[] }[] = [];
+    const fake = {
+      id: "paseo",
+      name: "Fake",
+      description: "records the moved sessions",
+      box: {
+        async onProjectMoved(_link: unknown, path: string, sessions: readonly MovedSession[]) {
+          calls.push({ path, sessions });
+        },
+      },
+    } as unknown as Integration;
+    for (const enabled of [true, false]) {
+      const w = world();
+      const app = project(w, w.operator);
+      const source = claudeSession(w.operator, app, "11111111-aaaa");
+      write(join(source, "memory/MEMORY.md"), "- note\n");
+      codexSession(w.operator, app, "33333333-cccc");
+
+      const result = await move(
+        w,
+        { path: "Developer/app" },
+        {
+          integrations: [fake],
+          readConfig: () => ({ host: { transport: "ssh", destination: "user@box.example" }, integrations: { paseo: enabled } }),
+        },
+      );
+      expect(result.error).toBeNull();
+    }
+
+    expect(calls).toEqual([
+      {
+        path: "~/Developer/app",
+        sessions: [
+          { provider: "claude", id: "11111111-aaaa" },
+          { provider: "codex", id: "33333333-cccc" },
+        ],
+      },
+    ]);
+  });
+
+  test("relays the sessions from box a to box b with the project path of box b", async () => {
+    const w = world();
+    const boxB = join(w.root, "box-b");
+    mkdirSync(boxB);
+    const linkB = boxLink(boxB, w.bin, []);
+    const appA = project(w, w.box);
+    claudeSession(w.box, appA, "11111111-aaaa");
+    const codex = codexSession(w.box, appA, "33333333-cccc");
+    const boxes = () => ({
+      boxes: [
+        { name: "a", host: { transport: "ssh" as const, destination: "user@a.example" } },
+        { name: "b", host: { transport: "ssh" as const, destination: "user@b.example" } },
+      ],
+    });
+
+    const result = await move(
+      w,
+      { path: "Developer/app", fromBox: "a", toBox: "b" },
+      { readConfig: boxes, createLink: ((options: { destination?: string }) => (options.destination === "user@a.example" ? w.link : linkB)) as MoveDependencies["createLink"] },
+    );
+
+    expect(result.error).toBeNull();
+    const appB = join(boxB, "Developer/app");
+    expect(existsSync(join(boxB, ".claude/projects", projectDirectoryName(appB), "11111111-aaaa.jsonl"))).toBe(true);
+    expect(firstLine(join(boxB, codex)).payload.cwd).toBe(appB);
+    expect(listTree(w.operator)).toEqual([]);
   });
 });

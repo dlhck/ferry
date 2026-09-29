@@ -19,6 +19,9 @@ export type LocalVersion =
   | { readonly version: string; readonly source: string }
   | { readonly version: null; readonly source: null };
 
+/** A session that `ferry move` carried. `provider` is the harness id, such as `claude` or `codex`. */
+export type MovedSession = { readonly provider: string; readonly id: string };
+
 /** The work that `plan` describes. `purge` is disable with `--purge`. */
 export type IntegrationAction = "enable" | "disable" | "purge" | "update";
 
@@ -66,8 +69,8 @@ export interface IntegrationBoxPart {
   update(link: IntegrationLink, progress: Progress): Promise<readonly string[]>;
   /** Read the state of the service on the box without changes. */
   health(link: IntegrationLink, config?: IntegrationsConfig): Promise<IntegrationHealth>;
-  /** Tell the service about a project that `ferry move` put at `path` on the box. */
-  onProjectMoved(link: IntegrationLink, path: string): Promise<void>;
+  /** Tell the service about a project that `ferry move` put at `path` on the box, and the sessions it carried. */
+  onProjectMoved(link: IntegrationLink, path: string, sessions: readonly MovedSession[]): Promise<void>;
   /** The steps that the operator does on this machine to connect to the box at `destination`. */
   connectSteps(destination: string): readonly string[];
 }

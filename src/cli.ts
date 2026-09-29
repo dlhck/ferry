@@ -262,7 +262,7 @@ const JSON_RESULTS: Record<string, string> = {
   history: "{ commits: [{ commit, date, subject, paths }] }, newest first",
   revert:
     "{ dryRun, commit, subject, tip, paths, settings: [{ file, keys }], sync }. sync is the sync result, or null with --dry-run or --no-sync",
-  move: "{ path, source, destination, dryRun, git, carry, refused, skipped, notes, trash }",
+  move: "{ path, source, destination, dryRun, git, carry, refused, skipped, notes, trash, sessions }",
   tunnel:
     "events forward-opened, forward-closed, forward-failed, following, connection-lost, tunnel-closed. " +
     "With --list, one envelope: { box, listeners: [{ port, address, process }] }",
@@ -780,14 +780,21 @@ carries the untracked and ignored files that pass the deny rules, skips build
 output such as node_modules and dist, and checks each file with SHA-256.
 Between two boxes, the files go through a temporary directory on this machine,
 and nothing stays here. With --remove, the source copy goes to ~/.Trash on
-macOS, else to ~/.ferry/trash. Run --dry-run first.`)
+macOS, else to ~/.ferry/trash. Run --dry-run first.
+
+Ferry also carries the Claude and Codex sessions of the project and the Claude
+project memory, so claude --resume and codex resume find them on the
+destination. A session file there stays, unless the source has the same file.
+Ferry skips a session that fails the deny rules and names the file and the
+rule. The source keeps its sessions.`)
     .argument("<path>", "project folder inside the home directory")
     .option("--from-box <name>", "move the project from this box. Without --to-box, the destination is this machine")
     .option("--to-box <name>", "move the project to this box. Without it and --from-box, Ferry uses default_box or the only box")
     .option("--dry-run", "print what Ferry would carry, refuse, and skip without changes")
     .option("--remove", "after verification, move the source copy to a trash directory")
     .option("--include-env", "also carry .env files that pass the token and secret rules")
-    .option("--allow-secrets", "with --include-env, also carry .env files that hold tokens or secrets")
+    .option("--no-sessions", "do not carry the agent sessions and the project memory")
+    .option("--allow-secrets", "also carry sessions, and with --include-env .env files, that hold tokens or secrets")
     .option("--yes", "carry .env files with secrets without a confirmation prompt")
     .action(
       async (
@@ -798,6 +805,7 @@ macOS, else to ~/.ferry/trash. Run --dry-run first.`)
           dryRun?: boolean;
           remove?: boolean;
           includeEnv?: boolean;
+          sessions?: boolean;
           allowSecrets?: boolean;
           yes?: boolean;
         },
@@ -814,6 +822,7 @@ macOS, else to ~/.ferry/trash. Run --dry-run first.`)
               dryRun: options.dryRun === true,
               remove: options.remove === true,
               includeEnv: options.includeEnv === true,
+              sessions: options.sessions !== false,
               allowSecrets: options.allowSecrets === true,
               yes: options.yes === true,
             },
