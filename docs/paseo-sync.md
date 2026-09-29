@@ -7,7 +7,9 @@ With the Paseo integration enabled for a box, `ferry sync` carries agent profile
 Ferry reads `~/.paseo/config.json`, `~/.paseo/plugins/sources.json`, and each managed checkout's Git HEAD. It carries the plugin ID, repository URL, plugin subdirectory, installed commit, and enabled state. It uses `paseo plugin install --ref` for a missing plugin and `paseo plugin update --ref` for an existing plugin. An unchanged plugin needs no install or update.
 
 - The box daemon must have access to the Git repository. SSH agent forwarding to the Ferry command does not give the running Paseo daemon access to that agent.
-- Ferry keeps the box's global `pluginsEnabled` switch. To run plugins, enable plugins in Paseo on that box.
+- After at least one enabled plugin is installed or current on the box, Ferry sets the box's global `pluginsEnabled` switch to `true` in `~/.paseo/config.json` and runs `paseo daemon reload`. Paseo 0.10.1 applies the switch on reload without a restart. Paseo has no CLI command for the switch. Ferry keeps all other config keys and does not write the file when the switch is already on.
+- Turning on the switch starts every plugin that is enabled on the box, including box-only plugins. Ferry disables locally disabled plugins before it turns on the switch.
+- Ferry never turns off the switch. With no enabled plugin to carry, or when all plugins are skipped, disabled, or in conflict, the switch stays as it is.
 - Ferry preserves box-only plugins. Removing a local plugin does not uninstall its box copy.
 - A matching ID with a different repository or subdirectory produces a warning. Ferry does not replace it.
 - New plugins that are disabled locally are skipped. Paseo's install command enables new plugins, so installing then disabling would briefly run their code. Existing box plugins can be disabled and updated.

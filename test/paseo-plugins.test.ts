@@ -30,14 +30,23 @@ function fixture() {
   configure(); record({ kind: "git", remote });
   return { home, checkout, configure, record, commit: git("rev-parse", "HEAD") };
 }
-function box(installed: unknown = []) {
+const readConfig = "if [ -e '.paseo/config.json' ]; then printf 'F' && cat '.paseo/config.json'; else printf 'M'; fi";
+function box(installed: unknown = [], config: unknown = { pluginsEnabled: true }) {
   const commands: string[] = [];
   const link: IntegrationLink = { run: async (command, options) => {
     commands.push(command);
     expect(options?.agentForwarding).toBeUndefined();
-    return { ok: true, address: "box", stdout: command === "paseo plugin ls --json" ? JSON.stringify(installed) : "{}", stderr: "" };
+    const stdout = command === "paseo plugin ls --json" ? JSON.stringify(installed)
+      : command === readConfig ? (config === null ? "M" : `F${typeof config === "string" ? config : JSON.stringify(config)}`) : "{}";
+    return { ok: true, address: "box", stdout, stderr: "" };
   } };
   return { commands, link };
+}
+/** The config text in the write command, parsed. */
+function written(commands: readonly string[]): unknown {
+  const write = commands.find((command) => command.includes("config.json.ferry-tmp"));
+  const text = write?.match(/^umask 077 && mkdir -p '\.paseo' && printf '%s' '(.*)' > /s)?.[1];
+  return text === undefined ? undefined : JSON.parse(text.replaceAll("'\\''", "'"));
 }
 function installed(overrides: Record<string, unknown> = {}) {
   return { id: plugin.id, enabled: true, installation: {
@@ -86,21 +95,57 @@ describe("Paseo Git plugin discovery", () => {
 });
 
 describe("Paseo Git plugin reconciliation", () => {
-  test("installs the exact commit and subdirectory without changing global settings", async () => {
-    const b = box(); await carry(b.link);
-    expect(b.commands).toEqual(["paseo plugin ls --json", `paseo plugin install 'git:${remote}:plugins/review' --id 'review' --ref '${revision}' --json`]);
+  test("installs the exact commit and subdirectory, then enables the missing global switch", async () => {
+    const config = { daemon: { listen: "127.0.0.1:6767" }, plugins: { "box-only": { source: "directory", path: "/p" } } };
+    const b = box([], config); await carry(b.link);
+    expect(b.commands.slice(0, 3)).toEqual(["paseo plugin ls --json", `paseo plugin install 'git:${remote}:plugins/review' --id 'review' --ref '${revision}' --json`, readConfig]);
+    expect(written(b.commands)).toEqual({ ...config, pluginsEnabled: true });
+    expect(b.commands.at(-1)).toBe("paseo daemon reload");
   });
-  test("does nothing to current or box-only plugins", async () => {
+  test("enables a false global switch for a current plugin", async () => {
+    const b = box([installed()], { pluginsEnabled: false });
+    expect(await carry(b.link)).toEqual([]);
+    expect(written(b.commands)).toEqual({ pluginsEnabled: true });
+    expect(b.commands.at(-1)).toBe("paseo daemon reload");
+  });
+  test("does nothing to current or box-only plugins or an enabled global switch", async () => {
     const b = box([installed(), { id: "box-only", enabled: true }]);
     expect(await carry(b.link)).toEqual([]);
-    expect(b.commands).toEqual(["paseo plugin ls --json"]);
+    expect(b.commands).toEqual(["paseo plugin ls --json", readConfig]);
+  });
+  test("disables mapped plugins before it enables the global switch", async () => {
+    const other = { ...plugin, id: "other" };
+    const c = box([installed(), installed({ id: "other" })], { pluginsEnabled: false });
+    await carryPaseoPlugins(c.link, { plugins: [other, { ...plugin, enabled: false }], warnings: [] });
+    expect(c.commands.indexOf("paseo plugin disable 'review' --json")).toBeLessThan(c.commands.indexOf(readConfig));
+    expect(written(c.commands)).toEqual({ pluginsEnabled: true });
+  });
+  test("does not enable the global switch without an enabled reconciled plugin", async () => {
+    for (const [installedPlugins, value] of [
+      [[], { ...plugin, enabled: false }],
+      [[installed()], { ...plugin, enabled: false }],
+      [[installed({ installation: { identity: { kind: "directory" } } })], plugin],
+    ] as const) {
+      const b = box(installedPlugins, { pluginsEnabled: false });
+      await carry(b.link, value);
+      expect(b.commands).not.toContain(readConfig);
+    }
+    const none = box([], { pluginsEnabled: false });
+    expect(await carryPaseoPlugins(none.link, { plugins: [], warnings: ["skipped"] })).toEqual(["skipped"]);
+    expect(none.commands).toEqual([]);
+  });
+  test("creates a missing box config and refuses an invalid one without exposing it", async () => {
+    const b = box([installed()], null); await carry(b.link);
+    expect(written(b.commands)).toEqual({ pluginsEnabled: true });
+    await expect(carry(box([installed()], "secret-token").link)).rejects.toThrow("is not a JSON object");
+    await expect(carry(box([installed()], "secret-token").link)).rejects.not.toThrow("secret");
   });
   test("disables before updating and enables only after updating", async () => {
     const older = installed(); older.installation.currentRevision = "b".repeat(40);
     const b = box([older]); await carry(b.link, { ...plugin, enabled: false });
     expect(b.commands.slice(1)).toEqual(["paseo plugin disable 'review' --json", `paseo plugin update 'review' --ref '${revision}' --json`]);
     const disabled = box([{ ...older, enabled: false }]); await carry(disabled.link);
-    expect(disabled.commands.slice(1)).toEqual([`paseo plugin update 'review' --ref '${revision}' --json`, "paseo plugin enable 'review' --json"]);
+    expect(disabled.commands.slice(1)).toEqual([`paseo plugin update 'review' --ref '${revision}' --json`, "paseo plugin enable 'review' --json", readConfig]);
   });
   test("does not execute absent disabled plugins or replace conflicting sources", async () => {
     const b = box(); expect((await carry(b.link, { ...plugin, enabled: false }))[0]).toContain("disabled locally");
@@ -112,7 +157,7 @@ describe("Paseo Git plugin reconciliation", () => {
   test("matches the SSH remote identity that Paseo redacts", async () => {
     const b = box([installed({ installation: { identity: { kind: "git", remote: "ssh://example.com/repo.git", pluginPath: plugin.path }, currentRevision: revision } })]);
     expect(await carry(b.link, { ...plugin, remote: "ssh://git@example.com/repo.git" })).toEqual([]);
-    expect(b.commands).toHaveLength(1);
+    expect(b.commands).toEqual(["paseo plugin ls --json", readConfig]);
   });
   test("rejects invalid list output and suppresses command errors that can contain credentials", async () => {
     await expect(carry(box({}).link)).rejects.toThrow("did not return a plugin list");
