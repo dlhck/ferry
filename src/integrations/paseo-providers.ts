@@ -25,6 +25,8 @@ const SCRIPT_RUNNERS = new Set([
 const FILE_ARGUMENT = /\.(?:json5?|jsonc|ya?ml|toml|env|ini|conf|cfg|pem|key|sh|[cm]?js|ts|py|rb|txt)$/i;
 /** A scoped npm package, such as `@scope/name@1.2.3`. It is the one argument with a slash that is not a path. */
 const SCOPED_PACKAGE = /^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*(?:@[A-Za-z0-9._-]+)?$/;
+/** A loopback host, alone, with a port, or as a URL host. It names a service on one machine. */
+const LOOPBACK_HOST = /^(?:localhost|[^:/]*\.localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[?::1?\]?)(?::\d+)?$/i;
 const CREDENTIAL_ARGUMENT = /api[-_]?key|token|secret|passw|credential|auth/i;
 
 export type PaseoProvider = {
@@ -103,20 +105,23 @@ function portableFields(entry: Record<string, unknown>): Record<string, unknown>
 /**
  * Classify one command argument, or its value after `=` for a flag. Whitespace
  * means embedded command text. A URL with a user, query, or fragment can hold
- * a credential. A slash, a `~`, `.`, or drive prefix, or a file extension
- * means a host path.
+ * a credential. A `file:` URL, a slash, a `~`, `.`, or drive prefix, or a file
+ * extension means a host path. Only a remote `http:` or `https:` URL is portable.
  */
-function argumentIssue(arg: string): "path" | "script" | "credential" | null {
+function argumentIssue(arg: string): "path" | "script" | "credential" | "endpoint" | null {
   if (/[\s\x00-\x1f]/.test(arg)) return "script";
   const value = arg.startsWith("-") && arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : arg;
   if (value.includes("://")) {
     try {
       const url = new URL(value);
-      return url.username || url.password || url.search || url.hash ? "credential" : null;
+      if (url.username || url.password || url.search || url.hash) return "credential";
+      if (url.protocol === "file:") return "path";
+      return url.protocol !== "http:" && url.protocol !== "https:" || LOOPBACK_HOST.test(url.host) ? "endpoint" : null;
     } catch {
       return "credential";
     }
   }
+  if (LOOPBACK_HOST.test(value)) return "endpoint";
   if (/^(?:~|\.|[A-Za-z]:)/.test(value) || (/[\\/]/.test(value) && !SCOPED_PACKAGE.test(value)) || FILE_ARGUMENT.test(value)) {
     return "path";
   }
@@ -136,6 +141,7 @@ function createBlocker(entry: Record<string, unknown>, command: readonly string[
     const issues = new Set(args.map(argumentIssue));
     if (issues.has("path")) reasons.push("its command has a local path argument");
     if (issues.has("script")) reasons.push("its command has a script-like argument");
+    if (issues.has("endpoint")) reasons.push("its command has a loopback or non-HTTP URL");
     if (issues.has("credential") || command.some((arg) => CREDENTIAL_ARGUMENT.test(arg)) ||
         carriedContentHits(".env", Buffer.from(command.join("\n"))).length > 0) {
       reasons.push("its command has a credential-like argument");

@@ -104,6 +104,14 @@ describe("Paseo provider discovery", () => {
       [["agent", "--run", "exec wrapper now"], "script-like argument", ["exec wrapper"]],
       [["agent", "--endpoint", "https://user:pass@example.com"], "credential-like argument", ["user:pass", "example.com"]],
       [["agent", "--endpoint=https://example.com/v1?key=abc"], "credential-like argument", ["key=abc", "example.com"]],
+      [["agent", "--config", "file:///home/user/config.json"], "local path", ["/home/user", "config.json"]],
+      [["agent", "--config=file:///home/user/config.json"], "local path", ["/home/user", "config.json"]],
+      [["agent", "--endpoint", "http://localhost:8080"], "loopback or non-HTTP URL", ["localhost", "8080"]],
+      [["agent", "--endpoint=http://127.0.0.1:1234"], "loopback or non-HTTP URL", ["127.0.0.1", "1234"]],
+      [["agent", "--endpoint=http://[::1]:1234"], "loopback or non-HTTP URL", ["::1", "1234"]],
+      [["agent", "--endpoint=http://api.localhost"], "loopback or non-HTTP URL", ["api.localhost"]],
+      [["agent", "--host", "localhost:8080"], "loopback or non-HTTP URL", ["localhost", "8080"]],
+      [["agent", "--endpoint=ws://api.example.com"], "loopback or non-HTTP URL", ["ws:", "api.example.com"]],
     ];
     for (const [command, reason, hidden] of cases) {
       const [provider] = readPaseoProviders(home({ custom: { extends: "acp", label: "Custom", command } })).providers;
@@ -115,6 +123,7 @@ describe("Paseo provider discovery", () => {
       ["gemini", "--experimental-acp"],
       ["npx", "@google/gemini-cli@0.9.0", "--experimental-acp"],
       ["agent", "--endpoint=https://api.example.com/v1", "--model", "glm-4.6"],
+      ["agent", "--endpoint", "http://api.example.com:8080/v1"],
     ]) {
       const [provider] = readPaseoProviders(home({ custom: { extends: "acp", label: "Custom", command } })).providers;
       expect(provider?.createBlocker).toBeNull();
