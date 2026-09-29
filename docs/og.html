@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<!--
+  Source of og.png (1200x630). To render it again, from any directory with playwright-core installed:
+  node -e "const {chromium}=require('playwright-core');(async()=>{const b=await chromium.launch({executablePath:process.env.HOME+'/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome'});const p=await b.newPage({viewport:{width:1200,height:630}});await p.goto('file://'+process.argv[1]);await p.evaluate(()=>document.fonts.ready);await p.waitForTimeout(300);await p.screenshot({path:process.argv[2]});await b.close()})()" "$PWD/docs/og.html" docs/og.png
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="robots" content="noindex">
+<title>Ferry social card</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@600;700&family=JetBrains+Mono:wght@500;600&family=Young+Serif&display=block" rel="stylesheet">
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:1200px;height:630px;overflow:hidden;background:#F1EADB}
+.card{position:relative;width:1200px;height:630px;color:#13233A}
+.scene{position:absolute;inset:0;width:1200px;height:630px;display:block}
+.copy{position:absolute;left:56px;top:44px;width:760px}
+.brand{display:flex;align-items:center;gap:16px;font:400 64px/1 'Young Serif',Georgia,serif;letter-spacing:-.01em}
+.brand svg{width:66px;height:43px}
+h1{margin:22px 0 0;font:400 58px/1.05 'Young Serif',Georgia,serif;letter-spacing:-.01em}
+h1 em{font-style:normal;color:#8A5A0E}
+.url{position:absolute;left:28px;bottom:26px;font:600 20px/1 'JetBrains Mono',monospace;color:#F1EADB;letter-spacing:.02em}
+.tag{position:absolute;right:56px;top:66px;font:600 18px/1 'JetBrains Mono',monospace;letter-spacing:.12em;text-transform:uppercase;color:#3C4A5E}
+.lbl{font:600 15px 'Hanken Grotesk',sans-serif;fill:#13233A;text-anchor:middle;paint-order:stroke;stroke:#F1EADB;stroke-width:4px;stroke-linejoin:round}
+.lbl-sm{font:500 12px 'JetBrains Mono',monospace;fill:#13233A;text-anchor:middle;paint-order:stroke;stroke:#F1EADB;stroke-width:4px;stroke-linejoin:round}
+.lbl-quay{font:600 11px 'JetBrains Mono',monospace;fill:#F1EADB;letter-spacing:.06em}
+.sign-t{font:700 9.5px 'Hanken Grotesk',sans-serif;fill:#A8351F;text-anchor:middle}
+.isle-lbl{font-family:'Hanken Grotesk',sans-serif;font-weight:700;fill:#13233A;text-anchor:middle;paint-order:stroke;stroke:#F1EADB;stroke-width:5px;stroke-linejoin:round}
+.crate-t{font:600 8.2px 'JetBrains Mono',monospace;fill:#13233A;text-anchor:middle}
+.hull-name{font:700 8px 'Hanken Grotesk',sans-serif;letter-spacing:.32em;fill:#F1EADB;text-anchor:middle}
+</style>
+</head>
+<body>
+<div class="card">
+  <svg class="scene" viewBox="0 -60 1200 630" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+      <defs>
+        <linearGradient id="g-sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#EFE5CE"/><stop offset=".75" stop-color="#F4DAB6"/><stop offset="1" stop-color="#F2CFA5"/></linearGradient>
+        <linearGradient id="g-sea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8AA5B1"/><stop offset=".16" stop-color="#5A7C92"/><stop offset=".55" stop-color="#2A4B6B"/><stop offset="1" stop-color="#14304B"/></linearGradient>
+        <radialGradient id="g-glow"><stop offset="0" stop-color="#FFE3A3" stop-opacity=".95"/><stop offset="1" stop-color="#FFE3A3" stop-opacity="0"/></radialGradient>
+        <radialGradient id="g-sunsea" cx=".5" cy="0" r="1"><stop offset="0" stop-color="#F6C996" stop-opacity=".55"/><stop offset="1" stop-color="#F6C996" stop-opacity="0"/></radialGradient>
+        <linearGradient id="g-beam" x1="0" x2="1"><stop offset="0" stop-color="#FFE7A8" stop-opacity=".9"/><stop offset="1" stop-color="#FFE7A8" stop-opacity="0"/></linearGradient>
+        <g id="isle">
+          <path d="M-130 4 C-112 -36 -62 -60 0 -62 C66 -64 112 -36 136 4 Z" fill="#6E8568" stroke="#13233A" stroke-width="2.5" stroke-linejoin="round"/>
+          <path d="M22 -61 C72 -60 110 -34 134 2 L66 2 C74 -22 56 -46 22 -61 Z" fill="#5A7155"/>
+          <path d="M-70 -34 q10 -6 20 0 M-40 -46 q8 -5 16 0 M40 -40 q8 -5 16 0" stroke="#4E6549" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+          <path d="M-186 -9V9M-160 -9V9M-134 -9V9" stroke="#13233A" stroke-width="3.5"/>
+          <rect x="-192" y="-14" width="78" height="6" rx="1" fill="#9A7C55" stroke="#13233A" stroke-width="2"/>
+          <path d="M70 -48V-130" stroke="#13233A" stroke-width="3.5"/>
+          <rect x="-22" y="-116" width="66" height="56" rx="3" fill="#EDE4D0" stroke="#13233A" stroke-width="2.5"/>
+          <path d="M-12 -103H20M-12 -91H20M-12 -79H20" stroke="#13233A" stroke-width="2.5"/>
+          <circle cx="31" cy="-103" r="2.6" fill="#13233A"/><circle cx="31" cy="-91" r="2.6" fill="#13233A"/><circle cx="31" cy="-79" r="2.6" fill="#13233A"/>
+          <path d="M-29 -114 L11 -137 L51 -114 Z" fill="#3E5670" stroke="#13233A" stroke-width="2.5" stroke-linejoin="round"/>
+        </g>
+      </defs>
+
+      <!-- sky -->
+      <rect y="-60" width="1200" height="330" fill="url(#g-sky)"/>
+      <circle cx="1000" cy="262" r="62" fill="#F6C48C" opacity=".8"/>
+      <g fill="#FBF4E6" opacity=".9">
+        <g class="cloud c2"><path d="M700 76 h120 a14 14 0 0 0 -20 -14 a20 20 0 0 0 -38 -8 a16 16 0 0 0 -32 8 a12 12 0 0 0 -30 14 z"/></g>
+        <g class="cloud"><path d="M930 150 h90 a12 12 0 0 0 -18 -12 a16 16 0 0 0 -30 -4 a12 12 0 0 0 -26 10 z" opacity=".8"/></g>
+      </g>
+
+      <!-- sea -->
+      <rect y="262" width="1200" height="338" fill="url(#g-sea)"/>
+      <path d="M0 262.5H1200" stroke="#F4E3C6" stroke-width="1.2" opacity=".7"/>
+      <ellipse cx="1000" cy="264" rx="120" ry="70" fill="url(#g-sunsea)"/>
+      <g stroke="#FCE3BE" stroke-width="2" stroke-linecap="round">
+        <path class="glint" d="M960 276h26"/><path class="glint" d="M1004 284h34"/><path class="glint" d="M972 296h22"/><path class="glint" d="M1016 306h18"/><path class="glint" d="M984 318h14"/>
+      </g>
+      <g id="waves" fill="none" stroke="#F1EADB" stroke-linecap="round"></g>
+
+      <!-- far islands -->
+      <g transform="translate(860 290) scale(.5)">
+        <use href="#isle"/>
+        <circle id="halo-b" cx="70" cy="-138" r="26" fill="#35C07F" opacity=".45"/>
+        <circle id="lamp-b" cx="70" cy="-138" r="8" fill="#35C07F" stroke="#13233A" stroke-width="2.5"/>
+        <text class="isle-lbl" x="-20" y="40" font-size="30">box b</text>
+      </g>
+      <g transform="translate(1110 322) scale(.6)">
+        <use href="#isle"/>
+        <circle id="halo-c" cx="70" cy="-138" r="26" fill="#35C07F" opacity=".45"/>
+        <circle id="lamp-c" cx="70" cy="-138" r="8" fill="#35C07F" stroke="#13233A" stroke-width="2.5"/>
+        <text class="isle-lbl" x="-20" y="38" font-size="26">box c</text>
+      </g>
+
+      <!-- ferry -->
+      <g id="ferry" transform="translate(585 452) rotate(-1) scale(1.12)">
+        <g id="wake" opacity=".9" fill="none" stroke="#F1EADB" stroke-linecap="round">
+          <path d="M-96 6 Q-134 4 -178 10" stroke-width="3" opacity=".75"/>
+          <path d="M-94 10 Q-140 16 -206 24" stroke-width="2.2" opacity=".5"/>
+          <path d="M-104 2 Q-150 -3 -196 2" stroke-width="1.6" opacity=".4"/>
+          <path d="M100 8 q12 4 24 2 M96 12 q16 6 30 6" stroke-width="2" opacity=".7"/>
+        </g>
+        <ellipse cx="0" cy="12" rx="106" ry="4.5" fill="#0C1B2D" opacity=".3"/>
+        <g id="smoke" fill="#EDE4D0"><circle cx="-81" cy="-72" r="4" opacity=".6"/><circle cx="-87" cy="-83" r="6" opacity=".4"/><circle cx="-94" cy="-95" r="8" opacity=".2"/></g>
+        <rect x="-86" y="-64" width="11" height="22" fill="#C8902F" stroke="#13233A" stroke-width="2"/>
+        <path d="M-86 -59h11" stroke="#13233A" stroke-width="3"/>
+        <rect x="-98" y="-44" width="42" height="31" rx="2" fill="#EFE6D3" stroke="#13233A" stroke-width="2"/>
+        <rect x="-101" y="-48" width="48" height="5" rx="1.5" fill="#13233A"/>
+        <g fill="#F7C66B" stroke="#13233A" stroke-width="1.3"><rect x="-92" y="-37" width="8" height="8" rx="1.5"/><rect x="-81" y="-37" width="8" height="8" rx="1.5"/><rect x="-70" y="-37" width="8" height="8" rx="1.5"/></g>
+        <path d="M-104 -14 H110 Q104 0 92 12 H-90 Q-100 2 -104 -14 Z" fill="#1E3A5A" stroke="#13233A" stroke-width="2" stroke-linejoin="round"/>
+        <path d="M-101.5 -7 H106.5" stroke="#C0694C" stroke-width="3"/>
+        <path d="M-104 -14 H110" stroke="#EFE6D3" stroke-width="1.5"/>
+        <g id="ferry-name"><text class="hull-name" x="0" y="6">FERRY</text></g>
+        <g transform="translate(-31 -23)"><rect x="-25" y="-9" width="50" height="18" rx="2" fill="#C8902F" stroke="#13233A" stroke-width="1.3"/><path d="M-20 -9V9M20 -9V9" stroke="#13233A" stroke-opacity=".28"/><text class="crate-t" y="3.2">skills</text></g>
+        <g transform="translate(21 -23)"><rect x="-25" y="-9" width="50" height="18" rx="2" fill="#E4D5B0" stroke="#13233A" stroke-width="1.3"/><path d="M-20 -9V9M20 -9V9" stroke="#13233A" stroke-opacity=".28"/><text class="crate-t" y="3.2">AGENTS.md</text></g>
+        <g transform="translate(73 -23)"><rect x="-25" y="-9" width="50" height="18" rx="2" fill="#8AA573" stroke="#13233A" stroke-width="1.3"/><path d="M-20 -9V9M20 -9V9" stroke="#13233A" stroke-opacity=".28"/><text class="crate-t" y="3.2">subagents</text></g>
+        <g transform="translate(-31 -41)"><rect x="-25" y="-9" width="50" height="18" rx="2" fill="#C9775A" stroke="#13233A" stroke-width="1.3"/><path d="M-20 -9V9M20 -9V9" stroke="#13233A" stroke-opacity=".28"/><text class="crate-t" y="3.2">commands</text></g>
+        <g transform="translate(21 -41)"><rect x="-25" y="-9" width="50" height="18" rx="2" fill="#9AAEC2" stroke="#13233A" stroke-width="1.3"/><path d="M-20 -9V9M20 -9V9" stroke="#13233A" stroke-opacity=".28"/><text class="crate-t" y="3.2">settings</text></g>
+        <g transform="translate(73 -41)"><rect x="-25" y="-9" width="50" height="18" rx="2" fill="#A889B4" stroke="#13233A" stroke-width="1.3"/><path d="M-20 -9V9M20 -9V9" stroke="#13233A" stroke-opacity=".28"/><text class="crate-t" y="3.2">MCP</text></g>
+        <g transform="translate(21 -59)"><rect x="-25" y="-9" width="50" height="18" rx="2" fill="#5AA7A0" stroke="#13233A" stroke-width="1.3"/><path d="M-20 -9V9M20 -9V9" stroke="#13233A" stroke-opacity=".28"/><text class="crate-t" y="3.2">Paseo</text></g>
+      </g>
+
+      <!-- near island -->
+      <g transform="translate(930 505) scale(.95)">
+        <use href="#isle"/>
+        <circle id="halo-a" cx="70" cy="-138" r="24" fill="#E3A33B" opacity=".35"/>
+        <circle id="lamp-a" cx="70" cy="-138" r="8" fill="#E3A33B" stroke="#13233A" stroke-width="2.5"/>
+        <text class="isle-lbl" x="-10" y="40" font-size="21">box a</text>
+      </g>
+
+      <!-- harbor -->
+      <g id="harbor">
+        <path d="M0 400 H345 V600 H0 Z" fill="#4D5966"/>
+        <path d="M0 436H345M0 474H345M0 512H345M0 550H345M60 404V436M170 404V436M280 404V436M20 436V474M120 436V474M230 436V474M340 436V474M80 474V512M190 474V512M300 474V512M30 512V550M140 512V550M250 512V550" stroke="#3E4955" stroke-width="2"/>
+        <rect x="0" y="397" width="345" height="7" fill="#D9CCB0" stroke="#13233A" stroke-width="2"/>
+        <path d="M345 398V600" stroke="#13233A" stroke-width="2"/>
+        <circle cx="338" cy="444" r="9" fill="none" stroke="#1B2530" stroke-width="5"/>
+        <circle id="win-glow" cx="47" cy="361" r="46" fill="url(#g-glow)" opacity=".45"/>
+        <rect x="86" y="300" width="11" height="24" fill="#B5654A" stroke="#13233A" stroke-width="2"/>
+        <rect x="16" y="332" width="92" height="66" fill="#EFE6D3" stroke="#13233A" stroke-width="2"/>
+        <path d="M6 336 L62 296 L118 336 Z" fill="#B5654A" stroke="#13233A" stroke-width="2" stroke-linejoin="round"/>
+        <rect id="win" x="28" y="348" width="38" height="28" rx="2" fill="#F7C66B" stroke="#13233A" stroke-width="2"/>
+        <path d="M37 370h20M39.5 368V357H54.5V368" stroke="#13233A" stroke-width="1.8" fill="none" stroke-linejoin="round"/>
+        <rect x="76" y="358" width="20" height="40" rx="2" fill="#3E5670" stroke="#13233A" stroke-width="2"/>
+        <text class="lbl" x="62" y="284">your machine</text>
+        <text id="edit-note" class="lbl-sm" x="126" y="297" style="text-anchor:start" opacity="0">you change a skill</text>
+        <path d="M134 400V326" stroke="#13233A" stroke-width="2.5"/>
+        <rect x="99" y="310" width="70" height="17" rx="3" fill="#F7EFE0" stroke="#A8351F" stroke-width="1.8"/>
+        <text class="sign-t" x="134" y="322">stays ashore</text>
+        <g id="key" transform="translate(134 400)">
+          
+          <g transform="scale(1.25)" stroke="#13233A" stroke-width="1.2">
+            <circle cx="0" cy="-24" r="7" fill="none" stroke="#D6A43E" stroke-width="4.2"/>
+            <circle cx="0" cy="-24" r="9.2" fill="none"/>
+            <circle cx="0" cy="-24" r="4.8" fill="none"/>
+            <rect x="-2.2" y="-15" width="4.4" height="15" fill="#D6A43E"/>
+            <rect x="2" y="-9" width="5" height="3" fill="#D6A43E"/>
+            <rect x="2" y="-4" width="4" height="3" fill="#D6A43E"/>
+          </g>
+        </g>
+        <rect x="326" y="352" width="8" height="46" fill="#EFE6D3" stroke="#13233A" stroke-width="2"/>
+        <circle id="gate-lamp" cx="330" cy="344" r="6.5" fill="#E0492E" stroke="#13233A" stroke-width="2"/>
+        <g transform="translate(330 368)">
+          <g id="gate-arm">
+            <rect x="-52" y="-3.5" width="52" height="7" rx="2" fill="#EFE6D3" stroke="#13233A" stroke-width="1.6"/>
+            <path d="M-44 -2.7v5.4M-32 -2.7v5.4M-20 -2.7v5.4" stroke="#B23A26" stroke-width="5"/>
+          </g>
+        </g>
+        <text class="lbl-quay" x="336" y="424" text-anchor="end">deny rules</text>
+      </g>
+    </svg>
+  <div class="copy">
+    <div class="brand"><svg viewBox="0 0 34 22" aria-hidden="true"><path d="M1 13h32l-4 8H5z" fill="#13233A"/><rect x="5" y="6" width="8" height="7" rx="1" fill="#13233A"/><rect x="7" y="1" width="3" height="5" fill="#C8902F"/><rect x="15" y="8" width="7" height="5" fill="#C8902F" stroke="#13233A"/><rect x="23" y="8" width="7" height="5" fill="#4E9C95" stroke="#13233A"/></svg>Ferry</div>
+    <h1>Your agent setup.<br><em>Wherever you run.</em></h1>
+  </div>
+  <div class="url">dlhck.github.io/ferry</div>
+  <div class="tag">Open-source CLI</div>
+</div>
+<script>
+  // Same waves as the page scene, drawn once.
+  const NS = 'http://www.w3.org/2000/svg';
+  const host = document.getElementById('waves');
+  [[270,.8,26,.5],[279,1,32,.45],[292,1.3,40,.42],[310,1.7,50,.38],[336,2.1,60,.34],[368,2.5,70,.3],[406,3,82,.28],[448,3.4,94,.26],[496,3.8,106,.24],[548,4.2,118,.22],[592,4.6,130,.2]].forEach(([y, amp, p, op]) => {
+    let d = `M${-p} ${y}`;
+    for (let x = -p; x < 1200 + p; x += p) d += ` q${p / 4} ${-amp} ${p / 2} 0 t${p / 2} 0`;
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', d);
+    path.setAttribute('stroke-width', (1 + amp * .3).toFixed(2));
+    path.setAttribute('opacity', op);
+    path.setAttribute('stroke-dasharray', `${p * .7} ${p * .3}`);
+    host.appendChild(path);
+  });
+</script>
+</body>
+</html>

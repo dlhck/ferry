@@ -1,3 +1,5 @@
+<a href="https://dlhck.github.io/ferry/"><img src="https://raw.githubusercontent.com/dlhck/ferry/main/docs/readme-hero.png" alt="An illustration of Ferry. A ferry carries crates labelled skills, AGENTS.md, subagents, commands, settings, MCP and Paseo from your machine to three boxes. A key stays ashore behind the deny rules barrier."></a>
+
 # ferry
 
 [![CI](https://github.com/dlhck/ferry/actions/workflows/ci.yml/badge.svg)](https://github.com/dlhck/ferry/actions/workflows/ci.yml)
