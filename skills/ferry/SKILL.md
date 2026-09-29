@@ -166,6 +166,9 @@ Do not run these commands yourself. When `auth.loginRequired` or `mcpLogins.logi
    - On a terminal, Ferry asks before the transfer. Without a terminal, Ferry stops before any change unless `--yes` is set. Do not add `--yes` to get past this stop. Give the operator the command to run instead.
    - The destination gets these files with mode 600.
 6. Add `--remove` only when the operator asks. Ferry refuses `--remove` if it refuses any local-only file. After verification, Ferry moves the source copy to `~/.Trash` on macOS or to `~/.ferry/trash` on Linux and on the box. It does not delete it.
+7. Ferry also carries the Claude and Codex sessions of the project and the Claude project memory in `~/.claude/projects/<encoded path>/memory`. The dry run prints a `Carry sessions:` line. After the move, `claude --resume` and `codex resume` in the project on the destination list them. `--no-sessions` turns this off.
+   - A session file that is only on the destination stays. A session on both machines gets the source copy. The source keeps its sessions.
+   - Ferry applies the deny rules to each session and memory file. A `WARNING: Ferry skips the session of <file> (<rule>)` line names a session that stays on the source. Ferry carries it with `--allow-secrets` only, with the same rules as step 5, and never with a private key.
 
 ## Install skills
 
@@ -261,7 +264,7 @@ With `--json`, the stdout of the command of `ferry expose` goes to stderr.
 
 With `--json`, Ferry never asks:
 
-- A step that needs a confirmation fails with `confirmation-required`, unless the command has `--yes`. This applies to `install`, `update`, `uninstall`, `integrations enable|disable`, `box add` on a `[host]` config, and `.env` files with secrets in `move`. The message of the error names what needs the confirmation.
+- A step that needs a confirmation fails with `confirmation-required`, unless the command has `--yes`. This applies to `install`, `update`, `uninstall`, `integrations enable|disable`, `box add` on a `[host]` config, and `.env` files and sessions with secrets in `move`. The message of the error names what needs the confirmation.
 - The SSH host keys of the snapshot host in `init` and `box add` need `--accept-host-keys`. `--yes` does not trust them. Without `--accept-host-keys`, the command fails with `confirmation-required`, and `error.details.hostKeys` is a list of `{ host, type, fingerprint }`. With `--accept-host-keys`, Ferry trusts the keys and writes the fingerprints to stderr.
 - `ferry init --json` without the values that it needs fails with `missing-values`. The message lists the missing values, such as `host, sshUser, snapshotUrl`.
 - `ferry auth <tool> --json` prints a `login` event before the envelope: `{ "type": "login", "provider", "url", "userCode", "codeRequired", "localPort", "timeoutMs" }`, and for `--mcp` also `server`. The login ends in the browser. When `codeRequired` is `true`, Ferry reads the code that the browser shows as one line on stdin. Without a line, it fails with `missing-values`.
@@ -305,7 +308,7 @@ With `--json`, Ferry never asks:
 | `auth` | Without a tool: `{ providers: [{ id, login: "startable", "manual", or "off" }] }`. With a tool: the last login result, `{ kind, provider, ... }`, where `kind` is `logged-in`, `already-done`, `device-url`, `printed-url`, `local-port-forward`, or `manual-ssh`. |
 | `tools` | `{ tools: [{ id, name, kind, install, policy: { policy, default }, boxes: [{ name, policy, default }], operatorVersion }] }` |
 | `skills add` | `{ argv }`, the `npx skills add` command that ran. |
-| `move` | `{ path, source, destination, dryRun, git: { url, branch } or null, carry: [{ path, sha256, secrets }], refused: [{ path, code, reason }], skipped, notes, trash }` |
+| `move` | `{ path, source, destination, dryRun, git: { url, branch } or null, carry: [{ path, sha256, secrets }], refused: [{ path, code, reason }], skipped, notes, trash, sessions: { carry: [{ harness, id, files, secrets }], refused: [{ path, code, reason }] } }`. A memory file is a session with `id` null. |
 | `tunnel --list` | `{ box, listeners: [{ port, address, process }] }` |
 | `integrations` | `{ boxes: [{ name, destination, integrations: [{ id, description, enabled, localVersion, localSource, connectSteps }] }] }`. `name` is `null` for a `[host]` config. |
 | `integrations enable`, `integrations disable` | `{ integration, action, dryRun, plan, output, enabled, connectSteps }`. `enabled` is the new config value, or `null` for a dry run. |

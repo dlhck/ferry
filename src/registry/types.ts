@@ -45,7 +45,29 @@ export type HarnessDescriptor = {
    * sets this.
    */
   readonly mcp?: { readonly file: string; readonly format: "json" | "toml"; readonly key: string };
+  /** Where the harness keeps its sessions. `ferry move` carries the sessions of the project. Only a builtin descriptor sets this. */
+  readonly sessions?: SessionStore;
 };
+
+/**
+ * A session store and how ferry finds the sessions of one project path. The
+ * paths are relative to a home.
+ */
+export type SessionStore =
+  /**
+   * One directory under `root` for each project. Its name is the absolute
+   * project path with each character that is not a letter or a digit changed
+   * to `-`. Each `<id>.jsonl` in it is a session, and the directory `<id>`
+   * next to it holds more files of that session. `memory` names a directory
+   * in it that holds the project memory.
+   */
+  | { readonly layout: "project-directory"; readonly root: string; readonly memory: string }
+  /**
+   * Session files anywhere under `root` whose name matches the glob `files`.
+   * The first line of a session is JSON that records the session `id` and the
+   * project path `cwd` in its `payload`.
+   */
+  | { readonly layout: "first-line-cwd"; readonly root: string; readonly files: string };
 
 /** Codex, Pi, and Cursor Agent read `.agents/skills` instead of their own copies. */
 export function ownsSkills(harness: HarnessDescriptor): boolean {

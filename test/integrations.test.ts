@@ -375,7 +375,7 @@ describe("Paseo project move", () => {
       },
     };
 
-    await createPaseo().box.onProjectMoved(link, "~/Developer/it's");
+    await createPaseo().box.onProjectMoved(link, "~/Developer/it's", []);
 
     expect(commands).toEqual([`paseo project create "$HOME"/'Developer/it'"'"'s' >/dev/null`]);
   });
@@ -387,7 +387,7 @@ describe("Paseo project move", () => {
       },
     };
 
-    await expect(createPaseo().box.onProjectMoved(link, "~/app")).rejects.toThrow(
+    await expect(createPaseo().box.onProjectMoved(link, "~/app", [])).rejects.toThrow(
       "paseo project create failed: directory_not_found",
     );
   });

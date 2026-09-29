@@ -16,6 +16,7 @@ import type {
   IntegrationHealth,
   IntegrationLink,
   LocalVersion,
+  MovedSession,
 } from "./types.ts";
 
 export type PaseoOptions = {
@@ -396,7 +397,8 @@ export function createPaseo(options: PaseoOptions = {}): BoxIntegration {
       }
       return parseHealth(result.stdout, local.version, config?.paseo_relay === true);
     },
-    async onProjectMoved(link: IntegrationLink, path: string): Promise<void> {
+    // Paseo does not import the moved sessions yet.
+    async onProjectMoved(link: IntegrationLink, path: string, _sessions: readonly MovedSession[]): Promise<void> {
       // `project create` is idempotent. It returns the existing project for a known directory.
       const result = await link.run(`paseo project create ${boxPath(path)} >/dev/null`, { timeoutMs: BOX_TIMEOUT_MS });
       if (!result.ok) throw new Error(`paseo project create failed: ${result.error.message}`);
