@@ -837,6 +837,32 @@ describe("brief status", () => {
     expect(report.boxes[0]!.issues[0]!.command).toBe("ferry auth 'my tool' --box default");
   });
 
+  test("names each hook command that runs a home file Ferry does not carry", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const report = await composeBriefStatus(
+      [
+        box(calls, {
+          auth: { status: async () => ({ providers: [] }), mcpStatus: async () => [] },
+          hookPaths: () => [
+            { file: "/home/user/.claude/settings.json", at: "hooks.Stop[0].hooks[0].command", path: "~/bin/notify.sh" },
+          ],
+        }),
+      ],
+      checkedAt,
+    );
+
+    expect(report.boxes[0]!.issues).toEqual([
+      {
+        kind: "hook",
+        name: "~/bin/notify.sh",
+        state: "uncarried",
+        message:
+          "Hook hooks.Stop[0].hooks[0].command in /home/user/.claude/settings.json runs ~/bin/notify.sh, and Ferry does not carry that file. Move it into ~/.claude/hooks.",
+        command: null,
+      },
+    ]);
+  });
+
   test("reads only the link, the logins, the MCP logins, and the tools", async () => {
     const calls: Calls = { reads: [], mutations: [] };
     await composeBriefStatus([box(calls)], checkedAt);
@@ -862,6 +888,10 @@ describe("brief status", () => {
               calls.reads.push("tools.check");
               return [];
             },
+          },
+          hookPaths: () => {
+            calls.reads.push("hookPaths");
+            return [];
           },
         }),
       ],

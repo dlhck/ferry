@@ -987,7 +987,7 @@ function hookPathHits(
  * never passes, because the box home has a different path. Programs on PATH,
  * `$CLAUDE_PROJECT_DIR` paths, and absolute paths outside the home pass.
  */
-function unmanagedWords(
+export function unmanagedWords(
   command: string,
   home: string,
   harnesses: readonly HarnessDescriptor[],
@@ -1005,7 +1005,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** Every string `command` property under `value`, with its JSON location. */
-function hookCommands(value: unknown, at: string): { at: string; command: string }[] {
+export function hookCommands(value: unknown, at: string): { at: string; command: string }[] {
   if (typeof value !== "object" || value === null) return [];
   const found: { at: string; command: string }[] = [];
   for (const [key, child] of Object.entries(value)) {
