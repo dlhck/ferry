@@ -32,10 +32,14 @@ import { installBoxPlugins, mergeBoxSettings } from "./box-settings.ts";
 import { registerBoxMcp } from "./box-mcp.ts";
 import {
   carryAgentProfiles,
+  carryPaseoPreferences,
   profileName,
   readAgentProfiles,
+  readPaseoPreferences,
   refreshUnitPath,
   type AgentProfile,
+  type MetadataProvider,
+  type PaseoPreferences,
 } from "./integrations/paseo.ts";
 import { carryPaseoPlugins, readPaseoPlugins, type PaseoPlugins } from "./integrations/paseo-plugins.ts";
 import { carryPaseoProviders, readPaseoProviders, type PaseoProviders } from "./integrations/paseo-providers.ts";
@@ -129,6 +133,11 @@ export type SyncPlan = {
       readonly createBlocker: string | null;
     }[];
     readonly warnings: readonly string[];
+  } | null;
+  /** The set Paseo preferences, or null when Paseo is off. It holds the length of the shared instructions, never the text. */
+  readonly paseoPreferences?: {
+    readonly metadataProviders: readonly MetadataProvider[] | null;
+    readonly appendSystemPromptLength: number | null;
   } | null;
   /** The box PATH directories, relative to the home, for the `~/.profile` block and the Paseo unit. */
   readonly pathDirs: readonly string[];
@@ -237,10 +246,12 @@ export async function runSync(
       const profiles = source.boxes.some((box) => box.integrations.paseo === true) ? paseoProfiles(home) : null;
       let plugins: PaseoPlugins | null = null;
       let providers: PaseoProviders | null = null;
+      let preferences: PaseoPreferences | null = null;
       try {
         if (profiles !== null) {
           plugins = readPaseoPlugins(home);
           providers = readPaseoProviders(home);
+          preferences = readPaseoPreferences(home);
         }
       } catch (cause) {
         throw new SyncError("manifest-refusal", "operator", messageOf(cause), { cause });
@@ -254,6 +265,7 @@ export async function runSync(
           profiles: box.integrations.paseo === true ? profiles : null,
           plugins: box.integrations.paseo === true ? plugins : null,
           providers: box.integrations.paseo === true ? providers : null,
+          preferences: box.integrations.paseo === true ? preferences : null,
           pathDirs,
         })),
       };
@@ -266,7 +278,8 @@ export async function runSync(
     : boxes.reduce((total, box) => {
         const plugins = box.plugins;
         const pluginStep = plugins && (plugins.plugins.length > 0 || plugins.warnings.length > 0) ? 1 : 0;
-        return total + BOX_STEPS + (box.profiles === null ? 0 : 2) + pluginStep + (hasProviders(box.providers) ? 1 : 0);
+        return total + BOX_STEPS + (box.profiles === null ? 0 : 2) + pluginStep +
+          (hasProviders(box.providers) ? 1 : 0) + (hasPreferences(box.preferences) ? 1 : 0);
       }, operatorSteps);
   if (planned !== (input.dryRun ? 1 : operatorSteps + BOX_STEPS)) progress.plan(planned);
   for (const leftover of seed.leftovers) {
@@ -426,11 +439,16 @@ type SyncBox = ResolvedBox & {
   readonly profiles: readonly AgentProfile[] | null;
   readonly plugins: PaseoPlugins | null;
   readonly providers: PaseoProviders | null;
+  readonly preferences: PaseoPreferences | null;
   readonly pathDirs: readonly string[];
 };
 
 function hasProviders(providers: PaseoProviders | null): providers is PaseoProviders {
   return providers !== null && (providers.providers.length > 0 || providers.warnings.length > 0);
+}
+
+function hasPreferences(preferences: PaseoPreferences | null): preferences is PaseoPreferences {
+  return preferences !== null && (preferences.metadataProviders !== undefined || preferences.appendSystemPrompt !== undefined);
 }
 
 /** The box steps after the connect: checkout update, Apply, plugins, settings, MCP, PATH, and Paseo. */
@@ -625,6 +643,19 @@ async function applyOnBox(context: {
     } catch (cause) {
       warn(`Warning: Ferry could not carry the Paseo agent profiles: ${messageOf(cause)}. The sync is complete.`);
     }
+    const preferences = box.preferences;
+    if (hasPreferences(preferences)) {
+      try {
+        const carry = await boxStep(
+          "Carrying Paseo preferences",
+          () => carryPaseoPreferences(link, preferences),
+          (carry) => (carry.changed ? "updated" : "no changes"),
+        );
+        for (const warning of carry.warnings) warn(`Warning: ${warning}`);
+      } catch (cause) {
+        warn(`Warning: Ferry could not carry the Paseo preferences: ${messageOf(cause)}. The sync is complete.`);
+      }
+    }
     // The restart also applies the profiles, so it runs after the carry.
     try {
       const restarted = await boxStep(
@@ -786,6 +817,10 @@ function makePlan(
       })),
       warnings: box.providers.warnings,
     },
+    paseoPreferences: box.preferences === null ? null : {
+      metadataProviders: box.preferences.metadataProviders ?? null,
+      appendSystemPromptLength: box.preferences.appendSystemPrompt?.length ?? null,
+    },
     pathDirs: box.pathDirs,
     offHarnesses: off.map((harness) => harness.id),
   };
@@ -862,6 +897,7 @@ function printPlan(plan: SyncPlan, gitAuth: GitAuth, writeLine: (line: string) =
         ...plan.paseoPlugins.warnings,
       ]),
       ...(plan.paseoProviders == null ? [] : providerLines(plan.paseoProviders)),
+      ...(plan.paseoPreferences == null ? [] : [preferencesLine(plan.paseoPreferences)]),
       ...denyListLines(),
     ].join("\n"),
   );
@@ -880,6 +916,23 @@ function providerLines(plan: NonNullable<SyncPlan["paseoProviders"]>): string[] 
       [`Paseo provider ${provider.id} is created only when the box defines it first: ${provider.createBlocker}.`]),
     ...plan.warnings,
   ];
+}
+
+/** The dry-run line of the Paseo preferences. It never holds the text of the shared instructions. */
+function preferencesLine(preferences: NonNullable<SyncPlan["paseoPreferences"]>): string {
+  const { metadataProviders: providers, appendSystemPromptLength: length } = preferences;
+  if (providers === null && length === null) return "Paseo preferences: none set locally. Ferry keeps the box values.";
+  const fields = [
+    providers !== null && `agents.metadataGeneration.providers ${
+      providers.length === 0
+        ? "[] (clears the box list)"
+        : providers.map((entry) => `${entry.provider}${entry.model ? `/${entry.model}` : ""}${entry.thinkingOptionId ? ` (thinking ${entry.thinkingOptionId})` : ""}`).join(", ")
+    }`,
+    length !== null && `daemon.appendSystemPrompt ${
+      length === 0 ? "empty (clears the box instructions)" : `${plural(length, "character")}, text not shown. It changes the instructions of each agent on the box`
+    }`,
+  ].filter(Boolean);
+  return `Paseo preferences: ${fields.join("; ")} -> box ~/.paseo/config.json, then paseo daemon reload. Ferry skips each metadata provider that is not available on the box. An unset local field keeps the box value.`;
 }
 
 /** List the deny rules in the `ferry status` format. It reads no remote state. */

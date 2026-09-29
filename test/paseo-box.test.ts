@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   carryAgentProfiles,
+  carryPaseoPreferences,
   createPaseo,
   readAgentProfiles,
   refreshUnitPath,
@@ -706,5 +707,92 @@ describe("Paseo agent profiles", () => {
 
     await expect(carryAgentProfiles(box, [claude])).rejects.toThrow("providers");
     expect(existsSync(join(box.home, ".paseo/config.json"))).toBe(false);
+  });
+});
+
+describe("Paseo preferences", () => {
+  const claude = { provider: "claude", model: "haiku" };
+  const codex = { provider: "codex", model: "mini", thinkingOptionId: "low" };
+  const config = (box: FakeBox) => JSON.parse(readFileSync(join(box.home, ".paseo/config.json"), "utf8"));
+
+  function runningBox(providers: readonly { provider: string; available: boolean }[]): FakeBox {
+    const box = fakeBox();
+    touch(join(box.state, "active-ferry-paseo.service"));
+    writeFileSync(join(box.state, "status"), JSON.stringify({ localDaemon: "running", providers }));
+    return box;
+  }
+
+  test("sets only the two fields, keeps other box keys, skips a missing provider, and reloads", async () => {
+    const box = runningBox([
+      { provider: "claude", available: true },
+      { provider: "codex", available: false },
+    ]);
+    touch(join(box.home, ".paseo/config.json"), JSON.stringify({
+      version: 1,
+      daemon: { listen: "127.0.0.1:6767", agentProfiles: [{ id: "keep" }] },
+      agents: { providers: { claude: { enabled: true } }, metadataGeneration: { providers: [{ provider: "pi" }] } },
+    }));
+
+    const result = await carryPaseoPreferences(box, { metadataProviders: [claude, codex], appendSystemPrompt: "Be brief." });
+
+    expect(result).toEqual({
+      warnings: ["Paseo metadata provider codex was not carried: it is not available on the box."],
+      changed: true,
+    });
+    expect(config(box)).toEqual({
+      version: 1,
+      daemon: { listen: "127.0.0.1:6767", agentProfiles: [{ id: "keep" }], appendSystemPrompt: "Be brief." },
+      agents: { providers: { claude: { enabled: true } }, metadataGeneration: { providers: [claude] } },
+    });
+    expect(box.log()).toEqual(["paseo daemon reload"]);
+  });
+
+  test("keeps the box list when no local metadata provider is available on the box", async () => {
+    const box = runningBox([{ provider: "claude", available: false }]);
+    touch(join(box.home, ".paseo/config.json"), JSON.stringify({ agents: { metadataGeneration: { providers: [{ provider: "pi" }] } } }));
+
+    const result = await carryPaseoPreferences(box, { metadataProviders: [claude] });
+
+    expect(result.changed).toBe(false);
+    expect(result.warnings).toContain("Ferry kept the box agents.metadataGeneration.providers, because no local metadata provider is available on the box.");
+    expect(config(box).agents.metadataGeneration.providers).toEqual([{ provider: "pi" }]);
+    expect(box.log()).toEqual([]);
+  });
+
+  test("explicit empty values clear the box values without a provider check", async () => {
+    const box = fakeBox();
+    touch(join(box.home, ".paseo/config.json"), JSON.stringify({
+      daemon: { appendSystemPrompt: "Old." },
+      agents: { metadataGeneration: { providers: [{ provider: "pi" }] } },
+    }));
+
+    expect(await carryPaseoPreferences(box, { metadataProviders: [], appendSystemPrompt: "" })).toEqual({ warnings: [], changed: true });
+    expect(config(box)).toEqual({ daemon: { appendSystemPrompt: "" }, agents: { metadataGeneration: { providers: [] } } });
+    expect(box.commands.some((command) => command.includes("daemon status"))).toBe(false);
+  });
+
+  test("with no local fields, it does nothing on the box", async () => {
+    const box = runningBox([]);
+
+    expect(await carryPaseoPreferences(box, {})).toEqual({ warnings: [], changed: false });
+    expect(box.commands).toEqual([]);
+  });
+
+  test("writes nothing and does not reload when the box already has the values", async () => {
+    const box = fakeBox();
+    touch(join(box.home, ".paseo/config.json"), `${JSON.stringify({ daemon: { appendSystemPrompt: "Be brief." } }, null, 2)}\n`);
+
+    expect((await carryPaseoPreferences(box, { appendSystemPrompt: "Be brief." })).changed).toBe(false);
+    expect(box.log()).toEqual([]);
+  });
+
+  test("fails without the instruction text when the box config is not an object", async () => {
+    const box = fakeBox();
+    touch(join(box.home, ".paseo/config.json"), JSON.stringify({ agents: [] }));
+
+    const error = await carryPaseoPreferences(box, { appendSystemPrompt: "Private rule." }).catch((caught: unknown) => caught);
+    expect(String(error)).toContain("agents");
+    expect(String(error)).not.toContain("Private rule.");
+    expect(box.log()).toEqual([]);
   });
 });

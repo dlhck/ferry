@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { readPaseoPlugins } from "./integrations/paseo-plugins.ts";
 import { readPaseoProviders } from "./integrations/paseo-providers.ts";
+import { readPaseoPreferences } from "./integrations/paseo.ts";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -370,6 +371,9 @@ async function observeSource(home: string): Promise<WatchObservation> {
     // Only set providers change the identity, so an existing identity stays the same without them.
     const providers = readPaseoProviders(home);
     if (providers.providers.length > 0 || providers.warnings.length > 0) hash.update(JSON.stringify(providers));
+    // Only set preferences change the identity, so an existing identity stays the same without them.
+    const preferences = readPaseoPreferences(home);
+    if (Object.keys(preferences).length > 0) hash.update(JSON.stringify(preferences));
     return { ok: true, identity: hash.digest("hex") };
   } catch (error) {
     const message = messageOf(error);

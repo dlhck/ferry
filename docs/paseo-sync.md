@@ -1,6 +1,6 @@
 # Paseo sync
 
-With the Paseo integration enabled for a box, `ferry sync` carries agent profiles, managed Git and npm plugins, and provider definitions from the operator machine. These go directly to the box. They are not stored in the snapshot repository. `ferry watch` detects changes to plugin commits, npm versions, enabled states, and provider definitions.
+With the Paseo integration enabled for a box, `ferry sync` carries agent profiles, managed Git and npm plugins, provider definitions, metadata model preferences, and shared system instructions from the operator machine. These go directly to the box. They are not stored in the snapshot repository. `ferry watch` detects changes to plugin commits, npm versions, enabled states, provider definitions, and the two preferences.
 
 ## Git and npm plugins
 
@@ -44,7 +44,25 @@ Ferry reads `agents.providers` from `~/.paseo/config.json` and merges an allowli
 - Ferry refuses the sync before it publishes or connects to a box when an entry does not match the Paseo schema, or when a carried field holds a token or a secret. The error names the provider and the rule, never the value.
 - Warnings and errors never show env values, command arguments, or box config contents. `ferry sync --dry-run` and its `--json` plan show provider IDs, carried field names, model IDs, and skip reasons.
 - An entry in Paseo's legacy runtime format, on either host, produces a warning and is skipped.
-- Provider definitions are carried after plugins and before agent profiles, so a profile can use a provider that the same sync creates. A provider failure produces a warning and does not block the core sync.
+- Provider definitions are carried after plugins and before agent profiles and preferences, so a profile or a metadata provider can use a provider that the same sync creates. A provider failure produces a warning and does not block the core sync.
+
+## Preferences
+
+Ferry reads two fields from `~/.paseo/config.json` and writes them into the box `~/.paseo/config.json`. Then it runs `paseo daemon reload`. Paseo 0.10.1 applies both fields on reload without a restart, although the metadata generation page still says to restart after a direct edit.
+
+| Field | Contents |
+| --- | --- |
+| `agents.metadataGeneration.providers` | The ordered list of providers that Paseo tries first for workspace titles, worktree branch names, commit messages, and pull request text. Each entry has a `provider`, an optional `model`, and an optional `thinkingOptionId`. |
+| `daemon.appendSystemPrompt` | Shared instructions that Paseo adds to the system prompt of each agent on the box. |
+
+- The preference step carries only these two fields. It does not copy other keys, environment blocks, or credentials. It keeps all other box keys. Provider definitions have their own step. See [Provider definitions](#provider-definitions).
+- A field that the local config does not set keeps the box value. An explicit empty list or empty string clears the box value.
+- Ferry skips each metadata provider that is not available on the box, as it does for agent profiles. When no local provider is available on the box, Ferry keeps the box list.
+- Ferry refuses the sync before it publishes or connects to a box when a field does not match the Paseo schema, or when it holds a token or a `key: value` secret line. The error names the field and the rule, never the text or the value.
+- `ferry sync --dry-run` and its `--json` plan show the providers and the length of the shared instructions. They never show the instruction text.
+- The shared instructions change the instructions of each agent on the box. A preference failure produces a warning and does not block the core sync.
+
+Project scripts, setup, and metadata instructions stay in each project's `paseo.json`, which travels with the project in Git.
 
 ## Other sync candidates
 
@@ -53,8 +71,6 @@ Research checked on 2026-09-29 against Paseo 0.10.1 and current upstream documen
 | Candidate | Recommendation | Required handling |
 | --- | --- | --- |
 | Workspace label names and colors | Next candidate | Merge by Paseo's normalized, case-insensitive label name. Preserve box-only labels and workspace assignments. Local color wins for a matching name. Treat a rename as a new definition unless explicit rename history is available. |
-| Metadata model preferences | Good candidate | Carry `agents.metadataGeneration.providers`. Filter unavailable providers as Ferry does for agent profiles. |
-| Shared system instructions | Good candidate with content checks | Carry `daemon.appendSystemPrompt` through Ferry's secret checks. Show that this changes instructions for agents on the box. |
 | Terminal profiles | Conditional | Commands must exist on the target OS. Reject credentials and local absolute paths. Do not copy environment blocks without a field-level policy. |
 | Auto-archive after merge | Small candidate | Carry `daemon.autoArchiveAfterMerge` only with an explicit setting, since it changes workspace lifecycle. |
 | Project scripts, setup, and metadata instructions | Use project Git | These already live in `paseo.json`. Carry them with the project rather than maintaining a second copy in host sync. |

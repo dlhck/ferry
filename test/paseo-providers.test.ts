@@ -412,10 +412,11 @@ test("sync refuses a secret in a carried provider field before it connects", asy
   expect(connected).toBe(false);
 });
 
-test("sync applies provider definitions before it checks provider availability for profiles", async () => {
+test("sync applies provider definitions before it checks provider availability for profiles and metadata preferences", async () => {
   const path = home({ zai: { extends: "claude", label: "Z.AI", models } });
   const config = JSON.parse(readFileSync(join(path, ".paseo/config.json"), "utf8"));
   config.daemon = { agentProfiles: [{ id: "glm", name: "GLM", provider: "zai" }] };
+  config.agents.metadataGeneration = { providers: [{ provider: "zai", model: "glm-4.6" }] };
   writeFileSync(join(path, ".paseo/config.json"), JSON.stringify(config));
   const commands: string[] = [];
   const warnings: string[] = [];
@@ -442,6 +443,9 @@ test("sync applies provider definitions before it checks provider availability f
   expect(reload).toBeGreaterThan(-1);
   expect(reload).toBeLessThan(status);
   expect(warnings.some((line) => line.includes("provider zai is not available"))).toBe(false);
+  expect(warnings.some((line) => line.includes("metadata provider zai was not carried"))).toBe(false);
+  const preferences = commands.findLastIndex((command) => command.includes("metadataGeneration") && command.includes("ferry-tmp"));
+  expect(preferences).toBeGreaterThan(reload);
 });
 
 test("watch detects provider-only changes with its real observer", async () => {
