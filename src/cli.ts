@@ -1123,7 +1123,7 @@ changes only the config.`)
   for (const integration of operatorIntegrations(current, dependencies.integrations ?? INTEGRATIONS)) {
     if (!integration.operator.available()) continue;
     const known = new Set(program.commands);
-    integration.operator.registerCommands?.(program);
+    integration.operator.registerCommands?.(program, { json, writeLine, report });
     for (const command of program.commands) if (!known.has(command)) addBoxCommand(command);
   }
 

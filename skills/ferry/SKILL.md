@@ -319,6 +319,7 @@ With `--json`, Ferry never asks:
 | `tunnel --list` | `{ box, listeners: [{ port, address, process }] }` |
 | `integrations` | `{ boxes: [{ name, destination, integrations: [{ id, description, enabled, localVersion, localSource, connectSteps }] }] }`. `name` is `null` for a `[host]` config. |
 | `integrations enable`, `integrations disable` | `{ integration, action, dryRun, plan, output, enabled, connectSteps }`. `enabled` is the new config value, or `null` for a dry run. |
+| `sherlock add` | `{ name, box, target, tunnelCommand }`. With `--json`, it needs `--password-stdin` or `--password-env`. |
 | `watch install` | `{ manager: "launchd" or "systemd", path }` |
 | `tunnel install` | `{ manager: "launchd" or "systemd", path }` |
 | `tunnel uninstall` | `{ manager, path, removed }`. `removed` is `false` when the box had no service file. |

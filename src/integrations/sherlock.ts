@@ -17,7 +17,7 @@ import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "../c
 import { FerryError } from "../errors.ts";
 import { Link, type LinkOptions } from "../link.ts";
 import { parsePortSpecs } from "../tunnel.ts";
-import type { IntegrationHealth, OperatorIntegration } from "./types.ts";
+import type { IntegrationCommandContext, IntegrationHealth, OperatorIntegration } from "./types.ts";
 
 export const SHERLOCK_INSTALL = "curl -fsSL https://raw.githubusercontent.com/michaelbromley/sherlock/main/install.sh | bash";
 
@@ -41,7 +41,6 @@ export type SherlockDependencies = {
   /** Asks for the password without echo. Null when the operator cancels. */
   readonly askPassword: (message: string) => Promise<string | null>;
   readonly interactive: () => boolean;
-  readonly writeLine: (line: string) => void;
 };
 
 export type SherlockAddInput = {
@@ -67,7 +66,7 @@ export function createSherlock(dependencies: Partial<SherlockDependencies> = {})
     operator: {
       available: () => resolved.which("sherlock") !== null,
       install: SHERLOCK_INSTALL,
-      registerCommands: (program) => registerCommands(program, resolved),
+      registerCommands: (program, context) => registerCommands(program, context, resolved),
       health: () => sherlockHealth(resolved),
     },
   };
@@ -80,7 +79,10 @@ export function tunnelCommand(box: string, target: string): string {
 }
 
 /** Add the connection with `sherlock connection add`, then record it in `~/.ferry/sherlock.json`. */
-export async function addSherlockConnection(input: SherlockAddInput, resolved: SherlockDependencies): Promise<SherlockRecord> {
+export async function addSherlockConnection(
+  input: SherlockAddInput,
+  resolved: SherlockDependencies,
+): Promise<SherlockRecord & { readonly tunnelCommand: string }> {
   if (input.boxes.length > 1) throw new FerryError("usage", "ferry sherlock add uses one box. Give --box once.");
   if (input.passwordStdin === true && input.passwordEnv !== undefined) {
     throw new FerryError("usage", "Give --password-stdin or --password-env, not both.");
@@ -124,9 +126,7 @@ export async function addSherlockConnection(input: SherlockAddInput, resolved: S
     schemaVersion: 1,
     connections: [...file.connections.filter((entry) => entry.name !== input.name), record],
   });
-  resolved.writeLine(`Added Sherlock connection ${input.name}. Tunnel command: ${command}`);
-  resolved.writeLine(`Sherlock opens the tunnel on the first query. Try: sherlock -c ${input.name} tables`);
-  return record;
+  return { ...record, tunnelCommand: command };
 }
 
 /**
@@ -189,7 +189,7 @@ async function checkConnection(
   return { ...record, state: "box-offline", error: `could not connect to ${record.box}: ${reached.error.message}` };
 }
 
-function registerCommands(program: Command, resolved: SherlockDependencies): void {
+function registerCommands(program: Command, context: IntegrationCommandContext, resolved: SherlockDependencies): void {
   const command = program
     .command("sherlock")
     .description("Add Sherlock database connections that tunnel through a box");
@@ -210,7 +210,10 @@ On a terminal, Ferry asks for the password and gives it to Sherlock on stdin.
 Sherlock stores it in the keychain of this machine. With --password-stdin,
 Sherlock reads the password from the stdin of Ferry. Ferry never stores the
 password and never changes the Sherlock config file. Ferry records the name,
-box, and target in ~/.ferry/sherlock.json for ferry status.`)
+box, and target in ~/.ferry/sherlock.json for ferry status.
+
+With --json, Ferry asks nothing, so give --password-stdin or --password-env.
+With --json: { name, box, target, tunnelCommand }.`)
     .argument("<name>", "connection name in Sherlock")
     .requiredOption("--target <target>", "box port or host:port that the box can reach, such as 5432 or db.example:5432")
     .requiredOption("--type <type>", "postgres, mysql, mssql, or redis")
@@ -222,7 +225,17 @@ box, and target in ~/.ferry/sherlock.json for ferry status.`)
     .option("--force", "replace a Sherlock connection with the same name")
     .action(async (name: string, options: Omit<SherlockAddInput, "name" | "boxes">) => {
       const boxes = program.opts<{ box?: string[] }>().box ?? [];
-      await addSherlockConnection({ ...options, name, boxes }, resolved);
+      if (context.json() && options.passwordStdin !== true && options.passwordEnv === undefined) {
+        throw new FerryError("usage", "With --json, Ferry asks nothing. Give --password-stdin or --password-env.");
+      }
+      const result = await addSherlockConnection(
+        { ...options, name, boxes },
+        { ...resolved, interactive: () => !context.json() && resolved.interactive() },
+      );
+      context.report(result, () => {
+        context.writeLine(`Added Sherlock connection ${name}. Tunnel command: ${result.tunnelCommand}`);
+        context.writeLine(`Sherlock opens the tunnel on the first query. Try: sherlock -c ${name} tables`);
+      });
     });
 }
 
@@ -304,7 +317,6 @@ const defaultDependencies: SherlockDependencies = {
     return prompts.isCancel(value) ? null : (value ?? "");
   },
   interactive: () => process.stdin.isTTY === true && process.stdout.isTTY === true,
-  writeLine: console.log,
 };
 
 export const sherlock = createSherlock();

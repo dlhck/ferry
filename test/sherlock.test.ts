@@ -42,14 +42,14 @@ const CONFIG: PartialOperatorConfig = {
 
 const REACHED: LinkResult = { ok: true, address: "box.example", stdout: "", stderr: "" };
 
-type Calls = { sherlock: { args: readonly string[]; input: SherlockInput }[]; reach: string[]; output: string[] };
+type Calls = { sherlock: { args: readonly string[]; input: SherlockInput }[]; reach: string[] };
 
 /** Fakes for Sherlock and the box. `list` is the output of `sherlock connection list`. */
 function fakes(
   overrides: Partial<SherlockDependencies> & { list?: readonly string[]; reach?: (target: string) => LinkResult } = {},
 ) {
   const home = tempRoot();
-  const calls: Calls = { sherlock: [], reach: [], output: [] };
+  const calls: Calls = { sherlock: [], reach: [] };
   const dependencies: SherlockDependencies = {
     which: () => "/usr/local/bin/sherlock",
     runSherlock: async (args, input) => {
@@ -68,7 +68,6 @@ function fakes(
     home: () => home,
     askPassword: async () => "s3cret-example",
     interactive: () => true,
-    writeLine: (line) => calls.output.push(line),
     ...overrides,
   };
   return { home, calls, dependencies };
@@ -96,7 +95,7 @@ describe("ferry sherlock add", () => {
   test("adds a connection with the ferry tunnel command and gives the password to Sherlock on stdin", async () => {
     const { home, calls, dependencies } = fakes();
 
-    await addSherlockConnection({ ...input, boxes: ["edge"] }, dependencies);
+    const result = await addSherlockConnection({ ...input, boxes: ["edge"] }, dependencies);
 
     expect(calls.sherlock).toEqual([
       {
@@ -115,7 +114,12 @@ describe("ferry sherlock add", () => {
     // Ferry writes only its record. It has no password, and Ferry does not touch the Sherlock config.
     expect(readFileSync(join(home, ".ferry", "sherlock.json"), "utf8")).not.toContain("s3cret-example");
     expect(existsSync(join(home, ".config"))).toBe(false);
-    expect(calls.output.at(-1)).toBe("Sherlock opens the tunnel on the first query. Try: sherlock -c app-db tables");
+    expect(result).toEqual({
+      name: "app-db",
+      box: "edge",
+      target: "db.example:5432",
+      tunnelCommand: "ferry tunnel --box edge db.example:5432:{{port}}",
+    });
   });
 
   test("adds a connection to a box port on the default box", async () => {
@@ -391,6 +395,33 @@ while :; do sleep 0.05; done
     for (const file of readdirSync(join(env.home, ".ferry"))) {
       expect(readFileSync(join(env.home, ".ferry", file), "utf8")).not.toContain("s3cret-example");
     }
+  }, 20_000);
+
+  test("with --json, add prints one envelope on stdout and asks nothing", async () => {
+    const env = setup(true);
+
+    const refused = await env.run(["--json", "sherlock", "add", "app-db", "--target", "5432", "--type", "postgres"]);
+    const ranSherlock = existsSync(env.env.FAKE_SHERLOCK_LOG);
+    const added = await env.run(
+      ["--json", "sherlock", "add", "app-db", "--target", "5432", "--type", "postgres", "--database", "app", "--username", "dbuser", "--password-env", "APP_DB_PASSWORD"],
+    );
+
+    expect(refused.exitCode).not.toBe(0);
+    expect(JSON.parse(refused.stdout)).toMatchObject({
+      ok: false,
+      error: { code: "usage", message: "With --json, Ferry asks nothing. Give --password-stdin or --password-env." },
+    });
+    expect(ranSherlock).toBe(false);
+    expect(added.exitCode).toBe(0);
+    expect(JSON.parse(added.stdout)).toEqual({
+      schemaVersion: 1,
+      command: "sherlock add",
+      ok: true,
+      result: { name: "app-db", box: "lab", target: "5432", tunnelCommand: "ferry tunnel --box lab 5432:{{port}}" },
+      warnings: [],
+      error: null,
+    });
+    expect(readFileSync(env.env.FAKE_SHERLOCK_LOG, "utf8")).toContain("--password-env\nAPP_DB_PASSWORD\n");
   }, 20_000);
 
   test("the tunnel command runs as Sherlock runs it: in a shell, without a terminal, and SIGTERM to the group closes it", async () => {
