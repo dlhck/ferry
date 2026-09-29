@@ -112,8 +112,10 @@ final class StatusModel: ObservableObject {
         guard let report, let checkedAt else { return .missing }
         if Date().timeIntervalSince(checkedAt) > Self.staleAfter { return .stale(checkedAt) }
         // An offline box counts as one issue, and so does a disconnected tunnel. Ports do not count.
+        // The tunnel of an offline box does not count, because the offline box is the cause.
+        let offline = Set(report.boxes.filter { !$0.online }.map(\.name))
         let count = report.boxes.reduce(0) { $0 + ($1.online ? $1.issues.count : 1) }
-            + tunnels.filter { !$0.connected }.count
+            + tunnels.filter { !$0.connected && !offline.contains($0.box) }.count
         return count == 0 ? .clear : .issues(count)
     }
 
