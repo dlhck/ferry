@@ -121,7 +121,12 @@ export async function planOperator(
       } else if (tool.update.operatorSkip !== undefined && path.includes(tool.update.operatorSkip.pathIncludes)) {
         operator.push({ tool: tool.id, reason: tool.update.operatorSkip.reason });
       } else {
-        operator.push({ tool: tool.id, command: tool.update.command });
+        const home = process.env.HOME?.replace(/\/+$/, "");
+        const command =
+          tool.id === "codex" && home !== undefined && path.startsWith(`${home}/.codex/packages/standalone/`)
+            ? `env -u CODEX_HOME ${tool.update.command}`
+            : tool.update.command;
+        operator.push({ tool: tool.id, command });
       }
     }
   }
