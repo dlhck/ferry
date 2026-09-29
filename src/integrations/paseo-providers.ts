@@ -16,8 +16,15 @@ const BUILTIN_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"];
 const ID_PATTERN = /^[a-z][a-z0-9-]*$/;
 /** A command name that the box resolves through its PATH. */
 const BARE_EXECUTABLE = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
-/** An absolute, home, relative, or drive path, alone or as a flag value. */
-const PATH_ARGUMENT = /^(?:\/|~|\.\.?\/|[A-Za-z]:[\\/])|=(?:\/|~|[A-Za-z]:[\\/])/;
+/** Shells and interpreters run a script argument that Ferry cannot check. */
+const SCRIPT_RUNNERS = new Set([
+  "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "env", "node", "deno", "bun",
+  "python", "python3", "perl", "ruby", "php", "lua", "pwsh", "powershell", "cmd", "osascript",
+]);
+/** A file name with a config, key, script, or text extension. */
+const FILE_ARGUMENT = /\.(?:json5?|jsonc|ya?ml|toml|env|ini|conf|cfg|pem|key|sh|[cm]?js|ts|py|rb|txt)$/i;
+/** A scoped npm package, such as `@scope/name@1.2.3`. It is the one argument with a slash that is not a path. */
+const SCOPED_PACKAGE = /^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*(?:@[A-Za-z0-9._-]+)?$/;
 const CREDENTIAL_ARGUMENT = /api[-_]?key|token|secret|passw|credential|auth/i;
 
 export type PaseoProvider = {
@@ -93,6 +100,29 @@ function portableFields(entry: Record<string, unknown>): Record<string, unknown>
   return fields;
 }
 
+/**
+ * Classify one command argument, or its value after `=` for a flag. Whitespace
+ * means embedded command text. A URL with a user, query, or fragment can hold
+ * a credential. A slash, a `~`, `.`, or drive prefix, or a file extension
+ * means a host path.
+ */
+function argumentIssue(arg: string): "path" | "script" | "credential" | null {
+  if (/[\s\x00-\x1f]/.test(arg)) return "script";
+  const value = arg.startsWith("-") && arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : arg;
+  if (value.includes("://")) {
+    try {
+      const url = new URL(value);
+      return url.username || url.password || url.search || url.hash ? "credential" : null;
+    } catch {
+      return "credential";
+    }
+  }
+  if (/^(?:~|\.|[A-Za-z]:)/.test(value) || (/[\\/]/.test(value) && !SCOPED_PACKAGE.test(value)) || FILE_ARGUMENT.test(value)) {
+    return "path";
+  }
+  return null;
+}
+
 /** Why a box that lacks the provider cannot get a working copy, or null. */
 function createBlocker(entry: Record<string, unknown>, command: readonly string[] | undefined): string | null {
   const reasons: string[] = [];
@@ -102,8 +132,11 @@ function createBlocker(entry: Record<string, unknown>, command: readonly string[
   if (command !== undefined) {
     const [executable = "", ...args] = command;
     if (!BARE_EXECUTABLE.test(executable)) reasons.push("its command is not a bare executable name");
-    if (args.some((arg) => PATH_ARGUMENT.test(arg))) reasons.push("its command has a local path argument");
-    if (command.some((arg) => CREDENTIAL_ARGUMENT.test(arg)) ||
+    if (SCRIPT_RUNNERS.has(executable.toLowerCase())) reasons.push("its command runs a shell or interpreter");
+    const issues = new Set(args.map(argumentIssue));
+    if (issues.has("path")) reasons.push("its command has a local path argument");
+    if (issues.has("script")) reasons.push("its command has a script-like argument");
+    if (issues.has("credential") || command.some((arg) => CREDENTIAL_ARGUMENT.test(arg)) ||
         carriedContentHits(".env", Buffer.from(command.join("\n"))).length > 0) {
       reasons.push("its command has a credential-like argument");
     }
@@ -224,7 +257,8 @@ export async function carryPaseoProviders(link: IntegrationLink, source: PaseoPr
   const verify: PaseoProvider[] = [];
   const kept = new Set<string>();
   for (const provider of source.providers) {
-    const existing = before[provider.id];
+    // An own-key read, so a provider named `constructor` does not find Object.prototype.constructor.
+    const existing = Object.hasOwn(before, provider.id) ? before[provider.id] : undefined;
     if (existing !== undefined) {
       if (object(existing) && object(existing.command)) {
         warnings.push(`Paseo provider ${provider.id} was skipped: the box entry uses the legacy provider format. Open and save it in Paseo on the box to migrate it.`);

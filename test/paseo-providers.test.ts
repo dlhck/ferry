@@ -92,6 +92,36 @@ describe("Paseo provider discovery", () => {
     }
   });
 
+  test("keeps path, script, and credential URL arguments out of a new provider's command", () => {
+    const cases: [readonly string[], string, readonly string[]][] = [
+      [["agent", "--config=./local.json"], "local path", ["local.json"]],
+      [["agent", "--config=../local.json"], "local path", ["local.json"]],
+      [["agent", "config/local.json"], "local path", ["config/local.json"]],
+      [["agent", "--config", "local.json"], "local path", ["local.json"]],
+      [["agent", "--profile=C:\\Users\\example\\agent"], "local path", ["Users"]],
+      [["sh", "-c", "exec /Users/example/private-wrapper"], "shell or interpreter", ["private-wrapper", "/Users/example"]],
+      [["node", "-e", "require('x')"], "shell or interpreter", ["require"]],
+      [["agent", "--run", "exec wrapper now"], "script-like argument", ["exec wrapper"]],
+      [["agent", "--endpoint", "https://user:pass@example.com"], "credential-like argument", ["user:pass", "example.com"]],
+      [["agent", "--endpoint=https://example.com/v1?key=abc"], "credential-like argument", ["key=abc", "example.com"]],
+    ];
+    for (const [command, reason, hidden] of cases) {
+      const [provider] = readPaseoProviders(home({ custom: { extends: "acp", label: "Custom", command } })).providers;
+      expect(provider?.command).toBeNull();
+      expect(provider?.createBlocker).toContain(reason);
+      for (const text of hidden) expect(JSON.stringify(provider)).not.toContain(text);
+    }
+    for (const command of [
+      ["gemini", "--experimental-acp"],
+      ["npx", "@google/gemini-cli@0.9.0", "--experimental-acp"],
+      ["agent", "--endpoint=https://api.example.com/v1", "--model", "glm-4.6"],
+    ]) {
+      const [provider] = readPaseoProviders(home({ custom: { extends: "acp", label: "Custom", command } })).providers;
+      expect(provider?.createBlocker).toBeNull();
+      expect(provider?.command).toEqual(command);
+    }
+  });
+
   test("refuses entries that Paseo's schema rejects, naming the provider and rule", () => {
     const cases: [unknown, string][] = [
       [{ Bad: { extends: "claude", label: "Bad" } }, "provider ID"],
@@ -242,6 +272,42 @@ describe("Paseo provider carry", () => {
     const defined = box({ agents: { providers: { zai: { extends: "claude", label: "Z.AI", env: { KEY: "box" } } } } });
     expect((await carryPaseoProviders(defined.link, local)).carried).toEqual(["zai"]);
     expect(written(defined.commands).agents.providers.zai).toEqual({ extends: "claude", label: "Z.AI", env: { KEY: "box" }, models });
+  });
+
+  test("does not send a skipped command to a box that lacks the provider", async () => {
+    const b = box({}, ["sh"]);
+    const result = await carryPaseoProviders(b.link, source({
+      wrapper: { extends: "acp", label: "Wrapper", command: ["sh", "-c", "exec /Users/example/private-wrapper"] },
+    }));
+    expect(result).toEqual({
+      carried: [],
+      warnings: ["Paseo provider wrapper was not created on the box: its command runs a shell or interpreter, its command has a script-like argument. Define it on the box first, then Ferry syncs its portable fields."],
+      changed: false,
+    });
+    expect(b.commands.join("\n")).not.toContain("private-wrapper");
+    expect(b.commands).toEqual([readConfig]);
+  });
+
+  test("merges allowlisted fields into a box provider whose local command is not portable", async () => {
+    const b = box({ agents: { providers: { wrapper: { extends: "acp", label: "Old", command: ["box-agent"] } } } });
+    const result = await carryPaseoProviders(b.link, source({
+      wrapper: { extends: "acp", label: "Wrapper", models, command: ["sh", "-c", "exec /Users/example/private-wrapper"] },
+    }));
+    expect(result).toEqual({ carried: ["wrapper"], warnings: [], changed: true });
+    expect(written(b.commands).agents.providers.wrapper).toEqual({ extends: "acp", label: "Wrapper", command: ["box-agent"], models });
+    expect(b.commands.join("\n")).not.toContain("private-wrapper");
+  });
+
+  test("treats a provider named constructor as new, not as an inherited box entry", async () => {
+    const b = box({ agents: { providers: {} } });
+    const result = await carryPaseoProviders(b.link, source({ constructor: { extends: "claude", label: "Constructor", models } }));
+    expect(result).toEqual({ carried: ["constructor"], warnings: [], changed: true });
+    expect(written(b.commands).agents.providers).toEqual({ constructor: { extends: "claude", label: "Constructor", models } });
+
+    const existing = box({ agents: { providers: { constructor: { extends: "claude", label: "Old" } } } });
+    expect((await carryPaseoProviders(existing.link, source({ constructor: { extends: "claude", label: "New" } }))).carried)
+      .toEqual(["constructor"]);
+    expect(written(existing.commands).agents.providers.constructor).toEqual({ extends: "claude", label: "New" });
   });
 
   test("skips a provider that the box defines with a different extends value", async () => {
