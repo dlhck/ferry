@@ -196,6 +196,7 @@ export async function runInit(
     snapshotUrl: required(values.snapshotUrl),
     harness: existing?.harness,
     update: existing?.update,
+    status: existing?.status,
     integrations: existing?.integrations,
     tools: existing?.tools,
   };

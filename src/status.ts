@@ -1,6 +1,7 @@
 import type { ApplyAction, ApplyPlan } from "./apply.ts";
 import type { AuthProviderStatus, AuthStatusReport, McpLoginStatus } from "./auth-start.ts";
 import type { BoxMcpIssue } from "./box-mcp.ts";
+import type { BoxResources, ResourceLimits } from "./box-resources.ts";
 import type { GitAuth } from "./config.ts";
 import { parseGitIdentity, type GitIdentity } from "./git-identity.ts";
 import type { UncarriedHookPath } from "./hook-paths.ts";
@@ -56,6 +57,11 @@ export type BoxStatusDependencies = {
   readonly hookPaths?: () => readonly UncarriedHookPath[];
   /** The integrations that are enabled for this box only. */
   readonly integrations?: readonly IntegrationCheck[];
+  /** The disk, memory, and load that the probe read, and the limits. Only the brief check reads them. */
+  readonly resources?: {
+    read(): BoxResources | null;
+    readonly limits: ResourceLimits;
+  };
 };
 
 export type StatusDependencies = {
@@ -173,11 +179,13 @@ export type StatusReport = {
  * stdio MCP server, with the name `harness/server`, in the state `env-missing`,
  * `env-unchecked`, `command-missing`, or `not-portable`. `tool`: a tool with the state `drift`,
  * `missing`, or `hidden`. `hook`: a hook command that refers to a home file
- * Ferry does not carry, with the name of that path. `check-failed`: Ferry
- * cannot read a part of the box.
+ * Ferry does not carry, with the name of that path. `resource`: the free disk
+ * of the home file system (`disk`) or the available memory (`memory`) of the
+ * box is below its limit, in the state `low`. `check-failed`: Ferry cannot
+ * read a part of the box.
  */
 export type BriefIssue = {
-  readonly kind: "login" | "mcp-login" | "mcp-server" | "tool" | "hook" | "check-failed";
+  readonly kind: "login" | "mcp-login" | "mcp-server" | "tool" | "hook" | "resource" | "check-failed";
   readonly name: string;
   readonly state: string;
   readonly message: string;
@@ -193,6 +201,8 @@ export type BriefBoxStatus = {
   readonly error: string | null;
   /** Empty when the box is offline. */
   readonly issues: readonly BriefIssue[];
+  /** The disk, memory, and load of the box. Null when the box is offline or the check has no resource read. */
+  readonly resources: BoxResources | null;
 };
 
 /** The report of `ferry status --brief`, and the content of `~/.ferry/status.json`. */
@@ -204,8 +214,8 @@ export type BriefStatusReport = {
 };
 
 /**
- * Check only the link, the logins, the MCP logins, the carried stdio MCP
- * servers, and the tools of each box.
+ * Check only the link, the disk, memory, and load, the logins, the MCP logins,
+ * the carried stdio MCP servers, and the tools of each box.
  * It reads no store, no apply plan, no git identity, and no sudo, so it is
  * fast enough for the watch to run on a timer.
  */
@@ -240,10 +250,11 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
     progress.skip("Checking MCP logins on the box", OFFLINE);
     if (box.mcpServers) progress.skip("Checking MCP servers on the box", OFFLINE);
     if (box.tools) progress.skip("Checking tools on the box", OFFLINE);
-    return { ...base, online: false, error, issues: [] };
+    return { ...base, online: false, error, issues: [], resources: null };
   }
 
-  const issues: BriefIssue[] = [];
+  const resources = box.resources?.read() ?? null;
+  const issues: BriefIssue[] = resources && box.resources ? resourceIssues(resources, box.resources.limits) : [];
   const failed = (name: string, cause: unknown) =>
     issues.push({ kind: "check-failed", name, state: "failed", message: dependencyError("box", cause).message, command: null });
   const flag = `--box ${box.name}`;
@@ -315,7 +326,46 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
 
   if (box.hookPaths) issues.push(...box.hookPaths().map(hookIssue));
 
-  return { ...base, online: true, error: null, issues };
+  return { ...base, online: true, error: null, issues, resources };
+}
+
+/** One item for the disk and one for the memory, when the value is below its limit. */
+function resourceIssues(resources: BoxResources, limits: ResourceLimits): BriefIssue[] {
+  const issues: BriefIssue[] = [];
+  const base = { kind: "resource", state: "low", command: null } as const;
+  const { disk, memory } = resources;
+  if (disk) {
+    const percent = (disk.freeKiB / disk.totalKiB) * 100;
+    const gib = disk.freeKiB / KIB_PER_GIB;
+    if (percent < limits.diskFreePercent || gib < limits.diskFreeGiB) {
+      issues.push({
+        ...base,
+        name: "disk",
+        message: `The home file system has ${formatGiB(gib)} free (${formatPercent(percent)}). The limit is ${formatGiB(limits.diskFreeGiB)} or ${formatPercent(limits.diskFreePercent)}. Free disk space on the box.`,
+      });
+    }
+  }
+  if (memory) {
+    const percent = (memory.availableKiB / memory.totalKiB) * 100;
+    if (percent < limits.memoryAvailablePercent) {
+      issues.push({
+        ...base,
+        name: "memory",
+        message: `The box has ${formatGiB(memory.availableKiB / KIB_PER_GIB)} memory available (${formatPercent(percent)}). The limit is ${formatPercent(limits.memoryAvailablePercent)}. Stop processes on the box.`,
+      });
+    }
+  }
+  return issues;
+}
+
+const KIB_PER_GIB = 1024 * 1024;
+
+function formatGiB(gib: number): string {
+  return `${Number(gib.toFixed(1))} GiB`;
+}
+
+function formatPercent(percent: number): string {
+  return `${Number(percent.toFixed(1))}%`;
 }
 
 function hookIssue(hook: UncarriedHookPath): BriefIssue {

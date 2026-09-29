@@ -270,7 +270,7 @@ const JSON_RESULTS: Record<string, string> = {
   "tunnel uninstall": "{ manager, path, removed }",
   expose: "events exposed and exited. The output of the command goes to stderr",
   status:
-    "the status report, schema version 2. With --brief, { schemaVersion: 1, checkedAt, boxes: [{ name, host, online, error, issues: [{ kind, name, state, message, command }] }] }",
+    "the status report, schema version 2. With --brief, { schemaVersion: 1, checkedAt, boxes: [{ name, host, online, error, issues: [{ kind, name, state, message, command }], resources: { disk, memory, load } }] }",
   doctor:
     "{ schemaVersion: 1, ok, checks: [{ id, box, status, message, fix }] }, also on failure. status is ok, failed, or skipped",
   integrations: "{ boxes: [{ name, destination, integrations: [{ id, description, enabled, parts, available, localVersion, localSource, connectSteps }] }] }",
@@ -986,12 +986,19 @@ unknown, Ferry cannot read the box version. With --json, result is the
 status report, schema version 2. The ferry agent skill describes its fields.
 Install the skill with ferry skills add dlhck/ferry --skill ferry.
 
---brief checks only the link, the logins, the MCP logins, the carried stdio MCP
-servers, and the tools of each box, and the hooks of this machine that run a
-home file Ferry does not carry. It prints one line for each item that needs
-action, with the Ferry command that fixes it. ferry watch writes the same
-report to ~/.ferry/status.json.`)
-    .option("--brief", "check only the link, the logins, the MCP logins, and the tools, and print what needs action")
+--brief checks only the link, the free disk, memory, and load, the logins, the
+MCP logins, the carried stdio MCP servers, and the tools of each box, and the
+hooks of this machine that run a home file Ferry does not carry. It prints one
+line for each item that needs action, with the Ferry command that fixes it.
+ferry watch writes the same report to ~/.ferry/status.json.
+
+The probe reads the free disk of the box home file system, the available
+memory, and the load average in its SSH command. --brief shows an item when
+the free disk is below 10% or 5 GiB, or the available memory is below 10%.
+Set other limits in [status] of ~/.ferry/config.toml with disk_free_percent,
+disk_free_gib, and memory_available_percent. A limit of 0 turns the check off.
+The load is only in the JSON report.`)
+    .option("--brief", "check only the link, the disk and memory, the logins, the MCP logins, and the tools, and print what needs action")
     .action(async (options: { brief?: boolean }) => {
       await withProgress(async (progress, writeLine) => {
         if (options.brief === true) {

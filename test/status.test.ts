@@ -4,6 +4,7 @@ import type { AuthStatusReport } from "../src/auth-start.ts";
 import type { LinkResult } from "../src/link.ts";
 import type { DenyRuleDescription } from "../src/manifest.ts";
 import type { TipReport } from "../src/store.ts";
+import { DEFAULT_RESOURCE_LIMITS } from "../src/box-resources.ts";
 import { composeBriefStatus, composeStatus, type BoxStatusDependencies, type StatusDependencies } from "../src/status.ts";
 import type { ToolStatus } from "../src/tools/check.ts";
 import { recordProgress } from "./fake-progress.ts";
@@ -711,6 +712,7 @@ describe("brief status", () => {
           host: "ferry@build-box",
           online: true,
           error: null,
+          resources: null,
           issues: [
             { kind: "login", name: "codex", state: "login-required", message: "codex needs a login.", command: "ferry auth codex --box a" },
             {
@@ -871,6 +873,69 @@ describe("brief status", () => {
     ]);
   });
 
+  test("reports low disk and memory with the value and the limit, and puts the values in the report", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const GIB = 1024 * 1024;
+    const resources = {
+      disk: { totalKiB: 100 * GIB, freeKiB: 4 * GIB },
+      memory: { totalKiB: 16 * GIB, availableKiB: 0.8 * GIB },
+      load: { one: 9.5, five: 8, fifteen: 6.2, cpus: 4 },
+    };
+    const report = await composeBriefStatus(
+      [
+        box(calls, {
+          auth: { status: async () => ({ providers: [] }), mcpStatus: async () => [] },
+          resources: { read: () => resources, limits: DEFAULT_RESOURCE_LIMITS },
+        }),
+      ],
+      checkedAt,
+    );
+
+    expect(report.boxes[0]!.resources).toEqual(resources);
+    expect(report.boxes[0]!.issues).toEqual([
+      {
+        kind: "resource",
+        name: "disk",
+        state: "low",
+        message: "The home file system has 4 GiB free (4%). The limit is 5 GiB or 10%. Free disk space on the box.",
+        command: null,
+      },
+      {
+        kind: "resource",
+        name: "memory",
+        state: "low",
+        message: "The box has 0.8 GiB memory available (5%). The limit is 10%. Stop processes on the box.",
+        command: null,
+      },
+    ]);
+  });
+
+  test("reports the disk when one of its two limits is crossed, and a limit of 0 turns a check off", async () => {
+    const GIB = 1024 * 1024;
+    const issues = async (disk: { totalKiB: number; freeKiB: number }, limits = DEFAULT_RESOURCE_LIMITS) => {
+      const calls: Calls = { reads: [], mutations: [] };
+      const report = await composeBriefStatus(
+        [
+          box(calls, {
+            auth: { status: async () => ({ providers: [] }), mcpStatus: async () => [] },
+            resources: { read: () => ({ disk, memory: { totalKiB: 16 * GIB, availableKiB: 0 }, load: null }), limits },
+          }),
+        ],
+        checkedAt,
+      );
+      return report.boxes[0]!.issues.map((issue) => issue.name);
+    };
+
+    // 20 GiB free is 2% of 1000 GiB.
+    expect(await issues({ totalKiB: 1000 * GIB, freeKiB: 20 * GIB })).toEqual(["disk", "memory"]);
+    // 4 GiB free is 40% of 10 GiB.
+    expect(await issues({ totalKiB: 10 * GIB, freeKiB: 4 * GIB })).toEqual(["disk", "memory"]);
+    expect(await issues({ totalKiB: 100 * GIB, freeKiB: 50 * GIB })).toEqual(["memory"]);
+    expect(
+      await issues({ totalKiB: 100 * GIB, freeKiB: 1 * GIB }, { diskFreePercent: 0, diskFreeGiB: 0, memoryAvailablePercent: 0 }),
+    ).toEqual([]);
+  });
+
   test("reads only the link, the logins, the MCP logins, and the tools", async () => {
     const calls: Calls = { reads: [], mutations: [] };
     await composeBriefStatus([box(calls)], checkedAt);
@@ -907,7 +972,7 @@ describe("brief status", () => {
     );
 
     expect(report.boxes).toEqual([
-      { name: "default", host: "ferry@build-box", online: false, error: "Tailscale host box is offline", issues: [] },
+      { name: "default", host: "ferry@build-box", online: false, error: "Tailscale host box is offline", issues: [], resources: null },
     ]);
     expect(calls.reads).toEqual(["link.probe"]);
   });

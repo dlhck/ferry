@@ -1260,6 +1260,48 @@ describe("ferry status --brief", () => {
     ]);
   });
 
+  test("reads the disk, memory, and load in the probe command, and applies the [status] limits", async () => {
+    const stack = fakeStack();
+    const link = stack.dependencies.createLink!({} as never);
+    const probes: string[] = [];
+
+    const report = await runBriefStatusCommand({}, {
+      ...stack.dependencies,
+      now,
+      readConfig: () => ({ ...stack.dependencies.readConfig!(), status: { diskFreeGiB: 50 } }),
+      createAuthStart: () => ({ status: async () => ({ providers: [] }), mcpStatus: async () => [] }),
+      createLink: () => ({
+        ...link,
+        async run(command: string) {
+          if (!command.startsWith("printf")) return link.run(command);
+          probes.push(command);
+          return {
+            ok: true as const,
+            address: "100.64.0.8",
+            stdout: "/box/home\ndisk 104857600 31457280\nmemory 16777216 8388608\nload 0.50 0.40 0.30\ncpus 8\n",
+            stderr: "",
+          };
+        },
+      }),
+    });
+
+    expect(probes).toHaveLength(1);
+    expect(probes[0]).toContain('df -Pk "$HOME"');
+    expect(probes[0]).toContain("/proc/meminfo");
+    expect(probes[0]).toContain("/proc/loadavg");
+    expect(report.boxes[0]!.resources).toEqual({
+      disk: { totalKiB: 104857600, freeKiB: 31457280 },
+      memory: { totalKiB: 16777216, availableKiB: 8388608 },
+      load: { one: 0.5, five: 0.4, fifteen: 0.3, cpus: 8 },
+    });
+    expect(formatBriefStatus(report)).toBe(
+      [
+        "Box default (ferry@box): ONLINE",
+        "  disk: The home file system has 30 GiB free (30%). The limit is 50 GiB or 10%. Free disk space on the box.",
+      ].join("\n"),
+    );
+  });
+
   test("prints one line for each box and each issue, with the fix command", async () => {
     const online = await runBriefStatusCommand({}, { ...fakeStack().dependencies, now });
     const offline = await runBriefStatusCommand({}, { ...fakeStack(false).dependencies, now });
