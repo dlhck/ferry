@@ -184,6 +184,24 @@ describe("FERRY_PATH of the menu bar app", () => {
     expect(() => resolveFerryPath("/Users/me/.bun/bin/bun", which(null))).toThrow("Ferry runs under bun, and PATH has no ferry.");
   });
 
+  test("under bun, the agent runs only the app binary, and FERRY_PATH is the ferry on PATH", async () => {
+    const home = directory();
+    const build = join(directory(), "Ferry Menu Bar.app");
+    mkdirSync(build);
+
+    const result = await installMenuBar(
+      { ...RELEASE, home, version: "0.0.0-dev", execPath: "/Users/me/.bun/bin/bun", app: build },
+      { run: fakeRun([]), which: which("/Users/me/.bun/bin/ferry") },
+    );
+
+    const body = readFileSync(result.path, "utf8");
+    const programArguments = [...body.split("<key>ProgramArguments</key>")[1]!.split("</array>")[0]!.matchAll(/<string>(.*)<\/string>/g)].map(
+      (match) => match[1],
+    );
+    expect(programArguments).toEqual([join(home, "Applications", "Ferry Menu Bar.app", "Contents", "MacOS", "FerryMenuBar")]);
+    expect(body).toContain("<key>FERRY_PATH</key>\n    <string>/Users/me/.bun/bin/ferry</string>");
+  });
+
   test("install fails before it changes anything when PATH has no ferry", async () => {
     const commands: ServiceCommand[] = [];
     await expect(
