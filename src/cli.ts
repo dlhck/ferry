@@ -1126,8 +1126,8 @@ macos/build.sh, a .app directory or its zip, without a checksum. A
 development build of Ferry needs --app.
 
 The app starts at login with ~/Library/LaunchAgents/dev.ferry.menubar.plist.
-It records the path of this Ferry as FERRY_PATH and the current PATH. Run the
-command again after you move Ferry or update it.`)
+It records the path of this Ferry as FERRY_PATH, the current PATH, and
+SSH_AUTH_SOCK. Run the command again after you move Ferry or update it.`)
     .option("--app <path>", "install a local build of macos/build.sh: a .app directory or its zip")
     .action(async (options: { app?: string }) => {
       const result = await (dependencies.installMenuBar ?? installMenuBar)(options.app === undefined ? {} : { app: options.app });
