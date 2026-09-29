@@ -897,7 +897,7 @@ describe("brief status", () => {
         kind: "resource",
         name: "disk",
         state: "low",
-        message: "The home file system has 4 GiB free (4%). The limit is 5 GiB or 10%. Free disk space on the box.",
+        message: "The home file system has 4 GiB free (4%). The limit is 5 GiB and 10%. Free disk space on the box.",
         command: null,
       },
       {
@@ -910,30 +910,40 @@ describe("brief status", () => {
     ]);
   });
 
-  test("reports the disk when one of its two limits is crossed, and a limit of 0 turns a check off", async () => {
+  test("reports the disk only when both limits are crossed, and a limit of 0 turns its part off", async () => {
     const GIB = 1024 * 1024;
-    const issues = async (disk: { totalKiB: number; freeKiB: number }, limits = DEFAULT_RESOURCE_LIMITS) => {
+    const DISK_ONLY = { ...DEFAULT_RESOURCE_LIMITS, memoryAvailablePercent: 0 };
+    const disk = async (totalGiB: number, freeGiB: number, limits = DISK_ONLY) => {
       const calls: Calls = { reads: [], mutations: [] };
       const report = await composeBriefStatus(
         [
           box(calls, {
             auth: { status: async () => ({ providers: [] }), mcpStatus: async () => [] },
-            resources: { read: () => ({ disk, memory: { totalKiB: 16 * GIB, availableKiB: 0 }, load: null }), limits },
+            resources: {
+              read: () => ({ disk: { totalKiB: totalGiB * GIB, freeKiB: freeGiB * GIB }, memory: { totalKiB: 16 * GIB, availableKiB: 0 }, load: null }),
+              limits,
+            },
           }),
         ],
         checkedAt,
       );
-      return report.boxes[0]!.issues.map((issue) => issue.name);
+      return report.boxes[0]!.issues.map((issue) => issue.message);
     };
 
-    // 20 GiB free is 2% of 1000 GiB.
-    expect(await issues({ totalKiB: 1000 * GIB, freeKiB: 20 * GIB })).toEqual(["disk", "memory"]);
-    // 4 GiB free is 40% of 10 GiB.
-    expect(await issues({ totalKiB: 10 * GIB, freeKiB: 4 * GIB })).toEqual(["disk", "memory"]);
-    expect(await issues({ totalKiB: 100 * GIB, freeKiB: 50 * GIB })).toEqual(["memory"]);
-    expect(
-      await issues({ totalKiB: 100 * GIB, freeKiB: 1 * GIB }, { diskFreePercent: 0, diskFreeGiB: 0, memoryAvailablePercent: 0 }),
-    ).toEqual([]);
+    // 80 GiB free is 8% of 1000 GiB: below the percent limit, not below the GiB limit.
+    expect(await disk(1000, 80)).toEqual([]);
+    // 4 GiB free is 40% of 10 GiB: below the GiB limit, not below the percent limit.
+    expect(await disk(10, 4)).toEqual([]);
+    expect(await disk(50, 2)).toEqual([
+      "The home file system has 2 GiB free (4%). The limit is 5 GiB and 10%. Free disk space on the box.",
+    ]);
+    expect(await disk(1000, 80, { ...DISK_ONLY, diskFreeGiB: 0 })).toEqual([
+      "The home file system has 80 GiB free (8%). The limit is 10%. Free disk space on the box.",
+    ]);
+    expect(await disk(10, 4, { ...DISK_ONLY, diskFreePercent: 0 })).toEqual([
+      "The home file system has 4 GiB free (40%). The limit is 5 GiB. Free disk space on the box.",
+    ]);
+    expect(await disk(100, 1, { diskFreePercent: 0, diskFreeGiB: 0, memoryAvailablePercent: 0 })).toEqual([]);
   });
 
   test("reads only the link, the logins, the MCP logins, and the tools", async () => {

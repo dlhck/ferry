@@ -994,9 +994,10 @@ ferry watch writes the same report to ~/.ferry/status.json.
 
 The probe reads the free disk of the box home file system, the available
 memory, and the load average in its SSH command. --brief shows an item when
-the free disk is below 10% or 5 GiB, or the available memory is below 10%.
-Set other limits in [status] of ~/.ferry/config.toml with disk_free_percent,
-disk_free_gib, and memory_available_percent. A limit of 0 turns the check off.
+the free disk is below both 10% and 5 GiB, or the available memory is below
+10%. Set other limits in [status] of ~/.ferry/config.toml with
+disk_free_percent, disk_free_gib, and memory_available_percent. A limit of 0
+turns its part of the check off. When one disk limit is 0, the other decides.
 The load is only in the JSON report.`)
     .option("--brief", "check only the link, the disk and memory, the logins, the MCP logins, and the tools, and print what needs action")
     .action(async (options: { brief?: boolean }) => {

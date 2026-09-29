@@ -106,10 +106,10 @@ export type IntegrationsConfig = {
 export type UpdateConfig = { readonly watch?: boolean };
 
 /**
- * The `[status]` limits of `ferry status --brief`. It reports a box when its
- * free disk of the home file system is below `diskFreePercent` or
+ * The `[status]` limits of `ferry status --brief`. It reports a box when the
+ * free disk of its home file system is below both `diskFreePercent` and
  * `diskFreeGiB`, or its available memory is below `memoryAvailablePercent`.
- * A limit of 0 turns the check off.
+ * A limit of 0 turns its part of the check off.
  */
 export type StatusLimitsConfig = {
   readonly diskFreePercent?: number;

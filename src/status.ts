@@ -329,7 +329,10 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
   return { ...base, online: true, error: null, issues, resources };
 }
 
-/** One item for the disk and one for the memory, when the value is below its limit. */
+/**
+ * One item for the disk when its free space is below both limits, and one for
+ * the memory when it is below its limit. A limit of 0 turns its part off.
+ */
 function resourceIssues(resources: BoxResources, limits: ResourceLimits): BriefIssue[] {
   const issues: BriefIssue[] = [];
   const base = { kind: "resource", state: "low", command: null } as const;
@@ -337,11 +340,15 @@ function resourceIssues(resources: BoxResources, limits: ResourceLimits): BriefI
   if (disk) {
     const percent = (disk.freeKiB / disk.totalKiB) * 100;
     const gib = disk.freeKiB / KIB_PER_GIB;
-    if (percent < limits.diskFreePercent || gib < limits.diskFreeGiB) {
+    const crossed = [
+      ...(limits.diskFreeGiB > 0 ? [{ low: gib < limits.diskFreeGiB, text: formatGiB(limits.diskFreeGiB) }] : []),
+      ...(limits.diskFreePercent > 0 ? [{ low: percent < limits.diskFreePercent, text: formatPercent(limits.diskFreePercent) }] : []),
+    ];
+    if (crossed.length > 0 && crossed.every((limit) => limit.low)) {
       issues.push({
         ...base,
         name: "disk",
-        message: `The home file system has ${formatGiB(gib)} free (${formatPercent(percent)}). The limit is ${formatGiB(limits.diskFreeGiB)} or ${formatPercent(limits.diskFreePercent)}. Free disk space on the box.`,
+        message: `The home file system has ${formatGiB(gib)} free (${formatPercent(percent)}). The limit is ${crossed.map((limit) => limit.text).join(" and ")}. Free disk space on the box.`,
       });
     }
   }

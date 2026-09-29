@@ -1268,7 +1268,7 @@ describe("ferry status --brief", () => {
     const report = await runBriefStatusCommand({}, {
       ...stack.dependencies,
       now,
-      readConfig: () => ({ ...stack.dependencies.readConfig!(), status: { diskFreeGiB: 50 } }),
+      readConfig: () => ({ ...stack.dependencies.readConfig!(), status: { diskFreePercent: 0, diskFreeGiB: 50 } }),
       createAuthStart: () => ({ status: async () => ({ providers: [] }), mcpStatus: async () => [] }),
       createLink: () => ({
         ...link,
@@ -1297,7 +1297,7 @@ describe("ferry status --brief", () => {
     expect(formatBriefStatus(report)).toBe(
       [
         "Box default (ferry@box): ONLINE",
-        "  disk: The home file system has 30 GiB free (30%). The limit is 50 GiB or 10%. Free disk space on the box.",
+        "  disk: The home file system has 30 GiB free (30%). The limit is 50 GiB. Free disk space on the box.",
       ].join("\n"),
     );
   });

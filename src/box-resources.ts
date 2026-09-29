@@ -11,7 +11,7 @@ export type BoxResources = {
   readonly load: { readonly one: number; readonly five: number; readonly fifteen: number; readonly cpus: number | null } | null;
 };
 
-/** The brief status reports an item when a value is below its limit. A limit of 0 turns the item off. */
+/** The brief status reports the disk when it is below both disk limits, and the memory when it is below its limit. A limit of 0 turns its part off. */
 export type ResourceLimits = Required<StatusLimitsConfig>;
 
 export const DEFAULT_RESOURCE_LIMITS: ResourceLimits = {
