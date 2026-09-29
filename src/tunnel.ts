@@ -4,9 +4,9 @@
  * `ferry expose` announces on the box.
  */
 
-import { rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { quoteShell } from "./box-settings.ts";
 import { resolveLinkOptions, type OperatorHostConfig } from "./config.ts";
 import { EXPOSED_DIR } from "./expose.ts";
@@ -28,7 +28,7 @@ type TunnelLink = Pick<Link, "run" | "tunnel" | "master">;
 export type TunnelDependencies = {
   readonly createLink: (options: LinkOptions) => TunnelLink;
   readonly writeLine: (line: string) => void;
-  /** Calls `stop` when the operator presses Ctrl-C. Returns a function that removes the handler. */
+  /** Calls `stop` on Ctrl-C (SIGINT) or SIGTERM. Returns a function that removes the handlers. */
   readonly onInterrupt: (stop: () => void) => () => void;
   readonly isPortFree: (port: number) => Promise<boolean>;
   /** The control socket of the master connection of `--follow`. */
@@ -37,6 +37,28 @@ export type TunnelDependencies = {
   readonly reconnectMs: number;
   /** With --json, prints one event for each forward change. */
   readonly emit: (event: OutputEvent) => void;
+  /** Writes `~/.ferry/tunnels/<box>.json` of `--follow`. */
+  readonly writeTunnelFile: (file: TunnelFile) => void;
+  /** Removes `~/.ferry/tunnels/<box>.json` when `--follow` stops. */
+  readonly removeTunnelFile: (box: string) => void;
+};
+
+/** The content of `~/.ferry/tunnels/<box>.json`. The menu bar app reads it. */
+export type TunnelFile = {
+  readonly schemaVersion: 1;
+  readonly box: string;
+  /** The pid of `ferry tunnel --follow`. A reader ignores the file when this pid does not run. */
+  readonly pid: number;
+  /** False after the connection drops, until Ferry connects again. */
+  readonly connected: boolean;
+  /** ISO 8601 time. */
+  readonly updatedAt: string;
+  readonly forwards: readonly {
+    readonly name?: string;
+    readonly cwd?: string;
+    readonly boxPort: number;
+    readonly localPort: number;
+  }[];
 };
 
 /** A live entry of `~/.ferry/exposed/` on the box. */
@@ -153,7 +175,7 @@ export async function runTunnel(
 /**
  * Follow the entries of `ferry expose` on the box until Ctrl-C. When the
  * connection drops after it was open, Ferry connects again and reads the
- * entries again.
+ * entries again. The tunnel file shows the forwards while the command runs.
  */
 async function follow(box: TunnelInput["box"], resolved: TunnelDependencies): Promise<void> {
   const link = resolved.createLink(resolveLinkOptions(box.host));
@@ -173,12 +195,14 @@ async function follow(box: TunnelInput["box"], resolved: TunnelDependencies): Pr
           retryInMs: resolved.reconnectMs,
         }),
       );
+      writeTunnelFile(box.name, false, [], resolved);
       resolved.writeLine(`The connection to ${box.name} closed: ${ended.reason}. Ferry connects again in ${resolved.reconnectMs / 1_000} s.`);
       await abortableSleep(resolved.reconnectMs, controller.signal);
       if (controller.signal.aborted) break;
     }
   } finally {
     stopListening();
+    resolved.removeTunnelFile(box.name);
   }
   resolved.emit({ type: "tunnel-closed", box: box.name });
   resolved.writeLine("Tunnel closed.");
@@ -205,6 +229,7 @@ async function followSession(
   signal.addEventListener("abort", close, { once: true });
   if (signal.aborted) close();
   resolved.emit({ type: "following", box: boxName, reconnected: reconnect });
+  writeTunnelFile(boxName, true, [], resolved);
   resolved.writeLine(
     `${reconnect ? "Connected again. " : ""}Following the ports that ferry expose announces on ${boxName}. Press Ctrl-C to close the tunnel.`,
   );
@@ -217,7 +242,11 @@ async function followSession(
       home = value;
     },
     (entries) => {
-      queue = queue.then(() => reconcile(master, forwards, entries, boxName, () => home, resolved, signal));
+      queue = queue
+        .then(() => reconcile(master, forwards, entries, boxName, () => home, resolved, signal))
+        .then(() => {
+          if (!signal.aborted) writeTunnelFile(boxName, true, forwards.values(), resolved);
+        });
     },
   );
   // The login shell of the box can be another shell, so the script runs in sh.
@@ -379,6 +408,26 @@ function followLine(entry: FollowEntry, localPort: number | null, boxName: strin
   return `${name}  ${local}${boxName}:${entry.port}${cwd}`;
 }
 
+function writeTunnelFile(box: string, connected: boolean, forwards: Iterable<FollowForward>, resolved: TunnelDependencies): void {
+  resolved.writeTunnelFile({
+    schemaVersion: 1,
+    box,
+    pid: process.pid,
+    connected,
+    updatedAt: new Date().toISOString(),
+    forwards: [...forwards].map((forward) => ({
+      ...(forward.name === null ? {} : { name: forward.name }),
+      ...(forward.cwd === null ? {} : { cwd: forward.cwd }),
+      boxPort: forward.port,
+      localPort: forward.localPort,
+    })),
+  });
+}
+
+function tunnelFilePath(box: string): string {
+  return join(homedir(), ".ferry", "tunnels", `${box}.json`);
+}
+
 function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(done, ms);
@@ -531,11 +580,25 @@ const defaultDependencies: TunnelDependencies = {
   createLink: (options) => new Link(options),
   writeLine: console.log,
   onInterrupt: (stop) => {
+    // The user service manager stops the service with SIGTERM.
     process.once("SIGINT", stop);
-    return () => process.off("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    return () => {
+      process.off("SIGINT", stop);
+      process.off("SIGTERM", stop);
+    };
   },
   isPortFree,
   controlPath: join(tmpdir(), `ferry-tunnel-${process.pid}.sock`),
   reconnectMs: 5_000,
   emit: () => {},
+  // Replace the file in one rename, so a reader never sees half a file.
+  writeTunnelFile: (file) => {
+    const path = tunnelFilePath(file.box);
+    const temporary = `${path}.tmp`;
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(temporary, `${JSON.stringify(file)}\n`, { mode: 0o600 });
+    renameSync(temporary, path);
+  },
+  removeTunnelFile: (box) => rmSync(tunnelFilePath(box), { force: true }),
 };

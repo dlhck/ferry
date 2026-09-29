@@ -767,7 +767,14 @@ Local ports bind to 127.0.0.1 only. The box end is 127.0.0.1 on the box, so a
 dev server that listens only on ::1 does not answer. A plain tunnel does not
 reconnect. With --follow, the local port is the box port when it is free, else
 the next free port, and Ferry connects again 5 seconds after a drop. Run
-ferry tunnel install to run --follow as a user service.`)
+ferry tunnel install to run --follow as a user service.
+
+--follow writes its forwards to ~/.ferry/tunnels/<box>.json when it connects,
+after each change, and when the connection drops. The menu bar app reads the
+file. Fields: schemaVersion (1), box, pid, connected (false after a drop, with
+no forwards), updatedAt, and forwards: [{ name, cwd, boxPort, localPort }].
+name and cwd are missing when the entry of ferry expose has none. Ferry
+removes the file when --follow stops on Ctrl-C or SIGTERM.`)
     .argument("[ports...]", "box port, or box:local to pick another local port, such as 3000 or 3000:4000")
     .option("--list", "list the TCP ports that listen on the box, with process names")
     .option("--follow", "open a forward for each port that ferry expose announces on the box, and close it when the port goes away")
@@ -792,6 +799,9 @@ its own service:
          log: ~/Library/Logs/ferry-tunnel-<box>.log
   Linux  ~/.config/systemd/user/ferry-tunnel-<box>.service
          log: journalctl --user -u ferry-tunnel-<box>.service -f
+
+The service writes ~/.ferry/tunnels/<box>.json, as ferry tunnel --follow does.
+The menu bar app shows its ports.
 
 The service starts again each time it exits. The service records the path of
 this Ferry, the current PATH, and SSH_AUTH_SOCK. PATH must find ssh, and
@@ -1106,6 +1116,9 @@ Ferry update, restart the service:
 The app shows the report of ~/.ferry/status.json: offline boxes, logins, MCP
 logins, and tool drift. ferry watch writes the file, so run ferry watch
 install too. Click an item with a Ferry command to run it in Terminal.
+
+The app also shows the ports of each running ferry tunnel --follow, from
+~/.ferry/tunnels/<box>.json. Click a port to open it in the browser.
 
 Ferry downloads ferry-menubar-macos.zip of the release of this Ferry,
 verifies it against SHA256SUMS of the release, and unpacks it to
