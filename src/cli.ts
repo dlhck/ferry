@@ -79,6 +79,7 @@ import {
   type StatusCommandInput,
 } from "./status-command.ts";
 import type { BriefStatusReport, StatusReport } from "./status.ts";
+import { failedChecks, formatDoctor, runDoctor, type DoctorDependencies, type DoctorInput, type DoctorReport } from "./doctor.ts";
 import { runToolsCommand, toolsLines, type ToolsCommandDependencies, type ToolsReport } from "./tools/command.ts";
 import { boxPathDirs } from "./tools/path.ts";
 import { runWatch, type WatchDependencies, type WatchInput } from "./watch.ts";
@@ -165,6 +166,7 @@ type CliDependencies = {
     input: StatusCommandInput,
     dependencies?: Partial<StatusCommandDependencies>,
   ) => Promise<StatusReport>;
+  readonly runDoctor?: (input: DoctorInput, dependencies?: Partial<DoctorDependencies>) => Promise<DoctorReport>;
   readonly runBriefStatus?: (
     input: StatusCommandInput,
     dependencies?: Partial<StatusCommandDependencies>,
@@ -254,6 +256,8 @@ const JSON_RESULTS: Record<string, string> = {
   expose: "events exposed and exited. The output of the command goes to stderr",
   status:
     "the status report, schema version 2. With --brief, { schemaVersion: 1, checkedAt, boxes: [{ name, host, online, error, issues: [{ kind, name, state, message, command }] }] }",
+  doctor:
+    "{ schemaVersion: 1, ok, checks: [{ id, box, status, message, fix }] }, also on failure. status is ok, failed, or skipped",
   integrations: "{ boxes: [{ name, destination, integrations: [{ id, description, enabled, localVersion, localSource, connectSteps }] }] }",
   "integrations enable": "{ integration, action, dryRun, plan, output, enabled, connectSteps }",
   "integrations disable": "{ integration, action, dryRun, plan, output, enabled, connectSteps }",
@@ -908,6 +912,37 @@ command that fixes it. ferry watch writes the same report to
       });
     });
 
+  program
+    .command("doctor")
+    .summary("Check SSH, Tailscale, snapshot access, linger, and services, and print a fix for each failure")
+    .description(`Check SSH, Tailscale, snapshot access, linger, and services, and print a fix for each failure.
+
+Ferry runs each check, also after a check fails, and changes nothing. It
+checks that the SSH agent has a key, that this machine can read the snapshot
+and push to it (git push --dry-run), and that the installed watch and tunnel
+services run this Ferry. For each box, it checks that the box responds over
+SSH with host key checks on, that Tailscale reaches a Tailscale box, that the
+box can read the snapshot with the forwarded agent or the deploy key of
+git_auth = "box", and that linger is on when a Ferry service runs on the box.
+
+The exit code is 1 when a check fails. With --json, result has one entry for
+each check, also on failure.`)
+    .action(async () => {
+      const result = await withProgress((progress) =>
+        (dependencies.runDoctor ?? runDoctor)({ selection: boxNames() }, { createLink, progress }),
+      );
+      if (result.ok) {
+        report(result, (result) => writeLine(formatDoctor(result)));
+        return;
+      }
+      if (!json()) writeLine(formatDoctor(result));
+      failedResult = result;
+      const count = failedChecks(result);
+      throw new FerryError("failed", `${count} of ${result.checks.length} checks failed.`, {
+        hint: "Run the fix of each failed check, then run ferry doctor again.",
+      });
+    });
+
   const integrations = program
     .command("integrations")
     .description("List the integrations of each box, whether each one is enabled, and the local app versions")
@@ -1248,7 +1283,7 @@ git_auth = "box" in its [box.<name>] table and run ferry init --box <name>.`)
     .argument("<name>", "box name")
     .action((name: string) => report(runBoxDefault({ name }, { readConfig: config, writeConfig: (value) => writeConfig(value), writeLine })));
 
-  for (const name of ["init", "install", "update", "auth", "sync", "move", "tunnel", "status", "integrations", "tools"]) {
+  for (const name of ["init", "install", "update", "auth", "sync", "move", "tunnel", "status", "doctor", "integrations", "tools"]) {
     const command = program.commands.find((known) => known.name() === name);
     if (command) boxCommands.add(command);
   }
