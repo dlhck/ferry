@@ -46,7 +46,8 @@ const UNIT_PATH = `.config/systemd/user/${UNIT}`;
 /** A unit that the operator wrote by hand before Ferry managed Paseo. */
 const OLD_UNIT = "paseo.service";
 const LISTEN = "127.0.0.1:6767";
-const SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+/** The system directories at the end of the PATH of ferry-paseo.service. */
+export const SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const INSTALL_TIMEOUT_MS = 10 * 60 * 1_000;
 
 /** The daemon gets the same PATH as a Ferry box command, so agents find the same tools. */
