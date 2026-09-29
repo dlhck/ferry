@@ -47,11 +47,7 @@ export type BoxStatusDependencies = {
     check(online: boolean): Promise<readonly ToolStatus[]>;
   };
   /** The integrations that are enabled for this box only. */
-  readonly integrations?: readonly {
-    readonly id: IntegrationId;
-    readonly name: string;
-    health(): Promise<IntegrationHealth>;
-  }[];
+  readonly integrations?: readonly IntegrationCheck[];
 };
 
 export type StatusDependencies = {
@@ -66,7 +62,16 @@ export type StatusDependencies = {
   };
   /** The selected boxes, in config order. */
   readonly boxes: readonly BoxStatusDependencies[];
+  /** The checks of the enabled integrations on this machine. */
+  readonly integrations?: readonly IntegrationCheck[];
   readonly progress?: Progress;
+};
+
+/** The health check of one enabled integration. */
+export type IntegrationCheck = {
+  readonly id: IntegrationId;
+  readonly name: string;
+  health(): Promise<IntegrationHealth>;
 };
 
 /** The health of one enabled integration. `state` is the machine-readable part. */
@@ -148,6 +153,8 @@ export type StatusReport = {
   readonly denyList: readonly DenyRuleDescription[];
   /** One entry for each selected box, in config order. */
   readonly boxes: readonly BoxStatus[];
+  /** The integration checks on this machine. Present only when an enabled integration has one. */
+  readonly integrations?: Readonly<Partial<Record<IntegrationId, IntegrationStatus>>>;
   /** The operator and git remote errors only. Each box has its own errors. */
   readonly errors: readonly StatusError[];
 };
@@ -309,8 +316,10 @@ const BOX_LIMIT = 4;
 /** Compose one read-only report from module-owned inspection methods. */
 export async function composeStatus(dependencies: StatusDependencies): Promise<StatusReport> {
   const progress = dependencies.progress ?? noProgress;
+  const operatorIntegrations = dependencies.integrations ?? [];
   progress.plan(
     1 +
+      operatorIntegrations.length +
       dependencies.boxes.reduce(
         (total, box) => total + BOX_STEPS + (box.tools ? 1 : 0) + (box.integrations?.length ?? 0),
         0,
@@ -345,6 +354,17 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     errors.push(storeError);
   }
 
+  const integrations: Partial<Record<IntegrationId, IntegrationStatus>> = {};
+  for (const integration of operatorIntegrations) {
+    integrations[integration.id] = await integrationStatus(
+      progress,
+      `Checking ${integration.name} on this machine`,
+      integration,
+      "operator",
+      errors,
+    );
+  }
+
   const shared: SharedStatus = { local, remote, operatorIdentity };
   const boxProgress = orderedProgress(progress, dependencies.boxes.map((box) => box.name));
   const boxes = await mapLimit(dependencies.boxes, BOX_LIMIT, async (box, index) => {
@@ -361,6 +381,7 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     operator: { gitIdentity: operatorIdentity, error: operatorError },
     denyList,
     boxes,
+    ...(operatorIntegrations.length > 0 ? { integrations } : {}),
     errors,
   };
 }
@@ -560,26 +581,7 @@ async function composeBoxStatus(
       };
       continue;
     }
-    try {
-      const health = await step(progress, name, () => integration.health(), undefined, (health) =>
-        health.warnings.length > 0 ? plural(health.warnings.length, "warning") : undefined,
-      );
-      integrations[integration.id] = {
-        name: integration.name,
-        lines: health.lines,
-        warnings: health.warnings,
-        state: health.json,
-      };
-    } catch (cause) {
-      const error = dependencyError("box", cause);
-      errors.push(error);
-      integrations[integration.id] = {
-        name: integration.name,
-        lines: ["unavailable"],
-        warnings: [],
-        state: { error: error.message },
-      };
-    }
+    integrations[integration.id] = await integrationStatus(progress, name, integration, "box", errors);
   }
 
   const localMatchesRemote = shared.local !== null && shared.local === shared.remote;
@@ -606,6 +608,26 @@ async function composeBoxStatus(
     ...(enabledIntegrations.length > 0 ? { integrations } : {}),
     errors,
   };
+}
+
+/** Run one integration health check as a progress step. A failed check adds its error to `errors`. */
+async function integrationStatus(
+  progress: Progress,
+  name: string,
+  integration: IntegrationCheck,
+  origin: StatusDependencyError["origin"],
+  errors: StatusError[],
+): Promise<IntegrationStatus> {
+  try {
+    const health = await step(progress, name, () => integration.health(), undefined, (health) =>
+      health.warnings.length > 0 ? plural(health.warnings.length, "warning") : undefined,
+    );
+    return { name: integration.name, lines: health.lines, warnings: health.warnings, state: health.json };
+  } catch (cause) {
+    const error = dependencyError(origin, cause);
+    errors.push(error);
+    return { name: integration.name, lines: ["unavailable"], warnings: [], state: { error: error.message } };
+  }
 }
 
 /**

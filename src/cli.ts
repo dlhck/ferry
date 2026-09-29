@@ -61,7 +61,7 @@ import {
   runBoxRemove,
   type BoxCommandDependencies,
 } from "./box.ts";
-import { INTEGRATIONS, integrationLines, listIntegrations, type Integration } from "./integrations/index.ts";
+import { INTEGRATIONS, integrationLines, listIntegrations, operatorIntegrations, type Integration } from "./integrations/index.ts";
 import {
   runIntegrationCommand,
   type IntegrationCommandDependencies,
@@ -272,7 +272,7 @@ const JSON_RESULTS: Record<string, string> = {
     "the status report, schema version 2. With --brief, { schemaVersion: 1, checkedAt, boxes: [{ name, host, online, error, issues: [{ kind, name, state, message, command }] }] }",
   doctor:
     "{ schemaVersion: 1, ok, checks: [{ id, box, status, message, fix }] }, also on failure. status is ok, failed, or skipped",
-  integrations: "{ boxes: [{ name, destination, integrations: [{ id, description, enabled, localVersion, localSource, connectSteps }] }] }",
+  integrations: "{ boxes: [{ name, destination, integrations: [{ id, description, enabled, parts, available, localVersion, localSource, connectSteps }] }] }",
   "integrations enable": "{ integration, action, dryRun, plan, output, enabled, connectSteps }",
   "integrations disable": "{ integration, action, dryRun, plan, output, enabled, connectSteps }",
   tools: "{ tools: [{ id, name, kind, install, policy: { policy, default }, boxes, operatorVersion }] }",
@@ -307,7 +307,8 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
 }
 
 function createProgram(dependencies: CliDependencies): { program: Command; state: RunState } {
-  // Commands that need the registry resolve it when they run, so help never reads the config.
+  // Commands that need the registry resolve it when they run. The program build reads the config
+  // one time to add the operator commands of the integrations. A failed read does not stop the start.
   const config = () => (dependencies.readConfig ?? readConfig)() ?? {};
   const registry = () => resolveRegistry(config());
   /** Each box command puts the PATH directories of the registry tools in front of PATH. `ferry sync` adds them itself. */
@@ -1028,7 +1029,7 @@ each check, also on failure.`)
 
   const integrations = program
     .command("integrations")
-    .description("List the integrations of each box, whether each one is enabled, and the local app versions")
+    .description("List the integrations of each box, whether each one is enabled, its parts, and the local app versions")
     .action(async () => {
       const result = await listIntegrations(config(), dependencies.integrations ?? INTEGRATIONS, boxNames());
       report(result, (result) => {
@@ -1053,7 +1054,10 @@ the box.
 For relay pairing, set paseo_relay = true in [integrations] of
 ~/.ferry/config.toml. A [box.<name>.integrations] table can override it.
 Run ferry integrations enable paseo --box <name> again to apply a change.
-A changed service config restarts the daemon and stops its agents.`)
+A changed service config restarts the daemon and stops its agents.
+
+An integration without a box part runs only on this machine. For it, Ferry
+changes only the config and adds its commands when it can run here.`)
     .argument("<name>", "integration name, such as paseo")
     .option("--dry-run", "print the box commands without connecting or writing")
     .option("--yes", "run without a confirmation prompt")
@@ -1078,7 +1082,8 @@ A changed service config restarts the daemon and stops its agents.`)
     .summary("Stop and remove an integration on the box, then turn it off in the config")
     .description(`Stop and remove an integration on the box, then turn it off in the config.
 
-Ferry never removes ~/.paseo on the box.`)
+Ferry never removes ~/.paseo on the box. An integration without a box part
+changes only the config.`)
     .argument("<name>", "integration name, such as paseo")
     .option("--purge", "also uninstall the integration package on the box")
     .option("--yes", "run without a confirmation prompt")
@@ -1098,6 +1103,17 @@ Ferry never removes ~/.paseo on the box.`)
       );
       report(result);
     });
+
+  // An enabled integration with an operator part adds its commands only when it can run on this machine.
+  let current: PartialOperatorConfig = {};
+  try {
+    current = config();
+  } catch {
+    // The commands that read the config report the error.
+  }
+  for (const integration of operatorIntegrations(current, dependencies.integrations ?? INTEGRATIONS)) {
+    if (integration.operator.available()) integration.operator.registerCommands?.(program);
+  }
 
   program
     .command("tools")

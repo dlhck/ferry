@@ -71,15 +71,17 @@ export async function runIntegrationCommand(
 
   const enable = input.action === "enable";
   const action: IntegrationCommandResult["action"] = enable ? "enable" : input.purge ? "purge" : "disable";
+  const box = integration.box;
   resolved.writeLine(`${enable ? "Enable" : "Disable"} ${integration.name}:`);
-  const plan = await integration.plan(action, undefined, config?.integrations);
+  const plan = box ? await box.plan(action, undefined, config?.integrations) : [];
   for (const line of plan) resolved.writeLine(line);
   const result = { integration: integration.id, action, plan };
   if (enable && input.dryRun) {
     resolved.writeLine("Dry run: Ferry made no changes.");
     return { ...result, dryRun: true, output: [], enabled: null, connectSteps: [] };
   }
-  if (!input.yes) {
+  // Without a box part, the command changes only the config, so it asks nothing.
+  if (box && !input.yes) {
     resolved.progress.pause();
     if ((await resolved.confirm(`${enable ? "Enable" : "Disable"} ${integration.name} on the box?`)) !== true) {
       resolved.writeLine(`${enable ? "Enable" : "Disable"} cancelled.`);
@@ -87,20 +89,26 @@ export async function runIntegrationCommand(
     }
   }
 
-  const link = resolved.createLink(target);
-  const lines = enable
-    ? await integration.enable(link, resolved.progress, config?.integrations)
-    : await integration.disable(link, resolved.progress, { purge: input.purge });
+  let lines: readonly string[] = [];
+  if (box) {
+    const link = resolved.createLink(target);
+    lines = enable
+      ? await box.enable(link, resolved.progress, config?.integrations)
+      : await box.disable(link, resolved.progress, { purge: input.purge });
+  }
   for (const line of lines) resolved.writeLine(line);
   // The flag changes only after the box steps succeed.
   resolved.setIntegration(integration.id, enable);
   const table = resolved.box === undefined ? "integrations" : `box.${resolved.box}.integrations`;
   resolved.writeLine(`Set [${table}] ${integration.id} = ${enable} in ${configPath()}.`);
+  if (enable && integration.operator && !integration.operator.available()) {
+    resolved.writeLine(`${integration.name} is not available on this machine. Ferry adds its commands when it is.`);
+  }
   const done = { ...result, dryRun: false, output: lines, enabled: enable };
-  if (!enable) return { ...done, connectSteps: [] };
+  if (!enable || !box) return { ...done, connectSteps: [] };
   resolved.writeLine(`Connect ${integration.name} to the box:`);
   const destination = host.transport === "ssh" ? host.destination : `${host.sshUser}@${host.tailscale}`;
-  const connectSteps = integration.connectSteps(destination);
+  const connectSteps = box.connectSteps(destination);
   for (const step of connectSteps) resolved.writeLine(`  ${step}`);
   return { ...done, connectSteps };
 }

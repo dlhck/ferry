@@ -71,7 +71,7 @@ Use `--host <tailscale host> --ssh-user <user>` instead of `--ssh-destination` f
 | `ferry move <path>` | Continue a project on a box, back on this machine, or on another box. |
 | `ferry tunnel` | Open box ports, or ports of a host that the box can reach, on `127.0.0.1` of this machine. `ferry tunnel install` runs `--follow` for one box as a user service. |
 | `ferry expose` | On the box: run a dev server and announce its port to `ferry tunnel --follow`. |
-| `ferry integrations` | List, enable, or disable the Paseo integration of a box. |
+| `ferry integrations` | List, enable, or disable the Paseo integration of a box. The list shows the part of each integration: `box` for a box service, `operator` for commands and status checks on this machine. |
 | `ferry uninstall` | Remove Ferry from this machine and restore the paths that `init` changed. |
 
 `ferry <command> --help` has the options, the config formats, and the details of each command.

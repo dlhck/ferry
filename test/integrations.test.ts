@@ -7,14 +7,15 @@ import {
   runIntegrationCommand,
   type IntegrationCommandDependencies,
 } from "../src/integrations/command.ts";
-import { INTEGRATIONS, integrationLines, listIntegrations } from "../src/integrations/index.ts";
+import { INTEGRATIONS, integrationLines, listIntegrations, operatorIntegrations } from "../src/integrations/index.ts";
+import { EXAMPLE_ID, operatorIntegration } from "./fake-integration.ts";
 
 /** The `ferry integrations` lines, as the CLI prints them. */
 async function integrationText(...args: Parameters<typeof listIntegrations>): Promise<string[]> {
   return integrationLines(await listIntegrations(...args));
 }
 import { createPaseo, paseoSourceHint } from "../src/integrations/paseo.ts";
-import type { Integration, IntegrationLink } from "../src/integrations/types.ts";
+import type { BoxIntegration, Integration, IntegrationLink } from "../src/integrations/types.ts";
 import { BunHostAdapter, type HostAdapter, type HostCommand, type LinkResult } from "../src/link.ts";
 
 const roots: string[] = [];
@@ -67,7 +68,7 @@ describe("Paseo local version", () => {
     copyFileSync(BINARY_PLIST, join(app, "Contents/Info.plist"));
     const host = fakeHost({ stdout: "0.9.2\n" });
 
-    const version = await createPaseo({ platform: "darwin", macApp: app, host }).localVersion();
+    const version = await createPaseo({ platform: "darwin", macApp: app, host }).box.localVersion();
 
     expect(version).toEqual({ version: "0.9.2", source: cli });
     expect(host.calls).toEqual([[cli, "--version"]]);
@@ -81,7 +82,7 @@ describe("Paseo local version", () => {
     copyFileSync(BINARY_PLIST, plist);
     const host = fakeHost({ stdout: "", exitCode: 1 }, { stdout: "0.9.1\n" });
 
-    const version = await createPaseo({ platform: "darwin", macApp: app, host }).localVersion();
+    const version = await createPaseo({ platform: "darwin", macApp: app, host }).box.localVersion();
 
     expect(version).toEqual({ version: "0.9.1", source: plist });
     expect(host.calls).toEqual([
@@ -97,7 +98,7 @@ describe("Paseo local version", () => {
     copyFileSync(BINARY_PLIST, plist);
 
     const version = await createPaseo({ platform: "darwin", macApp: app, host: new BunHostAdapter() })
-      .localVersion();
+      .box.localVersion();
 
     expect(version).toEqual({ version: "0.9.2", source: plist });
   });
@@ -109,7 +110,7 @@ describe("Paseo local version", () => {
     const host = fakeHost({ stdout: "paseo 0.10.0-beta.1\n" });
 
     const version = await createPaseo({ platform: "linux", linuxInstallDir: installDir, host })
-      .localVersion();
+      .box.localVersion();
 
     expect(version).toEqual({ version: "0.10.0-beta.1", source: cli });
     expect(host.calls).toEqual([[cli, "--version"]]);
@@ -120,10 +121,10 @@ describe("Paseo local version", () => {
     const host = fakeHost({ stdout: "0.9.2\n" }, { stdout: "0.9.2\n" });
 
     expect(
-      await createPaseo({ platform: "darwin", macApp: join(root, "Paseo.app"), host }).localVersion(),
+      await createPaseo({ platform: "darwin", macApp: join(root, "Paseo.app"), host }).box.localVersion(),
     ).toEqual({ version: null, source: null });
     expect(
-      await createPaseo({ platform: "linux", linuxInstallDir: join(root, "Paseo"), host }).localVersion(),
+      await createPaseo({ platform: "linux", linuxInstallDir: join(root, "Paseo"), host }).box.localVersion(),
     ).toEqual({ version: null, source: null });
     expect(host.calls).toEqual([]);
   });
@@ -135,7 +136,7 @@ describe("Paseo integration", () => {
   });
 
   test("connect steps name the Desktop settings and the box destination", () => {
-    expect(createPaseo().connectSteps("ploi@box")).toEqual([
+    expect(createPaseo().box.connectSteps("ploi@box")).toEqual([
       "Open Paseo Desktop.",
       "Open Settings → Add host → Remote SSH.",
       "Enter ssh://ploi@box.",
@@ -143,16 +144,16 @@ describe("Paseo integration", () => {
   });
 
   test("connect steps keep an ssh:// destination with its port", () => {
-    expect(createPaseo().connectSteps("ssh://user@box.example:2222")).toContain(
+    expect(createPaseo().box.connectSteps("ssh://user@box.example:2222")).toContain(
       "Enter ssh://user@box.example:2222.",
     );
   });
 
   test("connect steps put an IPv6 host in brackets", () => {
-    expect(createPaseo().connectSteps("user@fd7a:115c:a1e0::1")).toContain(
+    expect(createPaseo().box.connectSteps("user@fd7a:115c:a1e0::1")).toContain(
       "Enter ssh://user@[fd7a:115c:a1e0::1].",
     );
-    expect(createPaseo().connectSteps("fd7a:115c:a1e0::1")).toContain(
+    expect(createPaseo().box.connectSteps("fd7a:115c:a1e0::1")).toContain(
       "Enter ssh://[fd7a:115c:a1e0::1].",
     );
   });
@@ -203,7 +204,7 @@ function boxLink(state: BoxState | LinkResult): IntegrationLink & { commands: st
 }
 
 /** A Paseo integration with a local app at `version`, or no local app. */
-function paseoWithApp(version: string | null): Integration {
+function paseoWithApp(version: string | null): BoxIntegration {
   if (version === null) return createPaseo({ platform: "win32" });
   const app = join(tempRoot(), "Paseo.app");
   touch(join(app, "Contents/Resources/bin/paseo"));
@@ -218,7 +219,7 @@ describe("Paseo health", () => {
   test("reports a running daemon with the same version as the local app", async () => {
     const link = boxLink({});
 
-    const health = await paseoWithApp("0.9.2").health(link);
+    const health = await paseoWithApp("0.9.2").box.health(link);
 
     expect(health.lines).toEqual([
       "Service: ferry-paseo.service active, enabled",
@@ -258,7 +259,7 @@ describe("Paseo health", () => {
       status: daemonStatus({ localDaemon: "stopped", connectedDaemon: "unreachable", daemonVersion: null }),
     });
 
-    const health = await paseoWithApp("0.9.2").health(link);
+    const health = await paseoWithApp("0.9.2").box.health(link);
 
     expect(health.lines).toContain("Service: ferry-paseo.service inactive, enabled");
     expect(health.lines).toContain("Daemon: stopped, unreachable");
@@ -269,7 +270,7 @@ describe("Paseo health", () => {
   });
 
   test("warns when the box version differs from the local app", async () => {
-    const health = await paseoWithApp("0.10.0").health(boxLink({}));
+    const health = await paseoWithApp("0.10.0").box.health(boxLink({}));
 
     expect(health.lines).toContain("Version: box 0.9.2, local app 0.10.0");
     expect(health.warnings).toEqual([
@@ -278,7 +279,7 @@ describe("Paseo health", () => {
   });
 
   test("says not pinned when there is no local app", async () => {
-    const health = await paseoWithApp(null).health(boxLink({}));
+    const health = await paseoWithApp(null).box.health(boxLink({}));
 
     expect(health.lines).toContain("Version: box 0.9.2, not pinned (no local Paseo app)");
     expect(health.warnings).toEqual([]);
@@ -286,7 +287,7 @@ describe("Paseo health", () => {
   });
 
   test("warns when the relay is on", async () => {
-    const health = await paseoWithApp("0.9.2").health(boxLink({ status: daemonStatus({ relay: { enabled: true } }) }));
+    const health = await paseoWithApp("0.9.2").box.health(boxLink({ status: daemonStatus({ relay: { enabled: true } }) }));
 
     expect(health.lines).toContain("Listen: 127.0.0.1:6767, relay ON");
     expect(health.warnings).toEqual(["The Paseo relay is on. Ferry keeps it off on the box."]);
@@ -294,7 +295,7 @@ describe("Paseo health", () => {
   });
 
   test("warns when the daemon listens on an address that is not loopback", async () => {
-    const health = await paseoWithApp("0.9.2").health(boxLink({ status: daemonStatus({ listen: "0.0.0.0:6767" }) }));
+    const health = await paseoWithApp("0.9.2").box.health(boxLink({ status: daemonStatus({ listen: "0.0.0.0:6767" }) }));
 
     expect(health.warnings).toEqual([
       "Paseo listens on 0.0.0.0:6767, which is not a loopback address. Other hosts can control the daemon.",
@@ -303,13 +304,13 @@ describe("Paseo health", () => {
 
   test("accepts the loopback addresses", async () => {
     for (const listen of ["127.0.0.1:6767", "localhost:6767", "[::1]:6767", "/run/user/1000/paseo.sock"]) {
-      const health = await paseoWithApp("0.9.2").health(boxLink({ status: daemonStatus({ listen }) }));
+      const health = await paseoWithApp("0.9.2").box.health(boxLink({ status: daemonStatus({ listen }) }));
       expect(health.warnings).toEqual([]);
     }
   });
 
   test("warns when the old paseo.service is active", async () => {
-    const health = await paseoWithApp("0.9.2").health(boxLink({ active: "inactive", oldActive: "active" }));
+    const health = await paseoWithApp("0.9.2").box.health(boxLink({ active: "inactive", oldActive: "active" }));
 
     expect(health.warnings).toEqual([
       "The old paseo.service is active, so two Paseo daemons can run. Run ferry integrations enable paseo to replace it.",
@@ -323,7 +324,7 @@ describe("Paseo health", () => {
       error: { code: "host-offline", origin: "network", message: "Tailscale host box is offline" },
     });
 
-    const health = await paseoWithApp("0.9.2").health(link);
+    const health = await paseoWithApp("0.9.2").box.health(link);
 
     expect(health.lines).toEqual(["Box: unavailable (network/host-offline)"]);
     expect(health.warnings).toEqual([]);
@@ -331,7 +332,7 @@ describe("Paseo health", () => {
   });
 
   test("reports that Paseo is not installed on the box", async () => {
-    const health = await paseoWithApp("0.9.2").health(
+    const health = await paseoWithApp("0.9.2").box.health(
       boxLink({ active: "inactive", enabled: "not-found", status: null }),
     );
 
@@ -344,7 +345,7 @@ describe("Paseo health", () => {
   });
 
   test("reports malformed status output without the output itself", async () => {
-    const health = await paseoWithApp("0.9.2").health(boxLink({ status: "secretKeyB64=abc {not json" }));
+    const health = await paseoWithApp("0.9.2").box.health(boxLink({ status: "secretKeyB64=abc {not json" }));
 
     expect(health.lines).toContain("Daemon: unknown, paseo daemon status printed no valid JSON");
     expect(health.warnings).toEqual(["Ferry cannot read the output of paseo daemon status --json on the box."]);
@@ -353,7 +354,7 @@ describe("Paseo health", () => {
   });
 
   test("never shows the server ID or the hostname", async () => {
-    const health = await paseoWithApp("0.9.2").health(
+    const health = await paseoWithApp("0.9.2").box.health(
       boxLink({ status: daemonStatus({ serverId: "srv_secret", hostname: "box-host", logPath: "/p/daemon.log" }) }),
     );
 
@@ -374,7 +375,7 @@ describe("Paseo project move", () => {
       },
     };
 
-    await createPaseo().onProjectMoved(link, "~/Developer/it's");
+    await createPaseo().box.onProjectMoved(link, "~/Developer/it's");
 
     expect(commands).toEqual([`paseo project create "$HOME"/'Developer/it'"'"'s' >/dev/null`]);
   });
@@ -386,7 +387,7 @@ describe("Paseo project move", () => {
       },
     };
 
-    await expect(createPaseo().onProjectMoved(link, "~/app")).rejects.toThrow(
+    await expect(createPaseo().box.onProjectMoved(link, "~/app")).rejects.toThrow(
       "paseo project create failed: directory_not_found",
     );
   });
@@ -407,6 +408,7 @@ describe("integration list", () => {
 
     expect(await integrationText(CONFIG, [paseo])).toEqual([
       "paseo  disabled  Paseo daemon on the box",
+      "  Parts: box",
       `  Local app: 0.9.2 (${cli})`,
     ]);
   });
@@ -416,6 +418,7 @@ describe("integration list", () => {
 
     expect(await integrationText({ ...CONFIG, integrations: { paseo: true } }, [paseo])).toEqual([
       "paseo  enabled  Paseo daemon on the box",
+      "  Parts: box",
       "  Local app: not found. The box version is not pinned.",
       "  Connect to the box:",
       "    Open Paseo Desktop.",
@@ -452,6 +455,7 @@ describe("integration list with box tables", () => {
     expect(await integrationText(BOXES, [paseo()])).toEqual([
       "Box a",
       "  paseo  enabled  Paseo daemon on the box",
+      "    Parts: box",
       "    Local app: not found. The box version is not pinned.",
       "    Connect to the box:",
       "      Open Paseo Desktop.",
@@ -459,6 +463,7 @@ describe("integration list with box tables", () => {
       "      Enter ssh://dev@box-a.example.",
       "Box b",
       "  paseo  disabled  Paseo daemon on the box",
+      "    Parts: box",
       "    Local app: not found. The box version is not pinned.",
     ]);
   });
@@ -471,7 +476,8 @@ describe("integration list with box tables", () => {
 
   test("reads the local app version once", async () => {
     let reads = 0;
-    const counted: Integration = { ...paseo(), localVersion: async () => { reads += 1; return { version: null, source: null }; } };
+    const base = paseo();
+    const counted: Integration = { ...base, box: { ...base.box, localVersion: async () => { reads += 1; return { version: null, source: null }; } } };
     await integrationText(BOXES, [counted]);
     expect(reads).toBe(1);
   });
@@ -485,18 +491,21 @@ describe("integrations enable and disable", () => {
     const paseo = createPaseo({ platform: "win32" });
     return {
       ...paseo,
-      plan: async (action) => {
-        recorder.events.push(`plan ${action}`);
-        return [`Box: ${action} commands`];
-      },
-      enable: async () => {
-        recorder.events.push("enable");
-        if (failEnable) throw new Error("npm install failed");
-        return ["Paseo 0.9.2 runs on the box."];
-      },
-      disable: async (_link, _progress, options) => {
-        recorder.events.push(`disable purge=${options.purge}`);
-        return ["Stopped."];
+      box: {
+        ...paseo.box,
+        plan: async (action) => {
+          recorder.events.push(`plan ${action}`);
+          return [`Box: ${action} commands`];
+        },
+        enable: async () => {
+          recorder.events.push("enable");
+          if (failEnable) throw new Error("npm install failed");
+          return ["Paseo 0.9.2 runs on the box."];
+        },
+        disable: async (_link, _progress, options) => {
+          recorder.events.push(`disable purge=${options.purge}`);
+          return ["Stopped."];
+        },
       },
     };
   }
@@ -610,5 +619,98 @@ describe("integrations enable and disable", () => {
       ),
     ).rejects.toThrow("Ferry config has no complete host. Run ferry init.");
     expect(recorder.events).toEqual([]);
+  });
+});
+
+describe("an integration with only an operator part", () => {
+  test("enable changes only the config: no plan, no question, and no box link", async () => {
+    const events: string[] = [];
+    const output: string[] = [];
+
+    const result = await runIntegrationCommand(
+      { action: "enable", name: "example", yes: false, dryRun: false },
+      {
+        integrations: [operatorIntegration()],
+        readConfig: () => CONFIG,
+        setIntegration: (id, enabled) => events.push(`config ${id}=${enabled}`),
+        createLink: () => {
+          events.push("link");
+          return { run: async () => { throw new Error("no box call"); } };
+        },
+        confirm: async () => {
+          events.push("confirm");
+          return true;
+        },
+        writeLine: (line) => output.push(line),
+      },
+    );
+
+    expect(result).toEqual({
+      integration: EXAMPLE_ID,
+      action: "enable",
+      plan: [],
+      dryRun: false,
+      output: [],
+      enabled: true,
+      connectSteps: [],
+    });
+    expect(events).toEqual(["config example=true"]);
+    expect(output).toEqual(["Enable Example:", `Set [integrations] example = true in ${configPath()}.`]);
+  });
+
+  test("enable says when the integration cannot run on this machine", async () => {
+    const output: string[] = [];
+
+    await runIntegrationCommand(
+      { action: "enable", name: "example", yes: true, dryRun: false },
+      {
+        integrations: [operatorIntegration({ available: false })],
+        readConfig: () => CONFIG,
+        setIntegration: () => {},
+        writeLine: (line) => output.push(line),
+      },
+    );
+
+    expect(output.at(-1)).toBe("Example is not available on this machine. Ferry adds its commands when it is.");
+  });
+
+  test("the list shows the parts of each integration and whether the operator part can run here", async () => {
+    const paseo = createPaseo({ platform: "linux", linuxInstallDir: join(tempRoot(), "none") });
+    const config: PartialOperatorConfig = { ...CONFIG, integrations: { [EXAMPLE_ID]: true } };
+
+    const list = await listIntegrations(config, [paseo, operatorIntegration({ available: false })]);
+
+    expect(list.boxes[0]?.integrations.map(({ id, parts, available }) => ({ id, parts, available }))).toEqual([
+      { id: "paseo", parts: ["box"], available: null },
+      { id: EXAMPLE_ID, parts: ["operator"], available: false },
+    ]);
+    expect(integrationLines(list).slice(3)).toEqual([
+      "example  enabled  Example checks on this machine",
+      "  Parts: operator",
+      "  This machine: not available",
+    ]);
+  });
+
+  test("is on when [integrations] or at least one box enables it", () => {
+    const example = operatorIntegration();
+    const boxes = (override: boolean | undefined): PartialOperatorConfig => ({
+      ...CONFIG,
+      host: undefined,
+      integrations: { [EXAMPLE_ID]: true },
+      boxes: [
+        { name: "a", host: { transport: "ssh", destination: "dev@box-a.example" }, integrations: { [EXAMPLE_ID]: false } },
+        {
+          name: "b",
+          host: { transport: "ssh", destination: "dev@box-b.example" },
+          ...(override === undefined ? {} : { integrations: { [EXAMPLE_ID]: override } }),
+        },
+      ],
+    });
+
+    expect(operatorIntegrations(CONFIG, [example])).toEqual([]);
+    expect(operatorIntegrations({ ...CONFIG, integrations: { [EXAMPLE_ID]: true } }, [example])).toEqual([example]);
+    expect(operatorIntegrations(boxes(undefined), [example])).toEqual([example]);
+    expect(operatorIntegrations(boxes(false), [example])).toEqual([]);
+    expect(operatorIntegrations({ ...CONFIG, integrations: { paseo: true } }, INTEGRATIONS)).toEqual([]);
   });
 });

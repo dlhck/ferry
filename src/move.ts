@@ -22,7 +22,7 @@ import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, posix, relative, resolve } from "node:path";
 import { BoxRequiredError, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import { ConfigMissingError, readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
-import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
+import { hasBoxPart, INTEGRATIONS, type Integration } from "./integrations/index.ts";
 import { paseoSourceHint } from "./integrations/paseo.ts";
 import type { IntegrationId } from "./integrations/types.ts";
 import { Link, type LinkOptions } from "./link.ts";
@@ -193,7 +193,7 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
   }
   const label = (box: ResolvedBox) => (relay ? `box ${box.name}` : "the box");
   const enabled = (box: ResolvedBox | null) =>
-    dependencies.integrations.filter((integration) => box?.integrations[integration.id] === true);
+    dependencies.integrations.filter(hasBoxPart).filter((integration) => box?.integrations[integration.id] === true);
   const local = localSide(home, dependencies.platform);
   const source = sourceBox ? boxSide(dependencies.createLink(resolveLinkOptions(sourceBox.host)), label(sourceBox)) : local;
   const destinationLink = destinationBox && dependencies.createLink(resolveLinkOptions(destinationBox.host));
@@ -333,7 +333,7 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
     for (const { integration, link } of registered) {
       progress.start(`Registering the project in ${integration.name}`);
       try {
-        await integration.onProjectMoved(link, `~/${rel}`);
+        await integration.box.onProjectMoved(link, `~/${rel}`);
         progress.done();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
