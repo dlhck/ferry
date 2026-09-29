@@ -601,8 +601,9 @@ ferry status shows "Box sudo: PASSWORDLESS" when the rule works.`)
     .summary("Start a login on the configured box without copying credentials")
     .description(`Start a login on the configured box without copying credentials.
 
-Tools: gh, claude, codex, and cursor. Ferry starts the vendor login on the box
-and prints a URL, and a code if the tool has one. Finish the login in a browser
+Tools: gh, claude, codex, cursor, and each [tools.<id>] table with login keys
+(see ferry tools --help). Ferry starts the vendor login on the box and prints
+a URL, and a code if the tool has one. Finish the login in a browser
 on this machine. When codex gives no device code, Ferry forwards local port
 1455 to the box for up to 120 seconds. Pi has no remote login. Run pi on the
 box and use /login.
@@ -970,12 +971,25 @@ such a tool, delete its table.
   path = [".local/bin"]
   depends = ["node"]
 
+  [tools.northflank]
+  local = "northflank --version"
+  install = "npm install -g @northflank/cli@{version}"
+  auth_status = "northflank list projects"
+  auth_login = "northflank login --do-not-open-browser"
+  auth_hosts = ["northflank.com"]
+
 local and install are required. local prints the version on this machine, box
 prints the version on the box, and latest prints the newest version, which the
 "latest" policy needs. update is the update command, and the default is
 install. {version} is the only placeholder. path adds home directories to the
 box PATH, and depends names the tools to install first. A comment must be on
-its own line. Run ferry sync after a path change.`)
+its own line. Run ferry sync after a path change.
+
+The auth keys let ferry auth <id> log the tool in on the box. auth_status
+passes when the tool is logged in. auth_login starts a login that prints a URL
+and finishes after the browser step, with no input on the box. auth_hosts names
+the hosts that URL may have. Ferry passes the URL on with its fragment and
+query, which can hold the login session. Give all three keys or none.`)
     .action(async () => {
       const result = await (dependencies.runTools ?? runToolsCommand)({ tools: registry().tools, readConfig: config, boxes: boxNames() });
       report(result, (result) => {

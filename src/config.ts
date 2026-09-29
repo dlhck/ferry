@@ -68,7 +68,9 @@ export type ToolsConfig = { readonly [id: string]: ToolPolicy | ToolDefinition }
  * `latest` prints the newest version on this machine, for the `latest` policy.
  * `install` and `update` run on the box, and `update` defaults to `install`.
  * `path` holds directories relative to the home for the box `PATH`, and
- * `depends` names the tools to install first.
+ * `depends` names the tools to install first. `auth_status` passes on the box
+ * when the tool is logged in, `auth_login` starts a login that prints a URL,
+ * and `auth_hosts` names the hosts that URL may have. A login needs all three.
  */
 export type ToolDefinition = {
   readonly version?: ToolPolicy;
@@ -79,6 +81,9 @@ export type ToolDefinition = {
   readonly update?: string;
   readonly path?: readonly string[];
   readonly depends?: readonly string[];
+  readonly auth_status?: string;
+  readonly auth_login?: string;
+  readonly auth_hosts?: readonly string[];
 };
 
 /** The policy that the config sets for a tool, or undefined for the default of its kind. */
@@ -142,7 +147,21 @@ const SECTION_KEYS: Record<string, readonly string[]> = {
 };
 
 /** The keys of a `[tools.<id>]` table, in the order that writeConfig writes them. */
-const TOOL_KEYS = ["version", "local", "box", "latest", "install", "update", "path", "depends"] as const;
+const TOOL_KEYS = [
+  "version",
+  "local",
+  "box",
+  "latest",
+  "install",
+  "update",
+  "path",
+  "depends",
+  "auth_status",
+  "auth_login",
+  "auth_hosts",
+] as const;
+/** The keys of a tool login. A tool table has all of them or none. */
+const TOOL_AUTH_KEYS = ["auth_status", "auth_login", "auth_hosts"] as const;
 
 /** An exact version, such as 1.4.2 or 2026.09.15-d2fe57e. It goes into box commands, so the characters stay few. */
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
@@ -314,6 +333,12 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
         throw new ConfigError(`missing ${key} in ${table} of ${path}. A tool table needs local and install.`);
       }
     }
+    if (TOOL_AUTH_KEYS.some((key) => definition[key] !== undefined)) {
+      const missing = TOOL_AUTH_KEYS.find((key) => definition[key] === undefined);
+      if (missing !== undefined) {
+        throw new ConfigError(`missing ${missing} in ${table} of ${path}. A login needs auth_status, auth_login, and auth_hosts.`);
+      }
+    }
   }
 
   if (hasHost && boxes.length > 0) {
@@ -412,10 +437,11 @@ function readToolKey(tool: Record<string, unknown>, key: string, encoded: string
     tool.version = parsePolicy(encoded, `version in ${section}`, path, false);
     return;
   }
-  if (key === "path" || key === "depends") {
+  if (key === "path" || key === "depends" || key === "auth_hosts") {
     const list = parseJson(encoded);
     if (!Array.isArray(list) || list.some((item) => typeof item !== "string" || item === "")) {
-      throw new ConfigError(`invalid value for ${key} in ${section} of ${path}. Use a list of strings, such as [".local/bin"].`);
+      const example = key === "auth_hosts" ? '["northflank.com"]' : '[".local/bin"]';
+      throw new ConfigError(`invalid value for ${key} in ${section} of ${path}. Use a list of strings, such as ${example}.`);
     }
     tool[key] = list;
     return;

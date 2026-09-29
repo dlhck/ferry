@@ -131,6 +131,27 @@ describe("operator entries", () => {
     expect(pnpm?.recipe?.update("it's")).toBe(`pnpm self-update 'it'"'"'s'`);
   });
 
+  test("the login keys of a config tool give a printed-url login that keeps the session in the URL", () => {
+    const registry = registryOf({
+      tools: {
+        northflank: {
+          local: "northflank --version",
+          install: "x",
+          auth_status: "northflank list projects",
+          auth_login: "northflank login --do-not-open-browser",
+          auth_hosts: ["northflank.com"],
+        },
+      },
+    });
+
+    expect(registry.tools.at(-1)?.auth).toEqual({
+      probe: "northflank list projects",
+      login: "northflank login --do-not-open-browser",
+      completion: { kind: "printed-url", allowedHosts: ["northflank.com"], sessionInUrl: true },
+    });
+    expect(registryOf({ tools: { node: NODE } }).tools.at(-1)?.auth).toBeUndefined();
+  });
+
   test("a config tool may depend on a builtin tool", () => {
     const registry = registryOf({ tools: { hub: { local: "hub --version", install: "x", depends: ["gh"] } } });
 

@@ -214,6 +214,39 @@ describe("operator config", () => {
     });
   });
 
+  test("reads the login keys of a tool table", () => {
+    const home = homeWithConfig([
+      ...BASE,
+      "",
+      "[tools.northflank]",
+      'local = "northflank --version"',
+      'install = "npm install -g @northflank/cli@{version}"',
+      'auth_status = "northflank list projects"',
+      'auth_login = "northflank login --do-not-open-browser"',
+      'auth_hosts = ["northflank.com"]',
+    ]);
+
+    expect(readConfig(home)?.tools?.northflank).toMatchObject({
+      auth_status: "northflank list projects",
+      auth_login: "northflank login --do-not-open-browser",
+      auth_hosts: ["northflank.com"],
+    });
+  });
+
+  test("refuses a tool table with only some of the login keys", () => {
+    const home = homeWithConfig([
+      ...BASE,
+      "",
+      "[tools.northflank]",
+      'local = "northflank --version"',
+      'install = "x"',
+      'auth_login = "northflank login --do-not-open-browser"',
+    ]);
+
+    expect(() => readConfig(home)).toThrow("missing auth_status in [tools.northflank]");
+    expect(() => readConfig(home)).toThrow("A login needs auth_status, auth_login, and auth_hosts.");
+  });
+
   test("refuses an unknown key in a tool table and names the tool and the key", () => {
     const home = homeWithConfig([...BASE, "", "[tools.pnpm]", 'local = "pnpm --version"', 'install = "x"', 'kind = "agent"']);
 
@@ -230,6 +263,8 @@ describe("operator config", () => {
     ["latest = 1", "invalid value for latest in [tools.pnpm]"],
     ['latest = ""', "invalid value for latest in [tools.pnpm]"],
     ['latest = ["npm view pnpm version"]', "invalid value for latest in [tools.pnpm]"],
+    ['auth_hosts = "northflank.com"', "invalid value for auth_hosts in [tools.pnpm]"],
+    ["auth_login = 1", "invalid value for auth_login in [tools.pnpm]"],
   ] as const) {
     test(`refuses the tool table line ${line}`, () => {
       const home = homeWithConfig([...BASE, "", "[tools.pnpm]", 'local = "pnpm --version"', 'install = "x"', line]);

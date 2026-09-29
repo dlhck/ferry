@@ -186,6 +186,28 @@ describe("AuthStart", () => {
     expect(JSON.stringify(result)).not.toContain(token);
   });
 
+  test("passes on the login session in the URL only for a tool that allows it", async () => {
+    const northflank = {
+      id: "northflank",
+      kind: "tool" as const,
+      auth: {
+        probe: "northflank list projects",
+        login: "northflank login --do-not-open-browser",
+        completion: { kind: "printed-url" as const, allowedHosts: ["northflank.com"], sessionInUrl: true },
+      },
+    };
+    const url = "https://app.northflank.com/cli/login#sessionToken=opaque";
+    const output = `ferry-login-dir /tmp/ferry-login.abc\nOpen this URL in your browser and follow the steps:\n\t${url}\n`;
+
+    const allowed = await new AuthStart(new FakeLink([loggedOut(), success(output)]), [northflank]).start("northflank");
+    const strict = await new AuthStart(new FakeLink([loggedOut(), success(output)]), [
+      { ...northflank, auth: { ...northflank.auth, completion: { kind: "printed-url", allowedHosts: ["northflank.com"] } } },
+    ]).start("northflank");
+
+    expect(allowed).toEqual({ kind: "printed-url", provider: "northflank", url });
+    expect(strict).toMatchObject({ kind: "failed", code: "login-output" });
+  });
+
   test("returns the Codex fallback URL before the callback forward opens, then forwards and probes", async () => {
     const timeout: LinkResult = {
       ok: false,
