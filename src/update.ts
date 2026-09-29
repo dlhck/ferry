@@ -18,7 +18,7 @@ import {
   type PartialOperatorConfig,
   type ToolsConfig,
 } from "./config.ts";
-import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
+import { hasBoxPart, INTEGRATIONS, type BoxIntegration, type Integration } from "./integrations/index.ts";
 import { BunHostAdapter, Link, type HostAdapter, type LinkError, type LinkOptions } from "./link.ts";
 import { FerryError, linkFailure } from "./errors.ts";
 import { errorInfo, type ErrorInfo } from "./output.ts";
@@ -139,7 +139,7 @@ type BoxUpdate = {
   /** `[<name>] ` in front of each box line when more than one box is selected, else empty. */
   readonly prefix: string;
   readonly link: Pick<Link, "run">;
-  readonly integrations: readonly Integration[];
+  readonly integrations: readonly BoxIntegration[];
   readonly plan: readonly ToolStep[];
   /** The link error when the box did not answer. Ferry then skips the box. */
   readonly offline: LinkError | null;
@@ -186,7 +186,7 @@ export async function runUpdateCommand(
             prefix: several ? `[${box.name}] ` : "",
             link,
             integrations: input.includeIntegrations === true
-              ? resolved.integrations.filter((integration) => box.integrations[integration.id] === true)
+              ? resolved.integrations.filter(hasBoxPart).filter((integration) => box.integrations[integration.id] === true)
               : [],
             plan: offline === null ? await planBox(box, link) : [],
             offline,
@@ -225,7 +225,7 @@ export async function runUpdateCommand(
     const plans: { id: string; plan: readonly string[] }[] = [];
     for (const integration of box.integrations) {
       resolved.writeLine(`${box.prefix}Box ${integration.id}:`);
-      const plan = await integration.plan("update", box.link);
+      const plan = await integration.box.plan("update", box.link);
       plans.push({ id: integration.id, plan });
       for (const line of plan) resolved.writeLine(`${box.prefix}  ${line}`);
     }
@@ -305,7 +305,7 @@ export async function runUpdateCommand(
   for (const box of reached) {
     for (const integration of box.integrations) {
       try {
-        for (const line of await integration.update(box.link, resolved.progress)) resolved.writeLine(`${box.prefix}${line}`);
+        for (const line of await integration.box.update(box.link, resolved.progress)) resolved.writeLine(`${box.prefix}${line}`);
         updated.push(`${box.prefix}box ${integration.id}`);
       } catch (error) {
         fail(`${box.prefix}box ${integration.id}`, box);

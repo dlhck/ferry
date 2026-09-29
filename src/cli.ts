@@ -61,7 +61,7 @@ import {
   runBoxRemove,
   type BoxCommandDependencies,
 } from "./box.ts";
-import { INTEGRATIONS, integrationLines, listIntegrations, type Integration } from "./integrations/index.ts";
+import { INTEGRATIONS, integrationLines, listIntegrations, operatorIntegrations, type Integration } from "./integrations/index.ts";
 import {
   runIntegrationCommand,
   type IntegrationCommandDependencies,
@@ -79,6 +79,7 @@ import {
   type StatusCommandInput,
 } from "./status-command.ts";
 import type { BriefStatusReport, StatusReport } from "./status.ts";
+import { failedChecks, formatDoctor, runDoctor, type DoctorDependencies, type DoctorInput, type DoctorReport } from "./doctor.ts";
 import { runToolsCommand, toolsLines, type ToolsCommandDependencies, type ToolsReport } from "./tools/command.ts";
 import { boxPathDirs } from "./tools/path.ts";
 import { runWatch, type WatchDependencies, type WatchInput } from "./watch.ts";
@@ -100,6 +101,15 @@ import {
   type UninstallInput,
   type UninstallResult,
 } from "./uninstall.ts";
+import {
+  historyLines,
+  HISTORY_LIMIT,
+  runHistory,
+  runRevert,
+  type RevertDependencies,
+  type RevertInput,
+  type RevertResult,
+} from "./revert.ts";
 import { runSkillsAdd, SkillsAddError, type RunProcess } from "./skills-add.ts";
 import { runMove, type MoveDependencies, type MoveInput, type MoveResult } from "./move.ts";
 import { runExpose, type ExposeDependencies, type ExposeInput } from "./expose.ts";
@@ -143,6 +153,8 @@ type CliDependencies = {
     dependencies?: Partial<UpdateCommandDependencies>,
   ) => Promise<UpdateCommandResult | null>;
   readonly runSync?: (input: SyncInput, dependencies?: SyncDependencies) => Promise<SyncResult>;
+  readonly runHistory?: typeof runHistory;
+  readonly runRevert?: (input: RevertInput, dependencies?: RevertDependencies) => Promise<RevertResult>;
   readonly runMove?: (input: MoveInput, dependencies?: Partial<MoveDependencies>) => Promise<MoveResult | null>;
   readonly runTunnel?: (
     input: TunnelInput,
@@ -165,6 +177,7 @@ type CliDependencies = {
     input: StatusCommandInput,
     dependencies?: Partial<StatusCommandDependencies>,
   ) => Promise<StatusReport>;
+  readonly runDoctor?: (input: DoctorInput, dependencies?: Partial<DoctorDependencies>) => Promise<DoctorReport>;
   readonly runBriefStatus?: (
     input: StatusCommandInput,
     dependencies?: Partial<StatusCommandDependencies>,
@@ -245,6 +258,9 @@ const JSON_RESULTS: Record<string, string> = {
     '{ providers: [{ id, login }] } without a provider, where login is "startable", "manual", or "off", else the login result { kind, provider, ... }. ' +
     'A "login" event line with the URL comes before the envelope. A login that needs the code from the browser reads it as one line on stdin',
   sync: "{ dryRun, published, boxes: [{ name, ok, step, error, plan, applyPlan, discarded }] }, also on failure of more than one box",
+  history: "{ commits: [{ commit, date, subject, paths }] }, newest first",
+  revert:
+    "{ dryRun, commit, subject, tip, paths, settings: [{ file, keys }], sync }. sync is the sync result, or null with --dry-run or --no-sync",
   move: "{ path, source, destination, dryRun, git, carry, refused, skipped, notes, trash }",
   tunnel:
     "events forward-opened, forward-closed, forward-failed, following, connection-lost, tunnel-closed. " +
@@ -254,7 +270,9 @@ const JSON_RESULTS: Record<string, string> = {
   expose: "events exposed and exited. The output of the command goes to stderr",
   status:
     "the status report, schema version 2. With --brief, { schemaVersion: 1, checkedAt, boxes: [{ name, host, online, error, issues: [{ kind, name, state, message, command }] }] }",
-  integrations: "{ boxes: [{ name, destination, integrations: [{ id, description, enabled, localVersion, localSource, connectSteps }] }] }",
+  doctor:
+    "{ schemaVersion: 1, ok, checks: [{ id, box, status, message, fix }] }, also on failure. status is ok, failed, or skipped",
+  integrations: "{ boxes: [{ name, destination, integrations: [{ id, description, enabled, parts, available, localVersion, localSource, connectSteps }] }] }",
   "integrations enable": "{ integration, action, dryRun, plan, output, enabled, connectSteps }",
   "integrations disable": "{ integration, action, dryRun, plan, output, enabled, connectSteps }",
   tools: "{ tools: [{ id, name, kind, install, policy: { policy, default }, boxes, operatorVersion }] }",
@@ -289,7 +307,8 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
 }
 
 function createProgram(dependencies: CliDependencies): { program: Command; state: RunState } {
-  // Commands that need the registry resolve it when they run, so help never reads the config.
+  // Commands that need the registry resolve it when they run. The program build reads the config
+  // one time to add the operator commands of the integrations. A failed read does not stop the start.
   const config = () => (dependencies.readConfig ?? readConfig)() ?? {};
   const registry = () => resolveRegistry(config());
   /** Each box command puts the PATH directories of the registry tools in front of PATH. `ferry sync` adds them itself. */
@@ -698,6 +717,56 @@ once on this machine.`)
     });
 
   program
+    .command("history")
+    .summary("List the recent snapshot commits and the paths each one changed")
+    .description(`List the recent snapshot commits and the paths each one changed.
+
+Ferry reads the local snapshot checkout in ~/.ferry/store. Give a commit id to
+ferry revert to undo that commit.`)
+    .option("-n, --limit <count>", `the number of commits (default: ${HISTORY_LIMIT})`, (value: string) => {
+      const count = Number(value);
+      if (!Number.isInteger(count) || count < 1) throw new FerryError("usage", "--limit must be a whole number above 0.");
+      return count;
+    })
+    .action(async (options: { limit?: number }) => {
+      const commits = await (dependencies.runHistory ?? runHistory)({ limit: options.limit });
+      report({ commits }, ({ commits }) => {
+        for (const line of historyLines(commits)) writeLine(line);
+      });
+    });
+
+  program
+    .command("revert")
+    .summary("Undo one snapshot commit on this machine and on all boxes")
+    .description(`Undo one snapshot commit on this machine and on all boxes.
+
+Ferry undoes the commit as git revert does, and later commits stay. The
+skills, AGENTS.md, and extra roots on this machine link into the snapshot, so
+they change with it. Ferry writes the reverted settings keys back into the
+local settings files and keeps all other keys. Then Ferry syncs all boxes.
+
+Ferry stops and changes nothing when a later commit changes the same lines,
+or when this machine has changes that are not in the snapshot. Run ferry sync
+first. Run ferry history for the commit ids.`)
+    .argument("<commit>", "the snapshot commit to undo")
+    .option("--dry-run", "print what the revert changes without writing")
+    .option("--no-sync", "do not sync the boxes after the revert")
+    .action(async (commit: string, options: { dryRun?: boolean; sync: boolean }) => {
+      const result = await withProgress((progress, writeLine) =>
+        (dependencies.runRevert ?? runRevert)(
+          { commit, dryRun: options.dryRun === true, sync: options.sync },
+          { progress, writeLine, syncDependencies: { warn } },
+        ),
+      ).catch((error: unknown) => {
+        if (error instanceof BoxesSyncError) {
+          failedResult = syncResult({ dryRun: false, published: error.published, boxes: error.results });
+        }
+        throw error;
+      });
+      report({ ...result, sync: result.sync ? syncResult(result.sync) : null });
+    });
+
+  program
     .command("move")
     .summary("Continue a project on a box, on this machine with --from-box, or on another box with both")
     .description(`Continue a project on a box, on this machine with --from-box, or on another box with both.
@@ -772,13 +841,32 @@ reconnect. With --follow, the local port is the box port when it is free, else
 the next free port, and Ferry connects again 5 seconds after a drop. Run
 ferry tunnel install to run --follow as a user service.
 
+Put a host before the box port to forward to a host that the box can reach,
+such as a database that accepts connections only from the box network. A
+numeric first part is a box port. The box resolves the host name. Put an IPv6
+address in brackets. Ferry first checks that the box can connect to the host,
+and stops with an error when it cannot.
+
+  5432                   127.0.0.1:5432 on the box, local port 5432
+  5432:15432             127.0.0.1:5432 on the box, local port 15432
+  db.example:5432        db.example:5432 from the box, local port 5432
+  db.example:5432:15432  db.example:5432 from the box, local port 15432
+  [fd00::1]:5432         [fd00::1]:5432 from the box, local port 5432
+
+A plain tunnel works as the child process of another program. It never
+prompts: OpenSSH runs in batch mode. The local port accepts connections after
+the SSH connection is ready. SIGTERM closes the tunnel with exit code 0.
+
 --follow writes its forwards to ~/.ferry/tunnels/<box>.json when it connects,
 after each change, and when the connection drops. The menu bar app reads the
 file. Fields: schemaVersion (1), box, pid, connected (false after a drop, with
 no forwards), updatedAt, and forwards: [{ name, cwd, boxPort, localPort }].
 name and cwd are missing when the entry of ferry expose has none. Ferry
 removes the file when --follow stops on Ctrl-C or SIGTERM.`)
-    .argument("[ports...]", "box port, or box:local to pick another local port, such as 3000 or 3000:4000")
+    .argument(
+      "[ports...]",
+      "box port, box:local to pick another local port, or host:port[:local] for a host that the box can reach, such as 3000, 3000:4000, or db.example:5432",
+    )
     .option("--list", "list the TCP ports that listen on the box, with process names")
     .option("--follow", "open a forward for each port that ferry expose announces on the box, and close it when the port goes away")
     .action(async (ports: string[], options: { list?: boolean; follow?: boolean }) => {
@@ -911,9 +999,40 @@ command that fixes it. ferry watch writes the same report to
       });
     });
 
+  program
+    .command("doctor")
+    .summary("Check SSH, Tailscale, snapshot access, linger, and services, and print a fix for each failure")
+    .description(`Check SSH, Tailscale, snapshot access, linger, and services, and print a fix for each failure.
+
+Ferry runs each check, also after a check fails, and changes nothing. It
+checks that the SSH agent has a key, that this machine can read the snapshot
+and push to it (git push --dry-run), and that the installed watch and tunnel
+services run this Ferry. For each box, it checks that the box responds over
+SSH with host key checks on, that Tailscale reaches a Tailscale box, that the
+box can read the snapshot with the forwarded agent or the deploy key of
+git_auth = "box", and that linger is on when a Ferry service runs on the box.
+
+The exit code is 1 when a check fails. With --json, result has one entry for
+each check, also on failure.`)
+    .action(async () => {
+      const result = await withProgress((progress) =>
+        (dependencies.runDoctor ?? runDoctor)({ selection: boxNames() }, { createLink, progress }),
+      );
+      if (result.ok) {
+        report(result, (result) => writeLine(formatDoctor(result)));
+        return;
+      }
+      if (!json()) writeLine(formatDoctor(result));
+      failedResult = result;
+      const count = failedChecks(result);
+      throw new FerryError("failed", `${count} of ${result.checks.length} checks failed.`, {
+        hint: "Run the fix of each failed check, then run ferry doctor again.",
+      });
+    });
+
   const integrations = program
     .command("integrations")
-    .description("List the integrations of each box, whether each one is enabled, and the local app versions")
+    .description("List the integrations of each box, whether each one is enabled, its parts, and the local app versions")
     .action(async () => {
       const result = await listIntegrations(config(), dependencies.integrations ?? INTEGRATIONS, boxNames());
       report(result, (result) => {
@@ -938,7 +1057,10 @@ the box.
 For relay pairing, set paseo_relay = true in [integrations] of
 ~/.ferry/config.toml. A [box.<name>.integrations] table can override it.
 Run ferry integrations enable paseo --box <name> again to apply a change.
-A changed service config restarts the daemon and stops its agents.`)
+A changed service config restarts the daemon and stops its agents.
+
+An integration without a box part runs only on this machine. For it, Ferry
+changes only the config and adds its commands when it can run here.`)
     .argument("<name>", "integration name, such as paseo")
     .option("--dry-run", "print the box commands without connecting or writing")
     .option("--yes", "run without a confirmation prompt")
@@ -963,7 +1085,8 @@ A changed service config restarts the daemon and stops its agents.`)
     .summary("Stop and remove an integration on the box, then turn it off in the config")
     .description(`Stop and remove an integration on the box, then turn it off in the config.
 
-Ferry never removes ~/.paseo on the box.`)
+Ferry never removes ~/.paseo on the box. An integration without a box part
+changes only the config.`)
     .argument("<name>", "integration name, such as paseo")
     .option("--purge", "also uninstall the integration package on the box")
     .option("--yes", "run without a confirmation prompt")
@@ -983,6 +1106,17 @@ Ferry never removes ~/.paseo on the box.`)
       );
       report(result);
     });
+
+  // An enabled integration with an operator part adds its commands only when it can run on this machine.
+  let current: PartialOperatorConfig = {};
+  try {
+    current = config();
+  } catch {
+    // The commands that read the config report the error.
+  }
+  for (const integration of operatorIntegrations(current, dependencies.integrations ?? INTEGRATIONS)) {
+    if (integration.operator.available()) integration.operator.registerCommands?.(program);
+  }
 
   program
     .command("tools")
@@ -1129,8 +1263,8 @@ macos/build.sh, a .app directory or its zip, without a checksum. A
 development build of Ferry needs --app.
 
 The app starts at login with ~/Library/LaunchAgents/dev.ferry.menubar.plist.
-It records the path of this Ferry as FERRY_PATH and the current PATH. Run the
-command again after you move Ferry or update it.`)
+It records the path of this Ferry as FERRY_PATH, the current PATH, and
+SSH_AUTH_SOCK. Run the command again after you move Ferry or update it.`)
     .option("--app <path>", "install a local build of macos/build.sh: a .app directory or its zip")
     .action(async (options: { app?: string }) => {
       const result = await (dependencies.installMenuBar ?? installMenuBar)(options.app === undefined ? {} : { app: options.app });
@@ -1251,7 +1385,7 @@ git_auth = "box" in its [box.<name>] table and run ferry init --box <name>.`)
     .argument("<name>", "box name")
     .action((name: string) => report(runBoxDefault({ name }, { readConfig: config, writeConfig: (value) => writeConfig(value), writeLine })));
 
-  for (const name of ["init", "install", "update", "auth", "sync", "move", "tunnel", "status", "integrations", "tools"]) {
+  for (const name of ["init", "install", "update", "auth", "sync", "move", "tunnel", "status", "doctor", "integrations", "tools"]) {
     const command = program.commands.find((known) => known.name() === name);
     if (command) boxCommands.add(command);
   }

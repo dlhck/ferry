@@ -6,6 +6,7 @@
  * ferry.json enter snapshot commits.
  */
 
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -21,6 +22,8 @@ import type { HarnessDescriptor } from "./registry/types.ts";
 const STORE_DIRECTORY = ".ferry/store";
 const DEFAULT_COMMIT_MESSAGE = "chore: update ferry snapshot";
 const METADATA_FILE = "ferry.json";
+/** The paths that a publish writes. */
+const PUBLISHED = ["skills", "roots", "settings", "AGENTS.md", METADATA_FILE];
 /** Version 2 records a harness descriptor. Version 1 recorded a bare id. */
 const SCHEMA_VERSION = 2;
 
@@ -63,7 +66,8 @@ export type StoreRefusalCode =
   | "remote-clash"
   | "missing-git-identity"
   | "unreadable-store"
-  | "schema-mismatch";
+  | "schema-mismatch"
+  | "unknown-commit";
 
 export class StoreRefusal extends Error {
   constructor(
@@ -91,6 +95,30 @@ export type PublishResult = {
   readonly published: boolean;
   readonly tip: string | null;
 };
+
+/** One snapshot commit and the paths it changed. */
+export type HistoryEntry = {
+  readonly commit: string;
+  readonly date: string;
+  readonly subject: string;
+  readonly paths: readonly string[];
+};
+
+/**
+ * The result of a revert of `commit` onto the local tip. `tree` is the
+ * snapshot without the commit. `conflicts` names the paths that later
+ * commits also changed.
+ */
+export type RevertPlan =
+  | {
+      readonly ok: true;
+      readonly commit: string;
+      readonly subject: string;
+      readonly base: string;
+      readonly tree: string;
+      readonly paths: readonly string[];
+    }
+  | { readonly ok: false; readonly commit: string; readonly conflicts: readonly string[] };
 
 export type TipReport = {
   readonly local: string | null;
@@ -143,7 +171,7 @@ export class Store {
 
     await checked(
       this.git,
-      ["add", "-A", "--", "skills", "roots", "settings", "AGENTS.md", METADATA_FILE],
+      ["add", "-A", "--", ...PUBLISHED],
       this.path,
     );
     const diff = await this.git.run({ args: ["diff", "--cached", "--quiet", "--"], cwd: this.path });
@@ -186,6 +214,118 @@ export class Store {
     return tipReport(local, remote, box);
   }
 
+  /**
+   * The seed paths whose bytes or executable bit differ from the local tip.
+   * An empty list means that a publish of `seed` changes nothing.
+   */
+  async unpublished(seed: Seed): Promise<string[]> {
+    const tip = await this.localTip();
+    const tracked = new Map<string, { mode: string; blob: string }>();
+    if (tip) {
+      const listed = await checked(this.git, ["ls-tree", "-r", "-z", tip], this.path);
+      for (const entry of decode(listed.stdout).split("\0").filter(Boolean)) {
+        const tab = entry.indexOf("\t");
+        const path = entry.slice(tab + 1);
+        const [mode = "", , blob = ""] = entry.slice(0, tab).split(" ");
+        // Publish writes only the seed layout, so other tracked files stay as they are.
+        if (PUBLISHED.some((top) => path === top || path.startsWith(`${top}/`))) tracked.set(path, { mode, blob });
+      }
+    }
+    const changed = new Set<string>();
+    for (const [path, file] of seedEntries(seed, this.metadata)) {
+      const entry = tracked.get(path);
+      tracked.delete(path);
+      const mode = file.executable ? "100755" : "100644";
+      if (!entry || entry.mode !== mode || entry.blob !== blobId(file.bytes)) changed.add(path);
+    }
+    for (const path of tracked.keys()) changed.add(path);
+    return [...changed].sort(compare);
+  }
+
+  /**
+   * Plan a revert of one commit of the local history, as `git revert` does.
+   * The plan changes no file and no ref.
+   */
+  async planRevert(ref: string): Promise<RevertPlan> {
+    const resolved = await this.git.run({
+      args: ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`],
+      cwd: this.path,
+    });
+    const commit = decode(resolved.stdout).trim();
+    if (resolved.status !== 0 || !commit) {
+      throw new StoreRefusal("unknown-commit", `${ref} is not a commit of the snapshot`);
+    }
+    const ancestor = await this.git.run({ args: ["merge-base", "--is-ancestor", commit, "HEAD"], cwd: this.path });
+    if (ancestor.status === 1) {
+      throw new StoreRefusal("unknown-commit", `${ref} is not in the history of the snapshot`);
+    }
+    if (ancestor.status !== 0) throw commandError(["merge-base", "--is-ancestor", commit, "HEAD"], ancestor);
+
+    const listed = await checked(this.git, ["rev-list", "--parents", "-n", "1", commit], this.path);
+    const parents = decode(listed.stdout).trim().split(" ").slice(1);
+    if (parents.length !== 1) {
+      throw new StoreRefusal(
+        "unknown-commit",
+        parents.length === 0
+          ? `${ref} is the first snapshot commit; Ferry cannot revert it`
+          : `${ref} is a merge commit; Ferry cannot revert it`,
+      );
+    }
+    const subject = decode((await checked(this.git, ["log", "-n", "1", "--format=%s", commit], this.path)).stdout).trim();
+
+    // A revert is a merge of the parent into HEAD, with the commit as the merge base.
+    const args = ["merge-tree", "--write-tree", "--name-only", "--no-messages", `--merge-base=${commit}`, "HEAD", `${commit}^`];
+    const merged = await this.git.run({ args, cwd: this.path });
+    const [tree = "", ...rest] = decode(merged.stdout).split("\n");
+    if (merged.status === 1) {
+      return { ok: false, commit, conflicts: [...new Set(rest.filter(Boolean))].sort(compare) };
+    }
+    if (merged.status !== 0) throw commandError(args, merged);
+    const base = decode((await checked(this.git, ["rev-parse", "HEAD"], this.path)).stdout).trim();
+    const diff = await checked(this.git, ["diff", "--name-only", "-z", base, tree], this.path);
+    const paths = decode(diff.stdout).split("\0").filter(Boolean).sort(compare);
+    return { ok: true, commit, subject, base, tree, paths };
+  }
+
+  /** The bytes of `path` in a commit or tree, or null when it has no such file. */
+  async readFile(treeish: string, path: string): Promise<Uint8Array | null> {
+    const result = await this.git.run({ args: ["cat-file", "blob", `${treeish}:${path}`], cwd: this.path });
+    return result.status === 0 ? result.stdout : null;
+  }
+
+  /**
+   * Commit the tree of a revert plan on the local tip and move the checkout
+   * to it. The local files that link into the checkout change with it.
+   * Return the new tip. `push` publishes it.
+   */
+  async commitRevert(plan: Extract<RevertPlan, { ok: true }>): Promise<string> {
+    const identity = await this.readIdentity();
+    const message = `revert: ${plan.subject}\n\nThis reverts commit ${plan.commit}.\n`;
+    const created = await checked(
+      this.git,
+      [
+        "-c",
+        `user.name=${identity.name}`,
+        "-c",
+        `user.email=${identity.email}`,
+        "commit-tree",
+        plan.tree,
+        "-p",
+        plan.base,
+        "-m",
+        message,
+      ],
+      this.path,
+    );
+    const tip = decode(created.stdout).trim();
+    await checked(this.git, ["merge", "--ff-only", "--quiet", tip], this.path);
+    return tip;
+  }
+
+  async push(): Promise<void> {
+    await checked(this.git, ["push", "origin", "HEAD"], this.path);
+  }
+
   private async localTip(): Promise<string | null> {
     return optionalTip(this.git, this.path, "HEAD");
   }
@@ -214,6 +354,28 @@ function tipReport(local: string | null, remote: string | null, box: string | nu
     remoteMatchesBox,
     allMatch: localMatchesRemote && remoteMatchesBox,
   };
+}
+
+/** The last `limit` commits of the checkout, newest first. A checkout without commits has none. */
+export async function readHistory(
+  checkout: string,
+  limit: number,
+  git: GitRunner = new RealGitRunner(),
+): Promise<HistoryEntry[]> {
+  if (!(await optionalTip(git, checkout, "HEAD"))) return [];
+  const result = await checked(
+    git,
+    ["log", "-n", String(limit), "-z", "--name-only", "--format=%x1e%H%x1f%aI%x1f%s"],
+    checkout,
+  );
+  return decode(result.stdout)
+    .split("\x1e")
+    .filter(Boolean)
+    .map((record) => {
+      const [header = "", ...paths] = record.split("\0");
+      const [commit = "", date = "", subject = ""] = header.split("\x1f");
+      return { commit, date, subject, paths: paths.map((path) => path.replace(/^\n/, "")).filter(Boolean) };
+    });
 }
 
 /**
@@ -377,6 +539,24 @@ function writeSeed(root: string, seed: Seed, metadata: string): void {
 
 function fileMode(file: SeedFile): number {
   return file.executable ? 0o755 : 0o644;
+}
+
+/** Each tracked path of `seed`, with its bytes and executable bit. */
+function seedEntries(seed: Seed, metadata: string): Map<string, { bytes: Uint8Array; executable: boolean }> {
+  const files = new Map<string, { bytes: Uint8Array; executable: boolean }>();
+  for (const [path, bytes] of seedFiles(seed, metadata)) files.set(path, { bytes, executable: false });
+  for (const skill of seed.skills) {
+    for (const file of skill.files) files.set(`skills/${skill.name}/${file.path}`, file);
+  }
+  for (const root of seed.roots) {
+    for (const file of root.files) files.set(`roots/${root.path}/${file.path}`, file);
+  }
+  return files;
+}
+
+/** The git blob id of `bytes`. */
+function blobId(bytes: Uint8Array): string {
+  return createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
 }
 
 function seedFiles(seed: Seed, metadata: string): Map<string, Uint8Array> {

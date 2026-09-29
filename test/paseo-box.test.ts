@@ -169,7 +169,7 @@ describe("Paseo enable", () => {
     mkdirSync(join(box.home, ".paseo/worktrees/x/.git"), { recursive: true });
     mkdirSync(join(box.home, "Developer/app/node_modules/pkg/.git"), { recursive: true });
 
-    const lines = await paseoWith("0.9.2").enable(box, noProgress);
+    const lines = await paseoWith("0.9.2").box.enable(box, noProgress);
 
     const log = box.log();
     expect(log.slice(0, 4)).toEqual([
@@ -193,7 +193,7 @@ describe("Paseo enable", () => {
     const box = fakeBox();
     writeFileSync(join(box.state, "linger"), "");
 
-    await paseoWith("0.9.2").enable(box, noProgress);
+    await paseoWith("0.9.2").box.enable(box, noProgress);
 
     expect(box.log().filter((line) => line.includes("linger"))).toEqual([]);
   });
@@ -202,7 +202,7 @@ describe("Paseo enable", () => {
     const box = fakeBox();
     writeFileSync(join(box.state, "linger-denied"), "");
 
-    const lines = await paseoWith("0.9.2").enable(box, noProgress);
+    const lines = await paseoWith("0.9.2").box.enable(box, noProgress);
 
     expect(box.log().filter((line) => line.includes("linger"))).toEqual([
       "loginctl enable-linger ploi",
@@ -217,7 +217,7 @@ describe("Paseo enable", () => {
     writeFileSync(join(box.state, "linger-denied"), "");
     writeFileSync(join(box.state, "sudo-denied"), "");
 
-    const lines = await paseoWith("0.9.2").enable(box, noProgress);
+    const lines = await paseoWith("0.9.2").box.enable(box, noProgress);
 
     expect(lines).toContain(
       'Warning: Ferry could not turn on linger (sudo: a password is required). Without linger, ferry-paseo.service stops when you log out of the box. Run sudo loginctl enable-linger "$USER" on the box.',
@@ -243,7 +243,7 @@ describe("Paseo enable", () => {
   test("installs the npm latest tag and says so when there is no local app", async () => {
     const box = fakeBox();
 
-    const lines = await paseoWith(null).enable(box, noProgress);
+    const lines = await paseoWith(null).box.enable(box, noProgress);
 
     expect(box.log()[0]).toBe(`npm install -g --prefix ${box.home}/.local @getpaseo/cli@latest`);
     expect(lines[0]).toBe("No local Paseo app. Ferry installs the npm latest tag. The version is not pinned.");
@@ -254,7 +254,7 @@ describe("Paseo enable", () => {
     writeFileSync(join(box.state, "node"), "v18.19.1\n");
     writeFileSync(join(box.state, "apt-node"), "v22.9.0\n");
 
-    await paseoWith("0.9.2").enable(box, noProgress);
+    await paseoWith("0.9.2").box.enable(box, noProgress);
 
     expect(box.log().slice(0, 3)).toEqual([
       "apt update",
@@ -267,7 +267,7 @@ describe("Paseo enable", () => {
     const box = fakeBox();
     writeFileSync(join(box.state, "node"), "v18.19.1\n");
 
-    await expect(paseoWith("0.9.2").enable(box, noProgress)).rejects.toThrow(
+    await expect(paseoWith("0.9.2").box.enable(box, noProgress)).rejects.toThrow(
       "Paseo needs Node 22 or later, and the box has Node v18.19.1 after the apt install.",
     );
     expect(box.log().some((line) => line.startsWith("npm "))).toBe(false);
@@ -280,7 +280,7 @@ describe("Paseo enable", () => {
     touch(join(box.state, "active-paseo.service"));
     touch(join(box.state, "enabled-paseo.service"));
 
-    const lines = await paseoWith("0.9.2").enable(box, noProgress);
+    const lines = await paseoWith("0.9.2").box.enable(box, noProgress);
 
     const log = box.log();
     expect(log.indexOf("systemctl disable --now paseo.service")).toBeGreaterThan(-1);
@@ -298,13 +298,13 @@ describe("Paseo enable", () => {
     const stopped = fakeBox();
     touch(join(stopped.home, ".config/systemd/user/paseo.service"));
     touch(join(stopped.state, "enabled-paseo.service"));
-    expect(await paseoWith("0.9.2").enable(stopped, noProgress)).toContain(
+    expect(await paseoWith("0.9.2").box.enable(stopped, noProgress)).toContain(
       "Disabled the old paseo.service. The file ~/.config/systemd/user/paseo.service stays.",
     );
     expect(stopped.log()).toContain("systemctl disable paseo.service");
 
     const clean = fakeBox();
-    await paseoWith("0.9.2").enable(clean, noProgress);
+    await paseoWith("0.9.2").box.enable(clean, noProgress);
     expect(clean.log().some((line) => line.includes(" paseo.service"))).toBe(false);
   });
 
@@ -313,7 +313,7 @@ describe("Paseo enable", () => {
     mkdirSync(join(box.home, "app/.git"), { recursive: true });
     writeFileSync(join(box.state, "fail-project"), join(box.home, "app"));
 
-    const lines = await paseoWith("0.9.2").enable(box, noProgress);
+    const lines = await paseoWith("0.9.2").box.enable(box, noProgress);
 
     expect(lines).toContain("Registered 0 of 1 box projects in Paseo.");
     expect(lines).toContain("Warning: paseo project create failed for app.");
@@ -332,7 +332,7 @@ describe("Paseo enable", () => {
     };
     const paseo = createPaseo({ platform: "win32", pollIntervalMs: 1_000, startTimeoutMs: 3_000, sleep: async () => {} });
 
-    await expect(paseo.enable(link, noProgress)).rejects.toThrow(
+    await expect(paseo.box.enable(link, noProgress)).rejects.toThrow(
       "The Paseo daemon did not report running within 3 s (localDaemon is stopped).",
     );
     expect(statuses).toHaveLength(4);
@@ -346,8 +346,8 @@ describe("Paseo enable and health", () => {
     touch(join(box.home, ".config/systemd/user/paseo.service"));
     touch(join(box.state, "active-paseo.service"));
 
-    await paseo.enable(box, noProgress);
-    const health = await paseo.health(box);
+    await paseo.box.enable(box, noProgress);
+    const health = await paseo.box.health(box);
 
     expect(health.lines[0]).toBe("Service: ferry-paseo.service active, enabled");
     expect(health.warnings).toEqual([]);
@@ -357,11 +357,11 @@ describe("Paseo enable and health", () => {
 describe("Paseo disable", () => {
   test("stops and removes the unit, keeps linger, the CLI and ~/.paseo", async () => {
     const box = fakeBox();
-    await paseoWith("0.9.2").enable(box, noProgress);
+    await paseoWith("0.9.2").box.enable(box, noProgress);
     touch(join(box.home, ".paseo/config.json"), "{}");
     const before = box.log().length;
 
-    const lines = await paseoWith("0.9.2").disable(box, noProgress, { purge: false });
+    const lines = await paseoWith("0.9.2").box.disable(box, noProgress, { purge: false });
 
     expect(box.log().slice(before)).toEqual([
       "systemctl disable --now ferry-paseo.service",
@@ -379,7 +379,7 @@ describe("Paseo disable", () => {
     const box = fakeBox();
     touch(join(box.home, ".paseo/config.json"), "{}");
 
-    const lines = await paseoWith("0.9.2").disable(box, noProgress, { purge: true });
+    const lines = await paseoWith("0.9.2").box.disable(box, noProgress, { purge: true });
 
     expect(box.log()).toEqual([
       "systemctl daemon-reload",
@@ -396,7 +396,7 @@ describe("Paseo update", () => {
     const box = fakeBox();
     activeUnit(box);
 
-    const lines = await paseoWith("0.9.2").update(box, noProgress);
+    const lines = await paseoWith("0.9.2").box.update(box, noProgress);
 
     expect(box.log()).toEqual([]);
     expect(lines).toEqual([CURRENT("0.9.2")]);
@@ -406,7 +406,7 @@ describe("Paseo update", () => {
     const box = fakeBox();
     activeUnit(box);
 
-    const lines = await paseoWith("0.9.3").update(box, noProgress);
+    const lines = await paseoWith("0.9.3").box.update(box, noProgress);
 
     expect(box.log()).toEqual([
       `npm install -g --prefix ${box.home}/.local @getpaseo/cli@0.9.3`,
@@ -418,7 +418,7 @@ describe("Paseo update", () => {
   test("updates with a warning when it cannot read the box version", async () => {
     const box = fakeBox();
 
-    const lines = await paseoWith("0.9.2").update(box, noProgress);
+    const lines = await paseoWith("0.9.2").box.update(box, noProgress);
 
     expect(box.log()).toEqual([
       `npm install -g --prefix ${box.home}/.local @getpaseo/cli@0.9.2`,
@@ -432,7 +432,7 @@ describe("Paseo update", () => {
     activeUnit(box);
     const calls: string[] = [];
 
-    const lines = await paseoUnpinned("0.9.2", calls).update(box, noProgress);
+    const lines = await paseoUnpinned("0.9.2", calls).box.update(box, noProgress);
 
     expect(calls).toEqual(["npm view @getpaseo/cli version"]);
     expect(box.log()).toEqual([]);
@@ -443,7 +443,7 @@ describe("Paseo update", () => {
     const box = fakeBox();
     activeUnit(box);
 
-    const lines = await paseoUnpinned("0.10.0").update(box, noProgress);
+    const lines = await paseoUnpinned("0.10.0").box.update(box, noProgress);
 
     expect(box.log()).toEqual([
       `npm install -g --prefix ${box.home}/.local @getpaseo/cli@0.10.0`,
@@ -456,7 +456,7 @@ describe("Paseo update", () => {
     const box = fakeBox();
     activeUnit(box);
 
-    const lines = await paseoUnpinned(null).update(box, noProgress);
+    const lines = await paseoUnpinned(null).box.update(box, noProgress);
 
     expect(box.log()).toEqual([
       `npm install -g --prefix ${box.home}/.local @getpaseo/cli@latest`,
@@ -475,7 +475,7 @@ describe("Paseo unit PATH", () => {
   test("enable writes the PATH directories of the Link into the unit", async () => {
     const box = fakeBox();
 
-    await paseoWith("0.9.2").enable(Object.assign(box, { pathDirs: dirs }), noProgress);
+    await paseoWith("0.9.2").box.enable(Object.assign(box, { pathDirs: dirs }), noProgress);
 
     expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(unitFile(dirs));
   });
@@ -510,7 +510,7 @@ describe("Paseo unit PATH", () => {
 
 describe("Paseo plan", () => {
   test("lists the exact enable commands and connects to nothing", async () => {
-    const lines = await paseoWith("0.9.2").plan("enable");
+    const lines = await paseoWith("0.9.2").box.plan("enable");
 
     expect(lines[0]).toMatch(/^Local app: Paseo 0\.9\.2 \(/);
     expect(lines).toContain('  npm install -g --prefix "$HOME/.local" @getpaseo/cli@0.9.2');
@@ -526,17 +526,17 @@ describe("Paseo plan", () => {
     const paseo = paseoWith("0.9.2");
     const uninstall = '  npm uninstall -g --prefix "$HOME/.local" @getpaseo/cli';
 
-    expect(await paseo.plan("disable")).not.toContain(uninstall);
-    expect(await paseo.plan("purge")).toContain(uninstall);
+    expect(await paseo.box.plan("disable")).not.toContain(uninstall);
+    expect(await paseo.box.plan("purge")).toContain(uninstall);
   });
 
   test("the enable, disable and purge plans make no box call, also with a link", async () => {
     const box = fakeBox();
     const paseo = paseoWith("0.9.2");
 
-    await paseo.plan("enable", box);
-    await paseo.plan("disable", box);
-    await paseo.plan("purge", box);
+    await paseo.box.plan("enable", box);
+    await paseo.box.plan("disable", box);
+    await paseo.box.plan("purge", box);
 
     expect(box.commands).toEqual([]);
   });
@@ -545,7 +545,7 @@ describe("Paseo plan", () => {
     const box = fakeBox();
     activeUnit(box);
 
-    const lines = await paseoWith("0.9.2").plan("update", box);
+    const lines = await paseoWith("0.9.2").box.plan("update", box);
 
     expect(lines.slice(1)).toEqual([CURRENT("0.9.2")]);
     expect(box.log()).toEqual([]);
@@ -555,7 +555,7 @@ describe("Paseo plan", () => {
     const box = fakeBox();
     activeUnit(box);
 
-    const lines = await paseoWith("0.9.3").plan("update", box);
+    const lines = await paseoWith("0.9.3").box.plan("update", box);
 
     expect(lines.slice(1)).toEqual([
       "Box: Paseo 0.9.2",
@@ -571,7 +571,7 @@ describe("Paseo plan", () => {
   test("the update plan warns when it cannot read the box version", async () => {
     const box = fakeBox();
 
-    const lines = await paseoWith("0.9.2").plan("update", box);
+    const lines = await paseoWith("0.9.2").box.plan("update", box);
 
     expect(lines[1]).toBe(UNREADABLE);
     expect(lines).toContain("  systemctl --user restart ferry-paseo.service");

@@ -663,12 +663,16 @@ describe("watch daily update", () => {
     const inputs: unknown[] = [];
     const paseoCalls: string[] = [];
     let scans = 0;
+    const base = createPaseo({ platform: "win32" });
     const paseo: Integration = {
-      ...createPaseo({ platform: "win32" }),
-      plan: async () => [],
-      update: async () => {
-        paseoCalls.push("update");
-        return [];
+      ...base,
+      box: {
+        ...base.box,
+        plan: async () => [],
+        update: async () => {
+          paseoCalls.push("update");
+          return [];
+        },
       },
     };
 

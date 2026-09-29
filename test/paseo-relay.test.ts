@@ -95,14 +95,14 @@ test("status accepts the configured relay", async () => {
       return { ...result, stdout: 'active=active\nenabled=enabled\nold=inactive\nferry-section\n' + JSON.stringify({ localDaemon: "running", relay: { enabled: true } }) };
     },
   };
-  const health = await createPaseo({ platform: "win32" }).health(link, { paseo_relay: true });
+  const health = await createPaseo({ platform: "win32" }).box.health(link, { paseo_relay: true });
   expect(health.warnings).toEqual([]);
 });
 
 for (const relay of [false, true]) {
   test(`enable applies relay=${relay} without restarting an unchanged unit`, async () => {
     const remote = box(unitFile(BUILTIN_BOX_PATH_DIRS, relay));
-    await createPaseo({ platform: "win32" }).enable(remote.link, noProgress, { paseo_relay: relay });
+    await createPaseo({ platform: "win32" }).box.enable(remote.link, noProgress, { paseo_relay: relay });
     expect(remote.commands).not.toContain("systemctl --user restart ferry-paseo.service");
     expect(remote.commands).toContain(writeCommand(".config/systemd/user/ferry-paseo.service", unitFile(BUILTIN_BOX_PATH_DIRS, relay)));
   });
@@ -110,7 +110,7 @@ for (const relay of [false, true]) {
 
 test("enable turns the relay off again", async () => {
   const remote = box(unitFile(BUILTIN_BOX_PATH_DIRS, true));
-  const lines = await createPaseo({ platform: "win32" }).enable(remote.link, noProgress, { paseo_relay: false });
+  const lines = await createPaseo({ platform: "win32" }).box.enable(remote.link, noProgress, { paseo_relay: false });
   expect(lines.at(-1)).toContain("The relay is off.");
   expect(remote.commands).toContain(writeCommand(".config/systemd/user/ferry-paseo.service", unitFile(BUILTIN_BOX_PATH_DIRS)));
   expect(remote.commands).toContain("systemctl --user restart ferry-paseo.service");

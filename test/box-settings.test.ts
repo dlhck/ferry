@@ -255,6 +255,25 @@ describe("mergeBoxSettings", () => {
     });
   });
 
+  test.each([
+    ["pi", ".pi/agent/settings.json", { defaultModel: "claude-sonnet" }, { packages: ["npm:pi-tools"] }],
+    ["cursor", ".cursor/cli-config.json", { maxMode: true }, { version: 1, authInfo: { userId: 1234 } }],
+  ])("merges the carried %s keys and keeps the other box keys", async (harness, file, keys, boxOnly) => {
+    const home = makeRoot();
+    const path = join(home, file);
+    write(path, JSON.stringify(boxOnly));
+
+    const written = await mergeBoxSettings({
+      remoteHome: home,
+      harnesses: BUILTIN_HARNESSES,
+      settings: [{ harness, bytes: Buffer.from(JSON.stringify(keys)) }],
+      link: new ShellLink(),
+    });
+
+    expect(written).toEqual([path]);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ ...boxOnly, ...keys });
+  });
+
   test("refuses and keeps a box settings file that is not JSON", async () => {
     const home = makeRoot();
     const path = join(home, ".claude", "settings.json");

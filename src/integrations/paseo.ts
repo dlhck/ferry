@@ -10,8 +10,9 @@ import { step, type Progress } from "../progress.ts";
 import { nodeBootstrap } from "../registry/builtin.ts";
 import { BUILTIN_BOX_PATH_DIRS } from "../tools/path.ts";
 import type {
-  Integration,
+  BoxIntegration,
   IntegrationAction,
+  IntegrationBoxPart,
   IntegrationHealth,
   IntegrationLink,
   LocalVersion,
@@ -173,7 +174,7 @@ const HEALTH_COMMAND = [
   "true",
 ].join("; ");
 
-export function createPaseo(options: PaseoOptions = {}): Integration {
+export function createPaseo(options: PaseoOptions = {}): BoxIntegration {
   const platform = options.platform ?? process.platform;
   const macApp = options.macApp ?? "/Applications/Paseo.app";
   const linuxInstallDir = options.linuxInstallDir ?? "/opt/Paseo";
@@ -231,10 +232,7 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
     return { target, box, warnings: [] };
   };
 
-  const self: Integration = {
-    id: "paseo",
-    name: "Paseo",
-    description: "Paseo daemon on the box",
+  const self: IntegrationBoxPart = {
     async localVersion(): Promise<LocalVersion> {
       if (platform === "darwin") {
         const cli = join(macApp, "Contents/Resources/bin/paseo");
@@ -412,7 +410,7 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
       ];
     },
   };
-  return self;
+  return { id: "paseo", name: "Paseo", description: "Paseo daemon on the box", box: self };
 }
 
 export const paseo = createPaseo();

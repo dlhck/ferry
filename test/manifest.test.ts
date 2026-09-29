@@ -1116,6 +1116,77 @@ describe("carried Codex settings keys", () => {
   });
 });
 
+describe("carried Pi settings keys", () => {
+  test("only the allowlisted keys leave settings.json", () => {
+    const home = makeHome();
+    write(
+      home,
+      ".pi/agent/settings.json",
+      JSON.stringify({
+        defaultProvider: "anthropic",
+        defaultModel: "claude-sonnet",
+        defaultThinkingLevel: "high",
+        enabledModels: ["claude-*"],
+        enableSkillCommands: true,
+        theme: "dark",
+        shellPath: "/usr/local/bin/bash",
+        npmCommand: ["mise", "exec", "--", "npm"],
+        packages: [`https://${tokens[0]![1]}@git.example.com/pi-tools.git`],
+        extensions: ["/home/user/pi-extensions"],
+      }),
+    );
+
+    const entry = seedOf(home).settings.find((candidate) => candidate.harness === "pi");
+    const text = Buffer.from(entry?.bytes ?? []).toString();
+
+    expect(JSON.parse(text)).toEqual({
+      defaultProvider: "anthropic",
+      defaultModel: "claude-sonnet",
+      defaultThinkingLevel: "high",
+      enabledModels: ["claude-*"],
+      enableSkillCommands: true,
+    });
+    for (const secret of [tokens[0]![1], "packages", "shellPath", "npmCommand", "/home/user"]) {
+      expect(text).not.toContain(secret);
+    }
+  });
+});
+
+describe("carried Cursor Agent settings keys", () => {
+  test("only the allowlisted keys leave cli-config.json", () => {
+    const home = makeHome();
+    const model = { modelId: "gpt-5", displayName: "GPT-5" };
+    write(
+      home,
+      ".cursor/cli-config.json",
+      JSON.stringify({
+        version: 1,
+        model,
+        maxMode: true,
+        hasChangedDefaultModel: true,
+        attribution: { attributeCommitsToAgent: false, attributePRsToAgent: false },
+        authInfo: { email: "operator@example.com", userId: 1234 },
+        permissions: { allow: ["Shell(ls)", "Read(/home/user/**)"], deny: [] },
+        statusLine: { type: "command", command: "/usr/local/bin/status-line" },
+        approvalMode: "unrestricted",
+      }),
+    );
+
+    const entry = seedOf(home).settings.find((candidate) => candidate.harness === "cursor");
+    const text = Buffer.from(entry?.bytes ?? []).toString();
+
+    expect(JSON.parse(text)).toEqual({
+      model,
+      maxMode: true,
+      hasChangedDefaultModel: true,
+      attribution: { attributeCommitsToAgent: false, attributePRsToAgent: false },
+    });
+    for (const secret of ["authInfo", "operator@example.com", "permissions", "status-line", "approvalMode"]) {
+      expect(text).not.toContain(secret);
+    }
+  });
+});
+
 describe("carried Claude hook commands", () => {
   function hooksWith(...commands: string[]) {
     return JSON.stringify({
