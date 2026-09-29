@@ -61,14 +61,23 @@ struct BoxSection: Sendable {
 }
 
 /// The envelope of `ferry --json`.
-private struct Envelope: Decodable {
+private struct Envelope<Value: Decodable>: Decodable {
     struct Failure: Decodable {
         let message: String
     }
 
     let ok: Bool
-    let result: BriefReport?
+    let result: Value?
     let error: Failure?
+}
+
+/// The part of the `ferry sync --json` result that the menu shows. A failed box fails the whole sync.
+private struct SyncReport: Decodable {
+    struct Box: Decodable {
+        let name: String
+    }
+
+    let boxes: [Box]
 }
 
 enum MenuState {
@@ -89,8 +98,24 @@ final class StatusModel: ObservableObject {
     /// The error of the last "Refresh now".
     @Published private(set) var refreshError: String?
     @Published private(set) var refreshing = false
+    /// The result of the last "Sync now".
+    @Published private(set) var syncMessage: String?
+    @Published private(set) var syncing = false
+    /// Why Ferry cannot post notifications.
+    @Published private(set) var notificationError: String?
+    @Published var notificationsEnabled = UserDefaults.standard.object(forKey: StatusModel.notificationsKey) as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(notificationsEnabled, forKey: Self.notificationsKey)
+            notificationError = nil
+            if notificationsEnabled { requestNotificationPermission() }
+        }
+    }
 
     private static let staleAfter: TimeInterval = 15 * 60
+    private static let notificationsKey = "notifications"
+    private let notifier = Notifier()
+    /// The items of the last report that give a notification when they are new, or nil before the first report.
+    private var alertItems: Set<String>?
     private let statusFile = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".ferry/status.json")
     private let tunnelsDirectory = FileManager.default.homeDirectoryForCurrentUser
@@ -98,6 +123,7 @@ final class StatusModel: ObservableObject {
     private var timer: Timer?
 
     init() {
+        if notificationsEnabled { requestNotificationPermission() }
         reload()
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.reload() }
@@ -150,13 +176,36 @@ final class StatusModel: ObservableObject {
         refreshError = nil
         tunnels = readTunnels()
         Task.detached {
-            let outcome = Self.runStatus()
+            let outcome = Self.runFerry(["status", "--brief"], as: BriefReport.self)
             await MainActor.run {
                 self.refreshing = false
                 switch outcome {
                 case let .success(report): self.show(report)
                 case let .failure(error): self.refreshError = error.message
                 }
+            }
+        }
+    }
+
+    /// Run `ferry sync`, show its result, then refresh the menu.
+    func sync() {
+        guard !syncing else { return }
+        syncing = true
+        syncMessage = nil
+        Task.detached {
+            let message: String
+            switch Self.runFerry(["sync"], as: SyncReport.self) {
+            case let .success(report):
+                message = "Synced \(report.boxes.count) \(report.boxes.count == 1 ? "box" : "boxes")."
+            case let .failure(error):
+                message = error.message
+            }
+            await MainActor.run {
+                self.syncing = false
+                self.syncMessage = message
+                // The menu is closed while the sync runs, so the notification tells the result.
+                if self.notificationsEnabled { self.notifier.post(title: "Ferry sync", body: message) }
+                self.refresh()
             }
         }
     }
@@ -200,37 +249,77 @@ final class StatusModel: ObservableObject {
     private func show(_ report: BriefReport) {
         self.report = report
         checkedAt = Self.parseDate(report.checkedAt)
+        notifyNewItems(report)
     }
 
-    private struct RefreshError: Error {
+    private func requestNotificationPermission() {
+        notifier.requestPermission { [weak self] message in
+            Task { @MainActor in self?.notificationError = message }
+        }
+    }
+
+    /// Post one notification for each item that the previous report did not have: an offline box,
+    /// a login or MCP login that needs a login, and a tool with drift. The first report sets the items without notifications.
+    private func notifyNewItems(_ report: BriefReport) {
+        var items: [(key: String, title: String, body: String)] = []
+        var kept = Set<String>()
+        for box in report.boxes {
+            if box.online {
+                items += box.issues.filter(Self.notifies).map { (key: "\(box.name)\t\($0.kind)\t\($0.name)", title: "Ferry: \(box.name)", body: $0.message) }
+            } else {
+                items.append((key: "\(box.name)\toffline", title: "Ferry: \(box.name) is offline", body: box.error ?? "Ferry cannot connect to the box."))
+                // An offline box has no issues in the report. Keep its items, so that they give no new notification when the box is back.
+                kept.formUnion(alertItems?.filter { $0.hasPrefix("\(box.name)\t") } ?? [])
+            }
+        }
+        let previous = alertItems
+        alertItems = kept.union(items.map(\.key))
+        guard let previous, notificationsEnabled else { return }
+        for item in items where !previous.contains(item.key) {
+            notifier.post(title: item.title, body: item.body)
+        }
+    }
+
+    private static func notifies(_ issue: BriefIssue) -> Bool {
+        switch issue.kind {
+        case "login": return issue.state != "unavailable"
+        case "mcp-login": return true
+        case "tool": return issue.state == "drift"
+        default: return false
+        }
+    }
+
+    private struct RunError: Error {
         let message: String
     }
 
-    private nonisolated static func runStatus() -> Result<BriefReport, RefreshError> {
+    /// Run ferry with the arguments and --json, and decode the result of its envelope.
+    private nonisolated static func runFerry<Value: Decodable>(_ arguments: [String], as _: Value.Type) -> Result<Value, RunError> {
         let process = Process()
-        // The launchd agent sets FERRY_PATH to the path of ferry.
+        // The launchd agent sets FERRY_PATH to the path of ferry. A GUI app does not get the PATH of the shell.
         if let ferry = ProcessInfo.processInfo.environment["FERRY_PATH"], !ferry.isEmpty {
             process.executableURL = URL(fileURLWithPath: ferry)
-            process.arguments = ["status", "--brief", "--json"]
+            process.arguments = arguments + ["--json"]
         } else {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = ["ferry", "status", "--brief", "--json"]
+            process.arguments = ["ferry"] + arguments + ["--json"]
         }
+        let command = "ferry \(arguments.joined(separator: " "))"
         let stdout = Pipe()
         process.standardOutput = stdout
         process.standardError = FileHandle.nullDevice
         do {
             try process.run()
         } catch {
-            return .failure(RefreshError(message: "Cannot run ferry: \(error.localizedDescription)"))
+            return .failure(RunError(message: "Cannot run ferry: \(error.localizedDescription)"))
         }
         let data = stdout.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data) else {
-            return .failure(RefreshError(message: "ferry status --brief --json printed no valid JSON."))
+        guard let envelope = try? JSONDecoder().decode(Envelope<Value>.self, from: data) else {
+            return .failure(RunError(message: "\(command) --json printed no valid JSON."))
         }
         if envelope.ok, let result = envelope.result { return .success(result) }
-        return .failure(RefreshError(message: envelope.error?.message ?? "ferry status --brief failed."))
+        return .failure(RunError(message: envelope.error?.message ?? "\(command) failed."))
     }
 
     /// `checkedAt` is `Date.toISOString()` of JavaScript, with milliseconds.

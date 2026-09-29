@@ -34,6 +34,8 @@ export type MenuBarInput = {
   /** The path of the running process. Under bun, it is the bun binary. */
   readonly execPath?: string;
   readonly path?: string;
+  /** SSH_AUTH_SOCK of the app. The default is SSH_AUTH_SOCK of this process. */
+  readonly sshAuthSock?: string;
   /** A local `.app` directory or a zip of `macos/build.sh`, in place of the release download. */
   readonly app?: string;
 };
@@ -117,8 +119,8 @@ export async function installMenuBar(
       executable: join(app, "Contents", "MacOS", EXECUTABLE),
       ...(uid === undefined ? {} : { uid }),
       ...(input.path === undefined ? {} : { path: input.path }),
-      // The app runs no SSH command.
-      sshAuthSock: "",
+      // Refresh now and Sync now run ferry, which connects to the boxes with SSH. The app uses the SSH agent of ferry watch.
+      ...(input.sshAuthSock === undefined ? {} : { sshAuthSock: input.sshAuthSock }),
     },
     { ...dependencies, run },
   );

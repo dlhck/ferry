@@ -26,7 +26,7 @@ function fakeRun(commands: ServiceCommand[], fail?: string) {
   };
 }
 
-const RELEASE = { platform: "darwin", uid: 501, version: "1.2.0", execPath: "/Users/me/.local/bin/ferry", path: "/opt/homebrew/bin:/usr/bin:/bin" } as const;
+const RELEASE = { platform: "darwin", uid: 501, version: "1.2.0", execPath: "/Users/me/.local/bin/ferry", path: "/opt/homebrew/bin:/usr/bin:/bin", sshAuthSock: "/private/tmp/agent.sock" } as const;
 
 describe("menu bar app installer", () => {
   test("downloads the release zip, verifies its checksum, unpacks it, and loads the launchd agent", async () => {
@@ -68,7 +68,7 @@ describe("menu bar app installer", () => {
     expect(body).toContain("<string>/opt/homebrew/bin:/usr/bin:/bin</string>");
     expect(body).toContain("<key>RunAtLoad</key>\n  <true/>");
     expect(body).toContain("<key>KeepAlive</key>\n  <false/>");
-    expect(body).not.toContain("SSH_AUTH_SOCK");
+    expect(body).toContain("<key>SSH_AUTH_SOCK</key>\n    <string>/private/tmp/agent.sock</string>");
   });
 
   test("refuses a download whose checksum does not match, before it unpacks", async () => {
