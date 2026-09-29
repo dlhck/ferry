@@ -131,8 +131,8 @@ describe("Paseo local version", () => {
 });
 
 describe("Paseo integration", () => {
-  test("the registry has Paseo only", () => {
-    expect(INTEGRATIONS.map((integration) => integration.id)).toEqual(["paseo"]);
+  test("the registry has Paseo and Sherlock", () => {
+    expect(INTEGRATIONS.map((integration) => integration.id)).toEqual(["paseo", "sherlock"]);
   });
 
   test("connect steps name the Desktop settings and the box destination", () => {

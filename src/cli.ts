@@ -61,6 +61,7 @@ import {
   runBoxRemove,
   type BoxCommandDependencies,
 } from "./box.ts";
+import type { IntegrationId } from "./integrations/types.ts";
 import { INTEGRATIONS, integrationLines, listIntegrations, operatorIntegrations, type Integration } from "./integrations/index.ts";
 import {
   runIntegrationCommand,
@@ -481,7 +482,7 @@ function createProgram(dependencies: CliDependencies): { program: Command; state
     ...boxConfig(selected),
     ...(selected?.config.boxes
       ? {
-          setIntegration: (id: "paseo", enabled: boolean) => setIntegration(id, enabled, homedir(), selected.box.name),
+          setIntegration: (id: IntegrationId, enabled: boolean) => setIntegration(id, enabled, homedir(), selected.box.name),
           box: selected.box.name,
         }
       : {}),
@@ -1065,7 +1066,10 @@ To carry daemon.autoArchiveAfterMerge, set paseo_auto_archive = true in
 override it. Sync applies it with paseo daemon reload, without a restart.
 
 An integration without a box part runs only on this machine. For it, Ferry
-changes only the config and adds its commands when it can run here.`)
+changes only the config and adds its commands when it can run here.
+
+sherlock: needs the sherlock executable on this machine. Ferry adds ferry
+sherlock add, and ferry status checks each connection that it added.`)
     .argument("<name>", "integration name, such as paseo")
     .option("--dry-run", "print the box commands without connecting or writing")
     .option("--yes", "run without a confirmation prompt")
@@ -1119,8 +1123,16 @@ changes only the config.`)
   } catch {
     // The commands that read the config report the error.
   }
+  // The commands of an integration accept --box.
+  const addBoxCommand = (command: Command) => {
+    boxCommands.add(command);
+    command.commands.forEach(addBoxCommand);
+  };
   for (const integration of operatorIntegrations(current, dependencies.integrations ?? INTEGRATIONS)) {
-    if (integration.operator.available()) integration.operator.registerCommands?.(program);
+    if (!integration.operator.available()) continue;
+    const known = new Set(program.commands);
+    integration.operator.registerCommands?.(program, { json, writeLine, report });
+    for (const command of program.commands) if (!known.has(command)) addBoxCommand(command);
   }
 
   program
