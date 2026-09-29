@@ -179,6 +179,51 @@ describe("ferry revert", () => {
     expect(readFileSync(setup.settingsFile, "utf8")).toBe(settings);
   });
 
+  test("refuses to rewrite a TOML settings file with comments and changes nothing", async () => {
+    const setup = await snapshotHome();
+    const codexFile = join(setup.home, ".codex", "config.toml");
+    const writeCodex = (model: string) =>
+      writeFileSync(codexFile, `# Keep this comment.\nmodel = "${model}"\napproval_policy = "never" # local only\n`);
+    mkdirSync(join(setup.home, ".codex"), { recursive: true });
+    writeCodex("gpt-a");
+    await setup.publish("chore: codex gpt-a");
+    writeCodex("gpt-b");
+    await setup.publish("chore: codex gpt-b");
+    const codexCommit = await git(setup.store, "rev-parse", "HEAD");
+    const text = readFileSync(codexFile, "utf8");
+
+    for (const dryRun of [true, false]) {
+      const error = await runRevert({ home: setup.home, commit: codexCommit, dryRun }, setup.dependencies).catch(
+        (caught: unknown) => caught,
+      );
+
+      expect(errorInfo(error).code).toBe("refused");
+      expect(errorInfo(error).message).toContain(codexFile);
+      expect(errorInfo(error).message).toContain("comments");
+      expect(errorInfo(error).message).toContain('model = "gpt-a"');
+    }
+    expect(await git(setup.store, "rev-parse", "HEAD")).toBe(codexCommit);
+    expect(readFileSync(codexFile, "utf8")).toBe(text);
+  });
+
+  test("rewrites a TOML settings file whose # signs are only in strings", async () => {
+    const setup = await snapshotHome();
+    const codexFile = join(setup.home, ".codex", "config.toml");
+    const writeCodex = (model: string) =>
+      writeFileSync(codexFile, `model = "${model}"\nnotify_url = "https://example.com/#top"\n`);
+    mkdirSync(join(setup.home, ".codex"), { recursive: true });
+    writeCodex("gpt-a");
+    await setup.publish("chore: codex gpt-a");
+    writeCodex("gpt-b");
+    await setup.publish("chore: codex gpt-b");
+    const codexCommit = await git(setup.store, "rev-parse", "HEAD");
+
+    await runRevert({ home: setup.home, commit: codexCommit, sync: false }, setup.dependencies);
+
+    const reverted = Bun.TOML.parse(readFileSync(codexFile, "utf8"));
+    expect(reverted).toEqual({ model: "gpt-a", notify_url: "https://example.com/#top" });
+  });
+
   test("refuses local changes that are not published", async () => {
     const setup = await snapshotHome();
     setup.writeSettings("haiku");

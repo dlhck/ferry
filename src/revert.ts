@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { apply } from "./apply.ts";
+import { stringify as stringifyToml } from "smol-toml";
 import { mergeSettings, record } from "./box-settings.ts";
 import { FerryError } from "./errors.ts";
 import type { Progress } from "./progress.ts";
@@ -175,16 +176,67 @@ async function settingsWrites(
     const text = existsSync(file) ? readFileSync(file, "utf8") : null;
     const local = parseLocal(file, text, descriptor.format);
     const kept = keys.filter((key) => !Bun.deepEquals(normalized(local[key]), before[key]));
+    const set = `Set these values by hand: ${revertedValues(keys, after, descriptor.format)}.`;
     if (kept.length > 0) {
       throw new FerryError(
         "refused",
-        `${file} has values in ${kept.join(", ")} that Ferry does not carry. Ferry did not revert and changed nothing.`,
-        { hint: "Change these keys by hand.", details: { paths: [file] } },
+        `${file} has values in ${kept.join(", ")} that Ferry does not carry. Ferry did not revert and changed nothing. ${set}`,
+        { hint: "Change these keys by hand, then run ferry sync.", details: { paths: [file], values: pick(after, keys) } },
+      );
+    }
+    // JSON has no comments, and Manifest refuses a JSON file that has them. A rewrite of TOML drops its comments.
+    if (descriptor.format === "toml" && text !== null && hasTomlComment(text)) {
+      throw new FerryError(
+        "refused",
+        `${file} has comments, and a rewrite would remove them. Ferry did not revert and changed nothing. ${set}`,
+        {
+          hint: "Change these keys by hand, then run ferry sync. Or remove the comments and run ferry revert again.",
+          details: { paths: [file], values: pick(after, keys) },
+        },
       );
     }
     writes.push({ file: descriptor.file, keys, text: mergeSettings(text, after, keys, descriptor.format) });
   }
   return writes;
+}
+
+/** The reverted keys as the file writes them. A key that the revert removes shows as `remove <key>`. */
+function revertedValues(keys: readonly string[], values: Record<string, unknown>, format: "json" | "toml"): string {
+  return keys
+    .map((key) => {
+      if (!Object.hasOwn(values, key)) return `remove ${key}`;
+      return format === "toml" ? stringifyToml({ [key]: values[key] }).trim() : `"${key}": ${JSON.stringify(values[key])}`;
+    })
+    .join("; ");
+}
+
+/** Each key with its value, and null for a key that the revert removes. */
+function pick(values: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+  return Object.fromEntries(keys.map((key) => [key, Object.hasOwn(values, key) ? values[key] : null]));
+}
+
+/** True when `text` has a `#` outside a TOML string. */
+function hasTomlComment(text: string): boolean {
+  for (let index = 0; index < text.length; ) {
+    const char = text[index];
+    if (char === "#") return true;
+    if (text.startsWith('"""', index) || text.startsWith("'''", index)) {
+      const quote = text.slice(index, index + 3);
+      index += 3;
+      while (index < text.length && !text.startsWith(quote, index)) index += quote === '"""' && text[index] === "\\" ? 2 : 1;
+      // A closing delimiter can have up to two more quotes of the string before it.
+      while (text[index] === quote[0]) index++;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      index++;
+      while (index < text.length && text[index] !== char && text[index] !== "\n") index += char === '"' && text[index] === "\\" ? 2 : 1;
+      index++;
+      continue;
+    }
+    index++;
+  }
+  return false;
 }
 
 function carried(bytes: Uint8Array | null): Record<string, unknown> {
