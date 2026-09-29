@@ -1,5 +1,6 @@
 /** The Paseo integration. The Paseo daemon runs on the box, and Paseo Desktop connects to it over SSH. */
 
+import type { IntegrationsConfig } from "../config.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { quoteShell, readCommand, writeCommand } from "../box-settings.ts";
@@ -49,7 +50,7 @@ const SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bi
 const INSTALL_TIMEOUT_MS = 10 * 60 * 1_000;
 
 /** The daemon gets the same PATH as a Ferry box command, so agents find the same tools. */
-export function unitFile(pathDirs: readonly string[]): string {
+export function unitFile(pathDirs: readonly string[], relay = false): string {
   return [
     "# Managed by ferry. ferry integrations disable paseo removes this file.",
     "[Unit]",
@@ -61,7 +62,7 @@ export function unitFile(pathDirs: readonly string[]): string {
     "ExecStart=%h/.local/bin/paseo daemon run",
     unitPathLine(pathDirs),
     `Environment=PASEO_LISTEN=${LISTEN}`,
-    "Environment=PASEO_RELAY_ENABLED=false",
+    `Environment=PASEO_RELAY_ENABLED=${relay}`,
     // The daemon self-update runs npm -g. This prefix points it to the Ferry install.
     "Environment=NPM_CONFIG_PREFIX=%h/.local",
     "Restart=on-failure",
@@ -248,7 +249,7 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
       }
       return { version: null, source: null };
     },
-    async plan(action: IntegrationAction, link?: IntegrationLink): Promise<readonly string[]> {
+    async plan(action: IntegrationAction, link?: IntegrationLink, config?: IntegrationsConfig): Promise<readonly string[]> {
       if (action === "disable" || action === "purge") {
         return [
           "Box commands:",
@@ -288,8 +289,10 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
         ...indent(installCommand(local.version)),
         ...indent(TAKEOVER_COMMAND),
         `  # write ~/${UNIT_PATH}. PATH also has the directories of the tools in the config:`,
-        ...unitFile(BUILTIN_BOX_PATH_DIRS).trimEnd().split("\n").map((line) => `  #   ${line}`),
+        ...unitFile(BUILTIN_BOX_PATH_DIRS, config?.paseo_relay === true).trimEnd().split("\n").map((line) => `  #   ${line}`),
         ...indent(START_COMMAND),
+        `  # If an existing unit changed: ${RESTART_COMMAND}`,
+        "A changed unit restarts the daemon and stops its agents.",
         ...indent(LINGER_COMMAND),
         ...indent(`${STATUS_COMMAND}   # repeat until localDaemon is running, for ${Math.round(startTimeoutMs / 1_000)} s`),
         ...indent(PROJECTS_COMMAND),
@@ -297,7 +300,7 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
       );
       return lines;
     },
-    async enable(link: IntegrationLink, progress: Progress): Promise<readonly string[]> {
+    async enable(link: IntegrationLink, progress: Progress, config?: IntegrationsConfig): Promise<readonly string[]> {
       const lines: string[] = [];
       const { version } = await self.localVersion();
       if (version === null) lines.push("No local Paseo app. Ferry installs the npm latest tag. The version is not pinned.");
@@ -325,10 +328,16 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
         lines.push(`Disabled the old ${OLD_UNIT}. The file ~/.config/systemd/user/${OLD_UNIT} stays.`);
       }
 
+      const unit = unitFile(linkPathDirs(link), config?.paseo_relay === true);
+      const previous = await boxRun(link, readCommand(UNIT_PATH), `Ferry could not read ~/${UNIT_PATH}`);
       await step(progress, `Writing ${UNIT}`, () =>
-        boxRun(link, writeCommand(UNIT_PATH, unitFile(linkPathDirs(link))), `Ferry could not write ~/${UNIT_PATH}`),
+        boxRun(link, writeCommand(UNIT_PATH, unit), `Ferry could not write ~/${UNIT_PATH}`),
       );
       await step(progress, `Starting ${UNIT}`, () => boxRun(link, START_COMMAND, `Ferry could not start ${UNIT}`));
+      if (previous.startsWith("F") && previous.slice(1) !== unit) {
+        await step(progress, `Restarting ${UNIT}`, () => boxRun(link, RESTART_COMMAND, `Ferry could not restart ${UNIT}`));
+        lines.push("The service config changed, so Ferry restarted the Paseo daemon. The restart stopped its agents.");
+      }
       // The daemon runs without linger until the user logs out, so a linger failure is a warning.
       const linger = await step(progress, "Turning on linger for the box user", async () => {
         const result = await link.run(LINGER_COMMAND, {});
@@ -351,7 +360,7 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
       lines.push(`Registered ${registered.length - failed.length} of ${registered.length} box projects in Paseo.`);
       if (failed.length > 0) lines.push(`Warning: paseo project create failed for ${failed.join(", ")}.`);
 
-      lines.push(`Paseo ${running} runs on the box at ${LISTEN}. The relay is off.`);
+      lines.push(`Paseo ${running} runs on the box at ${LISTEN}. The relay is ${config?.paseo_relay === true ? "on" : "off"}.`);
       return lines;
     },
     async disable(link: IntegrationLink, progress: Progress, options: { readonly purge: boolean }): Promise<readonly string[]> {
@@ -377,7 +386,7 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
       const running = await step(progress, "Waiting for the Paseo daemon", () => waitForDaemon(link), undefined, (v) => v);
       return [...check.warnings, `Paseo ${running} runs on the box${local.version === null ? ". The version is not pinned." : "."}`];
     },
-    async health(link: IntegrationLink): Promise<IntegrationHealth> {
+    async health(link: IntegrationLink, config?: IntegrationsConfig): Promise<IntegrationHealth> {
       const [result, local] = await Promise.all([
         link.run(HEALTH_COMMAND, { timeoutMs: BOX_TIMEOUT_MS }),
         this.localVersion(),
@@ -386,7 +395,7 @@ export function createPaseo(options: PaseoOptions = {}): Integration {
         const error = `${result.error.origin}/${result.error.code}`;
         return { lines: [`Box: unavailable (${error})`], warnings: [], json: { error } };
       }
-      return parseHealth(result.stdout, local.version);
+      return parseHealth(result.stdout, local.version, config?.paseo_relay === true);
     },
     async onProjectMoved(link: IntegrationLink, path: string): Promise<void> {
       // `project create` is idempotent. It returns the existing project for a known directory.
@@ -450,7 +459,11 @@ export async function refreshUnitPath(link: IntegrationLink, pathDirs: readonly 
     throw new PaseoError(`~/${UNIT_PATH} is not on the box. Run ferry integrations enable paseo`);
   }
   if (current.slice(1).split("\n").includes(unitPathLine(pathDirs))) return false;
-  await boxRun(link, writeCommand(UNIT_PATH, unitFile(pathDirs)), `Ferry could not write ~/${UNIT_PATH}`);
+  const text = current.slice(1);
+  const updated = /^Environment=PATH=.*$/m.test(text)
+    ? text.replace(/^Environment=PATH=.*$/m, unitPathLine(pathDirs))
+    : text.replace("[Service]", `[Service]\n${unitPathLine(pathDirs)}`);
+  await boxRun(link, writeCommand(UNIT_PATH, updated), `Ferry could not write ~/${UNIT_PATH}`);
   await boxRun(link, `systemctl --user daemon-reload && ${RESTART_COMMAND}`, `Ferry could not restart ${UNIT}`);
   return true;
 }
@@ -610,7 +623,7 @@ type DaemonStatus = {
   readonly providers: readonly { readonly provider: string; readonly available: boolean }[];
 };
 
-function parseHealth(stdout: string, localVersion: string | null): IntegrationHealth {
+function parseHealth(stdout: string, localVersion: string | null, relay: boolean): IntegrationHealth {
   const [head = "", status] = stdout.split(`\n${SECTION}\n`);
   const fields = new Map<string, string>();
   for (const line of head.split("\n")) {
@@ -664,7 +677,11 @@ function parseHealth(stdout: string, localVersion: string | null): IntegrationHe
       `Paseo listens on ${daemon.listen}, which is not a loopback address. Other hosts can control the daemon.`,
     );
   }
-  if (daemon.relay === true) warnings.push("The Paseo relay is on. Ferry keeps it off on the box.");
+  if (daemon.relay !== null && daemon.relay !== relay) {
+    warnings.push(relay
+      ? "The Paseo relay is off, but the config requests on. Run ferry integrations enable paseo to apply the config."
+      : "The Paseo relay is on. Ferry keeps it off on the box.");
+  }
   return { lines, warnings, json: { ...base, ...daemon, error: null } };
 }
 

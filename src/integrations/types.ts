@@ -4,7 +4,7 @@ import type { IntegrationsConfig } from "../config.ts";
 import type { Link } from "../link.ts";
 import type { Progress } from "../progress.ts";
 
-export type IntegrationId = keyof IntegrationsConfig;
+export type IntegrationId = "paseo";
 
 /** The box commands of an integration need only `run`. Tests inject a fake. */
 export type IntegrationLink = Pick<Link, "run">;
@@ -39,9 +39,9 @@ export interface Integration {
    * asks for confirmation. Only the `update` plan uses `link`, to read the box
    * version. The other plans do not connect to the box.
    */
-  plan(action: IntegrationAction, link?: IntegrationLink): Promise<readonly string[]>;
+  plan(action: IntegrationAction, link?: IntegrationLink, config?: IntegrationsConfig): Promise<readonly string[]>;
   /** Install and start the service on the box. A repeat run gives the same result. Returns report lines. */
-  enable(link: IntegrationLink, progress: Progress): Promise<readonly string[]>;
+  enable(link: IntegrationLink, progress: Progress, config?: IntegrationsConfig): Promise<readonly string[]>;
   /** Stop and remove the service. `purge` also removes the package on the box. Returns report lines. */
   disable(
     link: IntegrationLink,
@@ -51,7 +51,7 @@ export interface Integration {
   /** Install the local app version on the box and restart the service, if the box version differs. Only `ferry update` calls it. Returns report lines. */
   update(link: IntegrationLink, progress: Progress): Promise<readonly string[]>;
   /** Read the state of the service on the box without changes. */
-  health(link: IntegrationLink): Promise<IntegrationHealth>;
+  health(link: IntegrationLink, config?: IntegrationsConfig): Promise<IntegrationHealth>;
   /** Tell the service about a project that `ferry move` put at `path` on the box. */
   onProjectMoved(link: IntegrationLink, path: string): Promise<void>;
   /** The steps that the operator does on this machine to connect to the box at `destination`. */

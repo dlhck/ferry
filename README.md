@@ -92,6 +92,18 @@ Add `--json` to any command for scripts and agents: stdout then has only JSON, a
 - **Paseo.** `ferry integrations enable paseo` runs the Paseo daemon on a box and carries your Paseo agent profiles. See `ferry integrations enable --help`.
 - **Automatic sync.** `ferry watch install` syncs each change after one second. With `[update] watch = true`, it also updates the tools with the `"latest"` policy once a day. Every 5 minutes and after each sync, the watch writes `ferry status --brief --json` to `~/.ferry/status.json`. See `ferry watch install --help` and `ferry update --help`.
 
+### Paseo relay
+
+To use relay pairing, set this in `~/.ferry/config.toml` on the operator machine:
+
+```toml
+[integrations]
+paseo = true
+paseo_relay = true
+```
+
+The relay is off by default. Set `paseo_relay` in `[box.<name>.integrations]` to override it for one box. Run `ferry integrations enable paseo --box <name>` to apply the setting, including changes to an existing service. Omit `--box` for a single box. A changed service config restarts the daemon and stops its agents. Sync and updates preserve the applied relay setting.
+
 ## Agent skill
 
 The [`skills/ferry`](skills/ferry/SKILL.md) skill tells agents how to work with Ferry on both machines, for example not to edit a Ferry-managed file on the box. Install it on this machine, then run `ferry sync`:

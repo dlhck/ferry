@@ -916,10 +916,15 @@ command that fixes it. ferry watch writes the same report to
 
 paseo: Ferry installs Node 22 or later and the Paseo CLI at the version of the
 local Paseo app, then starts the user service ferry-paseo.service. The daemon
-listens on 127.0.0.1:6767 with the relay off. It has no password, so use it
+listens on 127.0.0.1:6767 with the relay off by default. It has no password, so use it
 only on a box with one user. To connect Paseo Desktop, add the Remote SSH host
 ssh://<box destination>. With Paseo on, sync carries the Paseo agent profiles,
-and move registers the project in Paseo on the box.`)
+and move registers the project in Paseo on the box.
+
+For relay pairing, set paseo_relay = true in [integrations] of
+~/.ferry/config.toml. A [box.<name>.integrations] table can override it.
+Run ferry integrations enable paseo --box <name> again to apply a change.
+A changed service config restarts the daemon and stops its agents.`)
     .argument("<name>", "integration name, such as paseo")
     .option("--dry-run", "print the box commands without connecting or writing")
     .option("--yes", "run without a confirmation prompt")

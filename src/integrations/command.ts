@@ -72,7 +72,7 @@ export async function runIntegrationCommand(
   const enable = input.action === "enable";
   const action: IntegrationCommandResult["action"] = enable ? "enable" : input.purge ? "purge" : "disable";
   resolved.writeLine(`${enable ? "Enable" : "Disable"} ${integration.name}:`);
-  const plan = await integration.plan(action);
+  const plan = await integration.plan(action, undefined, config?.integrations);
   for (const line of plan) resolved.writeLine(line);
   const result = { integration: integration.id, action, plan };
   if (enable && input.dryRun) {
@@ -89,7 +89,7 @@ export async function runIntegrationCommand(
 
   const link = resolved.createLink(target);
   const lines = enable
-    ? await integration.enable(link, resolved.progress)
+    ? await integration.enable(link, resolved.progress, config?.integrations)
     : await integration.disable(link, resolved.progress, { purge: input.purge });
   for (const line of lines) resolved.writeLine(line);
   // The flag changes only after the box steps succeed.
