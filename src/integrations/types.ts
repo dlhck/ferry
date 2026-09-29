@@ -1,5 +1,10 @@
-/** The contract for a built-in integration. An integration runs one service on the box. */
+/**
+ * The contract for a built-in integration. An integration has a box part, an
+ * operator part, or both. The box part runs one service on the box. The
+ * operator part adds commands and status checks on this machine.
+ */
 
+import type { Command } from "commander";
 import type { IntegrationsConfig } from "../config.ts";
 import type { Link } from "../link.ts";
 import type { Progress } from "../progress.ts";
@@ -30,8 +35,17 @@ export type IntegrationHealth = {
 export interface Integration {
   readonly id: IntegrationId;
   readonly name: string;
-  /** One line that says what the integration runs. */
+  /** One line that says what the integration does. */
   readonly description: string;
+  readonly box?: IntegrationBoxPart;
+  readonly operator?: IntegrationOperatorPart;
+}
+
+export type BoxIntegration = Integration & { readonly box: IntegrationBoxPart };
+export type OperatorIntegration = Integration & { readonly operator: IntegrationOperatorPart };
+
+/** The service of an integration on the box. */
+export interface IntegrationBoxPart {
   /** Find the local app version. It runs only on the operator machine. */
   localVersion(): Promise<LocalVersion>;
   /**
@@ -56,4 +70,14 @@ export interface Integration {
   onProjectMoved(link: IntegrationLink, path: string): Promise<void>;
   /** The steps that the operator does on this machine to connect to the box at `destination`. */
   connectSteps(destination: string): readonly string[];
+}
+
+/** The commands and checks of an integration on the operator machine. */
+export interface IntegrationOperatorPart {
+  /** True when the integration can run on this machine, for example when its executable is on the PATH. */
+  available(): boolean;
+  /** Add the commands of the integration to the Ferry CLI. Ferry calls it only when the integration is enabled and available. */
+  registerCommands?(program: Command): void;
+  /** Check the integration on this machine for `ferry status`. Ferry calls it only when the integration is enabled and available. */
+  health?(): Promise<IntegrationHealth>;
 }

@@ -17,6 +17,7 @@ import {
   runStatusCommand,
   type StatusCommandDependencies,
 } from "../src/status-command.ts";
+import { EXAMPLE_ID, operatorIntegration } from "./fake-integration.ts";
 import { fakeTerminal, recordProgress } from "./fake-progress.ts";
 
 const registry: Registry = {
@@ -584,11 +585,15 @@ describe("ferry status progress", () => {
       const stack = fakeStack(online);
       const readConfig = stack.dependencies.readConfig!;
       const calls: unknown[] = [];
+      const base = createPaseo({ platform: "win32" });
       const paseo: Integration = {
-        ...createPaseo({ platform: "win32" }),
-        async health(link) {
-          calls.push(link);
-          return health;
+        ...base,
+        box: {
+          ...base.box,
+          async health(link) {
+            calls.push(link);
+            return health;
+          },
         },
       };
       const dependencies: Partial<StatusCommandDependencies> = {
@@ -663,8 +668,50 @@ describe("ferry status progress", () => {
 
     const report = await status(stack, true);
 
+    expect("integrations" in report).toBe(false);
     expect("integrations" in report.boxes[0]!).toBe(false);
     expect(stack.output[0]).not.toContain("integrations");
+  });
+
+  describe("with an enabled operator part", () => {
+    function operator(available: boolean) {
+      const stack = fakeStack();
+      const readConfig = stack.dependencies.readConfig!;
+      const dependencies: Partial<StatusCommandDependencies> = {
+        ...stack.dependencies,
+        readConfig: () => ({ ...readConfig(), integrations: { [EXAMPLE_ID]: true } }),
+        integrations: [operatorIntegration({ available })],
+      };
+      return { stack, dependencies };
+    }
+
+    test("checks it on this machine, not on the box", async () => {
+      const { stack, dependencies } = operator(true);
+      const progress = recordProgress();
+
+      const report = await status(stack, false, { ...dependencies, progress });
+
+      expect(report.integrations).toEqual({
+        [EXAMPLE_ID]: { name: "Example", lines: ["Example: ready"], warnings: [], state: { ready: true } },
+      });
+      expect("integrations" in report.boxes[0]!).toBe(false);
+      expect(progress.events).toContain("start:Checking Example on this machine");
+      expect(stack.output[0]).toContain("Integrations on this machine:\n  Example:\n    Example: ready");
+    });
+
+    test("warns when it cannot run on this machine", async () => {
+      const { stack, dependencies } = operator(false);
+
+      const report = await status(stack, false, dependencies);
+
+      expect(report.integrations?.[EXAMPLE_ID]).toEqual({
+        name: "Example",
+        lines: ["not available on this machine"],
+        warnings: ["Example is enabled, but it is not available on this machine."],
+        state: { available: false },
+      });
+      expect(stack.output[0]).toContain("    WARNING: Example is enabled, but it is not available on this machine.");
+    });
   });
 });
 
@@ -682,11 +729,15 @@ describe("ferry status with more than one box", () => {
     const readConfig = online.dependencies.readConfig!;
     const healthLinks: unknown[] = [];
     const linkOptions: unknown[] = [];
+    const base = createPaseo({ platform: "win32" });
     const paseo: Integration = {
-      ...createPaseo({ platform: "win32" }),
-      async health(link) {
-        healthLinks.push(link);
-        return health;
+      ...base,
+      box: {
+        ...base.box,
+        async health(link) {
+          healthLinks.push(link);
+          return health;
+        },
       },
     };
     const onlineLink = online.dependencies.createLink!({ host: "unused", user: "unused" });

@@ -10,7 +10,7 @@ import {
 import { boxFerryStatus } from "./box-ferry.ts";
 import { BOX_SNAPSHOT_KEY, resolveBoxes, type ResolvedBox } from "./boxes.ts";
 import { readConfig, resolveLinkOptions, type OperatorHostConfig, type PartialOperatorConfig } from "./config.ts";
-import { INTEGRATIONS, type Integration } from "./integrations/index.ts";
+import { hasBoxPart, INTEGRATIONS, operatorIntegrations, type Integration, type OperatorIntegration } from "./integrations/index.ts";
 import { BunHostAdapter, Link, type HostAdapter, type HostCommandResult, type LinkOptions } from "./link.ts";
 import {
   BOX_GIT_IDENTITY_COMMAND,
@@ -33,6 +33,8 @@ import {
   type BoxStatus,
   type BoxStatusDependencies,
   type BriefStatusReport,
+  type IntegrationCheck,
+  type IntegrationStatus,
   type StatusReport,
 } from "./status.ts";
 import { checkTools, type ToolStatus } from "./tools/check.ts";
@@ -103,6 +105,7 @@ export async function runStatusCommand(
     store,
     manifest: { denyRules: resolved.denyRules },
     boxes: boxes.map((box) => boxDependencies(box, config, registry, local, resolved)),
+    integrations: operatorIntegrations(config, resolved.integrations).flatMap(operatorCheck),
     progress: resolved.progress,
   });
 
@@ -189,13 +192,29 @@ function boxDependencies(
       ],
     },
     integrations: resolved.integrations
+      .filter(hasBoxPart)
       .filter((integration) => box.integrations[integration.id] === true)
       .map((integration) => ({
         id: integration.id,
         name: integration.name,
-        health: () => integration.health(link, box.integrations),
+        health: () => integration.box.health(link, box.integrations),
       })),
   };
+}
+
+/** The check of an operator part. An integration that cannot run on this machine gets a warning instead. */
+function operatorCheck(integration: OperatorIntegration): IntegrationCheck[] {
+  const { id, name, operator } = integration;
+  if (!operator.available()) {
+    const health = {
+      lines: ["not available on this machine"],
+      warnings: [`${name} is enabled, but it is not available on this machine.`],
+      json: { available: false },
+    };
+    return [{ id, name, health: async () => health }];
+  }
+  const check = operator.health;
+  return check ? [{ id, name, health: () => check.call(operator) }] : [];
 }
 
 /** The shared block, then one block for each box. */
@@ -210,6 +229,7 @@ export function formatStatus(report: StatusReport): string {
     ...report.denyList.map(
       (rule) => `  ${rule.code}: ${rule.behavior} ${rule.description}`,
     ),
+    ...integrationLines("Integrations on this machine:", report.integrations),
     ...errorLines(report.errors),
     ...report.boxes.flatMap((box) => ["", ...boxLines(box, report.operator.gitIdentity)]),
   ];
@@ -270,7 +290,7 @@ function boxLines(box: BoxStatus, operator: GitIdentity | null): string[] {
     "",
     "MCP logins:",
     ...mcpLogins(box),
-    ...integrations(box),
+    ...integrationLines("Integrations:", box.integrations),
     ...errorLines(box.errors),
   ];
 }
@@ -393,12 +413,12 @@ function mcpLogins(box: BoxStatus): string[] {
   });
 }
 
-function integrations(box: BoxStatus): string[] {
-  const entries = Object.values(box.integrations ?? {});
+function integrationLines(title: string, statuses: BoxStatus["integrations"]): string[] {
+  const entries: IntegrationStatus[] = Object.values(statuses ?? {});
   if (entries.length === 0) return [];
   return [
     "",
-    "Integrations:",
+    title,
     ...entries.flatMap((entry) => [
       `  ${entry.name}:`,
       ...entry.lines.map((line) => `    ${line}`),

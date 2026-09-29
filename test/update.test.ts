@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createPaseo } from "../src/integrations/paseo.ts";
-import type { Integration } from "../src/integrations/types.ts";
+import type { BoxIntegration, Integration } from "../src/integrations/types.ts";
 import type { PartialOperatorConfig } from "../src/config.ts";
 import type { HostCommand, HostCommandResult, LinkOptions, LinkResult } from "../src/link.ts";
 import { BOX_FERRY_VERSION_COMMAND, boxFerryInstallCommand } from "../src/box-ferry.ts";
@@ -555,14 +555,18 @@ describe("update command registry", () => {
 
 describe("update command with integrations", () => {
   /** A Paseo stand-in that records its update calls. */
-  function fakePaseo(calls: string[], fail = false): Integration {
+  function fakePaseo(calls: string[], fail = false): BoxIntegration {
+    const paseo = createPaseo({ platform: "win32" });
     return {
-      ...createPaseo({ platform: "win32" }),
-      plan: async (action) => [`${action} commands`],
-      update: async () => {
-        calls.push("paseo update");
-        if (fail) throw new Error("restart failed");
-        return ["Paseo 0.9.2 runs on the box."];
+      ...paseo,
+      box: {
+        ...paseo.box,
+        plan: async (action) => [`${action} commands`],
+        update: async () => {
+          calls.push("paseo update");
+          if (fail) throw new Error("restart failed");
+          return ["Paseo 0.9.2 runs on the box."];
+        },
       },
     };
   }
@@ -621,11 +625,15 @@ describe("update command with integrations", () => {
   test("dry run gives the box link to the integration update plan", async () => {
     const { recorder, deps } = dependencies();
     const actions: string[] = [];
+    const fake = fakePaseo([]);
     const paseo: Integration = {
-      ...fakePaseo([]),
-      plan: async (action, link) => {
-        actions.push(`${action} ${link === undefined ? "offline" : "with link"}`);
-        return [];
+      ...fake,
+      box: {
+        ...fake.box,
+        plan: async (action, link) => {
+          actions.push(`${action} ${link === undefined ? "offline" : "with link"}`);
+          return [];
+        },
       },
     };
 
@@ -686,12 +694,16 @@ describe("update command across boxes", () => {
         },
       };
     };
+    const base = createPaseo({ platform: "win32" });
     const integration: Integration = {
-      ...createPaseo({ platform: "win32" }),
-      plan: async (action) => [`${action} commands`],
-      update: async (link) => {
-        paseo.push((link as unknown as { destination: string }).destination);
-        return ["Paseo 0.9.2 runs on the box."];
+      ...base,
+      box: {
+        ...base.box,
+        plan: async (action) => [`${action} commands`],
+        update: async (link) => {
+          paseo.push((link as unknown as { destination: string }).destination);
+          return ["Paseo 0.9.2 runs on the box."];
+        },
       },
     };
     return {
