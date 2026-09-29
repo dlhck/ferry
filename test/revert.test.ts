@@ -7,7 +7,7 @@ import type { OperatorConfig } from "../src/config.ts";
 import { errorInfo } from "../src/output.ts";
 import { runHistory, runRevert, type RevertDependencies } from "../src/revert.ts";
 import { openStore } from "../src/store.ts";
-import { inspectSyncSource, type SyncResult } from "../src/sync.ts";
+import { inspectSyncSource, runSync, type SyncResult } from "../src/sync.ts";
 
 const roots: string[] = [];
 
@@ -116,6 +116,38 @@ describe("ferry revert", () => {
     expect(syncs).toEqual([{ home: setup.home }]);
     // The local files match the snapshot, so the next watch or sync publishes nothing.
     expect((await setup.publish("chore: after revert")).published).toBe(false);
+  });
+
+  test("a sync that read the files before a revert does not publish them after it", async () => {
+    const setup = await snapshotHome();
+    let revertTip: string | null = null;
+
+    // The sync reads the files first. The revert runs while the sync waits for the store lock.
+    const error = await runSync(
+      { home: setup.home },
+      {
+        readConfig: setup.dependencies.readConfig,
+        publisher: setup.dependencies.publisher,
+        writeLine: () => {},
+        acquireStoreLock: async () => {
+          const reverted = await runRevert(
+            { home: setup.home, commit: setup.settingsCommit, sync: false },
+            { ...setup.dependencies, acquireStoreLock: async () => () => {} },
+          );
+          revertTip = reverted.tip;
+          return () => {};
+        },
+        createLink: () => {
+          throw new Error("no box in this test");
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(revertTip).not.toBeNull();
+    expect(await git(setup.remote, "rev-parse", "HEAD")).toBe(revertTip as unknown as string);
+    expect(JSON.parse(await git(setup.store, "show", "HEAD:settings/claude.json")).model).toBe("opus");
+    expect(JSON.parse(readFileSync(setup.settingsFile, "utf8")).model).toBe("opus");
   });
 
   test("reverts a skill commit through the store link", async () => {
