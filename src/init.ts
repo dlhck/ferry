@@ -2,9 +2,11 @@
 
 import { createHash } from "node:crypto";
 import { hostname, homedir } from "node:os";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { basename, join } from "node:path";
 import { commitApply, planApply, type ApplyPlan } from "./apply.ts";
 import { BOX_SNAPSHOT_KEY, resolveTargetBox, snapshotGit } from "./boxes.ts";
+import { installBundledSkill, SKILL_RELATIVE_PATH } from "./bundled-skill.ts";
 import {
   configPath,
   readConfig as readOperatorConfig,
@@ -41,6 +43,8 @@ export type InitInput = {
   readonly snapshotUrl?: string;
   /** The box to init again when the config has `[box.<name>]` tables. The default is `default_box` or the only box. */
   readonly box?: string;
+  /** False for `--no-skill`: do not install the bundled Ferry skill. Ferry records the choice. */
+  readonly skill?: boolean;
 };
 
 export type InitField = "host" | "sshUser" | "sshDestination" | "snapshotUrl";
@@ -88,6 +92,7 @@ export type InitDependencies = {
   readonly checkAgent?: () => Promise<OperatorAgentCheck>;
   readonly approveHostKeys?: (request: SnapshotHostKeyApproval) => Promise<boolean>;
   readonly progress?: Progress;
+  readonly installSkill?: typeof installBundledSkill;
 };
 
 export type InitManagedLink = {
@@ -117,6 +122,7 @@ export type InitExecutedResult = {
   readonly dryRun: false;
   readonly leftovers: readonly Leftover[];
   readonly published: boolean;
+  readonly skill: ReturnType<typeof installBundledSkill>;
 };
 
 export type InitResult = InitDryRunResult | InitExecutedResult;
@@ -196,6 +202,7 @@ export async function runInit(
     snapshotUrl: required(values.snapshotUrl),
     harness: existing?.harness,
     update: existing?.update,
+    status: existing?.status,
     integrations: existing?.integrations,
     tools: existing?.tools,
   };
@@ -204,13 +211,8 @@ export async function runInit(
     : { ...shared, host };
   const gitAuth = targetBox?.gitAuth ?? "agent";
   progress.plan(input.dryRun ? 1 : 3 + boxCheckSteps(config.snapshotUrl, gitAuth));
-
-  const seed = await step(
-    progress,
-    "Reading the portable set",
-    () => (dependencies.readSeed ?? readManifest)(home, input.harnesses),
-    (result) => !result.ok,
-  );
+  const readSeed = () => (dependencies.readSeed ?? readManifest)(home, input.harnesses);
+  let seed = await step(progress, "Reading the portable set", readSeed, (result) => !result.ok);
   if (!seed.ok) throw manifestRefusal(seed);
   if (input.dryRun) {
     return {
@@ -223,12 +225,28 @@ export async function runInit(
   const target = resolveLinkOptions(host);
   await checkBoxAccess(dependencies.createLink?.(target) ?? new Link(target), config.snapshotUrl, dependencies, gitAuth);
 
+  // Capture before the skill install, so uninstall removes a skill folder that init added.
+  const skillName = basename(SKILL_RELATIVE_PATH);
+  const skillNames = seed.skills.map((skill) => skill.name);
   const uninstallState = captureInitState({
     home,
     harnesses: input.harnesses,
-    skillNames: seed.skills.map((skill) => skill.name),
+    skillNames: skillNames.includes(skillName) || existsSync(join(home, SKILL_RELATIVE_PATH))
+      ? skillNames
+      : [...skillNames, skillName],
     rootPaths: seed.roots.map((root) => root.path),
   });
+
+  const skill = (dependencies.installSkill ?? installBundledSkill)({
+    home,
+    harnesses: input.harnesses,
+    enabled: input.skill !== false,
+  });
+  // A new or changed skill must be in the seed, so the snapshot carries it to the box.
+  if (skill.action === "installed" || skill.action === "updated") {
+    seed = readSeed();
+    if (!seed.ok) throw manifestRefusal(seed);
+  }
 
   const { store, publication } = await step(
     progress,
@@ -264,6 +282,7 @@ export async function runInit(
     dryRun: false,
     leftovers: seed.leftovers,
     published: publication.published,
+    skill,
   };
 }
 

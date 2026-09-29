@@ -179,6 +179,13 @@ describe("registerBoxMcp", () => {
 });
 
 /** A box home in a temporary directory. The link runs each command there with `sh`. */
+const HAS_JQ = Bun.which("jq") !== null;
+
+/** A test that runs box scripts with a real jq. It skips, and says why, when jq is not on the PATH. */
+function jqTest(title: string, run: () => Promise<void>): void {
+  test.skipIf(!HAS_JQ)(HAS_JQ ? title : `${title} (skipped: jq is not on the PATH)`, run);
+}
+
 /** The programs a box script may use, without jq. */
 const BOX_PROGRAMS = ["sh", "grep", "mkdir", "mv", "rm", "cat", "cmp", "timeout", "printf", "dirname"];
 
@@ -260,7 +267,7 @@ function stdio(name: string, fields: Partial<StdioMcpServer> = {}): StdioMcpServ
 }
 
 describe("registerBoxMcp with stdio servers", () => {
-  test("adds a stdio server with the claude and codex CLIs, writes it into the Cursor file, and keeps the box servers", async () => {
+  jqTest("adds a stdio server with the claude and codex CLIs, writes it into the Cursor file, and keeps the box servers", async () => {
     const box = shellBox();
     const claudeCalls = stubClaude(box.home);
     const codexCalls = stubCodex(box.home, { boxonly: { command: "box-mcp" } });
@@ -304,7 +311,7 @@ describe("registerBoxMcp with stdio servers", () => {
     expect(JSON.parse(box.read(".cursor/mcp.json"))).toEqual({ mcpServers: { boxonly: { command: "box-mcp" }, github: entry } });
   });
 
-  test("keeps the env values of the box entry and replaces its command and arguments", async () => {
+  jqTest("keeps the env values of the box entry and replaces its command and arguments", async () => {
     const box = shellBox();
     box.put(
       ".cursor/mcp.json",
@@ -324,7 +331,7 @@ describe("registerBoxMcp with stdio servers", () => {
     });
   });
 
-  test("does not rewrite a box file that already holds the carried servers", async () => {
+  jqTest("does not rewrite a box file that already holds the carried servers", async () => {
     const box = shellBox();
     const text = JSON.stringify({ mcpServers: { docs: { command: "docs-mcp", args: [], env: { DOCS_KEY: "box-value" } } } });
     box.put(".cursor/mcp.json", text);
@@ -340,7 +347,7 @@ describe("registerBoxMcp with stdio servers", () => {
     expect(box.read(".cursor/mcp.json")).toBe(text);
   });
 
-  test("leaves a Codex entry as it is, and warns when its command differs", async () => {
+  jqTest("leaves a Codex entry as it is, and warns when its command differs", async () => {
     const box = shellBox();
     const codexCalls = stubCodex(box.home, {
       same: { type: "stdio", command: "same-mcp", args: [] },
@@ -405,7 +412,7 @@ describe("registerBoxMcp with stdio servers", () => {
     expect(JSON.parse(box.read(".cursor/mcp.json"))).toEqual({ mcpServers: { time: { command: "time-mcp", args: [] } } });
   });
 
-  test("keeps the env of a changed Claude entry and leaves an unchanged one alone", async () => {
+  jqTest("keeps the env of a changed Claude entry and leaves an unchanged one alone", async () => {
     const box = shellBox();
     const claudeCalls = stubClaude(box.home);
     box.put(
@@ -471,7 +478,7 @@ describe("registerBoxMcp with stdio servers", () => {
 describe("box env values", () => {
   const SECRET = `ghp_${"s".repeat(36)}`;
 
-  test("never reach Ferry: the box merges each entry and prints only a status or key names", async () => {
+  jqTest("never reach Ferry: the box merges each entry and prints only a status or key names", async () => {
     const box = shellBox();
     const claudeCalls = stubClaude(box.home);
     stubCodex(box.home, { docs: { type: "stdio", command: "old-docs-mcp", args: [], env: { DOCS_KEY: SECRET } } });
@@ -518,7 +525,7 @@ describe("box env values", () => {
 });
 
 describe("checkBoxMcp", () => {
-  test("names env keys the box entry does not set, missing commands, and servers that are not portable", async () => {
+  jqTest("names env keys the box entry does not set, missing commands, and servers that are not portable", async () => {
     const box = shellBox();
     box.put(
       ".cursor/mcp.json",

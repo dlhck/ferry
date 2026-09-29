@@ -62,7 +62,7 @@ Use `--host <tailscale host> --ssh-user <user>` instead of `--ssh-destination` f
 | `ferry history` | List the last 20 snapshot commits and the paths each one changed. |
 | `ferry revert <commit>` | Undo one snapshot commit on this machine, including the carried settings keys, then sync all boxes. `--no-sync` skips the sync. `--dry-run` shows the plan. |
 | `ferry watch` | Sync each accepted change. `ferry watch install` runs it as a launchd or systemd user service. |
-| `ferry status` | Show the state of the snapshot and of each box. `--brief` shows only what needs action: offline boxes, logins, MCP logins, stdio MCP servers that lack something on the box, tool drift, and hooks that run a home file Ferry does not carry. |
+| `ferry status` | Show the state of the snapshot and of each box. `--brief` shows only what needs action: offline boxes, low disk or memory on a box, logins, MCP logins, stdio MCP servers that lack something on the box, tool drift, and hooks that run a home file Ferry does not carry. |
 | `ferry doctor` | Check the SSH agent, push access to the snapshot, SSH and Tailscale to each box, the box deploy key, linger, and the installed services. It changes nothing, runs every check, and prints a fix for each failed check. |
 | `ferry menubar install\|uninstall` | On macOS, install a menu bar app that shows the report of `ferry status --brief` for each box. The app reads `~/.ferry/status.json`, so `ferry watch` must run. It also shows the ports of each running `ferry tunnel --follow`. It sends a macOS notification when a box goes offline, a login or MCP login needs a login, or a tool has drift. Turn off Notifications in the menu to stop them. Sync now runs `ferry sync`. On Linux, see [the waybar module](docs/linux-status-bar.md). |
 | `ferry auth <tool>` | Start a login for `gh`, `claude`, `codex`, `cursor`, or a config tool with login keys on the box. `--mcp <server>` logs in to an MCP server. `--mcp <tool>/<server>`, the name in `ferry status`, also works. |
@@ -99,7 +99,7 @@ Add `--json` to any command for scripts and agents: stdout then has only JSON, a
 - **Paseo.** `ferry integrations enable paseo` runs the Paseo daemon on a box and carries your Paseo agent profiles, managed Git plugins at their installed commits, npm plugins at their installed versions, the portable fields of your Paseo provider definitions, metadata model preferences, shared system instructions, and portable terminal profiles. With `paseo_auto_archive = true` in `[integrations]` or `[box.<name>.integrations]`, it also carries the Paseo auto-archive-after-merge switch. When it carries an enabled plugin, Ferry also turns on the box's global plugin switch. When `ferry move` puts a project on a box with Paseo, Ferry registers the project in Paseo and imports each carried session as a Paseo agent. It skips a session that already has an agent on the box. A move to this machine imports nothing. Plugin settings, provider env blocks, provider commands, terminal profile env blocks and paths, and credentials stay on each host. See [Paseo sync](docs/paseo-sync.md) for supported sources, limitations, and other sync candidates, and `ferry integrations enable --help`.
 - **Sherlock.** With [Sherlock](https://github.com/michaelbromley/sherlock) on this machine, `ferry integrations enable sherlock` adds `ferry sherlock add <name> --box <box> --target <host:port> --type <type>`. It runs `sherlock connection add` with `--tunnel-command "ferry tunnel --box <box> <target>:{{port}}"`, so Sherlock queries a database on the box, or one that only the box can reach, through a tunnel that it opens on the first query. Sherlock stores the password in the keychain of this machine. Ferry never stores it and never edits the Sherlock config. Ferry records the name, box, and target in `~/.ferry/sherlock.json`, and `ferry status` checks that each box can reach its target. `ferry` must be on the PATH that Sherlock uses. See `ferry sherlock add --help`.
 - **Box awareness.** On each sync, a box gets `~/.ferry/box/AGENTS.md`: a short header that names the box and tells agents not to run `ferry sync` or edit Ferry-managed files there, then your `~/AGENTS.md` byte for byte. The instruction files of the box link to it. Your machine does not change. Agents run `ferry whoami` to check where they are.
-- **Automatic sync.** `ferry watch install` syncs each change after one second. With `[update] watch = true`, it also updates the tools with the `"latest"` policy once a day. Every 5 minutes and after each sync, the watch writes `ferry status --brief --json` to `~/.ferry/status.json`. See `ferry watch install --help` and `ferry update --help`.
+- **Automatic sync.** `ferry watch install` syncs each change after one second. With `[update] watch = true`, it also updates the tools with the `"latest"` policy once a day. Every 5 minutes and after each sync, the watch writes `ferry status --brief --json` to `~/.ferry/status.json`. That report has the free disk, memory, and load of each box. `--brief` shows an item when the free disk of the box home is below both 10% and 5 GiB, or the available memory is below 10%. Set other limits with `disk_free_percent`, `disk_free_gib`, and `memory_available_percent` in `[status]`. A limit of 0 turns its part of the check off. When one disk limit is 0, the other decides. See `ferry watch install --help` and `ferry update --help`.
 
 ### Paseo relay
 
@@ -115,11 +115,12 @@ The relay is off by default. Set `paseo_relay` in `[box.<name>.integrations]` to
 
 ## Agent skill
 
-The [`skills/ferry`](skills/ferry/SKILL.md) skill tells agents how to work with Ferry on both machines, for example not to edit a Ferry-managed file on the box. Install it on this machine, then run `ferry sync`:
+The [`skills/ferry`](skills/ferry/SKILL.md) skill tells agents how to work with Ferry on both machines, for example not to edit a Ferry-managed file on the box. Each Ferry build has the skill of its version, so Ferry installs it without network access.
 
-```sh
-ferry skills add dlhck/ferry --skill ferry
-```
+- `ferry init` writes the skill to `~/.agents/skills/ferry`. The snapshot carries it to the boxes.
+- `ferry self-update` writes the skill of the new version. Existing installs get the skill at their next self-update.
+- If the skill folder has local changes, or another tool wrote it, Ferry does not change it and prints a note. To get the bundled skill again, remove the folder and run `ferry self-update` or `ferry init`.
+- `ferry init --no-skill` does not install the skill. Ferry records the choice in `~/.ferry/skill.json`, and `ferry self-update` then skips the skill too. Run `ferry init` without the flag to turn the skill on again.
 
 ## Development
 
