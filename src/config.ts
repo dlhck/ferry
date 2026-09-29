@@ -92,10 +92,11 @@ export function toolPolicy(tools: ToolsConfig | undefined, id: string): ToolPoli
   return typeof entry === "string" ? entry : entry?.version;
 }
 
-/** Paseo and its relay are off unless their keys are true. */
+/** Paseo, its relay, and the carry of its auto-archive switch are off unless their keys are true. */
 export type IntegrationsConfig = {
   readonly paseo?: boolean;
   readonly paseo_relay?: boolean;
+  readonly paseo_auto_archive?: boolean;
 };
 
 /** `watch` turns on the daily tool update in `ferry watch`. */
@@ -145,7 +146,7 @@ const SECTION_KEYS: Record<string, readonly string[]> = {
   "[host]": ["transport", "tailscale", "ssh_user", "destination"],
   "[[harness]]": Object.keys(HARNESS_KEYS),
   "[update]": ["watch"],
-  "[integrations]": ["paseo", "paseo_relay"],
+  "[integrations]": ["paseo", "paseo_relay", "paseo_auto_archive"],
   "[tools]": BUILTIN_TOOLS.map((tool) => tool.id),
 };
 
