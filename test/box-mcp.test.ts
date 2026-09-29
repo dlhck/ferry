@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mcpCommand, registerBoxMcp } from "../src/box-mcp.ts";
+import { checkBoxMcp, mcpCommand, registerBoxMcp } from "../src/box-mcp.ts";
+import type { StdioMcpServer } from "../src/manifest.ts";
 import type { LinkResult, RunOptions } from "../src/link.ts";
 import { BUILTIN_HARNESSES, BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 import { recordProgress } from "./fake-progress.ts";
@@ -174,6 +175,255 @@ describe("registerBoxMcp", () => {
     expect(readFileSync(log, "utf8").split("\n")).toContain(HOSTILE_URL);
     expect(existsSync(join(directory, "pwned"))).toBe(false);
     expect(existsSync(join(directory, "pwned2"))).toBe(false);
+  });
+});
+
+/** A box home in a temporary directory. The link runs each command there with `sh`. */
+function shellBox() {
+  const home = mkdtempSync(join(tmpdir(), "ferry-mcp-box-"));
+  directories.push(home);
+  mkdirSync(join(home, "bin"));
+  const link = new FakeLink(async (command) => {
+    const child = Bun.spawn(["sh", "-c", command], {
+      cwd: home,
+      env: { HOME: home, PATH: `${join(home, "bin")}:/usr/bin:/bin` },
+      stdout: "pipe",
+    });
+    await child.exited;
+    return ok(await new Response(child.stdout).text());
+  });
+  const put = (file: string, text: string) => {
+    mkdirSync(join(home, file, ".."), { recursive: true });
+    writeFileSync(join(home, file), text);
+  };
+  return { home, link, put, read: (file: string) => readFileSync(join(home, file), "utf8") };
+}
+
+/** A stub claude on the box PATH that writes each call, one argument per line, to `claude.log`. */
+function stubClaude(home: string): () => string[][] {
+  const log = join(home, "claude.log");
+  writeFileSync(join(home, "bin", "claude"), ["#!/bin/sh", `printf '%s\\n' "$@" '--' >> '${log}'`].join("\n"));
+  chmodSync(join(home, "bin", "claude"), 0o755);
+  return () =>
+    existsSync(log)
+      ? readFileSync(log, "utf8").split("--\n").filter(Boolean).map((call) => call.trimEnd().split("\n"))
+      : [];
+}
+
+function stdio(name: string, fields: Partial<StdioMcpServer> = {}): StdioMcpServer {
+  return { name, type: "stdio", command: `${name}-mcp`, args: [], env: [], ...fields };
+}
+
+describe("registerBoxMcp with stdio servers", () => {
+  test("adds a Claude stdio server with the claude CLI, writes it into the Codex and Cursor files, and keeps the box servers", async () => {
+    const box = shellBox();
+    const claudeCalls = stubClaude(box.home);
+    const claudeJson = JSON.stringify({ numStartups: 3, mcpServers: { boxonly: { command: "box-mcp" } } });
+    box.put(".claude.json", claudeJson);
+    box.put(".codex/config.toml", ['model = "o3"', "[mcp_servers.boxonly]", 'command = "box-mcp"'].join("\n"));
+    const github = stdio("github", { command: "npx", args: ["-y", "@example/github-mcp"], env: ["GITHUB_TOKEN"] });
+
+    const warnings = await registerBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      mcp: [
+        { harness: "claude", servers: [github] },
+        { harness: "codex", servers: [github] },
+        { harness: "cursor", servers: [github] },
+      ],
+      link: box.link,
+    });
+
+    expect(warnings).toEqual([]);
+    expect(claudeCalls()).toEqual([
+      ["mcp", "remove", "--scope", "user", "github"],
+      [
+        "mcp",
+        "add-json",
+        "--scope",
+        "user",
+        "github",
+        JSON.stringify({ type: "stdio", command: "npx", args: ["-y", "@example/github-mcp"] }),
+      ],
+    ]);
+    // Claude owns ~/.claude.json, so Ferry never writes it.
+    expect(box.read(".claude.json")).toBe(claudeJson);
+    const entry = { command: "npx", args: ["-y", "@example/github-mcp"] };
+    expect(Bun.TOML.parse(box.read(".codex/config.toml"))).toEqual({
+      model: "o3",
+      mcp_servers: { boxonly: { command: "box-mcp" }, github: entry },
+    });
+    expect(JSON.parse(box.read(".cursor/mcp.json"))).toEqual({ mcpServers: { github: entry } });
+  });
+
+  test("keeps the env values of the box entry and replaces its command and arguments", async () => {
+    const box = shellBox();
+    box.put(
+      ".cursor/mcp.json",
+      JSON.stringify({ mcpServers: { github: { command: "old", args: ["x"], cwd: "/tmp", env: { GITHUB_TOKEN: "box-value" } } } }),
+    );
+
+    await registerBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      mcp: [{ harness: "cursor", servers: [stdio("github", { command: "github-mcp", env: ["GITHUB_TOKEN"] })] }],
+      link: box.link,
+    });
+
+    expect(JSON.parse(box.read(".cursor/mcp.json"))).toEqual({
+      mcpServers: { github: { command: "github-mcp", args: [], env: { GITHUB_TOKEN: "box-value" } } },
+    });
+  });
+
+  test("does not rewrite a box file that already holds the carried servers", async () => {
+    const box = shellBox();
+    const text = ["# box comment", "[mcp_servers.docs]", 'command = "docs-mcp"', "args = []"].join("\n");
+    box.put(".codex/config.toml", text);
+
+    await registerBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      mcp: [{ harness: "codex", servers: [stdio("docs")] }],
+      link: box.link,
+    });
+
+    expect(box.read(".codex/config.toml")).toBe(text);
+  });
+
+  test("keeps the env of a changed Claude entry and leaves an unchanged one alone", async () => {
+    const box = shellBox();
+    const claudeCalls = stubClaude(box.home);
+    box.put(
+      ".claude.json",
+      JSON.stringify({
+        mcpServers: {
+          github: { type: "stdio", command: "old-mcp", args: [], env: { GITHUB_TOKEN: "box-value" } },
+          time: { type: "stdio", command: "time-mcp", args: [], env: {} },
+        },
+      }),
+    );
+    const progress = recordProgress();
+
+    await registerBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      mcp: [
+        {
+          harness: "claude",
+          servers: [
+            { name: "linear", type: "http", url: "https://mcp.linear.app/mcp" },
+            stdio("github", { env: ["GITHUB_TOKEN"] }),
+            stdio("time"),
+          ],
+        },
+      ],
+      link: box.link,
+      progress,
+    });
+
+    const calls = claudeCalls();
+    expect(calls.filter((call) => call[1] === "add-json")).toEqual([
+      [
+        "mcp",
+        "add-json",
+        "--scope",
+        "user",
+        "github",
+        JSON.stringify({ type: "stdio", command: "github-mcp", args: [], env: { GITHUB_TOKEN: "box-value" } }),
+      ],
+    ]);
+    expect(calls.some((call) => call.includes("time"))).toBe(false);
+    expect(progress.events).toEqual(["count:1/3", "count:2/3", "count:3/3"]);
+  });
+
+  test("warns once when the claude CLI is not on the box", async () => {
+    const box = shellBox();
+
+    const warnings = await registerBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      mcp: [{ harness: "claude", servers: [stdio("github"), stdio("time")] }],
+      link: box.link,
+    });
+
+    expect(warnings).toEqual(["the claude CLI is not on the box PATH; no claude MCP server was declared"]);
+    expect(existsSync(join(box.home, ".claude.json"))).toBe(false);
+  });
+});
+
+describe("checkBoxMcp", () => {
+  test("names env keys the box entry does not set, missing commands, and servers that are not portable", async () => {
+    const box = shellBox();
+    box.put(
+      ".cursor/mcp.json",
+      JSON.stringify({ mcpServers: { github: { command: "npx", env: { GITHUB_TOKEN: "box-value", GITHUB_ORG: "" } } } }),
+    );
+
+    const issues = await checkBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      sources: [
+        {
+          harness: "cursor",
+          servers: [
+            stdio("github", { command: "sh", env: ["GITHUB_ORG", "GITHUB_TOKEN", "GITHUB_URL"] }),
+            stdio("missing", { command: "not-on-this-box-mcp" }),
+            // A registry tool supplies claude, so the tool check reports it.
+            stdio("agent", { command: "claude" }),
+            { name: "linear", type: "http", url: "https://mcp.linear.app/mcp" },
+          ],
+          nonPortable: ["local"],
+        },
+        { harness: "codex", servers: [stdio("docs", { command: "sh", env: ["DOCS_KEY"] })], nonPortable: [] },
+      ],
+      link: box.link,
+    });
+
+    expect(issues).toEqual([
+      { kind: "not-portable", harness: "cursor", server: "local" },
+      { kind: "command-missing", harness: "cursor", server: "missing", command: "not-on-this-box-mcp" },
+      { kind: "env-missing", harness: "codex", server: "docs", keys: ["DOCS_KEY"], file: ".codex/config.toml" },
+      { kind: "env-missing", harness: "cursor", server: "github", keys: ["GITHUB_ORG", "GITHUB_URL"], file: ".cursor/mcp.json" },
+    ]);
+  });
+
+  test("runs no box command when no stdio server is carried", async () => {
+    const link = new FakeLink(() => ok());
+
+    const issues = await checkBoxMcp({
+      remoteHome: "/home/agent",
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      sources: [{ harness: "claude", servers: [{ name: "linear", type: "http", url: "https://mcp.linear.app/mcp" }], nonPortable: [] }],
+      link,
+    });
+
+    expect(issues).toEqual([]);
+    expect(link.runs).toEqual([]);
+  });
+
+  test("passes a command with shell metacharacters to command -v as data", async () => {
+    const box = shellBox();
+
+    const issues = await checkBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      sources: [{ harness: "cursor", servers: [stdio("x", { command: "x$(touch pwned)'`touch pwned2`" })], nonPortable: [] }],
+      link: box.link,
+    });
+
+    expect(issues).toEqual([
+      { kind: "command-missing", harness: "cursor", server: "x", command: "x$(touch pwned)'`touch pwned2`" },
+    ]);
+    expect(existsSync(join(box.home, "pwned"))).toBe(false);
+    expect(existsSync(join(box.home, "pwned2"))).toBe(false);
   });
 });
 

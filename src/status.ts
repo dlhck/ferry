@@ -1,5 +1,6 @@
 import type { ApplyAction, ApplyPlan } from "./apply.ts";
 import type { AuthProviderStatus, AuthStatusReport, McpLoginStatus } from "./auth-start.ts";
+import type { BoxMcpIssue } from "./box-mcp.ts";
 import type { GitAuth } from "./config.ts";
 import { parseGitIdentity, type GitIdentity } from "./git-identity.ts";
 import type { LinkError, LinkResult } from "./link.ts";
@@ -41,6 +42,10 @@ export type BoxStatusDependencies = {
   readonly auth: {
     status(): Promise<AuthStatusReport>;
     mcpStatus(): Promise<readonly McpLoginStatus[]>;
+  };
+  /** The carried stdio MCP servers of this box. Only the brief check reads them. */
+  readonly mcpServers?: {
+    check(): Promise<readonly BoxMcpIssue[]>;
   };
   /** The registry tools with the policies of this box. `online` is false when the box is offline. */
   readonly tools?: {
@@ -161,11 +166,13 @@ export type StatusReport = {
 
 /**
  * One item of a box that needs action. `login`: a provider login. `mcp-login`:
- * an MCP server login, with the name `tool/server`. `tool`: a tool with the
- * state `drift`, `missing`, or `hidden`. `check-failed`: Ferry cannot read a part of the box.
+ * an MCP server login, with the name `tool/server`. `mcp-server`: a carried
+ * stdio MCP server, with the name `harness/server`, in the state `env-missing`,
+ * `command-missing`, or `not-portable`. `tool`: a tool with the state `drift`,
+ * `missing`, or `hidden`. `check-failed`: Ferry cannot read a part of the box.
  */
 export type BriefIssue = {
-  readonly kind: "login" | "mcp-login" | "tool" | "check-failed";
+  readonly kind: "login" | "mcp-login" | "mcp-server" | "tool" | "check-failed";
   readonly name: string;
   readonly state: string;
   readonly message: string;
@@ -192,7 +199,8 @@ export type BriefStatusReport = {
 };
 
 /**
- * Check only the link, the logins, the MCP logins, and the tools of each box.
+ * Check only the link, the logins, the MCP logins, the carried stdio MCP
+ * servers, and the tools of each box.
  * It reads no store, no apply plan, no git identity, and no sudo, so it is
  * fast enough for the watch to run on a timer.
  */
@@ -201,7 +209,7 @@ export async function composeBriefStatus(
   checkedAt: Date,
   progress: Progress = noProgress,
 ): Promise<BriefStatusReport> {
-  progress.plan(boxes.reduce((total, box) => total + 3 + (box.tools ? 1 : 0), 0));
+  progress.plan(boxes.reduce((total, box) => total + 3 + (box.mcpServers ? 1 : 0) + (box.tools ? 1 : 0), 0));
   const boxProgress = orderedProgress(progress, boxes.map((box) => box.name));
   const results = await mapLimit(boxes, BOX_LIMIT, async (box, index) => {
     try {
@@ -225,6 +233,7 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
   if (error !== null) {
     progress.skip("Checking logins on the box", OFFLINE);
     progress.skip("Checking MCP logins on the box", OFFLINE);
+    if (box.mcpServers) progress.skip("Checking MCP servers on the box", OFFLINE);
     if (box.tools) progress.skip("Checking tools on the box", OFFLINE);
     return { ...base, online: false, error, issues: [] };
   }
@@ -276,6 +285,17 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
     failed("MCP logins", cause);
   }
 
+  if (box.mcpServers) {
+    const servers = box.mcpServers;
+    try {
+      for (const issue of await step(progress, "Checking MCP servers on the box", () => servers.check())) {
+        issues.push(mcpServerIssue(issue));
+      }
+    } catch (cause) {
+      failed("MCP servers", cause);
+    }
+  }
+
   if (box.tools) {
     const check = box.tools;
     try {
@@ -289,6 +309,28 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
   }
 
   return { ...base, online: true, error: null, issues };
+}
+
+function mcpServerIssue(issue: BoxMcpIssue): BriefIssue {
+  const name = `${issue.harness}/${issue.server}`;
+  const base = { kind: "mcp-server", name, state: issue.kind, command: null } as const;
+  switch (issue.kind) {
+    case "env-missing":
+      return {
+        ...base,
+        message: `${name} needs ${issue.keys.join(", ")} on the box. Set ${issue.keys.length === 1 ? "it" : "them"} in the env of ${issue.server} in ~/${issue.file} on the box.`,
+      };
+    case "command-missing":
+      return {
+        ...base,
+        message: `${name} runs ${issue.command}, which is not on the box. Install ${issue.command} on the box, or add a tool for it to the registry.`,
+      };
+    case "not-portable":
+      return {
+        ...base,
+        message: `${name} refers to a path in your home, so Ferry does not carry it. Use a command on the PATH or a path outside the home.`,
+      };
+  }
 }
 
 function toolIssue(tool: ToolStatus, flag: string): BriefIssue | null {

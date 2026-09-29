@@ -682,8 +682,11 @@ manual SSH flow, or off.`)
     .description(`Publish the snapshot and apply it to the selected boxes, or to all boxes.
 
 A file that looks like a secret stops the sync before the publish. The error
-names the file, never the value. Ferry skips local MCP servers and hooks that
-refer to home paths that the box does not have, and prints a line for each.
+names the file, never the value. Ferry skips MCP servers that are neither
+remote HTTPS servers nor stdio commands, stdio MCP servers and hooks that refer
+to home paths that the box does not have, and prints a line for each. A stdio
+MCP server carries its command, its arguments, and the names of its env keys,
+never their values.
 Ferry syncs up to 4 boxes at the same time. A failed box does not stop the
 other boxes. Sync also writes the ferry PATH block in ~/.profile on the box.
 
@@ -973,8 +976,8 @@ unknown, Ferry cannot read the box version. With --json, result is the
 status report, schema version 2. The ferry agent skill describes its fields.
 Install the skill with ferry skills add dlhck/ferry --skill ferry.
 
---brief checks only the link, the logins, the MCP logins, and the tools of
-each box. It prints one line for each item that needs action, with the Ferry
+--brief checks only the link, the logins, the MCP logins, the carried stdio MCP
+servers, and the tools of each box. It prints one line for each item that needs action, with the Ferry
 command that fixes it. ferry watch writes the same report to
 ~/.ferry/status.json.`)
     .option("--brief", "check only the link, the logins, the MCP logins, and the tools, and print what needs action")

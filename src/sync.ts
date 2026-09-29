@@ -117,7 +117,7 @@ export type SyncPlan = {
   readonly force: boolean;
   /** Carried settings keys whose local value differs from the local store checkout. */
   readonly settingsChanges: readonly SettingsChange[];
-  /** The carried remote MCP servers, as `harness/server`. */
+  /** The carried MCP servers, as `harness/server`. */
   readonly mcpServers: readonly string[];
   /** Skills whose store copy the publish replaces with a real directory in one harness root. */
   readonly storeUpdates: readonly StoreUpdate[];
@@ -305,7 +305,7 @@ export async function runSync(
       }, operatorSteps);
   if (planned !== (input.dryRun ? 1 : operatorSteps + BOX_STEPS)) progress.plan(planned);
   for (const leftover of seed.leftovers) {
-    const label = leftover.code === "hook-path" ? "hook" : leftover.code === "mcp-local" ? "MCP server" : null;
+    const label = leftover.code === "hook-path" ? "hook" : leftover.code === "mcp-local" || leftover.code === "mcp-path" ? "MCP server" : null;
     if (!label) continue;
     warn(`Skipped ${label}: ${leftover.reason}: ${leftover.path}`);
   }

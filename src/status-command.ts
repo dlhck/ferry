@@ -8,6 +8,7 @@ import {
   type McpLoginStatus,
 } from "./auth-start.ts";
 import { boxFerryStatus } from "./box-ferry.ts";
+import { checkBoxMcp } from "./box-mcp.ts";
 import { BOX_SNAPSHOT_KEY, resolveBoxes, type ResolvedBox } from "./boxes.ts";
 import { readConfig, resolveLinkOptions, type OperatorHostConfig, type PartialOperatorConfig } from "./config.ts";
 import { hasBoxPart, INTEGRATIONS, operatorIntegrations, type Integration, type OperatorIntegration } from "./integrations/index.ts";
@@ -17,7 +18,7 @@ import {
   readOperatorGitIdentity,
   type GitIdentity,
 } from "./git-identity.ts";
-import { denyRules, type DenyRuleDescription } from "./manifest.ts";
+import { denyRules, readMcpSources, type DenyRuleDescription } from "./manifest.ts";
 import { noProgress, type Progress } from "./progress.ts";
 import {
   loadRegistry,
@@ -75,6 +76,8 @@ export type StatusCommandDependencies = {
     tools: readonly ToolDescriptor[],
   ) => StatusAuth;
   readonly denyRules: () => readonly DenyRuleDescription[];
+  /** Reads the carried MCP servers of the operator home. */
+  readonly readMcpSources: typeof readMcpSources;
   /** Runs the operator version commands of the tools. */
   readonly local: HostAdapter;
   /** All built-in integrations. Status checks the ones that the config enables. */
@@ -113,9 +116,9 @@ export async function runStatusCommand(
 }
 
 /**
- * Check the link, the logins, the MCP logins, and the tools of the selected
- * boxes, and nothing more. The CLI prints the report, and the watch writes it
- * to `~/.ferry/status.json`.
+ * Check the link, the logins, the MCP logins, the carried stdio MCP servers,
+ * and the tools of the selected boxes, and nothing more. The CLI prints the
+ * report, and the watch writes it to `~/.ferry/status.json`.
  */
 export async function runBriefStatusCommand(
   input: StatusCommandInput,
@@ -185,6 +188,18 @@ function boxDependencies(
       },
     },
     auth: resolved.createAuthStart(link, tools),
+    mcpServers: {
+      check() {
+        const harnesses = registry.harnesses.filter((harness) => !off.includes(harness));
+        return checkBoxMcp({
+          remoteHome: required(boxHome),
+          harnesses,
+          tools,
+          sources: resolved.readMcpSources(resolved.home(), harnesses),
+          link,
+        });
+      },
+    },
     tools: {
       check: async (online) => [
         ...(await checkTools(registry.tools, box.tools, local, online ? link : null)),
@@ -312,6 +327,7 @@ const defaultDependencies: StatusCommandDependencies = {
   inspectApply: (input) => apply(input),
   createAuthStart: (link, tools) => new AuthStart(link, tools),
   denyRules,
+  readMcpSources,
   local: new BunHostAdapter(),
   integrations: INTEGRATIONS,
   progress: noProgress,
