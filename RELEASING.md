@@ -4,8 +4,9 @@ A GitHub release starts the release. The owner publishes a release from a tag `v
 
 1. It reads the version from the tag. It refuses a tag that is not `vX.Y.Z` or `vX.Y.Z-<pre-release>`.
 2. It compiles `ferry-darwin-arm64`, `ferry-darwin-x64`, `ferry-linux-arm64` and `ferry-linux-x64` with `bun build --compile`. The build sets the version from the tag with `--define`, so `ferry --version` prints it. The two darwin binaries compile on macOS runners, `macos-latest` for arm64 and `macos-15-intel` for x64. Each gets an ad-hoc signature with `codesign --force --sign -`, and then passes `codesign -v`, `ferry --help`, and `ferry --version`. macOS kills an arm64 executable that has no valid signature, and a darwin binary compiled on Linux does not have a valid signature.
-3. It attaches the four binaries to the release.
-4. It publishes the npm packages with provenance through trusted publishing (OIDC). There is no npm token. It publishes the four platform packages first, then `@dlhck/ferry`.
+3. It builds `ferry-menubar-macos.zip` on `macos-latest` with `macos/build.sh`: the menu bar app as a universal binary, with the version of the tag and an ad-hoc signature.
+4. It writes `SHA256SUMS` for the four binaries and the zip, and attaches all of them to the release. `install.sh` and `ferry menubar install` verify their downloads against `SHA256SUMS`.
+5. It publishes the npm packages with provenance through trusted publishing (OIDC). There is no npm token. It publishes the four platform packages first, then `@dlhck/ferry`.
 
 A version with a pre-release part, for example `1.2.0-rc.1`, goes to the npm dist-tag `next`. All other versions go to `latest`.
 
