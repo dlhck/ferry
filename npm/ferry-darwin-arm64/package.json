@@ -7,7 +7,7 @@
     "type": "git",
     "url": "git+https://github.com/dlhck/ferry.git"
   },
-  "homepage": "https://github.com/dlhck/ferry#readme",
+  "homepage": "https://dlhck.github.io/ferry/",
   "os": ["darwin"],
   "cpu": ["arm64"],
   "files": [

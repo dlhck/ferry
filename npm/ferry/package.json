@@ -7,7 +7,7 @@
     "type": "git",
     "url": "git+https://github.com/dlhck/ferry.git"
   },
-  "homepage": "https://github.com/dlhck/ferry#readme",
+  "homepage": "https://dlhck.github.io/ferry/",
   "bugs": "https://github.com/dlhck/ferry/issues",
   "bin": {
     "ferry": "bin/ferry.js"
