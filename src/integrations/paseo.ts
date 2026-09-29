@@ -127,6 +127,12 @@ const PROJECTS_COMMAND = [
   "done",
 ].join("\n");
 const RESTART_COMMAND = `systemctl --user restart ${UNIT}`;
+/**
+ * `paseo import` refuses a provider session that an agent on the daemon
+ * already has. For an archived agent, it unarchives that agent. So a second
+ * move creates no duplicate agent.
+ */
+const ALREADY_IMPORTED = /Provider session is already imported/;
 /** The Paseo config, relative to the home directory, on the operator machine and on the box. */
 export const CONFIG_FILE = ".paseo/config.json";
 const RELOAD_COMMAND = "paseo daemon reload";
@@ -397,11 +403,22 @@ export function createPaseo(options: PaseoOptions = {}): BoxIntegration {
       }
       return parseHealth(result.stdout, local.version, config?.paseo_relay === true);
     },
-    // Paseo does not import the moved sessions yet.
-    async onProjectMoved(link: IntegrationLink, path: string, _sessions: readonly MovedSession[]): Promise<void> {
+    async onProjectMoved(link: IntegrationLink, path: string, sessions: readonly MovedSession[]): Promise<void> {
       // `project create` is idempotent. It returns the existing project for a known directory.
       const result = await link.run(`paseo project create ${boxPath(path)} >/dev/null`, { timeoutMs: BOX_TIMEOUT_MS });
       if (!result.ok) throw new Error(`paseo project create failed: ${result.error.message}`);
+      // One failed import does not stop the other imports. The error names each failed session.
+      const failed: string[] = [];
+      for (const session of sessions) {
+        const imported = await link.run(
+          `paseo import ${quoteShell(session.id)} --provider ${quoteShell(session.provider)} --cwd ${boxPath(path)} >/dev/null`,
+          { timeoutMs: BOX_TIMEOUT_MS },
+        );
+        if (!imported.ok && !ALREADY_IMPORTED.test(imported.error.message)) {
+          failed.push(`${session.provider} session ${session.id} (${imported.error.message})`);
+        }
+      }
+      if (failed.length > 0) throw new Error(`paseo import failed for ${failed.join(", ")}`);
     },
     connectSteps(destination: string): readonly string[] {
       // Paseo Desktop keeps its hosts in app storage and has no command to add one.

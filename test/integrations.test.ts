@@ -392,6 +392,53 @@ describe("Paseo project move", () => {
     );
   });
 
+  test("imports each moved session into the moved project", async () => {
+    const commands: string[] = [];
+    const link: IntegrationLink = {
+      async run(command) {
+        commands.push(command);
+        return { ok: true, address: "100.64.0.8", stdout: "", stderr: "" };
+      },
+    };
+
+    await createPaseo().box.onProjectMoved(link, "~/Developer/app", [
+      { provider: "claude", id: "1a2b" },
+      { provider: "codex", id: "it's" },
+    ]);
+
+    expect(commands).toEqual([
+      `paseo project create "$HOME"/'Developer/app' >/dev/null`,
+      `paseo import '1a2b' --provider 'claude' --cwd "$HOME"/'Developer/app' >/dev/null`,
+      `paseo import 'it'"'"'s' --provider 'codex' --cwd "$HOME"/'Developer/app' >/dev/null`,
+    ]);
+  });
+
+  test("skips a session that an agent already has, and names each failed import after it tries all", async () => {
+    const commands: string[] = [];
+    const link: IntegrationLink = {
+      async run(command) {
+        commands.push(command);
+        if (command.includes("'known'")) {
+          const message = "Error: Failed to import agent: Provider session is already imported: known";
+          return { ok: false, error: { code: "command-failed", origin: "box", message } };
+        }
+        if (command.includes("'broken'")) {
+          return { ok: false, error: { code: "command-failed", origin: "box", message: "Error: no session" } };
+        }
+        return { ok: true, address: "100.64.0.8", stdout: "", stderr: "" };
+      },
+    };
+
+    await expect(
+      createPaseo().box.onProjectMoved(link, "~/app", [
+        { provider: "claude", id: "known" },
+        { provider: "codex", id: "broken" },
+        { provider: "claude", id: "new" },
+      ]),
+    ).rejects.toThrow("paseo import failed for codex session broken (Error: no session)");
+    expect(commands.filter((command) => command.startsWith("paseo import"))).toHaveLength(3);
+  });
+
   test("names the command that removes the source project from Paseo", () => {
     expect(paseoSourceHint("~/Developer/app", "this machine")).toBe(
       "Paseo still lists ~/Developer/app on this machine. Ferry does not remove it. To remove it from Paseo, run paseo project ls to find its ID, then paseo project delete <id>. The files stay.",
