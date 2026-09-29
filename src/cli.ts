@@ -100,6 +100,15 @@ import {
   type UninstallInput,
   type UninstallResult,
 } from "./uninstall.ts";
+import {
+  historyLines,
+  HISTORY_LIMIT,
+  runHistory,
+  runRevert,
+  type RevertDependencies,
+  type RevertInput,
+  type RevertResult,
+} from "./revert.ts";
 import { runSkillsAdd, SkillsAddError, type RunProcess } from "./skills-add.ts";
 import { runMove, type MoveDependencies, type MoveInput, type MoveResult } from "./move.ts";
 import { runExpose, type ExposeDependencies, type ExposeInput } from "./expose.ts";
@@ -143,6 +152,8 @@ type CliDependencies = {
     dependencies?: Partial<UpdateCommandDependencies>,
   ) => Promise<UpdateCommandResult | null>;
   readonly runSync?: (input: SyncInput, dependencies?: SyncDependencies) => Promise<SyncResult>;
+  readonly runHistory?: typeof runHistory;
+  readonly runRevert?: (input: RevertInput, dependencies?: RevertDependencies) => Promise<RevertResult>;
   readonly runMove?: (input: MoveInput, dependencies?: Partial<MoveDependencies>) => Promise<MoveResult | null>;
   readonly runTunnel?: (
     input: TunnelInput,
@@ -245,6 +256,9 @@ const JSON_RESULTS: Record<string, string> = {
     '{ providers: [{ id, login }] } without a provider, where login is "startable", "manual", or "off", else the login result { kind, provider, ... }. ' +
     'A "login" event line with the URL comes before the envelope. A login that needs the code from the browser reads it as one line on stdin',
   sync: "{ dryRun, published, boxes: [{ name, ok, step, error, plan, applyPlan, discarded }] }, also on failure of more than one box",
+  history: "{ commits: [{ commit, date, subject, paths }] }, newest first",
+  revert:
+    "{ dryRun, commit, subject, tip, paths, settings: [{ file, keys }], sync }. sync is the sync result, or null with --dry-run or --no-sync",
   move: "{ path, source, destination, dryRun, git, carry, refused, skipped, notes, trash }",
   tunnel:
     "events forward-opened, forward-closed, forward-failed, following, connection-lost, tunnel-closed. " +
@@ -692,6 +706,56 @@ once on this machine.`)
         throw error;
       });
       report(syncResult(result));
+    });
+
+  program
+    .command("history")
+    .summary("List the recent snapshot commits and the paths each one changed")
+    .description(`List the recent snapshot commits and the paths each one changed.
+
+Ferry reads the local snapshot checkout in ~/.ferry/store. Give a commit id to
+ferry revert to undo that commit.`)
+    .option("-n, --limit <count>", `the number of commits (default: ${HISTORY_LIMIT})`, (value: string) => {
+      const count = Number(value);
+      if (!Number.isInteger(count) || count < 1) throw new FerryError("usage", "--limit must be a whole number above 0.");
+      return count;
+    })
+    .action(async (options: { limit?: number }) => {
+      const commits = await (dependencies.runHistory ?? runHistory)({ limit: options.limit });
+      report({ commits }, ({ commits }) => {
+        for (const line of historyLines(commits)) writeLine(line);
+      });
+    });
+
+  program
+    .command("revert")
+    .summary("Undo one snapshot commit on this machine and on all boxes")
+    .description(`Undo one snapshot commit on this machine and on all boxes.
+
+Ferry undoes the commit as git revert does, and later commits stay. The
+skills, AGENTS.md, and extra roots on this machine link into the snapshot, so
+they change with it. Ferry writes the reverted settings keys back into the
+local settings files and keeps all other keys. Then Ferry syncs all boxes.
+
+Ferry stops and changes nothing when a later commit changes the same lines,
+or when this machine has changes that are not in the snapshot. Run ferry sync
+first. Run ferry history for the commit ids.`)
+    .argument("<commit>", "the snapshot commit to undo")
+    .option("--dry-run", "print what the revert changes without writing")
+    .option("--no-sync", "do not sync the boxes after the revert")
+    .action(async (commit: string, options: { dryRun?: boolean; sync: boolean }) => {
+      const result = await withProgress((progress, writeLine) =>
+        (dependencies.runRevert ?? runRevert)(
+          { commit, dryRun: options.dryRun === true, sync: options.sync },
+          { progress, writeLine, syncDependencies: { warn } },
+        ),
+      ).catch((error: unknown) => {
+        if (error instanceof BoxesSyncError) {
+          failedResult = syncResult({ dryRun: false, published: error.published, boxes: error.results });
+        }
+        throw error;
+      });
+      report({ ...result, sync: result.sync ? syncResult(result.sync) : null });
     });
 
   program

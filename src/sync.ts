@@ -1109,7 +1109,7 @@ function acquireSyncLock(home: string, host: string): () => void {
 }
 
 /** Wait while another sync publishes. Only the publish holds this lock, so the wait is short. */
-async function acquireStoreLock(home: string): Promise<() => void> {
+export async function acquireStoreLock(home: string): Promise<() => void> {
   const path = join(home, ".ferry", "store.lock");
   for (;;) {
     const release = tryLock(path);
