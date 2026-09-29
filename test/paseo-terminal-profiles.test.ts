@@ -184,6 +184,18 @@ describe("Paseo terminal profile carry", () => {
     expect(b.commands.at(-1)).toBe("paseo daemon reload");
   });
 
+  test("keeps box fields named like Object.prototype keys on a same-ID profile, and stays idempotent", async () => {
+    const boxProfile = { id: "lazygit", constructor: "box-value", toString: "box-text", env: { BOX: "keep" }, name: "Old", command: "lazygit" };
+    const first = box(`{"daemon":{"terminalProfiles":[${JSON.stringify(boxProfile)}]}}`);
+    expect((await carryPaseoTerminalProfiles(first.link, source([lazygit]), [])).changed).toBe(true);
+    const profile = written(first.commands).daemon.terminalProfiles[0];
+    expect(profile).toEqual({ ...boxProfile, name: "Lazygit", icon: "git" });
+    expect(Object.keys(profile)).toEqual(["id", "constructor", "toString", "env", "name", "command", "icon"]);
+    const again = box(written(first.commands));
+    expect((await carryPaseoTerminalProfiles(again.link, source([lazygit]), [])).changed).toBe(false);
+    expect(again.commands.some((command) => command.includes("ferry-tmp"))).toBe(false);
+  });
+
   test("keeps the Paseo defaults when the box has no list", async () => {
     for (const config of [null, {}, { daemon: {} }]) {
       const b = box(config);

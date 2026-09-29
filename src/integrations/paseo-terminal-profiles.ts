@@ -264,8 +264,9 @@ export async function carryPaseoTerminalProfiles(
     // Keep the box key order and the other box fields. An allowlisted field that is absent locally goes away.
     const local: Record<string, unknown> = { ...portable(profile) };
     const entry = Object.fromEntries(Object.entries(next[index]!)
-      .filter(([key]) => !(PORTABLE_FIELDS as readonly string[]).includes(key) || key in local)
-      .map(([key, value]) => [key, key in local ? local[key] : value]));
+      .filter(([key]) => !(PORTABLE_FIELDS as readonly string[]).includes(key) || Object.hasOwn(local, key))
+      // An own-key check, so a box field named `constructor` does not find Object.prototype.constructor.
+      .map(([key, value]) => [key, Object.hasOwn(local, key) ? local[key] : value]));
     next[index] = { ...entry, ...local };
   }
   const carried = kept.map((profile) => profile.name);
