@@ -1,6 +1,6 @@
 # Paseo sync
 
-With the Paseo integration enabled for a box, `ferry sync` carries agent profiles, managed Git and npm plugins, provider definitions, metadata model preferences, shared system instructions, and portable terminal profiles from the operator machine. These go directly to the box. They are not stored in the snapshot repository. `ferry watch` detects changes to plugin commits, npm versions, enabled states, provider definitions, the two preferences, and terminal profiles.
+With the Paseo integration enabled for a box, `ferry sync` carries agent profiles, managed Git and npm plugins, provider definitions, metadata model preferences, shared system instructions, portable terminal profiles, and, with an explicit setting, the auto-archive switch from the operator machine. These go directly to the box. They are not stored in the snapshot repository. `ferry watch` detects changes to plugin commits, npm versions, enabled states, provider definitions, the preferences, and terminal profiles.
 
 ## Git and npm plugins
 
@@ -48,21 +48,38 @@ Ferry reads `agents.providers` from `~/.paseo/config.json` and merges an allowli
 
 ## Preferences
 
-Ferry reads two fields from `~/.paseo/config.json` and writes them into the box `~/.paseo/config.json`. Then it runs `paseo daemon reload`. Paseo 0.10.1 applies both fields on reload without a restart, although the metadata generation page still says to restart after a direct edit.
+Ferry reads these fields from `~/.paseo/config.json` and writes them into the box `~/.paseo/config.json`. Then it runs `paseo daemon reload`. Paseo 0.10.1 applies all three fields on reload without a restart, although the metadata generation page still says to restart after a direct edit.
 
 | Field | Contents |
 | --- | --- |
 | `agents.metadataGeneration.providers` | The ordered list of providers that Paseo tries first for workspace titles, worktree branch names, commit messages, and pull request text. Each entry has a `provider`, an optional `model`, and an optional `thinkingOptionId`. |
 | `daemon.appendSystemPrompt` | Shared instructions that Paseo adds to the system prompt of each agent on the box. |
+| `daemon.autoArchiveAfterMerge` | When `true`, Paseo archives a workspace after its pull request merges. Ferry carries it only to a box with `paseo_auto_archive = true`. See [Auto-archive after merge](#auto-archive-after-merge). |
 
-- The preference step carries only these two fields. It does not copy other keys, environment blocks, or credentials. It keeps all other box keys. Provider definitions have their own step. See [Provider definitions](#provider-definitions).
+- The preference step carries only these three fields. It does not copy other keys, environment blocks, or credentials. It keeps all other box keys. Provider definitions have their own step. See [Provider definitions](#provider-definitions).
 - A field that the local config does not set keeps the box value. An explicit empty list or empty string clears the box value.
 - Ferry skips each metadata provider that is not available on the box, as it does for agent profiles. When no local provider is available on the box, Ferry keeps the box list.
 - Ferry refuses the sync before it publishes or connects to a box when a field does not match the Paseo schema, or when it holds a token or a `key: value` secret line. The error names the field and the rule, never the text or the value.
-- `ferry sync --dry-run` and its `--json` plan show the providers and the length of the shared instructions. They never show the instruction text.
+- `ferry sync --dry-run` and its `--json` plan show the providers, the length of the shared instructions, and the auto-archive value that Ferry carries. They never show the instruction text.
 - The shared instructions change the instructions of each agent on the box. A preference failure produces a warning and does not block the core sync.
 
 Project scripts, setup, and metadata instructions stay in each project's `paseo.json`, which travels with the project in Git.
+
+### Auto-archive after merge
+
+`daemon.autoArchiveAfterMerge` changes the workspace lifecycle on the box, so Ferry carries it only when you turn it on in `~/.ferry/config.toml`:
+
+```toml
+[integrations]
+paseo = true
+paseo_auto_archive = true
+```
+
+The setting is off by default. Set `paseo_auto_archive` in `[box.<name>.integrations]` to override it for one box.
+
+- With the setting off, Ferry does not change the box value.
+- With the setting on, `ferry sync` writes the local value, `true` or `false`, to the box. When the local config does not set the key, Ferry keeps the box value.
+- Paseo 0.10.1 lists `daemon.autoArchiveAfterMerge` as a reloadable path, and its merge handler reads the current value for each workspace update. `paseo daemon reload` applies the value, so running agents continue.
 
 ## Terminal profiles
 
@@ -92,7 +109,6 @@ Research checked on 2026-09-29 against Paseo 0.10.1 and current upstream documen
 | Candidate | Recommendation | Required handling |
 | --- | --- | --- |
 | Workspace label names and colors | Next candidate | Merge by Paseo's normalized, case-insensitive label name. Preserve box-only labels and workspace assignments. Local color wins for a matching name. Treat a rename as a new definition unless explicit rename history is available. |
-| Auto-archive after merge | Small candidate | Carry `daemon.autoArchiveAfterMerge` only with an explicit setting, since it changes workspace lifecycle. |
 | Project scripts, setup, and metadata instructions | Use project Git | These already live in `paseo.json`. Carry them with the project rather than maintaining a second copy in host sync. |
 | Schedules | Explicit migration only | Map project paths, verify providers, and select one execution host. Copying an active schedule can run a task twice. |
 | Plugin settings | Defer | Each plugin owns its schema and may store credentials or host paths. Need a portable-field contract first. |
@@ -116,5 +132,7 @@ The daemon caches the catalog and commits label changes with workspace transacti
 - [Custom provider definitions](https://paseo.sh/docs/custom-providers.md)
 - [Project worktree configuration](https://paseo.sh/docs/worktrees.md)
 - [Schedules](https://paseo.sh/docs/schedules.md)
+- [Reloadable config paths, including auto-archive after merge](https://github.com/getpaseo/paseo/blob/main/packages/server/src/server/daemon-config-store.ts)
+- [Auto-archive after merge](https://github.com/getpaseo/paseo/blob/main/packages/server/src/server/auto-archive-on-merge/index.ts)
 - [Reloadable configuration, including terminal profiles](https://paseo.sh/docs/configuration)
 - [Terminal profile defaults and prompt placeholder](https://github.com/getpaseo/paseo/blob/main/packages/protocol/src/terminal-profiles.ts)

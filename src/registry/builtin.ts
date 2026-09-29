@@ -254,6 +254,8 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
         get: "claude mcp get {name}",
         remove: "claude mcp remove --scope user {name}",
         add: "claude mcp add --transport {type} --scope user {name} {url}",
+        // Claude rewrites ~/.claude.json while it runs, so stdio servers go through the CLI too.
+        addJson: "claude mcp add-json --scope user {name} {json}",
       },
       list: "claude mcp list",
       loginRequired: "^(.+): \\S+ \\(\\w+\\) - ! Needs authentication$",

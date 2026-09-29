@@ -599,7 +599,7 @@ describe("runSync", () => {
         join(home, ".claude.json"),
         JSON.stringify({
           mcpServers: {
-            repl: { command: "node", env: { KEY: "value" } },
+            repl: { command: join(home, "bin", "repl"), env: { KEY: "value" } },
             linear: { type: "http", url: "https://mcp.linear.app/mcp" },
           },
         }),
@@ -618,7 +618,7 @@ describe("runSync", () => {
       );
 
       expect(lines).toEqual([
-        `Skipped MCP server: MCP server repl is not a remote HTTPS server: ${join(home, ".claude.json")}`,
+        `Skipped MCP server: MCP server repl refers to a path in the home, which the box does not have: ${join(home, ".claude.json")}`,
       ]);
       expect(printed[0]?.mcpServers).toEqual(["claude/linear"]);
     } finally {

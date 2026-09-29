@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { carriedContentHits, carriedNameHit, denyRules, readSeed } from "../src/manifest.ts";
+import { carriedContentHits, carriedNameHit, denyRules, readMcpSources, readSeed } from "../src/manifest.ts";
 import type { Refusal, Seed } from "../src/manifest.ts";
 import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 
@@ -328,6 +328,11 @@ describe("the deny set", () => {
         behavior: "refuse",
       },
       {
+        code: "mcp-argument",
+        description: "stdio MCP server command or argument with a token or secret",
+        behavior: "refuse",
+      },
+      {
         code: "mcp-name",
         description: "MCP server name with characters other than letters, digits, dot, underscore, and hyphen",
         behavior: "refuse",
@@ -357,7 +362,12 @@ describe("the deny set", () => {
       },
       {
         code: "mcp-local",
-        description: "local or non-HTTPS MCP server; only remote HTTPS servers are carried",
+        description: "MCP server that is neither a remote HTTPS server nor a stdio command",
+        behavior: "skip",
+      },
+      {
+        code: "mcp-path",
+        description: "stdio MCP server whose command or arguments refer to a path in the operator home",
         behavior: "skip",
       },
     ]);
@@ -1346,14 +1356,14 @@ describe("carried MCP server declarations", () => {
     expect(seedOf(makeHome()).mcp).toEqual([]);
   });
 
-  test("skips a local server and a plain HTTP server with a note, and carries the rest", () => {
+  test("skips a server without a command and a plain HTTP server with a note, and carries the rest", () => {
     const home = makeHome();
     write(
       home,
       ".claude.json",
       JSON.stringify({
         mcpServers: {
-          repl: { type: "stdio", command: "node", args: ["repl.js"], env: { API_KEY: "value" } },
+          repl: { type: "stdio", args: ["repl.js"], env: { API_KEY: "value" } },
           dev: { type: "http", url: "http://localhost:3000/mcp" },
           linear: { type: "http", url: "https://mcp.linear.app/mcp" },
         },
@@ -1365,8 +1375,16 @@ describe("carried MCP server declarations", () => {
     expect(mcpOf(seed, "claude")).toEqual([{ name: "linear", type: "http", url: "https://mcp.linear.app/mcp" }]);
     const notes = seed.leftovers.filter((leftover) => leftover.code === "mcp-local");
     expect(notes).toEqual([
-      { path: join(home, ".claude.json"), code: "mcp-local", reason: "MCP server dev is not a remote HTTPS server" },
-      { path: join(home, ".claude.json"), code: "mcp-local", reason: "MCP server repl is not a remote HTTPS server" },
+      {
+        path: join(home, ".claude.json"),
+        code: "mcp-local",
+        reason: "MCP server dev is neither a remote HTTPS server nor a stdio command",
+      },
+      {
+        path: join(home, ".claude.json"),
+        code: "mcp-local",
+        reason: "MCP server repl is neither a remote HTTPS server nor a stdio command",
+      },
     ]);
     expect(JSON.stringify(seed)).not.toContain("API_KEY");
   });
@@ -1457,6 +1475,126 @@ describe("carried MCP server declarations", () => {
       reason: expect.any(String),
     };
     expect(refusalOf(home).forbidden).toEqual([hit, hit]);
+  });
+
+  test("carries the stdio servers of Claude, Codex, and Cursor Agent as command, arguments, and env key names", () => {
+    const home = makeHome();
+    const token = `ghp_${"a".repeat(36)}`;
+    write(
+      home,
+      ".claude.json",
+      JSON.stringify({
+        mcpServers: {
+          github: { type: "stdio", command: "npx", args: ["-y", "@example/github-mcp"], env: { GITHUB_TOKEN: token } },
+        },
+      }),
+    );
+    write(
+      home,
+      ".codex/config.toml",
+      [
+        "[mcp_servers.docs]",
+        'command = "uvx"',
+        'args = ["docs-mcp", "--root", "/srv/docs"]',
+        'env_vars = ["DOCS_TEAM"]',
+        "[mcp_servers.docs.env]",
+        'DOCS_KEY = "value-that-stays-here"',
+      ].join("\n"),
+    );
+    write(home, ".cursor/mcp.json", JSON.stringify({ mcpServers: { time: { command: "time-mcp" } } }));
+
+    const seed = seedOf(home);
+
+    expect(mcpOf(seed, "claude")).toEqual([
+      { name: "github", type: "stdio", command: "npx", args: ["-y", "@example/github-mcp"], env: ["GITHUB_TOKEN"] },
+    ]);
+    expect(mcpOf(seed, "codex")).toEqual([
+      { name: "docs", type: "stdio", command: "uvx", args: ["docs-mcp", "--root", "/srv/docs"], env: ["DOCS_KEY", "DOCS_TEAM"] },
+    ]);
+    expect(mcpOf(seed, "cursor")).toEqual([{ name: "time", type: "stdio", command: "time-mcp", args: [], env: [] }]);
+  });
+
+  test("env values never reach the seed or its identity", () => {
+    const home = makeHome();
+    const token = `ghp_${"b".repeat(36)}`;
+    const declare = (value: string) =>
+      write(
+        home,
+        ".claude.json",
+        JSON.stringify({ mcpServers: { github: { command: "github-mcp", env: { GITHUB_TOKEN: value } } } }),
+      );
+    declare(token);
+    write(home, ".codex/config.toml", ['[mcp_servers.docs]', 'command = "docs-mcp"', '[mcp_servers.docs.env]', 'DOCS_KEY = "hunter2-docs"'].join("\n"));
+    write(home, ".cursor/mcp.json", JSON.stringify({ mcpServers: { db: { command: "db-mcp", env: { DB_PASSWORD: "hunter2-db" } } } }));
+
+    const seed = seedOf(home);
+    const text = JSON.stringify(seed, (_, value) => (value instanceof Uint8Array ? Buffer.from(value).toString() : value));
+
+    expect(text).not.toContain(token);
+    expect(text).not.toContain("hunter2");
+    expect(text).toContain("GITHUB_TOKEN");
+    const before = seed.identity;
+    declare(`ghp_${"c".repeat(36)}`);
+    expect(seedOf(home).identity).toBe(before);
+  });
+
+  const secretArguments: readonly (readonly [string, readonly string[], string])[] = [
+    ["a token", ["serve", `ghp_${"a".repeat(36)}`], "github-token"],
+    ["a --key=value secret", ["--api-key=abc123"], "secret-field"],
+    ["a --key value secret", ["--password", "abc123"], "secret-field"],
+  ];
+  for (const [what, args, rule] of secretArguments) {
+    test(`refuses a stdio server with ${what} in its arguments, and names the server and the rule`, () => {
+      const home = makeHome();
+      write(home, ".cursor/mcp.json", JSON.stringify({ mcpServers: { tool: { command: "tool-mcp", args } } }));
+
+      const hits = refusalOf(home).forbidden;
+
+      expect(hits).toEqual([
+        {
+          path: join(home, ".cursor", "mcp.json"),
+          code: "mcp-argument",
+          reason: `MCP server tool has a command or argument that matches the ${rule} rule`,
+        },
+      ]);
+      expect(JSON.stringify(hits)).not.toContain("abc123");
+    });
+  }
+
+  test("passes a placeholder or a flag without a value in the arguments", () => {
+    const home = makeHome();
+    const args = ["--token", "--api-key=", "--verbose", `ghp_${"x".repeat(36)}`];
+    write(home, ".cursor/mcp.json", JSON.stringify({ mcpServers: { tool: { command: "tool-mcp", args } } }));
+
+    expect(mcpOf(seedOf(home), "cursor")).toEqual([{ name: "tool", type: "stdio", command: "tool-mcp", args, env: [] }]);
+  });
+
+  test("skips a stdio server that refers to a path in the home, and reports it", () => {
+    const home = makeHome();
+    write(
+      home,
+      ".claude.json",
+      JSON.stringify({
+        mcpServers: {
+          local: { command: join(home, "bin", "local-mcp") },
+          data: { command: "data-mcp", args: [`--dir=${join(home, "data")}`] },
+          system: { command: "/usr/local/bin/system-mcp", args: ["/srv/data"] },
+        },
+      }),
+    );
+
+    const seed = seedOf(home);
+
+    expect(mcpOf(seed, "claude")).toEqual([
+      { name: "system", type: "stdio", command: "/usr/local/bin/system-mcp", args: ["/srv/data"], env: [] },
+    ]);
+    expect(seed.leftovers.filter((leftover) => leftover.code === "mcp-path").map((leftover) => leftover.reason)).toEqual([
+      "MCP server data refers to a path in the home, which the box does not have",
+      "MCP server local refers to a path in the home, which the box does not have",
+    ]);
+    expect(readMcpSources(home, BUILTIN_HARNESSES)).toEqual([
+      { harness: "claude", servers: mcpOf(seed, "claude") as never, nonPortable: ["data", "local"] },
+    ]);
   });
 
   test("the identity follows the carried MCP servers", () => {
