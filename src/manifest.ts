@@ -205,8 +205,11 @@ const HOME_REFERENCE = /^(?:~|\$HOME|\$\{HOME\})\/(.*)$/;
 /** Shell quotes, operators, and `=` separate the words of a hook command. */
 const COMMAND_SEPARATORS = /[\s"'`;|&()<>=]+/;
 
-/** A file whose path relative to its skill directory is `path`. */
-export type SeedFile = { readonly path: string; readonly bytes: Uint8Array };
+/**
+ * A file whose path relative to its skill directory is `path`. `executable` is
+ * the owner execute bit, the only mode bit git records.
+ */
+export type SeedFile = { readonly path: string; readonly bytes: Uint8Array; readonly executable: boolean };
 
 export type SeedSkill = { readonly name: string; readonly files: readonly SeedFile[] };
 
@@ -499,7 +502,7 @@ function walk(root: string, dir: string, rootReal: string, seen: Set<string>, sc
       scan.forbidden.push(...hits);
       continue;
     }
-    scan.files.push({ path: relative(root, path), bytes });
+    scan.files.push({ path: relative(root, path), bytes, executable: (stat.mode & 0o100) !== 0 });
   }
 }
 
@@ -941,10 +944,10 @@ function note(path: string, of: Note): Note & { readonly path: string } {
   return { path, code: of.code, reason: of.reason };
 }
 
-/** Hash of one skill body. Two harnesses that produce the same key hold the same bytes. */
+/** Hash of one skill body. Two harnesses that produce the same key hold the same bytes and modes. */
 function contentKey(files: readonly SeedFile[]): string {
   const hash = createHash("sha256");
-  for (const file of files) hash.update(`${file.path}:${digest(file.bytes)}\n`);
+  for (const file of files) hash.update(`${file.path}:${file.executable ? "755" : "644"}:${digest(file.bytes)}\n`);
   return hash.digest("hex");
 }
 

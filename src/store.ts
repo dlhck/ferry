@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { Seed } from "./manifest.ts";
+import type { Seed, SeedFile } from "./manifest.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
 
 const STORE_DIRECTORY = ".ferry/store";
@@ -349,7 +349,7 @@ function writeSeed(root: string, seed: Seed, metadata: string): void {
     for (const file of skill.files) {
       const target = join(skills, skill.name, file.path);
       mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, file.bytes);
+      writeFileSync(target, file.bytes, { mode: fileMode(file) });
     }
   }
 
@@ -362,7 +362,7 @@ function writeSeed(root: string, seed: Seed, metadata: string): void {
     for (const file of extra.files) {
       const target = join(roots, extra.path, file.path);
       mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, file.bytes);
+      writeFileSync(target, file.bytes, { mode: fileMode(file) });
     }
   }
 
@@ -373,6 +373,10 @@ function writeSeed(root: string, seed: Seed, metadata: string): void {
 
   writeFileSync(join(root, "AGENTS.md"), seed.instructions?.bytes ?? new Uint8Array());
   writeFileSync(join(root, METADATA_FILE), metadata);
+}
+
+function fileMode(file: SeedFile): number {
+  return file.executable ? 0o755 : 0o644;
 }
 
 function seedFiles(seed: Seed, metadata: string): Map<string, Uint8Array> {
