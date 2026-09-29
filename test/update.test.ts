@@ -221,6 +221,36 @@ describe("update plan", () => {
       { tool: "codex", reason: "bundled with the Codex app" },
     ]);
   });
+
+  test("removes CODEX_HOME when the operator Codex is the default standalone install", async () => {
+    const codex = BUILTIN_TOOLS.find((tool) => tool.id === "codex")!;
+    const previousHome = process.env.HOME;
+    process.env.HOME = "/home/user";
+    try {
+      const { deps } = dependencies({
+        installed: ["codex"],
+        installedPaths: { codex: "/home/user/.codex/packages/standalone/releases/0.156.1/bin/codex" },
+      });
+
+      await expect(planOperator([codex], deps.local!)).resolves.toEqual([
+        { tool: "codex", command: "env -u CODEX_HOME codex update" },
+      ]);
+    } finally {
+      process.env.HOME = previousHome;
+    }
+  });
+
+  test.each(["/opt/homebrew/bin/codex", "/home/user/.local/lib/node_modules/@openai/codex/bin/codex.js"])(
+    "keeps the plain Codex update for %s",
+    async (path) => {
+      const codex = BUILTIN_TOOLS.find((tool) => tool.id === "codex")!;
+      const { deps } = dependencies({ installed: ["codex"], installedPaths: { codex: path } });
+
+      await expect(planOperator([codex], deps.local!)).resolves.toEqual([
+        { tool: "codex", command: "codex update" },
+      ]);
+    },
+  );
 });
 
 describe("update command", () => {
