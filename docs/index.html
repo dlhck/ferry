@@ -86,7 +86,7 @@ h1{font-size:clamp(2.5rem,5.6vw,4.3rem);line-height:1.02;text-wrap:balance}
 h1 em{font-style:normal;color:var(--brass)}
 .hero > div:first-child{container-type:inline-size}
 .hero h1{font-size:clamp(2rem,10.2cqi,4.3rem)}
-h2{font-size:clamp(1.9rem,4vw,3rem);line-height:1.08;text-wrap:balance}
+h2{font-size:clamp(1.55rem,3vw,2.35rem);line-height:1.12;text-wrap:balance}
 h3{font-size:1.35rem;line-height:1.2}
 .lede{font-size:1.15rem;line-height:1.55;color:var(--ink-2);margin:0 0 1.4rem;max-width:34rem}
 .lede strong{color:var(--ink);font-weight:600}
@@ -111,6 +111,25 @@ h3{font-size:1.35rem;line-height:1.2}
 .cmd-row[hidden]{display:none}
 .hero-links{display:flex;flex-wrap:wrap;gap:.5rem 1.2rem;margin-top:1.1rem;font-weight:600;font-size:.95rem}
 
+/* hero band: a chart of shallow water, with a grid and depth contours */
+.top{position:absolute;top:0;left:0;right:0;z-index:5}
+.hero-band{position:relative;padding:4.2rem 0 clamp(3.5rem,7vw,5.5rem);overflow:hidden;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1400' height='820' viewBox='0 0 1400 820'%3E%3Cg fill='none' stroke='%2313233A' stroke-opacity='.11' stroke-width='1.3'%3E%3Cpath d='M1030 170 L1033 180 L1029 190 L1019 199 L1006 205 L993 210 L982 214 L972 218 L964 223 L957 228 L948 232 L940 236 L930 239 L921 242 L911 245 L900 248 L889 250 L877 251 L865 250 L854 247 L843 243 L833 238 L823 234 L812 229 L802 223 L793 216 L790 206 L791 196 L797 186 L806 177 L814 170 L818 164 L818 157 L814 149 L809 140 L806 130 L807 120 L812 111 L820 104 L830 98 L840 94 L852 90 L864 87 L876 85 L888 86 L900 88 L911 91 L922 95 L932 98 L941 101 L951 104 L960 109 L967 115 L973 122 L976 129 L981 136 L987 141 L996 147 L1009 153 L1021 161Z'/%3E%3Cpath d='M1107 170 L1105 186 L1094 201 L1078 213 L1060 223 L1043 231 L1027 238 L1013 245 L999 252 L986 258 L973 263 L960 270 L947 278 L934 287 L918 296 L900 303 L881 306 L861 304 L844 298 L828 290 L812 282 L796 276 L779 270 L761 263 L745 253 L736 240 L734 225 L740 209 L750 194 L761 181 L766 170 L766 160 L761 148 L754 135 L749 120 L748 105 L752 90 L760 77 L772 64 L786 54 L803 45 L822 40 L842 38 L863 40 L882 46 L900 51 L916 56 L932 58 L949 59 L966 60 L983 64 L996 72 L1006 82 L1014 94 L1020 105 L1030 114 L1045 122 L1063 131 L1083 141 L1099 155Z'/%3E%3Cpath d='M1174 170 L1166 191 L1152 210 L1134 226 L1114 241 L1093 253 L1072 262 L1050 270 L1029 276 L1011 283 L996 293 L982 307 L968 324 L949 342 L926 356 L900 364 L873 362 L847 354 L824 343 L803 331 L782 322 L758 315 L733 307 L711 296 L695 280 L688 261 L689 239 L697 219 L705 201 L710 185 L709 170 L704 155 L698 138 L692 120 L690 101 L691 81 L696 60 L705 40 L718 21 L738 5 L764 -5 L793 -8 L824 -3 L853 5 L878 14 L900 20 L921 20 L944 18 L968 15 L992 17 L1014 24 L1031 36 L1044 51 L1056 66 L1070 78 L1090 89 L1114 100 L1139 113 L1160 129 L1172 149Z' stroke-dasharray='5 7'/%3E%3Cpath d='M1231 170 L1223 195 L1211 219 L1193 241 L1170 259 L1141 273 L1110 283 L1079 290 L1055 297 L1037 309 L1023 328 L1010 354 L993 381 L967 405 L935 419 L900 421 L865 414 L834 400 L805 386 L777 374 L748 364 L719 355 L691 342 L670 324 L656 301 L651 277 L651 252 L652 230 L651 209 L647 190 L642 170 L638 150 L635 128 L633 106 L632 82 L631 55 L633 27 L642 -2 L661 -27 L691 -44 L729 -49 L771 -45 L811 -34 L845 -22 L874 -15 L900 -15 L927 -20 L956 -26 L987 -29 L1017 -24 L1043 -13 L1065 2 L1085 18 L1107 32 L1132 45 L1161 59 L1188 75 L1211 95 L1226 119 L1232 144Z'/%3E%3Cpath d='M1286 170 L1284 200 L1273 229 L1252 255 L1219 275 L1179 289 L1139 298 L1106 307 L1084 321 L1071 344 L1060 376 L1045 411 L1020 444 L985 467 L943 476 L900 473 L859 461 L820 447 L784 433 L750 420 L716 406 L685 389 L660 367 L641 343 L627 317 L616 292 L604 267 L593 244 L582 220 L575 195 L573 170 L575 145 L576 119 L574 91 L567 60 L561 25 L562 -12 L576 -46 L607 -71 L652 -83 L704 -82 L755 -71 L800 -58 L837 -50 L869 -49 L900 -55 L933 -64 L969 -69 L1005 -69 L1039 -62 L1072 -51 L1104 -38 L1137 -25 L1171 -11 L1204 6 L1233 28 L1256 53 L1271 81 L1279 110 L1284 140Z'/%3E%3Cpath d='M1347 170 L1348 205 L1332 238 L1300 266 L1255 287 L1207 301 L1167 314 L1140 330 L1126 356 L1117 391 L1105 432 L1082 472 L1046 503 L1001 521 L951 527 L900 523 L851 513 L805 500 L762 484 L724 464 L690 439 L663 411 L641 383 L619 357 L596 334 L569 311 L542 288 L520 261 L507 232 L505 201 L510 170 L515 140 L514 109 L504 75 L490 35 L482 -9 L490 -51 L518 -85 L566 -105 L625 -110 L686 -105 L741 -94 L787 -87 L827 -85 L863 -90 L900 -97 L939 -104 L979 -106 L1021 -106 L1064 -103 L1109 -98 L1155 -90 L1201 -77 L1241 -58 L1273 -31 L1294 1 L1307 36 L1316 70 L1326 103 L1338 136Z' stroke-dasharray='5 7'/%3E%3Cpath d='M1410 170 L1404 209 L1376 245 L1333 274 L1283 296 L1240 315 L1209 337 L1193 365 L1183 403 L1170 446 L1149 489 L1114 526 L1068 553 L1015 571 L958 579 L900 579 L843 571 L790 554 L743 527 L706 493 L676 457 L651 424 L624 397 L591 376 L550 359 L506 338 L469 312 L446 279 L438 243 L443 206 L449 170 L448 135 L436 97 L418 54 L405 7 L407 -41 L432 -82 L478 -111 L540 -126 L606 -130 L668 -128 L723 -124 L771 -124 L815 -126 L858 -129 L900 -133 L944 -137 L990 -143 L1040 -150 L1097 -157 L1157 -160 L1216 -152 L1267 -132 L1305 -100 L1327 -60 L1339 -18 L1347 22 L1360 59 L1379 95 L1399 131Z'/%3E%3Cpath d='M228 640 L228 648 L224 656 L217 663 L209 669 L200 674 L191 678 L184 683 L178 687 L171 692 L164 697 L157 701 L149 706 L141 712 L131 718 L120 724 L107 728 L95 728 L83 725 L74 717 L68 707 L64 698 L60 689 L55 683 L48 678 L41 674 L33 669 L28 662 L26 655 L27 647 L28 640 L29 633 L29 626 L27 618 L26 609 L27 600 L30 591 L36 584 L44 577 L54 572 L64 568 L76 566 L87 566 L99 567 L110 571 L120 576 L128 581 L136 584 L145 584 L155 582 L167 579 L181 578 L194 579 L204 584 L210 591 L214 600 L216 608 L218 616 L221 624 L225 632Z'/%3E%3Cpath d='M286 640 L281 653 L274 664 L264 675 L255 685 L246 694 L237 703 L227 712 L216 719 L203 725 L191 731 L179 738 L167 748 L154 760 L139 772 L120 782 L99 785 L79 781 L63 770 L51 755 L42 740 L35 726 L28 716 L17 708 L5 702 L-6 694 L-16 685 L-23 674 L-27 663 L-29 652 L-32 640 L-35 628 L-38 615 L-39 602 L-36 589 L-30 576 L-20 564 L-10 554 L3 543 L16 534 L32 527 L49 523 L69 524 L88 529 L105 537 L120 546 L133 550 L146 550 L161 546 L180 540 L202 535 L223 535 L241 541 L254 550 L263 563 L269 576 L275 589 L280 601 L285 614 L287 627Z' stroke-dasharray='5 7'/%3E%3Cpath d='M332 640 L324 656 L317 671 L311 686 L306 701 L299 717 L288 730 L272 741 L253 750 L235 757 L218 766 L204 779 L189 796 L170 815 L147 831 L120 839 L92 838 L67 826 L46 808 L31 788 L19 770 L7 755 L-6 744 L-21 734 L-36 724 L-49 712 L-62 700 L-73 686 L-84 672 L-96 657 L-105 640 L-111 622 L-111 604 L-105 586 L-93 570 L-80 555 L-66 540 L-53 524 L-39 509 L-22 495 L-0 486 L26 483 L53 488 L79 498 L101 509 L120 515 L138 515 L158 509 L181 500 L209 492 L237 489 L264 493 L286 503 L304 517 L318 533 L329 550 L338 568 L343 586 L344 605 L339 623Z'/%3E%3Cpath d='M367 640 L363 659 L364 678 L366 699 L365 721 L356 741 L338 757 L314 770 L290 780 L268 791 L250 807 L233 828 L213 852 L187 873 L155 887 L120 889 L86 880 L56 863 L31 842 L11 821 L-7 803 L-24 787 L-40 772 L-56 757 L-71 743 L-88 729 L-108 715 L-131 700 L-155 683 L-176 663 L-189 640 L-190 616 L-180 593 L-163 572 L-143 553 L-126 535 L-112 515 L-99 494 L-82 474 L-58 458 L-28 451 L7 452 L41 460 L71 470 L97 477 L120 477 L144 470 L172 460 L203 450 L237 445 L271 446 L303 453 L332 465 L358 481 L379 501 L393 523 L400 548 L398 573 L389 598 L377 620Z' stroke-dasharray='5 7'/%3E%3C/g%3E%3C/svg%3E") right -120px top -60px/1400px 820px no-repeat,
+    linear-gradient(rgba(19,35,58,.055) 1px,transparent 1px) 0 0/88px 88px,
+    linear-gradient(90deg,rgba(19,35,58,.055) 1px,transparent 1px) 0 0/88px 88px,
+    linear-gradient(180deg,#D9E4E3 0%,#CFDDE0 55%,#C5D7DC 100%)}
+.band-edge{position:absolute;left:0;right:0;bottom:-1px;width:100%;height:18px;display:block}
+.hero-links a{color:#6B4507}
+.hero-links a:hover{color:var(--ink)}
+@media (max-width:560px){
+  .hero-band .voyage{width:100%}
+  .hero-band .plate{border-radius:0;border-left:0;border-right:0}
+  .hero-band .deck{padding-inline:.75rem}
+  .hero-band .term{min-height:0}
+  .hero-band .term pre{font-size:.76rem;line-height:1.65}
+}
+
 /* voyage figure */
 .voyage{position:relative;margin-top:.5rem;margin-bottom:0}
 .plate{position:relative;border:1.5px solid var(--ink);border-radius:18px;overflow:hidden;background:#EFE3C8;box-shadow:0 30px 60px -40px rgba(19,35,58,.55)}
@@ -133,7 +152,7 @@ h3{font-size:1.35rem;line-height:1.2}
 .term-btn svg{width:12px;height:12px}
 .term pre{margin:0;padding:1rem 1.1rem 1.2rem;font-size:.82rem;line-height:1.75;white-space:pre-wrap;word-break:break-word;flex:1}
 .term .ln{display:block}
-.term .ln[hidden]{display:none}
+.term .ln[hidden]{display:block;visibility:hidden}
 .term .p{color:#E0B25A}
 .term .c{color:#9FB0C3}
 .term .deny{color:#F4957C}
@@ -217,7 +236,6 @@ section.band{padding:clamp(4rem,9vw,7.5rem) 0 0}
 
 /* benefits */
 section.benefits{padding-top:clamp(2.5rem,6vw,4.5rem)}
-.benefits + .voyage{margin-top:clamp(2.5rem,6vw,4.5rem)}
 .gains{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1.2rem clamp(1.2rem,3vw,2.2rem)}
 .gains li{display:flex;flex-direction:column;align-items:flex-start;min-width:0}
 .gains svg{width:40px;height:40px;padding:7px;border-radius:10px;background:var(--paper-2);color:var(--ink);margin-bottom:.9rem}
@@ -394,6 +412,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
 </header>
 
 <main id="main">
+<div class="hero-band">
 <section class="hero wrap" aria-labelledby="hero-title">
   <div>
     <h1 id="hero-title">Your agent setup.<br> <em>Wherever you run.</em></h1>
@@ -418,39 +437,6 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
     </div>
     <p class="hero-links"><a href="https://github.com/dlhck/ferry">Source on GitHub</a><a href="https://www.npmjs.com/package/@dlhck/ferry">npm package</a><a href="https://github.com/dlhck/ferry/releases">Releases</a></p>
   </div>
-</section>
-
-<section class="band wrap benefits" id="why" aria-labelledby="why-title">
-  <div class="sec-head">
-    <h2 id="why-title">Stop setting up the same workflow on every machine.</h2>
-    <p>You've taught your agents how you work. Moving to a remote box should carry that work with you.</p>
-  </div>
-  <ul class="gains">
-    <li>
-      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M6 12a10 10 0 0 1 18-3M26 20a10 10 0 0 1-18 3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><path d="M24 3.5V9h-5.5M8 28.5V23h5.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      <h3>Configure once. Keep every box in sync.</h3>
-      <p>Update your skills and instructions on your machine. Ferry's watcher sends those changes to your boxes automatically.</p>
-      <a class="gain-cmd" href="#cmd-watch"><code>ferry watch install</code></a>
-    </li>
-    <li>
-      <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="6" width="26" height="18" rx="2.5" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M3 11h26M11 29h10M16 24v5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><circle cx="7" cy="8.6" r="1" fill="currentColor"/><circle cx="10.4" cy="8.6" r="1" fill="currentColor"/></svg>
-      <h3>Open remote previews in your local browser.</h3>
-      <p>Forward remote dev server ports to localhost, with automatic forwarding for servers announced through Ferry.</p>
-      <a class="gain-cmd" href="#cmd-tunnel"><code>ferry tunnel --follow</code></a>
-    </li>
-    <li>
-      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 11h20M18 5l6 6-6 6M28 21H8M14 15l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      <h3>Continue your project on another machine.</h3>
-      <p>Move a Git project to a box and bring it back, including untracked files.</p>
-      <a class="gain-cmd" href="#cmd-move"><code>ferry move</code></a>
-    </li>
-    <li>
-      <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M15.6 15.6L28 28M23 23l-3.5 3.5M26 20l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
-      <h3>Logins stay where they are.</h3>
-      <p>Ferry starts logins on the box and never copies a token.</p>
-      <a class="gain-cmd" href="#cmd-auth"><code>ferry auth</code></a>
-    </li>
-  </ul>
 </section>
 
 <figure class="voyage wrap-wide" id="voyage">
@@ -632,6 +618,42 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
 
   <figcaption id="voyage-cap">One voyage of <code>ferry sync</code>. The picture simplifies three things. The ferry does not deliver to the boxes. Ferry connects to each box over SSH or Tailscale, and the box pulls the snapshot from your private repo. A file that matches a deny rule is not turned back while the rest sails on. The match stops the whole sync, and nothing is published. Paseo cargo does not go into the snapshot. Ferry writes it to each box directly.</figcaption>
 </figure>
+<svg class="band-edge" viewBox="0 0 1200 18" preserveAspectRatio="none" aria-hidden="true"><path d="M0 18H1200V12 Q1170 2 1140 12 T1080 12 T1020 12 T960 12 T900 12 T840 12 T780 12 T720 12 T660 12 T600 12 T540 12 T480 12 T420 12 T360 12 T300 12 T240 12 T180 12 T120 12 T60 12 T0 12Z" fill="#F1EADB"/></svg>
+</div>
+
+<section class="band wrap benefits" id="why" aria-labelledby="why-title">
+  <div class="sec-head">
+    <h2 id="why-title">Stop setting up the same workflow on every machine.</h2>
+    <p>You've taught your agents how you work. Moving to a remote box should carry that work with you.</p>
+  </div>
+  <ul class="gains">
+    <li>
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M6 12a10 10 0 0 1 18-3M26 20a10 10 0 0 1-18 3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><path d="M24 3.5V9h-5.5M8 28.5V23h5.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <h3>Configure once. Keep every box in sync.</h3>
+      <p>Update your skills and instructions on your machine. Ferry's watcher sends those changes to your boxes automatically.</p>
+      <a class="gain-cmd" href="#cmd-watch"><code>ferry watch install</code></a>
+    </li>
+    <li>
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="6" width="26" height="18" rx="2.5" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M3 11h26M11 29h10M16 24v5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><circle cx="7" cy="8.6" r="1" fill="currentColor"/><circle cx="10.4" cy="8.6" r="1" fill="currentColor"/></svg>
+      <h3>Open remote previews in your local browser.</h3>
+      <p>Forward remote dev server ports to localhost, with automatic forwarding for servers announced through Ferry.</p>
+      <a class="gain-cmd" href="#cmd-tunnel"><code>ferry tunnel --follow</code></a>
+    </li>
+    <li>
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 11h20M18 5l6 6-6 6M28 21H8M14 15l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <h3>Continue your project on another machine.</h3>
+      <p>Move a Git project to a box and bring it back, including untracked files.</p>
+      <a class="gain-cmd" href="#cmd-move"><code>ferry move</code></a>
+    </li>
+    <li>
+      <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M15.6 15.6L28 28M23 23l-3.5 3.5M26 20l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+      <h3>Logins stay where they are.</h3>
+      <p>Ferry starts logins on the box and never copies a token.</p>
+      <a class="gain-cmd" href="#cmd-auth"><code>ferry auth</code></a>
+    </li>
+  </ul>
+</section>
+
 
 <section class="band wrap" id="how" aria-labelledby="how-title">
   <div class="sec-head">
