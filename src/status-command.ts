@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { join, posix } from "node:path";
+import { listBoxSkills } from "./adopt-box.ts";
 import { apply, type ApplyPlan, type RemoteApplyInput } from "./apply.ts";
 import {
   AuthStart,
@@ -207,6 +208,7 @@ function boxDependencies(
         await boxFerryStatus(online ? link : null, resolved.ferryVersion),
       ],
     },
+    boxSkills: { list: () => listBoxSkills(link, registry.harnesses) },
     hookPaths: () => uncarriedHookPaths(resolved.home(), registry.harnesses.filter((harness) => !off.includes(harness))),
     integrations: resolved.integrations
       .filter(hasBoxPart)
@@ -287,6 +289,7 @@ function boxLines(box: BoxStatus, operator: GitIdentity | null): string[] {
     "",
     managedPaths(box),
     ...box.managedPaths.unhealthy.map((action) => `  - ${managedPath(action)}`),
+    ...boxSkillLines(box),
     ...toolLines(box.tools),
     "",
     "Authentication:",
@@ -442,6 +445,19 @@ function integrationLines(title: string, statuses: BoxStatus["integrations"]): s
       ...entry.lines.map((line) => `    ${line}`),
       ...entry.warnings.map((warning) => `    WARNING: ${warning}`),
     ]),
+  ];
+}
+
+/** One line for each skill that is only on the box, with the command that adopts it. */
+function boxSkillLines(box: BoxStatus): string[] {
+  if (box.boxOnlySkills === undefined) return [];
+  const { skills } = box.boxOnlySkills;
+  if (skills === null) return ["", `Box-only skills: unavailable${box.link.online ? "" : " while host is offline"}`];
+  if (skills.length === 0) return ["", "Box-only skills: none"];
+  return [
+    "",
+    `Box-only skills: ${skills.length}, the snapshot does not have them`,
+    ...skills.map((skill) => `  ${skill.name}: ${skill.paths.join(", ")}, run ferry adopt --from-box ${box.name} ${/^[A-Za-z0-9._-]+$/.test(skill.name) ? skill.name : quoteShell(skill.name)}`),
   ];
 }
 

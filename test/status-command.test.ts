@@ -111,6 +111,8 @@ function fakeStack(
             ? boxSudo
             : command.includes(" status ")
             ? boxChanges
+            : command.includes("ls-tree")
+            ? ""
             : command.includes("--get-regexp")
               ? boxIdentity
               : "same-tip\n",
@@ -324,6 +326,30 @@ describe("ferry status command", () => {
     expect(stack.mutations).toEqual([]);
   });
 
+  test("lists each box-only skill with the command that adopts it", async () => {
+    const stack = fakeStack();
+    const hex = (value: string) => Buffer.from(value).toString("hex");
+    const link = stack.dependencies.createLink!({ host: "box", user: "ferry" });
+    const dependencies = {
+      ...stack.dependencies,
+      createLink: () => ({
+        ...link,
+        async run(command: string): Promise<LinkResult> {
+          if (!command.includes("ls-tree")) return link.run(command);
+          const stdout = [`H\t${hex("/box/home")}`, "T\t", `E\t0\t${hex("draft")}\t1\tO\t`].join("\n");
+          return { ok: true, address: "100.64.0.8", stdout: `${stdout}\n`, stderr: "" };
+        },
+      }),
+    };
+
+    const report = await status(stack, false, dependencies);
+
+    expect(report.boxes[0]!.boxOnlySkills).toEqual({ skills: [{ name: "draft", paths: ["~/.codex/skills/draft"] }], error: null });
+    expect(stack.output[0]).toContain(
+      "Box-only skills: 1, the snapshot does not have them\n  draft: ~/.codex/skills/draft, run ferry adopt --from-box default draft\n",
+    );
+  });
+
   test("names each changed file in a dirty box checkout in text and JSON", async () => {
     const changes = " M skills/tdd/SKILL.md\0?? skills/scratch/SKILL.md\0";
     const text = fakeStack(true, changes);
@@ -512,6 +538,8 @@ describe("ferry status progress", () => {
       "done",
       "start:Checking managed links on the box",
       "done",
+      "start:Listing box-only skills",
+      "done",
       "start:Checking logins on the box",
       "done",
       "start:Checking MCP logins on the box",
@@ -537,6 +565,7 @@ describe("ferry status progress", () => {
       "skip:Reading the box git identity",
       "skip:Checking sudo on the box",
       "skip:Checking managed links on the box",
+      "skip:Listing box-only skills",
       "skip:Checking logins on the box",
       "skip:Checking MCP logins on the box",
       "skip:Checking tools on the box",
@@ -559,6 +588,7 @@ describe("ferry status progress", () => {
       "Reading the box git identity       – skipped  host offline",
       "Checking sudo on the box           – skipped  host offline",
       "Checking managed links on the box  – skipped  host offline",
+      "Listing box-only skills            – skipped  host offline",
       "Checking logins on the box         – skipped  host offline",
       "Checking MCP logins on the box     – skipped  host offline",
       "Checking tools on the box          – skipped  host offline",
@@ -873,6 +903,7 @@ describe("ferry status with more than one box", () => {
       "[a] Reading the box git identity",
       "[a] Checking sudo on the box",
       "[a] Checking managed links on the box",
+      "[a] Listing box-only skills",
       "[a] Checking logins on the box",
       "[a] Checking MCP logins on the box",
       "[a] Checking tools on the box",
@@ -883,6 +914,7 @@ describe("ferry status with more than one box", () => {
       "[b] Reading the box git identity",
       "[b] Checking sudo on the box",
       "[b] Checking managed links on the box",
+      "[b] Listing box-only skills",
       "[b] Checking logins on the box",
       "[b] Checking MCP logins on the box",
       "[b] Checking tools on the box",
