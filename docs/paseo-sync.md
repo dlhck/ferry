@@ -102,6 +102,14 @@ Ferry reads `daemon.terminalProfiles` from `~/.paseo/config.json` and merges the
 - Warnings and errors never show arguments, other field names, or box output. `ferry sync --dry-run` and its `--json` plan show each profile's ID, name, command, number of arguments, and skip reasons.
 - Terminal profiles are carried after the preferences and before the PATH of `ferry-paseo.service` is updated. A terminal profile failure produces a warning and does not block the core sync.
 
+## Moved sessions
+
+After `ferry move` carries a project to a box with Paseo, Ferry runs `paseo project create` for the project directory. Then it runs `paseo import <session-id> --provider <claude|codex> --cwd <project>` for each carried session.
+
+- Paseo refuses a session that an agent on the box already has, and Ferry skips it. For an archived agent, Paseo unarchives that agent. A second move creates no duplicate agent.
+- A failed import does not stop the other imports or the move. The move warning names each failed session.
+- A move to this machine imports nothing. The integration runs only on a box.
+
 ## Other sync candidates
 
 Research checked on 2026-09-29 against Paseo 0.10.1 and current upstream documentation. The entries below are proposals, not implemented sync behavior.
