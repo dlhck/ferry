@@ -8,14 +8,21 @@ struct FerryMenuBarApp: App {
         MenuBarExtra {
             MenuContent(model: model)
         } label: {
+            // The menu bar shows the label as a monochrome template, so each state has its own symbol and text.
             switch model.state {
             case .missing, .stale:
-                Image(systemName: "questionmark.circle")
+                Image(systemName: "ferry")
+                    .accessibilityLabel("Ferry: status unknown")
+                Text("?")
+                    .accessibilityHidden(true)
             case .clear:
-                Image(systemName: "checkmark.circle")
+                Image(systemName: "ferry")
+                    .accessibilityLabel("Ferry: all clear")
             case let .issues(count):
-                Image(systemName: "exclamationmark.triangle.fill")
+                Image(systemName: "ferry.fill")
+                    .accessibilityLabel("Ferry: \(count) \(count == 1 ? "item needs" : "items need") action")
                 Text("\(count)")
+                    .accessibilityHidden(true)
             }
         }
         .menuBarExtraStyle(.menu)
