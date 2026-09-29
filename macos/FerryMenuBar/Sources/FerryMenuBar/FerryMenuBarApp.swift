@@ -38,9 +38,9 @@ struct MenuContent: View {
             if let error = model.refreshError {
                 Text(error)
             }
-            if let report = model.report {
-                ForEach(Array(report.boxes.enumerated()), id: \.offset) { _, box in
-                    Divider()
+            ForEach(Array(model.sections.enumerated()), id: \.offset) { _, section in
+                Divider()
+                if let box = section.box {
                     Text("\(box.name)  \(box.online ? "ONLINE" : "OFFLINE")")
                     if let error = box.error {
                         Text(error)
@@ -50,6 +50,20 @@ struct MenuContent: View {
                             Button(issue.message) { model.openInTerminal(command) }
                         } else {
                             Text(issue.message)
+                        }
+                    }
+                } else {
+                    Text(section.name)
+                }
+                if let tunnel = section.tunnel {
+                    Text("Ports")
+                    if !tunnel.connected {
+                        Text("Tunnel disconnected")
+                    } else if tunnel.forwards.isEmpty {
+                        Text("No ports. Run ferry expose on the box.")
+                    } else {
+                        ForEach(Array(tunnel.forwards.enumerated()), id: \.offset) { _, forward in
+                            Button(forward.title) { model.openPort(forward.localPort) }
                         }
                     }
                 }

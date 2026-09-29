@@ -26,6 +26,40 @@ struct BriefIssue: Decodable, Sendable {
     let command: String?
 }
 
+/// The content of ~/.ferry/tunnels/<box>.json, which `ferry tunnel --follow` writes.
+struct TunnelFile: Decodable, Sendable {
+    let schemaVersion: Int
+    let box: String
+    /// The pid of `ferry tunnel --follow`.
+    let pid: Int
+    /// False after the connection drops, until Ferry connects again.
+    let connected: Bool
+    let updatedAt: String
+    let forwards: [TunnelForward]
+}
+
+struct TunnelForward: Decodable, Sendable {
+    let name: String?
+    let cwd: String?
+    let boxPort: Int
+    let localPort: Int
+
+    /// `web · shop → localhost:3000`: the name, the last folder of cwd, and the local port.
+    var title: String {
+        let folder = cwd.map { URL(fileURLWithPath: $0).lastPathComponent }
+        let parts = [name, folder].compactMap { $0 }.filter { !$0.isEmpty }
+        let local = "localhost:\(localPort)"
+        return parts.isEmpty ? local : "\(parts.joined(separator: " · ")) → \(local)"
+    }
+}
+
+/// The menu part of one box: its report in status.json, its tunnel file, or both.
+struct BoxSection: Sendable {
+    let name: String
+    let box: BriefBox?
+    let tunnel: TunnelFile?
+}
+
 /// The envelope of `ferry --json`.
 private struct Envelope: Decodable {
     struct Failure: Decodable {
@@ -49,6 +83,8 @@ enum MenuState {
 @MainActor
 final class StatusModel: ObservableObject {
     @Published private(set) var report: BriefReport?
+    /// The tunnel files whose `ferry tunnel --follow` runs, sorted by box.
+    @Published private(set) var tunnels: [TunnelFile] = []
     @Published private(set) var checkedAt: Date?
     /// The error of the last "Refresh now".
     @Published private(set) var refreshError: String?
@@ -57,6 +93,8 @@ final class StatusModel: ObservableObject {
     private static let staleAfter: TimeInterval = 15 * 60
     private let statusFile = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".ferry/status.json")
+    private let tunnelsDirectory = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".ferry/tunnels")
     private var timer: Timer?
 
     init() {
@@ -73,13 +111,26 @@ final class StatusModel: ObservableObject {
     var state: MenuState {
         guard let report, let checkedAt else { return .missing }
         if Date().timeIntervalSince(checkedAt) > Self.staleAfter { return .stale(checkedAt) }
-        // An offline box counts as one issue.
+        // An offline box counts as one issue, and so does a disconnected tunnel. Ports do not count.
         let count = report.boxes.reduce(0) { $0 + ($1.online ? $1.issues.count : 1) }
+            + tunnels.filter { !$0.connected }.count
         return count == 0 ? .clear : .issues(count)
     }
 
-    /// Read ~/.ferry/status.json again.
+    /// The boxes of status.json in their order, then the boxes that have only a tunnel file.
+    var sections: [BoxSection] {
+        let boxes = report?.boxes ?? []
+        let known = Set(boxes.map(\.name))
+        let reported = boxes.map { box in
+            BoxSection(name: box.name, box: box, tunnel: tunnels.first(where: { $0.box == box.name }))
+        }
+        let tunnelOnly = tunnels.filter { !known.contains($0.box) }.map { BoxSection(name: $0.box, box: nil, tunnel: $0) }
+        return reported + tunnelOnly
+    }
+
+    /// Read ~/.ferry/status.json and ~/.ferry/tunnels/ again.
     func reload() {
+        tunnels = readTunnels()
         guard let data = try? Data(contentsOf: statusFile),
               let report = try? JSONDecoder().decode(BriefReport.self, from: data)
         else {
@@ -95,6 +146,7 @@ final class StatusModel: ObservableObject {
         guard !refreshing else { return }
         refreshing = true
         refreshError = nil
+        tunnels = readTunnels()
         Task.detached {
             let outcome = Self.runStatus()
             await MainActor.run {
@@ -119,6 +171,28 @@ final class StatusModel: ObservableObject {
         } catch {
             refreshError = "Cannot open Terminal: \(error.localizedDescription)"
         }
+    }
+
+    /// Open a forwarded port in the default browser.
+    func openPort(_ port: Int) {
+        guard let url = URL(string: "http://localhost:\(port)") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// The valid tunnel files. A file whose pid does not run is stale: its `ferry tunnel --follow` stopped without removing it.
+    private func readTunnels() -> [TunnelFile] {
+        let files = (try? FileManager.default.contentsOfDirectory(at: tunnelsDirectory, includingPropertiesForKeys: nil)) ?? []
+        return files
+            .filter { $0.pathExtension == "json" }
+            .compactMap { try? JSONDecoder().decode(TunnelFile.self, from: Data(contentsOf: $0)) }
+            .filter { Self.isRunning($0.pid) }
+            .sorted { $0.box < $1.box }
+    }
+
+    /// kill(pid, 0) sends no signal. ESRCH means no process has the pid. EPERM means that the process runs as another user.
+    private static func isRunning(_ pid: Int) -> Bool {
+        guard pid > 0, pid <= Int(Int32.max) else { return false }
+        return kill(pid_t(pid), 0) == 0 || errno != ESRCH
     }
 
     private func show(_ report: BriefReport) {
