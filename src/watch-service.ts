@@ -47,7 +47,7 @@ export type UserService = {
   readonly environment?: Readonly<Record<string, string>>;
 };
 
-const WATCH_SERVICE: UserService = {
+export const WATCH_SERVICE: UserService = {
   command: "watch",
   label: "dev.ferry.watch",
   log: "ferry-watch.log",
@@ -165,11 +165,11 @@ export async function uninstallUserService(
   throw new Error(`ferry ${service.command} uninstall does not support ${platform}`);
 }
 
-function launchdPath(service: UserService, home: string): string {
+export function launchdPath(service: UserService, home: string): string {
   return join(home, "Library", "LaunchAgents", `${service.label}.plist`);
 }
 
-function systemdPath(service: UserService, home: string): string {
+export function systemdPath(service: UserService, home: string): string {
   return join(home, ".config", "systemd", "user", service.unit);
 }
 

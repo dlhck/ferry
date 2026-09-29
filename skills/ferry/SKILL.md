@@ -315,16 +315,16 @@ With `--json`, Ferry never asks:
 | `menubar install` | `{ app, path, version, ferryPath }`. `path` is the launchd agent. `version` is the release of the app, or `null` with `--app`. |
 | `menubar uninstall` | `{ app, path, removed }`. `removed` is `false` when neither the app nor the agent was there. |
 | `uninstall` | `{ removed, restored }` |
-| `self-update` | `{ current, latest, updated }`. `updated` is `false` when `current` is the latest release. The output of the installer goes to stderr. |
+| `self-update` | `{ current, latest, updated, services: [{ service, action, message }] }`. An action is `restarted`, `updated`, `skipped`, or `failed`. A failed service action is also in `warnings` and does not fail the binary update. `updated` is `false` when `current` is the latest release. The output of the installer goes to stderr. |
 
 ## Other commands
 
 - `ferry --version` prints the Ferry version.
-- `ferry self-update` updates Ferry on the operator machine. Then `ferry update` puts the new version on the boxes. With `--json`, Ferry never asks to update before a command.
+- `ferry self-update` updates Ferry on the operator machine. It restarts installed watch and tunnel services only when their service files point at this Ferry. On macOS, it updates an installed release menu bar app. It skips a menu bar app whose service marks it as a local `--app` build. Then `ferry update` puts the new version on the boxes. With `--json`, Ferry never asks to update before a command.
 - On the box, `ferry expose [--port <n>] -- <command...>` runs a dev server and announces its port. The port is `--port`, else `$PASEO_PORT`. On the operator machine, `ferry tunnel --follow` opens a forward for each announced port until Ctrl-C. `ferry tunnel install [--box <name>]` runs `--follow` for one box as a user service, and `ferry tunnel uninstall [--box <name>]` removes it. `ferry tunnel install --help` names the service file and the log. Do not write to or remove files in `~/.ferry/exposed/` yourself.
 - `ferry tunnel --follow` (also as the service) writes `~/.ferry/tunnels/<box>.json` when it connects, after each change of the forwards, and when the connection drops: `{ schemaVersion: 1, box, pid, connected, updatedAt, forwards: [{ name, cwd, boxPort, localPort }] }`. `name` and `cwd` are missing when the entry has none. `connected` is `false` with no forwards after a drop, until Ferry connects again. Ferry removes the file on Ctrl-C or SIGTERM. A file whose `pid` does not run is stale. Read the file to find the local port of a dev server. Do not write it yourself. A plain `ferry tunnel <port>` writes no file.
 - `ferry update --dry-run` prints the update plan for the agent tools on both machines.
 - `ferry init --dry-run` prints the init plan without writing or connecting.
-- `ferry watch` syncs accepted changes in the foreground. `ferry watch install` installs it as a user service.
+- `ferry watch` syncs accepted changes in the foreground. `ferry watch install` installs it as a user service. A successful `ferry self-update` restarts the service when it points at the updated Ferry.
 - On macOS, `ferry menubar install` installs a menu bar app that shows the report of `~/.ferry/status.json` and the ports of `~/.ferry/tunnels/*.json`. It needs `ferry watch`. A development build of Ferry needs `--app <path>`, a build of `macos/build.sh`. `ferry menubar uninstall` removes the app.
 - `ferry <command> --help` has the details and the config formats. For example, `ferry tools --help` shows the `[tools]` tables, `ferry update --help` shows the sudo rule for the daily update, and `ferry box add --help` shows the `git_auth = "box"` deploy key step.

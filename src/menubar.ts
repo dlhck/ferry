@@ -62,7 +62,7 @@ export type MenuBarUninstallResult = {
   readonly removed: boolean;
 };
 
-function menuBarService(ferryPath: string): UserService {
+export function menuBarService(ferryPath: string, source: "local" | "release" = "release"): UserService {
   return {
     command: "menubar",
     label: "dev.ferry.menubar",
@@ -72,7 +72,7 @@ function menuBarService(ferryPath: string): UserService {
     args: [],
     // Quit in the menu stops the app until the next login.
     restart: "no",
-    environment: { FERRY_PATH: ferryPath },
+    environment: { FERRY_PATH: ferryPath, FERRY_MENUBAR_SOURCE: source },
   };
 }
 
@@ -110,7 +110,7 @@ export async function installMenuBar(
   }
 
   const service = await installUserService(
-    menuBarService(ferryPath),
+    menuBarService(ferryPath, source === null ? "release" : "local"),
     {
       home,
       platform: "darwin",

@@ -64,6 +64,7 @@ describe("menu bar app installer", () => {
     const body = readFileSync(plist, "utf8");
     expect(body).toContain(`<string>${app}/Contents/MacOS/FerryMenuBar</string>`);
     expect(body).toContain("<key>FERRY_PATH</key>\n    <string>/Users/me/.local/bin/ferry</string>");
+    expect(body).toContain("<key>FERRY_MENUBAR_SOURCE</key>\n    <string>release</string>");
     expect(body).toContain("<string>/opt/homebrew/bin:/usr/bin:/bin</string>");
     expect(body).toContain("<key>RunAtLoad</key>\n  <true/>");
     expect(body).toContain("<key>KeepAlive</key>\n  <false/>");
@@ -113,6 +114,7 @@ describe("menu bar app installer", () => {
 
     expect(result.version).toBeNull();
     expect(commands[1]).toEqual(["ditto", build, join(home, "Applications", "Ferry Menu Bar.app")]);
+    expect(readFileSync(result.path, "utf8")).toContain("<key>FERRY_MENUBAR_SOURCE</key>\n    <string>local</string>");
   });
 
   test("--app unpacks a local zip without a download", async () => {

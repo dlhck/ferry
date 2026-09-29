@@ -263,7 +263,7 @@ const JSON_RESULTS: Record<string, string> = {
   "watch install": "{ manager, path }",
   "menubar install": "{ app, path, version, ferryPath }. version is null with --app",
   "menubar uninstall": "{ app, path, removed }",
-  "self-update": "{ current, latest, updated }. The output of the installer goes to stderr",
+  "self-update": "{ current, latest, updated, services: [{ service, action, message }] }. The output of the installer goes to stderr",
   "box list": "{ boxes: [{ name, transport, destination, default }] }",
   "box add": "{ name, transport, destination, gitAuth, migrated }",
   "box remove": "{ name, defaultBoxRemoved }",
@@ -806,10 +806,8 @@ The menu bar app shows its ports.
 The service starts again each time it exits. The service records the path of
 this Ferry, the current PATH, and SSH_AUTH_SOCK. PATH must find ssh, and
 tailscale for a Tailscale box. Run the command again after you move Ferry or
-change these values. After a Ferry update, restart the service:
-
-  launchctl kickstart -k gui/$(id -u)/dev.ferry.tunnel.<box>
-  systemctl --user restart ferry-tunnel-<box>.service`)
+change these values. A successful ferry self-update restarts the service when
+it points at the updated Ferry.`)
     .action(async () => {
       const { name } = tunnelBox();
       const result = await (dependencies.installTunnelService ?? installTunnelService)({ box: name });
@@ -1095,11 +1093,9 @@ journalctl --user -u ferry-watch.service -f.
 
 The service records the path of this Ferry, the current PATH, and
 SSH_AUTH_SOCK. PATH must find git, ssh, and tailscale for a Tailscale box.
-Run the command again after you move Ferry or change these values. After a
-Ferry update, restart the service:
-
-  launchctl kickstart -k gui/$(id -u)/dev.ferry.watch
-  systemctl --user restart ferry-watch.service`)
+Run the command again after you move Ferry or change these values. A
+successful ferry self-update restarts the service when it points at the
+updated Ferry.`)
     .action(async () => {
       const result = await (dependencies.installWatchService ?? installWatchService)();
       report(result, (result) => writeLine(`Installed ${result.manager} service at ${result.path}`));
@@ -1151,8 +1147,10 @@ and ~/Applications/Ferry Menu Bar.app. The log stays.`)
     .description(`Update Ferry on this machine to the latest release.
 
 Ferry updates in the same way as it was installed: with npm, or with the
-release installer in the directory of this binary. Then run ferry update to
-put the new version on the boxes.
+release installer in the directory of this binary. It restarts installed
+watch and tunnel services that point at this Ferry. On macOS, it also updates
+an installed release menu bar app. Then run ferry update to put the new
+version on the boxes.
 
 On a terminal, each command also asks to update when a newer release is
 there. Ferry reads the latest release at most once a day. It does not ask
@@ -1160,6 +1158,8 @@ with --json, with CI set, or with FERRY_NO_UPDATE_CHECK=1.`)
     .action(async () => {
       const selfUpdateDependencies: Partial<SelfUpdateDependencies> = {
         writeLine,
+        warn,
+        json: json(),
         // With --json, stdout carries only JSON, so the output of the installer goes to stderr.
         ...(json() ? { run: runToStderr } : {}),
       };

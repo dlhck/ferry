@@ -7,11 +7,14 @@
  */
 
 import * as prompts from "@clack/prompts";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { FerryError } from "./errors.ts";
+import { menuBarService } from "./menubar.ts";
+import { tunnelService } from "./tunnel-service.ts";
 import { isReleaseVersion, VERSION } from "./version.ts";
+import { launchdPath, systemdPath, WATCH_SERVICE, type UserService } from "./watch-service.ts";
 
 const STATE_RELATIVE_PATH = ".ferry/update-check.json";
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1_000;
@@ -33,20 +36,44 @@ export type SelfUpdateResult = {
   readonly current: string;
   readonly latest: string;
   readonly updated: boolean;
+  readonly services: readonly SelfUpdateServiceResult[];
+};
+
+export type SelfUpdateServiceResult = {
+  readonly service: string;
+  readonly action: "restarted" | "updated" | "skipped" | "failed";
+  readonly message: string;
+};
+
+export type SelfUpdateCommandResult = {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
 };
 
 export type SelfUpdateDependencies = {
   readonly version: string;
   readonly home: string;
+  readonly platform: NodeJS.Platform;
+  readonly uid: number | undefined;
   /** The path of the running Ferry binary. It tells how Ferry was installed. */
   readonly execPath: string;
+  /** The Ferry script under Bun. */
+  readonly scriptPath: string | undefined;
+  readonly json: boolean;
   readonly now: () => number;
   /** The version of the latest release, or null when Ferry cannot read it. */
   readonly fetchLatest: () => Promise<string | null>;
   readonly choose: (current: string, latest: string) => Promise<UpdateChoice>;
   /** Runs the update command with the terminal of Ferry and returns its exit code. */
   readonly run: (argv: readonly string[]) => Promise<number>;
+  /** Runs a service-manager or new-Ferry command and captures its output. */
+  readonly runService: (argv: readonly string[]) => Promise<SelfUpdateCommandResult>;
+  readonly exists: (path: string) => boolean;
+  readonly readFile: (path: string) => string;
+  readonly readDirectory: (path: string) => readonly string[];
   readonly writeLine: (line: string) => void;
+  readonly warn: (line: string) => void;
 };
 
 /**
@@ -87,6 +114,7 @@ export async function offerSelfUpdate(dependencies: Partial<SelfUpdateDependenci
     return false;
   }
   resolved.writeLine(`Updated Ferry to ${latest}. Run the command again.`);
+  await refreshInstalledServices(latest, resolved);
   resolved.writeLine(`Run ferry update to put Ferry ${latest} on the boxes.`);
   return true;
 }
@@ -104,13 +132,230 @@ export async function runSelfUpdate(dependencies: Partial<SelfUpdateDependencies
   writeState(path, { ...readState(path), checkedAt: resolved.now(), latest });
   if (!isNewer(latest, current)) {
     resolved.writeLine(`Ferry ${current} is the latest version.`);
-    return { current, latest, updated: false };
+    return { current, latest, updated: false, services: [] };
   }
   if ((await resolved.run(updateCommand(latest, resolved.execPath))) !== 0) {
     throw new FerryError("update-failed", `The update to Ferry ${latest} failed.`);
   }
   resolved.writeLine(`Updated Ferry to ${latest}. Run ferry update to put it on the boxes.`);
-  return { current, latest, updated: true };
+  const services = await refreshInstalledServices(latest, resolved);
+  return { current, latest, updated: true, services };
+}
+
+async function refreshInstalledServices(
+  latest: string,
+  dependencies: SelfUpdateDependencies,
+): Promise<readonly SelfUpdateServiceResult[]> {
+  if (dependencies.platform !== "darwin" && dependencies.platform !== "linux") return [];
+  const results: SelfUpdateServiceResult[] = [];
+  const installed = installedServices(dependencies);
+  for (const entry of installed) {
+    const result = await restartService(entry.service, entry.box, entry.path, dependencies);
+    results.push(result);
+    dependencies.writeLine(result.message);
+    if (result.action === "failed") dependencies.warn(result.message);
+  }
+  if (dependencies.platform === "darwin") {
+    const result = await updateMenuBar(latest, dependencies);
+    if (result) {
+      results.push(result);
+      dependencies.writeLine(result.message);
+      if (result.action === "failed") dependencies.warn(result.message);
+    }
+  }
+  return results;
+}
+
+function installedServices(dependencies: SelfUpdateDependencies): readonly {
+  service: UserService;
+  box?: string;
+  path: string;
+}[] {
+  const pathOf = dependencies.platform === "darwin" ? launchdPath : systemdPath;
+  const services: { service: UserService; box?: string; path: string }[] = [];
+  const watchPath = pathOf(WATCH_SERVICE, dependencies.home);
+  if (dependencies.exists(watchPath)) services.push({ service: WATCH_SERVICE, path: watchPath });
+  const directory = dirname(watchPath);
+  let names: readonly string[] = [];
+  try {
+    names = dependencies.readDirectory(directory);
+  } catch {
+    // A missing service directory means that no tunnel service is installed.
+  }
+  const pattern = dependencies.platform === "darwin"
+    ? /^dev\.ferry\.tunnel\.([a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?)\.plist$/
+    : /^ferry-tunnel-([a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?)\.service$/;
+  for (const name of [...names].sort()) {
+    const box = pattern.exec(name)?.[1];
+    if (box === undefined) continue;
+    const service = tunnelService(box);
+    const path = pathOf(service, dependencies.home);
+    if (dependencies.exists(path)) services.push({ service, box, path });
+  }
+  return services;
+}
+
+async function restartService(
+  service: UserService,
+  box: string | undefined,
+  path: string,
+  dependencies: SelfUpdateDependencies,
+): Promise<SelfUpdateServiceResult> {
+  const name = box === undefined ? "watch service" : `tunnel service of ${box}`;
+  const id = box === undefined ? "watch" : `tunnel:${box}`;
+  let body: string;
+  try {
+    body = dependencies.readFile(path);
+  } catch (error) {
+    return { service: id, action: "skipped", message: `Skipped the ${name}: ${errorMessage(error)}` };
+  }
+  const actual = serviceFerryCommand(body, service.args, dependencies.platform);
+  const expected = currentFerryCommand(dependencies);
+  if (!actual || !sameCommand(actual, expected)) {
+    return {
+      service: id,
+      action: "skipped",
+      message: `Skipped the ${name}: it runs ${actual?.join(" ") ?? "an unrecognized command"}.`,
+    };
+  }
+  const command = dependencies.platform === "darwin"
+    ? ["launchctl", "kickstart", "-k", `gui/${dependencies.uid}/${service.label}`]
+    : ["systemctl", "--user", "restart", service.unit];
+  let run: SelfUpdateCommandResult;
+  try {
+    run = await dependencies.runService(command);
+  } catch (error) {
+    return {
+      service: id,
+      action: "failed",
+      message: `Warning: Could not restart the ${name}: ${errorMessage(error)}`,
+    };
+  }
+  if (run.exitCode !== 0) {
+    return {
+      service: id,
+      action: "failed",
+      message: `Warning: Could not restart the ${name}: ${commandError(run)}`,
+    };
+  }
+  return { service: id, action: "restarted", message: `Restarted the ${name}.` };
+}
+
+async function updateMenuBar(
+  latest: string,
+  dependencies: SelfUpdateDependencies,
+): Promise<SelfUpdateServiceResult | null> {
+  const path = launchdPath(menuBarService(""), dependencies.home);
+  if (!dependencies.exists(path)) return null;
+  let body = "";
+  try {
+    body = dependencies.readFile(path);
+  } catch (error) {
+    return { service: "menubar", action: "failed", message: `Warning: Could not read the menu bar service: ${errorMessage(error)}` };
+  }
+  if (menuBarSource(body) === "local") {
+    return {
+      service: "menubar",
+      action: "skipped",
+      message: "Skipped the menu bar app: --app installed a local build.",
+    };
+  }
+  const command = [...currentFerryCommand(dependencies), "menubar", "install", ...(dependencies.json ? ["--json"] : [])];
+  let run: SelfUpdateCommandResult;
+  try {
+    run = await dependencies.runService(command);
+  } catch (error) {
+    return {
+      service: "menubar",
+      action: "failed",
+      message: `Warning: Could not update the menu bar app: ${errorMessage(error)}`,
+    };
+  }
+  if (dependencies.json) {
+    try {
+      const envelope = JSON.parse(run.stdout) as { ok?: unknown; warnings?: unknown; error?: { message?: unknown } | null };
+      if (Array.isArray(envelope.warnings)) {
+        for (const warning of envelope.warnings) if (typeof warning === "string") dependencies.warn(warning);
+      }
+      if (envelope.ok !== true) {
+        const message = typeof envelope.error?.message === "string" ? envelope.error.message : commandError(run);
+        return { service: "menubar", action: "failed", message: `Warning: Could not update the menu bar app: ${message}` };
+      }
+    } catch {
+      return {
+        service: "menubar",
+        action: "failed",
+        message: "Warning: Could not update the menu bar app: the new Ferry returned invalid JSON.",
+      };
+    }
+  }
+  if (run.exitCode !== 0) {
+    return {
+      service: "menubar",
+      action: "failed",
+      message: `Warning: Could not update the menu bar app: ${commandError(run)}`,
+    };
+  }
+  const legacy = menuBarSource(body) === null;
+  return {
+    service: "menubar",
+    action: "updated",
+    message: legacy
+      ? `Updated the menu bar app to ${latest}. Its service did not record whether --app installed it.`
+      : `Updated the menu bar app to ${latest}.`,
+  };
+}
+
+function currentFerryCommand(dependencies: SelfUpdateDependencies): readonly string[] {
+  if (!/^bun(?:\.[^.]+)?$/.test(basename(dependencies.execPath))) return [dependencies.execPath];
+  return dependencies.scriptPath === undefined ? [dependencies.execPath] : [dependencies.execPath, dependencies.scriptPath];
+}
+
+function serviceFerryCommand(
+  body: string,
+  serviceArgs: readonly string[],
+  platform: NodeJS.Platform,
+): readonly string[] | null {
+  const command = platform === "darwin" ? launchdCommand(body) : systemdCommand(body);
+  if (command === null || command.length <= serviceArgs.length) return null;
+  const tail = command.slice(-serviceArgs.length);
+  if (!sameCommand(tail, serviceArgs)) return null;
+  return command.slice(0, -serviceArgs.length);
+}
+
+function launchdCommand(body: string): readonly string[] | null {
+  const array = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(body)?.[1];
+  if (array === undefined) return null;
+  return [...array.matchAll(/<string>([\s\S]*?)<\/string>/g)].map((match) => xmlText(match[1] ?? ""));
+}
+
+function systemdCommand(body: string): readonly string[] | null {
+  const line = /^ExecStart=(.*)$/m.exec(body)?.[1];
+  if (line === undefined) return null;
+  return [...line.matchAll(/"((?:\\.|[^"])*)"|(\S+)/g)].map((match) =>
+    match[1] === undefined ? (match[2] ?? "") : match[1].replaceAll('\\"', '"').replaceAll("\\\\", "\\"),
+  );
+}
+
+function menuBarSource(body: string): "local" | "release" | null {
+  const source = /<key>FERRY_MENUBAR_SOURCE<\/key>\s*<string>(local|release)<\/string>/.exec(body)?.[1];
+  return source === "local" || source === "release" ? source : null;
+}
+
+function sameCommand(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((part, index) => part === right[index]);
+}
+
+function xmlText(value: string): string {
+  return value.replaceAll("&quot;", '"').replaceAll("&gt;", ">").replaceAll("&lt;", "<").replaceAll("&amp;", "&");
+}
+
+function commandError(result: SelfUpdateCommandResult): string {
+  return result.stderr.trim() || result.stdout.trim() || `exit code ${result.exitCode}`;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : "Ferry could not read the service file.";
 }
 
 /**
@@ -200,10 +445,27 @@ function writeState(path: string, state: CheckState): void {
 const defaultDependencies: SelfUpdateDependencies = {
   version: VERSION,
   home: homedir(),
+  platform: process.platform,
+  uid: process.getuid?.(),
   execPath: process.execPath,
+  scriptPath: process.argv[1],
+  json: false,
   now: Date.now,
   fetchLatest: fetchLatestRelease,
   choose: chooseUpdate,
   run: (argv) => Bun.spawn([...argv], { stdio: ["inherit", "inherit", "inherit"] }).exited,
+  runService: async (argv) => {
+    const child = Bun.spawn([...argv], { stdin: "inherit", stdout: "pipe", stderr: "pipe" });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    return { exitCode, stdout, stderr };
+  },
+  exists: existsSync,
+  readFile: (path) => readFileSync(path, "utf8"),
+  readDirectory: readdirSync,
   writeLine: console.log,
+  warn: () => {},
 };
