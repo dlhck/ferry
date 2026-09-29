@@ -37,6 +37,8 @@ export type SelfUpdateResult = {
   readonly latest: string;
   readonly updated: boolean;
   readonly services: readonly SelfUpdateServiceResult[];
+  /** The message of the skill update by the new Ferry, or null when Ferry did not update. */
+  readonly skill: string | null;
 };
 
 export type SelfUpdateServiceResult = {
@@ -69,6 +71,8 @@ export type SelfUpdateDependencies = {
   readonly run: (argv: readonly string[]) => Promise<number>;
   /** Runs a service-manager or new-Ferry command and captures its output. */
   readonly runService: (argv: readonly string[]) => Promise<SelfUpdateCommandResult>;
+  /** Runs `install-skill` of the new Ferry and captures its output. */
+  readonly runSkillUpdate: (argv: readonly string[]) => Promise<SelfUpdateCommandResult>;
   readonly exists: (path: string) => boolean;
   readonly readFile: (path: string) => string;
   readonly readDirectory: (path: string) => readonly string[];
@@ -115,6 +119,7 @@ export async function offerSelfUpdate(dependencies: Partial<SelfUpdateDependenci
   }
   resolved.writeLine(`Updated Ferry to ${latest}. Run the command again.`);
   await refreshInstalledServices(latest, resolved);
+  await refreshSkill(resolved);
   resolved.writeLine(`Run ferry update to put Ferry ${latest} on the boxes.`);
   return true;
 }
@@ -132,14 +137,34 @@ export async function runSelfUpdate(dependencies: Partial<SelfUpdateDependencies
   writeState(path, { ...readState(path), checkedAt: resolved.now(), latest });
   if (!isNewer(latest, current)) {
     resolved.writeLine(`Ferry ${current} is the latest version.`);
-    return { current, latest, updated: false, services: [] };
+    return { current, latest, updated: false, services: [], skill: null };
   }
   if ((await resolved.run(updateCommand(latest, resolved.execPath))) !== 0) {
     throw new FerryError("update-failed", `The update to Ferry ${latest} failed.`);
   }
   resolved.writeLine(`Updated Ferry to ${latest}. Run ferry update to put it on the boxes.`);
   const services = await refreshInstalledServices(latest, resolved);
-  return { current, latest, updated: true, services };
+  const skill = await refreshSkill(resolved);
+  return { current, latest, updated: true, services, skill };
+}
+
+/**
+ * Let the new Ferry write its bundled skill. The running process still has the
+ * old skill. A failure is a warning: the binary update is done.
+ */
+async function refreshSkill(dependencies: SelfUpdateDependencies): Promise<string> {
+  let run: SelfUpdateCommandResult;
+  try {
+    run = await dependencies.runSkillUpdate([...currentFerryCommand(dependencies), "install-skill"]);
+  } catch (error) {
+    run = { exitCode: 1, stdout: "", stderr: errorMessage(error) };
+  }
+  const message = run.exitCode === 0
+    ? run.stdout.trim()
+    : `Warning: Could not update the Ferry skill: ${commandError(run)}`;
+  dependencies.writeLine(message);
+  if (run.exitCode !== 0) dependencies.warn(message);
+  return message;
 }
 
 async function refreshInstalledServices(
@@ -447,6 +472,16 @@ function writeState(path: string, state: CheckState): void {
   }
 }
 
+async function runCaptured(argv: readonly string[]): Promise<SelfUpdateCommandResult> {
+  const child = Bun.spawn([...argv], { stdin: "inherit", stdout: "pipe", stderr: "pipe" });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  return { exitCode, stdout, stderr };
+}
+
 const defaultDependencies: SelfUpdateDependencies = {
   version: VERSION,
   home: homedir(),
@@ -459,15 +494,8 @@ const defaultDependencies: SelfUpdateDependencies = {
   fetchLatest: fetchLatestRelease,
   choose: chooseUpdate,
   run: (argv) => Bun.spawn([...argv], { stdio: ["inherit", "inherit", "inherit"] }).exited,
-  runService: async (argv) => {
-    const child = Bun.spawn([...argv], { stdin: "inherit", stdout: "pipe", stderr: "pipe" });
-    const [exitCode, stdout, stderr] = await Promise.all([
-      child.exited,
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ]);
-    return { exitCode, stdout, stderr };
-  },
+  runService: runCaptured,
+  runSkillUpdate: runCaptured,
   exists: existsSync,
   readFile: (path) => readFileSync(path, "utf8"),
   readDirectory: readdirSync,

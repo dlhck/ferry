@@ -52,6 +52,7 @@ import {
   type PartialOperatorConfig,
 } from "./config.ts";
 import { BOX_MARKER } from "./box-ferry.ts";
+import { installBundledSkill } from "./bundled-skill.ts";
 import { BoxRequiredError, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import {
   boxListLines,
@@ -251,7 +252,7 @@ function helpList(label: string, items: readonly string[]): string {
 
 /** The --json result of each command, for its help. */
 const JSON_RESULTS: Record<string, string> = {
-  init: "{ dryRun, leftovers, published }, or with --dry-run { dryRun, leftovers, plan }",
+  init: "{ dryRun, leftovers, published, skill: { action, path, message } }, or with --dry-run { dryRun, leftovers, plan }",
   install: "{ plan: [{ tool, policy, version, action, command, dependsOn }], gitIdentity }",
   update: "{ dryRun, boxes: [{ name, ok, error, offline, plan, integrations }], operator, updated, failed }, also on failure",
   uninstall: "{ removed, restored }",
@@ -282,7 +283,8 @@ const JSON_RESULTS: Record<string, string> = {
   "watch install": "{ manager, path }",
   "menubar install": "{ app, path, version, ferryPath }. version is null with --app",
   "menubar uninstall": "{ app, path, removed }",
-  "self-update": "{ current, latest, updated, services: [{ service, action, message }] }. The output of the installer goes to stderr",
+  "self-update":
+    "{ current, latest, updated, services: [{ service, action, message }], skill }. skill is the message of the skill update, or null. The output of the installer goes to stderr",
   "box list": "{ boxes: [{ name, transport, destination, default }] }",
   "box add": "{ name, transport, destination, gitAuth, migrated }",
   "box remove": "{ name, defaultBoxRemoved }",
@@ -502,6 +504,10 @@ direct SSH.
 With box tables, init runs again for the box of --box, else default_box, else
 the only box. Use ferry box add to add a box.
 
+Init writes the Ferry agent skill of this version to ~/.agents/skills/ferry,
+so the snapshot carries it to the boxes. ferry self-update writes the skill
+of the new version. Ferry does not change a skill folder with local changes.
+
 Add a custom harness in ~/.ferry/config.toml. A repeat init keeps it:
 
   [[harness]]
@@ -515,6 +521,7 @@ Add a custom harness in ~/.ferry/config.toml. A repeat init keeps it:
     .option("--snapshot-url <url>", "private snapshot git URL")
     .option("--dry-run", "print the init plan without writing or connecting")
     .option("--accept-host-keys", "trust the SSH host keys of the snapshot host on the box without a confirmation prompt")
+    .option("--no-skill", "do not install the Ferry agent skill. Ferry records the choice, and self-update then skips the skill too")
     .action(async (options: {
       host?: string;
       sshUser?: string;
@@ -522,6 +529,7 @@ Add a custom harness in ~/.ferry/config.toml. A repeat init keeps it:
       snapshotUrl?: string;
       dryRun?: boolean;
       acceptHostKeys?: boolean;
+      skill: boolean;
     }) => {
       const execute = dependencies.runInit ?? runInit;
       const [box, ...others] = boxNames();
@@ -534,6 +542,7 @@ Add a custom harness in ~/.ferry/config.toml. A repeat init keeps it:
             sshDestination: options.sshDestination,
             snapshotUrl: options.snapshotUrl,
             dryRun: options.dryRun === true,
+            skill: options.skill,
             harnesses: registry().harnesses,
             ...(box !== undefined ? { box } : {}),
           },
@@ -1306,7 +1315,9 @@ and ~/Applications/Ferry Menu Bar.app. The log stays.`)
 Ferry updates in the same way as it was installed: with npm, or with the
 release installer in the directory of this binary. It restarts installed
 watch and tunnel services that point at this Ferry. On macOS, it also updates
-an installed release menu bar app. Then run ferry update to put the new
+an installed release menu bar app. It writes the Ferry agent skill of the new
+version to ~/.agents/skills/ferry, unless ferry init --no-skill turned it off
+or the skill folder has local changes. Then run ferry update to put the new
 version on the boxes.
 
 On a terminal, each command also asks to update when a newer release is
@@ -1321,6 +1332,15 @@ with --json, with CI set, or with FERRY_NO_UPDATE_CHECK=1.`)
         ...(json() ? { run: runToStderr } : {}),
       };
       report(await (dependencies.runSelfUpdate ?? runSelfUpdate)(selfUpdateDependencies));
+    });
+
+  // self-update runs this command of the new Ferry, because only the new binary has the new skill.
+  program
+    .command("install-skill", { hidden: true })
+    .description("Write the Ferry agent skill of this version to ~/.agents/skills/ferry")
+    .action(() => {
+      const result = installBundledSkill({ home: homedir(), harnesses: registry().harnesses });
+      report(result, (result) => writeLine(result.message));
     });
 
   const box = program.command("box").description("List, add, and remove the boxes of the config");
@@ -1591,6 +1611,7 @@ function reportInit(result: InitResult, writeLine: (line: string) => void): void
     return;
   }
   writeLine(result.published ? "Snapshot seed published." : "Snapshot already matches the seed.");
+  writeLine(result.skill.message);
 }
 
 /** The shape of `result` for `ferry sync --json`: one entry for each selected box, also when some boxes failed. */

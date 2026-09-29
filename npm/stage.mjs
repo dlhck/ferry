@@ -2,7 +2,8 @@
 // Usage: node npm/stage.mjs <version> <dist-dir> <out-dir>
 //
 // Copies the npm package templates to <out-dir>, sets <version> in every package,
-// and copies the binaries dist/ferry-<os>-<arch> into the platform packages.
+// copies the binaries dist/ferry-<os>-<arch> into the platform packages, and
+// copies the Ferry skill into the main package.
 // Publish the platform packages in <out-dir> first, then <out-dir>/ferry.
 
 import { chmodSync, copyFileSync, cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -52,3 +53,6 @@ const main = stage("ferry", (manifest) => {
   }
 });
 copyFileSync(join(root, "README.md"), join(main, "README.md"));
+// The binary embeds the Ferry skill. The package also has it as a file.
+mkdirSync(join(main, "skills", "ferry"), { recursive: true });
+copyFileSync(join(root, "skills", "ferry", "SKILL.md"), join(main, "skills", "ferry", "SKILL.md"));

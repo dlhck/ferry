@@ -173,11 +173,15 @@ Do not run these commands yourself. When `auth.loginRequired` or `mcpLogins.logi
 
 Run `ferry skills add <source> [args...]` on the operator machine. It runs `npx skills add` and adds `-g` and `--copy`, so the skill lands in a global harness root, and the next sync links it into the store. Add `--project` to install into the current project instead. Put arguments after `--` to pass them through without Ferry reading them. Then run `ferry sync --dry-run` and `ferry sync`, or let `ferry watch` publish it.
 
-For example, this installs this skill:
+For example:
 
 ```sh
-ferry skills add dlhck/ferry --skill ferry
+ferry skills add owner/repo --skill some-skill
 ```
+
+## The Ferry skill
+
+`ferry init` writes this skill to `~/.agents/skills/ferry` from the Ferry binary, and `ferry self-update` writes the skill of the new version. Ferry does not change the folder when it has local changes or another tool wrote it. `ferry init --no-skill` turns the install off. Do not edit this skill on the box.
 
 ## Integrations
 
@@ -305,7 +309,7 @@ With `--json`, Ferry never asks:
 
 | Command | `result` |
 | --- | --- |
-| `init` | `{ dryRun: false, leftovers, published }`. With `--dry-run`: `{ dryRun: true, leftovers, plan: { operator, box, gitRemote, localCheckout, configPath, skills, instructions, links } }`. |
+| `init` | `{ dryRun: false, leftovers, published, skill: { action, path, message } }`. `skill.action` is `installed`, `updated`, `unchanged`, `kept`, or `off`. With `--dry-run`: `{ dryRun: true, leftovers, plan: { operator, box, gitRemote, localCheckout, configPath, skills, instructions, links } }`. |
 | `box list` | `{ boxes: [{ name, transport, destination, default }] }` |
 | `box add` | `{ name, transport, destination, gitAuth, migrated }` |
 | `box remove` | `{ name, defaultBoxRemoved }` |
@@ -328,7 +332,7 @@ With `--json`, Ferry never asks:
 | `menubar install` | `{ app, path, version, ferryPath }`. `path` is the launchd agent. `version` is the release of the app, or `null` with `--app`. |
 | `menubar uninstall` | `{ app, path, removed }`. `removed` is `false` when neither the app nor the agent was there. |
 | `uninstall` | `{ removed, restored }` |
-| `self-update` | `{ current, latest, updated, services: [{ service, action, message }] }`. An action is `restarted`, `updated`, `skipped`, or `failed`. A failed service action is also in `warnings` and does not fail the binary update. `updated` is `false` when `current` is the latest release. The output of the installer goes to stderr. |
+| `self-update` | `{ current, latest, updated, services: [{ service, action, message }], skill }`. `skill` is the message of the skill update, or `null` when Ferry did not update. An action is `restarted`, `updated`, `skipped`, or `failed`. A failed service action is also in `warnings` and does not fail the binary update. `updated` is `false` when `current` is the latest release. The output of the installer goes to stderr. |
 
 ## Other commands
 

@@ -26,6 +26,12 @@ import { recordProgress } from "./fake-progress.ts";
 import type { StatusCommandInput } from "../src/status-command.ts";
 import type { StatusReport } from "../src/status.ts";
 
+const INIT_SKILL = {
+  action: "installed",
+  path: "/home/user/.agents/skills/ferry",
+  message: "Installed the Ferry skill in ~/.agents/skills/ferry.",
+} as const;
+
 /** A status report without boxes, for the mocks of runStatus. */
 const EMPTY_REPORT: StatusReport = {
   schemaVersion: 2,
@@ -74,6 +80,7 @@ describe("ferry --help", () => {
       dryRun: false,
       leftovers: [],
       published: true,
+      skill: INIT_SKILL,
     };
     const output: string[] = [];
     const program = buildProgram({
@@ -104,7 +111,27 @@ describe("ferry --help", () => {
       sshUser: "david",
       snapshotUrl: "snapshot.git",
     });
-    expect(output).toEqual(["Snapshot seed published."]);
+    expect(received?.skill).toBe(true);
+    expect(output).toEqual(["Snapshot seed published.", INIT_SKILL.message]);
+  });
+
+  test("--no-skill turns off the skill install of init", async () => {
+    let received: InitInput | undefined;
+    const program = buildProgram({
+      readConfig: () => null,
+      runInit: async (input) => {
+        received = input;
+        return { dryRun: false, leftovers: [], published: false, skill: { ...INIT_SKILL, action: "off" } };
+      },
+      writeLine: () => {},
+    });
+
+    await program.parseAsync(
+      ["init", "--ssh-destination", "user@box.example", "--snapshot-url", "snapshot.git", "--no-skill"],
+      { from: "user" },
+    );
+
+    expect(received?.skill).toBe(false);
   });
 
   test("wires an explicit SSH destination to init", async () => {
@@ -117,6 +144,7 @@ describe("ferry --help", () => {
           dryRun: false,
           leftovers: [],
           published: false,
+          skill: INIT_SKILL,
         };
       },
       writeLine: () => {},
@@ -152,6 +180,7 @@ describe("ferry --help", () => {
           dryRun: false,
           leftovers: [],
           published: false,
+          skill: INIT_SKILL,
         };
       },
       approveHostKeys: async (value) => value === request,
@@ -1083,7 +1112,7 @@ describe("--box", () => {
       readConfig: () => BOXES,
       runInit: async (input) => {
         received = input;
-        return { dryRun: false, leftovers: [], published: false };
+        return { dryRun: false, leftovers: [], published: false, skill: INIT_SKILL };
       },
       writeLine: () => {},
     });
@@ -1123,7 +1152,7 @@ describe("progress selection", () => {
       },
       runInit: async (_input, dependencies) => {
         received.init = dependencies?.progress;
-        return { dryRun: false, leftovers: [], published: false };
+        return { dryRun: false, leftovers: [], published: false, skill: INIT_SKILL };
       },
       runInstall: async (_input, dependencies) => {
         received.install = dependencies?.progress;
@@ -1829,7 +1858,7 @@ describe("--json", () => {
         prompt: async () => ({}),
         runInit: async (_input, dependencies) => {
           received = dependencies;
-          return { dryRun: false, leftovers: [], published: true };
+          return { dryRun: false, leftovers: [], published: true, skill: INIT_SKILL };
         },
       });
       expect(received).toBeDefined();
@@ -1901,7 +1930,7 @@ describe("--json", () => {
         args: ["init"],
         runInit: async (_input: InitInput, dependencies?: InitDependencies): Promise<InitResult> => {
           if ((await dependencies?.approveHostKeys?.(key)) !== true) throw new Error("not trusted");
-          return { dryRun: false, leftovers: [], published: true };
+          return { dryRun: false, leftovers: [], published: true, skill: INIT_SKILL };
         },
       },
       "box add": {
@@ -2025,7 +2054,7 @@ describe("--json", () => {
       readConfig: () => HOST,
       runInit: async (_input, dependencies) => {
         received = dependencies;
-        return { dryRun: false, leftovers: [], published: true };
+        return { dryRun: false, leftovers: [], published: true, skill: INIT_SKILL };
       },
       prompt: async () => ({}),
       writeLine: () => {},

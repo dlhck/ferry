@@ -38,6 +38,7 @@ describe("ferry uninstall", () => {
     await runInit(initInput(home), initDependencies(home));
 
     expect(existsSync(join(home, ".ferry/uninstall.json"))).toBe(true);
+    expect(existsSync(join(home, ".agents/skills/ferry/SKILL.md"))).toBe(true);
     expect(lstatSync(join(home, ".claude/CLAUDE.md")).isSymbolicLink()).toBe(true);
     expect(realpathSync(join(home, ".claude/CLAUDE.md"))).toBe(join(home, ".ferry/store/AGENTS.md"));
 
@@ -49,6 +50,7 @@ describe("ferry uninstall", () => {
     expect(readFileSync(join(home, ".agents/skills/not-a-skill.txt"), "utf8")).toBe(
       "leave this alone\n",
     );
+    expect(existsSync(join(home, ".agents/skills/ferry"))).toBe(false);
     expect(existsSync(join(home, ".codex"))).toBe(false);
     expect(readlinkSync(join(home, ".claude/CLAUDE.md"))).toBe("../AGENTS.md");
     expect(existsSync(join(home, ".ferry"))).toBe(false);
