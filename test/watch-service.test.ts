@@ -43,6 +43,28 @@ describe("watch service installer", () => {
     ]);
   });
 
+  test("runs the Ferry script with bun in a launchd service", async () => {
+    const sourceHome = home();
+
+    const result = await installWatchService(
+      {
+        home: sourceHome,
+        platform: "darwin",
+        executable: "/opt/homebrew/bin/bun",
+        scriptPath: "/home/user/ferry/src/cli.ts",
+        uid: 501,
+        path: "/opt/homebrew/bin:/usr/bin:/bin",
+      },
+      { run: async () => ({ ok: true, stderr: "" }) },
+    );
+
+    expect(readFileSync(result.path, "utf8")).toContain(`  <array>
+    <string>/opt/homebrew/bin/bun</string>
+    <string>/home/user/ferry/src/cli.ts</string>
+    <string>watch</string>
+  </array>`);
+  });
+
   test("writes and enables a systemd user service", async () => {
     const sourceHome = home();
     const commands: ServiceCommand[] = [];
@@ -133,5 +155,18 @@ WantedBy=default.target
       uid: 1000,
       path: "/usr/bin:/bin",
     })).rejects.toThrow("absolute Ferry executable path");
+  });
+
+  test("refuses a relative Ferry script path before writing", async () => {
+    const sourceHome = home();
+
+    await expect(installWatchService({
+      home: sourceHome,
+      platform: "linux",
+      executable: "/home/user/.bun/bin/bun",
+      scriptPath: "src/cli.ts",
+      uid: 1000,
+      path: "/usr/bin:/bin",
+    })).rejects.toThrow("absolute Ferry script path");
   });
 });
