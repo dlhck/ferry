@@ -30,7 +30,7 @@ function fixture(source = "same\n", stored = "same\n") {
   writeFileSync(join(store, "skills", "example", "SKILL.md"), stored);
   const seed: Seed = {
     ok: true,
-    skills: [{ name: "example", files: [{ path: "SKILL.md", bytes: Buffer.from(source) }] }],
+    skills: [{ name: "example", files: [{ path: "SKILL.md", bytes: Buffer.from(source), executable: false }] }],
     instructions: null,
     roots: [],
     settings: [],
@@ -143,7 +143,7 @@ describe("local root adoption", () => {
     writeFileSync(join(store, "roots", ".claude", "agents", "reviewer.md"), "review\n");
     const withRoot: Seed = {
       ...seed,
-      roots: [{ path: ".claude/agents", files: [{ path: "reviewer.md", bytes: Buffer.from("review\n") }] }],
+      roots: [{ path: ".claude/agents", files: [{ path: "reviewer.md", bytes: Buffer.from("review\n"), executable: false }] }],
     };
 
     adoptPublishedSkills(home, store, [{ id: "claude", name: "Claude", extraRoots: [".claude/agents"] }], withRoot);

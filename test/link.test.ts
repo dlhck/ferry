@@ -335,6 +335,64 @@ describe("Link", () => {
     });
   });
 
+  test("a tunnel port with a remote host forwards to that host, with an IPv6 address in brackets", async () => {
+    const host = new FakeHost([result({ exitCode: 255 })]);
+    const link = new Link({ destination: "user@box.example" }, host);
+
+    await link.tunnel({
+      ports: [
+        { localPort: 15432, remotePort: 5432, remoteHost: "db.example" },
+        { localPort: 6379, remotePort: 6379, remoteHost: "fd00::1" },
+      ],
+    });
+
+    expect(host.commands[0]?.argv.slice(-5)).toEqual([
+      "-L",
+      "127.0.0.1:15432:db.example:5432",
+      "-L",
+      "127.0.0.1:6379:[fd00::1]:6379",
+      "user@box.example",
+    ]);
+  });
+
+  test("reach opens one connection from the box with ssh -W", async () => {
+    const host = new FakeHost([result(), result({ timedOut: true, exitCode: null })]);
+    const link = new Link({ destination: "user@box.example" }, host);
+
+    expect(await link.reach({ host: "db.example", port: 5432 })).toEqual({
+      ok: true,
+      address: "user@box.example",
+      stdout: "",
+      stderr: "",
+    });
+    // A server that keeps the connection open until the timeout accepted it.
+    expect((await link.reach({ host: "fd00::1", port: 5432 })).ok).toBe(true);
+    expect(host.commands.map((command) => [command.argv, command.timeoutMs, command.input])).toEqual([
+      [["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-W", "db.example:5432", "user@box.example"], 10_000, undefined],
+      [["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-W", "[fd00::1]:5432", "user@box.example"], 10_000, undefined],
+    ]);
+  });
+
+  test("reach tells a host that the box cannot open from a box that OpenSSH cannot reach", async () => {
+    const host = new FakeHost([
+      result({
+        exitCode: 255,
+        stderr: "channel 0: open failed: connect failed: Name or service not known\nstdio forwarding failed\n",
+      }),
+      result({ exitCode: 255, stderr: "ssh: connect to host box.example port 22: Connection refused\n" }),
+    ]);
+    const link = new Link({ destination: "user@box.example" }, host);
+
+    expect(await link.reach({ host: "db.example", port: 5432 })).toEqual({
+      ok: false,
+      error: { code: "forward-failed", origin: "box", message: "connect failed: Name or service not known" },
+    });
+    expect(await link.reach({ host: "db.example", port: 5432 })).toEqual({
+      ok: false,
+      error: { code: "ssh-failed", origin: "network", message: "ssh: connect to host box.example port 22: Connection refused" },
+    });
+  });
+
   test("an aborted signal stops the tunnel and reports it as stopped", async () => {
     const stop = new AbortController();
     const host = new FakeHost([result({ exitCode: 255 })]);

@@ -1336,6 +1336,17 @@ describe("ferry tunnel", () => {
     expect(text).toContain("~/.config/systemd/user/ferry-tunnel-<box>.service");
     expect(text).toContain("journalctl --user -u ferry-tunnel-<box>.service -f");
   });
+
+  test("tunnel --help describes the host form and the child process behavior", () => {
+    const tunnel = buildProgram().commands.find((command) => command.name() === "tunnel")!;
+    let text = "";
+    tunnel.configureOutput({ writeOut: (value) => (text += value) });
+    tunnel.outputHelp();
+    expect(text).toContain("host:port[:local] for a host that the box can reach");
+    expect(text).toContain("db.example:5432:15432  db.example:5432 from the box, local port 15432");
+    expect(text).toContain("[fd00::1]:5432         [fd00::1]:5432 from the box, local port 5432");
+    expect(text).toContain("SIGTERM closes the tunnel with exit code 0.");
+  });
 });
 
 describe("ferry expose", () => {

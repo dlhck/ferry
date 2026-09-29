@@ -1,5 +1,6 @@
 /**
- * `ferry tunnel` opens box ports on the operator machine, lists the ports that
+ * `ferry tunnel` opens box ports, or ports of a host that the box can reach,
+ * on the operator machine, lists the ports that
  * listen on the box, or with `--follow` opens a forward for each port that
  * `ferry expose` announces on the box.
  */
@@ -15,7 +16,7 @@ import { FerryError } from "./errors.ts";
 import { errorEvent, type OutputEvent } from "./output.ts";
 
 export type TunnelInput = {
-  /** Port specs: `<box>` or `<box>:<local>`. */
+  /** Port specs: `[<host>:]<box>[:<local>]`. */
   readonly ports: readonly string[];
   readonly list: boolean;
   /** Follow the entries of `ferry expose` on the box. */
@@ -23,7 +24,7 @@ export type TunnelInput = {
   readonly box: { readonly name: string; readonly host: OperatorHostConfig };
 };
 
-type TunnelLink = Pick<Link, "run" | "tunnel" | "master">;
+type TunnelLink = Pick<Link, "run" | "tunnel" | "master" | "reach">;
 
 export type TunnelDependencies = {
   readonly createLink: (options: LinkOptions) => TunnelLink;
@@ -142,15 +143,25 @@ export async function runTunnel(
     if (!(await resolved.isPortFree(port.localPort))) {
       throw new Error(
         `Local port ${port.localPort} is in use on this machine. Pick another local port with box:local, ` +
-          `such as ferry tunnel ${port.remotePort}:${port.localPort + 1}.`,
+          `such as ferry tunnel ${remoteTarget(port)}:${port.localPort + 1}.`,
       );
     }
   }
 
   const link = resolved.createLink(resolveLinkOptions(input.box.host));
+  // The box connects to 127.0.0.1 only when a client connects, so a dev server can start later.
+  for (const port of ports) {
+    if (port.remoteHost === undefined) continue;
+    const reached = await link.reach({ host: port.remoteHost, port: port.remotePort });
+    if (reached.ok) continue;
+    if (reached.error.origin === "box") {
+      throw new Error(`${input.box.name} cannot reach ${remoteTarget(port)}: ${reached.error.message}`);
+    }
+    throw new Error(`Could not connect to ${input.box.name}: ${reached.error.message}`);
+  }
   for (const port of ports) {
     resolved.emit({ type: "forward-opened", name: null, localPort: port.localPort, box: input.box.name, remotePort: port.remotePort });
-    resolved.writeLine(`http://localhost:${port.localPort} -> ${input.box.name}:127.0.0.1:${port.remotePort}`);
+    resolved.writeLine(`http://localhost:${port.localPort} -> ${input.box.name}:${remoteTarget({ remoteHost: "127.0.0.1", ...port })}`);
   }
   resolved.writeLine("Press Ctrl-C to close the tunnel.");
 
@@ -440,24 +451,39 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-/** Parse `<box>` and `<box>:<local>` port specs. Two specs cannot use the same local port. */
+/**
+ * Parse `<box>`, `<box>:<local>`, `<host>:<box>`, and `<host>:<box>:<local>`
+ * port specs. A numeric first part is a port on 127.0.0.1 of the box. An IPv6
+ * host is in brackets. Two specs cannot use the same local port.
+ */
 export function parsePortSpecs(specs: readonly string[]): TunnelPort[] {
   const ports: TunnelPort[] = [];
   for (const spec of specs) {
-    const match = /^(\d+)(?::(\d+))?$/.exec(spec);
-    const remotePort = Number(match?.[1]);
-    const localPort = match?.[2] === undefined ? remotePort : Number(match[2]);
+    const match =
+      /^()(\d+)(?::(\d+))?$/.exec(spec) ??
+      /^\[([0-9A-Fa-f.:]*:[0-9A-Fa-f.:]*)\]:(\d+)(?::(\d+))?$/.exec(spec) ??
+      /^((?!\d+:)[A-Za-z0-9_][A-Za-z0-9_.-]*):(\d+)(?::(\d+))?$/.exec(spec);
+    const remoteHost = match?.[1] || undefined;
+    const remotePort = Number(match?.[2]);
+    const localPort = match?.[3] === undefined ? remotePort : Number(match[3]);
     if (!validPort(remotePort) || !validPort(localPort)) {
       throw new Error(
-        `invalid port ${spec}. Give a box port from 1 through 65535, or box:local, such as 3000:3001.`,
+        `invalid port ${spec}. Give a box port from 1 through 65535, box:local such as 3000:3001, ` +
+          "or host:port[:local] such as db.example:5432:15432.",
       );
     }
     if (ports.some((port) => port.localPort === localPort)) {
       throw new Error(`local port ${localPort} is given more than once.`);
     }
-    ports.push({ remotePort, localPort });
+    ports.push(remoteHost === undefined ? { remotePort, localPort } : { remoteHost, remotePort, localPort });
   }
   return ports;
+}
+
+/** `3000`, `db.example:5432`, or `[fd00::1]:5432`. */
+function remoteTarget(port: TunnelPort): string {
+  if (port.remoteHost === undefined) return String(port.remotePort);
+  return `${port.remoteHost.includes(":") ? `[${port.remoteHost}]` : port.remoteHost}:${port.remotePort}`;
 }
 
 /** Bind the port on `127.0.0.1` for a moment. A port that Ferry cannot bind is busy. */

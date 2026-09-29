@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -37,7 +39,7 @@ function seed(body = "Use small commits.\n"): Seed {
     skills: [
       {
         name: "tdd",
-        files: [{ path: "SKILL.md", bytes: Buffer.from(body) }],
+        files: [{ path: "SKILL.md", bytes: Buffer.from(body), executable: false }],
       },
     ],
     instructions: { bytes: Buffer.from("Keep changes surgical.\n") },
@@ -106,8 +108,30 @@ const expectedMetadata = {
       skillRoot: ".pi/agent/skills",
       ownSkills: false,
       instructionFile: ".pi/agent/AGENTS.md",
+      settings: {
+        file: ".pi/agent/settings.json",
+        format: "json",
+        keys: [
+          "defaultProvider",
+          "defaultModel",
+          "defaultThinkingLevel",
+          "enabledModels",
+          "thinkingBudgets",
+          "enableSkillCommands",
+        ],
+      },
     },
-    { id: "cursor", name: "Cursor Agent", skillRoot: ".cursor/skills", ownSkills: false },
+    {
+      id: "cursor",
+      name: "Cursor Agent",
+      skillRoot: ".cursor/skills",
+      ownSkills: false,
+      settings: {
+        file: ".cursor/cli-config.json",
+        format: "json",
+        keys: ["model", "maxMode", "hasChangedDefaultModel", "attribution"],
+      },
+    },
   ],
 };
 
@@ -326,7 +350,7 @@ describe("store publish", () => {
     const home = makeHome();
     const old: Seed = {
       ...seed(),
-      skills: [...seed().skills, { name: ".system", files: [{ path: "SKILL.md", bytes: Buffer.from("old") }] }],
+      skills: [...seed().skills, { name: ".system", files: [{ path: "SKILL.md", bytes: Buffer.from("old"), executable: false }] }],
     };
     const store = await openStore("snapshot.git", old, { git, home, harnesses: BUILTIN_HARNESSES });
     await store.publish(old);
@@ -356,8 +380,8 @@ describe("store layout of Claude subagents and commands", () => {
         {
           path: ".claude/agents",
           files: [
-            { path: "reviewer.md", bytes: Buffer.from("review agent") },
-            { path: "old.md", bytes: Buffer.from("old agent") },
+            { path: "reviewer.md", bytes: Buffer.from("review agent"), executable: false },
+            { path: "old.md", bytes: Buffer.from("old agent"), executable: false },
           ],
         },
         { path: ".claude/commands", files: [] },
@@ -374,7 +398,7 @@ describe("store layout of Claude subagents and commands", () => {
 
     const trimmed: Seed = {
       ...value,
-      roots: [{ path: ".claude/agents", files: [{ path: "reviewer.md", bytes: Buffer.from("review agent") }] }],
+      roots: [{ path: ".claude/agents", files: [{ path: "reviewer.md", bytes: Buffer.from("review agent"), executable: false }] }],
     };
     await store.publish(trimmed);
 
@@ -485,5 +509,69 @@ describe("store layout of carried settings keys", () => {
     expect(git.invocations.find((invocation) => invocation.args[0] === "add")?.args).toContain(
       "settings",
     );
+  });
+});
+
+describe("store file modes", () => {
+  /** Run git with no user or system config, so the test does not depend on the machine. */
+  function realGit(cwd: string, ...args: string[]): string {
+    const result = Bun.spawnSync(["git", "-c", "commit.gpgsign=false", ...args], {
+      cwd,
+      env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+    });
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+    return result.stdout.toString();
+  }
+
+  function treeMode(checkout: string, path: string): string {
+    return realGit(checkout, "ls-tree", "HEAD", "--", path).split(/\s/, 1)[0] ?? "";
+  }
+
+  function executable(path: string): boolean {
+    return (statSync(path).mode & 0o111) !== 0;
+  }
+
+  test("keeps the executable bit in the store, the snapshot tree, and the box checkout", async () => {
+    const root = makeHome();
+    const home = join(root, "home");
+    const remote = join(root, "snapshot.git");
+    const box = join(root, "box");
+    realGit(root, "init", "--quiet", "--bare", remote);
+
+    const skill = join(home, ".agents", "skills", "runner");
+    mkdirSync(join(skill, "scripts"), { recursive: true });
+    writeFileSync(join(skill, "SKILL.md"), "Run the script.\n");
+    writeFileSync(join(skill, "scripts", "run.sh"), "#!/bin/sh\necho run\n", { mode: 0o755 });
+    chmodSync(join(skill, "scripts", "run.sh"), 0o755);
+
+    const first = readSeed(home, BUILTIN_HARNESSES);
+    if (!first.ok) throw new Error("expected a seed");
+    const store = await openStore(remote, first, { home, harnesses: BUILTIN_HARNESSES });
+    realGit(store.path, "config", "user.name", "Ferry Operator");
+    realGit(store.path, "config", "user.email", "operator@example.com");
+    realGit(store.path, "config", "commit.gpgsign", "false");
+
+    expect((await store.publish(first)).published).toBe(true);
+    const script = join(store.path, "skills", "runner", "scripts", "run.sh");
+    expect(executable(script)).toBe(true);
+    expect(executable(join(store.path, "skills", "runner", "SKILL.md"))).toBe(false);
+    expect(treeMode(store.path, "skills/runner/scripts/run.sh")).toBe("100755");
+    expect(treeMode(store.path, "skills/runner/SKILL.md")).toBe("100644");
+
+    realGit(root, "clone", "--quiet", remote, box);
+    expect(executable(join(box, "skills", "runner", "scripts", "run.sh"))).toBe(true);
+
+    chmodSync(join(skill, "scripts", "run.sh"), 0o644);
+    const second = readSeed(home, BUILTIN_HARNESSES);
+    if (!second.ok) throw new Error("expected a seed");
+    expect(second.identity).not.toBe(first.identity);
+
+    expect((await store.publish(second)).published).toBe(true);
+    expect(executable(script)).toBe(false);
+    expect(treeMode(store.path, "skills/runner/scripts/run.sh")).toBe("100644");
+
+    realGit(box, "fetch", "--quiet");
+    realGit(box, "reset", "--quiet", "--hard", "@{upstream}");
+    expect(executable(join(box, "skills", "runner", "scripts", "run.sh"))).toBe(false);
   });
 });
