@@ -12,7 +12,7 @@ const homes: string[] = [];
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 const remote = "https://github.com/example/plugins.git";
 const revision = "a".repeat(40);
-const plugin: PaseoPlugin = { id: "review", remote, path: "plugins/review", commit: revision, enabled: true };
+const plugin: PaseoPlugin = { kind: "git", id: "review", remote, path: "plugins/review", commit: revision, enabled: true };
 function fixture() {
   const home = mkdtempSync(join(tmpdir(), "ferry-plugins-"));
   homes.push(home);
@@ -53,7 +53,7 @@ function installed(overrides: Record<string, unknown> = {}) {
     identity: { kind: "git", remote, pluginPath: plugin.path }, currentRevision: revision,
   }, ...overrides };
 }
-const carry = (link: IntegrationLink, value = plugin) => carryPaseoPlugins(link, { plugins: [value], warnings: [] });
+const carry = (link: IntegrationLink, value: PaseoPlugin = plugin) => carryPaseoPlugins(link, { plugins: [value], warnings: [] });
 
 describe("Paseo Git plugin discovery", () => {
   test("reads the installed commit and subdirectory, including legacy Git records", () => {
@@ -63,10 +63,10 @@ describe("Paseo Git plugin discovery", () => {
     f.configure(false);
     expect(readPaseoPlugins(f.home).plugins[0]?.enabled).toBe(false);
   });
-  test("skips npm, local directories, and dirty checkouts", () => {
+  test("skips unknown source kinds, local directories, and dirty checkouts", () => {
     const f = fixture();
-    f.record({ kind: "npm" });
-    expect(readPaseoPlugins(f.home).warnings[0]).toContain("only managed Git");
+    f.record({ kind: "tarball", url: "https://user:secret@example.com/plugin.tgz" });
+    expect(readPaseoPlugins(f.home).warnings).toEqual(["Paseo plugin review was skipped: only managed Git and npm plugins can sync."]);
     writeFileSync(join(f.home, ".paseo/plugins/sources.json"), "{}");
     expect(readPaseoPlugins(f.home).plugins).toEqual([]);
     f.record({ kind: "git", remote });
@@ -180,7 +180,7 @@ test("dry runs include plugins only for enabled boxes and make no connections", 
     createLink: () => { throw new Error("must stay offline"); }, writeLine: () => {},
   };
   const result = await runSync({ home: f.home, dryRun: true }, deps);
-  expect(result.boxes[0]?.plan.paseoPlugins?.plugins[0]?.commit).toBe(f.commit);
+  expect(result.boxes[0]?.plan.paseoPlugins?.plugins[0]).toMatchObject({ commit: f.commit });
   expect(result.boxes[1]?.plan.paseoPlugins).toBeNull();
 });
 
@@ -224,4 +224,156 @@ test("sync carries plugins before the unit check and reports failures without bl
     expect(install).toBeLessThan(unit);
     expect(warnings.some((line) => line.includes("could not carry the Paseo plugins"))).toBe(fail);
   }
+});
+
+const uuid = "12345678-1234-1234-1234-123456789abc";
+const tools: Extract<PaseoPlugin, { kind: "npm" }> = { kind: "npm", id: "tools", packageName: "@acme/tools", path: ".", version: "1.2.3", enabled: true };
+/** An npm installation in Paseo 0.10.1's layout: <id>/<uuid>/node_modules/<package>, with the version in package-lock.json. */
+function npmFixture(packageName = tools.packageName, path = ".") {
+  const home = mkdtempSync(join(tmpdir(), "ferry-npm-plugins-"));
+  homes.push(home);
+  const versionRoot = join(home, ".paseo/plugins/tools", uuid);
+  const packageRoot = join(versionRoot, "node_modules", packageName);
+  mkdirSync(join(packageRoot, path), { recursive: true });
+  const install = (version: string, installedVersion = version) => {
+    writeFileSync(join(versionRoot, "package.json"), JSON.stringify({ name: "paseo-plugin-installation", dependencies: { [packageName]: version } }));
+    writeFileSync(join(versionRoot, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: {
+      "": { dependencies: { [packageName]: version } },
+      [`node_modules/${packageName}`]: { version, resolved: `https://registry.example.com/${packageName}/-/tools-${version}.tgz?token=secret`, integrity: "sha512-example" },
+    } }));
+    writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name: packageName, version: installedVersion }));
+  };
+  const configure = (enabled = true, configured = join(packageRoot, path)) => writeFileSync(join(home, ".paseo/config.json"), JSON.stringify({
+    plugins: { tools: { source: "directory", path: configured, enabled } },
+  }));
+  install("1.2.3"); configure();
+  writeFileSync(join(home, ".paseo/plugins/sources.json"), JSON.stringify({ tools: { kind: "npm" } }));
+  return { home, versionRoot, packageRoot, install, configure };
+}
+function installedNpm(overrides: Record<string, unknown> = {}) {
+  return { id: tools.id, enabled: true, installation: {
+    identity: { kind: "npm", packageName: tools.packageName, pluginPath: "." }, currentRevision: tools.version,
+  }, ...overrides };
+}
+function expectRefused(home: string, message: string, secret: string) {
+  try { readPaseoPlugins(home); throw new Error("accepted an unsafe npm installation"); }
+  catch (error) {
+    expect(String(error)).toContain(message);
+    expect(String(error)).not.toContain(secret);
+  }
+}
+
+describe("Paseo npm plugin discovery", () => {
+  test("reads the exact installed version of scoped and unscoped packages, with subdirectories", () => {
+    const f = npmFixture();
+    expect(readPaseoPlugins(f.home)).toEqual({ plugins: [tools], warnings: [] });
+    f.configure(false);
+    expect(readPaseoPlugins(f.home).plugins[0]?.enabled).toBe(false);
+    const nested = npmFixture("review-kit", "plugins/review");
+    expect(readPaseoPlugins(nested.home).plugins).toEqual([{ ...tools, packageName: "review-kit", path: "plugins/review" }]);
+  });
+  test("carries the lockfile version, never the requested range or the resolved URL", () => {
+    const f = npmFixture();
+    writeFileSync(join(f.versionRoot, "package.json"), JSON.stringify({ dependencies: { "@acme/tools": "^1.0.0" } }));
+    const plan = JSON.stringify(readPaseoPlugins(f.home));
+    expect(plan).toContain('"version":"1.2.3"');
+    expect(plan).not.toContain("^1.0.0");
+    expect(plan).not.toContain("registry.example.com");
+    expect(plan).not.toContain("secret");
+  });
+  test("refuses missing or mismatched acquisition artifacts without exposing values", () => {
+    const f = npmFixture();
+    f.install("1.2.3", "9.9.9-secret");
+    expectRefused(f.home, "could not read the managed npm installation", "9.9.9-secret");
+    rmSync(join(f.versionRoot, "package-lock.json"));
+    expectRefused(f.home, "could not read the managed npm installation", "secret");
+  });
+  test("refuses moving versions and credential-bearing package identities without exposing values", () => {
+    const f = npmFixture();
+    f.install("latest-secret");
+    expectRefused(f.home, "nonportable or credential-bearing npm package", "latest-secret");
+    const token = `sk-ant-${"a1".repeat(12)}`;
+    const leaked = npmFixture(`@acme/${token}`);
+    expectRefused(leaked.home, "nonportable or credential-bearing npm package", token);
+  });
+  test("refuses paths outside the managed npm installation and invalid package names", () => {
+    const f = npmFixture();
+    f.configure(true, join(f.versionRoot, "other"));
+    expectRefused(f.home, "outside its managed npm installation", f.versionRoot);
+    f.configure(true, "/tmp/other");
+    expectRefused(f.home, "outside its managed npm installation", "/tmp/other");
+    const upper = npmFixture("@Acme/Tools");
+    expectRefused(upper.home, "outside its managed npm installation", "Acme");
+  });
+});
+
+describe("Paseo npm plugin reconciliation", () => {
+  test("installs the exact version of a scoped package without --ref, then enables the global switch", async () => {
+    const b = box([], { pluginsEnabled: false }); await carry(b.link, tools);
+    expect(b.commands.slice(0, 3)).toEqual(["paseo plugin ls --json", "paseo plugin install 'npm:@acme/tools@1.2.3' --id 'tools' --json", readConfig]);
+    expect(written(b.commands)).toEqual({ pluginsEnabled: true });
+    const nested = box([]); await carry(nested.link, { ...tools, packageName: "review-kit", path: "plugins/review" });
+    expect(nested.commands[1]).toBe("paseo plugin install 'npm:review-kit@1.2.3:plugins/review' --id 'tools' --json");
+  });
+  test("updates to the exact version in either direction and is idempotent", async () => {
+    for (const boxVersion of ["1.0.0", "2.0.0"]) {
+      const b = box([installedNpm({ installation: { ...installedNpm().installation, currentRevision: boxVersion } })]);
+      await carry(b.link, tools);
+      expect(b.commands.slice(1)).toEqual(["paseo plugin update 'tools' --version '1.2.3' --json", readConfig]);
+    }
+    const current = box([installedNpm()]);
+    expect(await carry(current.link, tools)).toEqual([]);
+    expect(current.commands).toEqual(["paseo plugin ls --json", readConfig]);
+  });
+  test("reconciles enabled state in a safe order", async () => {
+    const older = installedNpm({ installation: { ...installedNpm().installation, currentRevision: "1.0.0" } });
+    const b = box([older]); await carry(b.link, { ...tools, enabled: false });
+    expect(b.commands.slice(1)).toEqual(["paseo plugin disable 'tools' --json", "paseo plugin update 'tools' --version '1.2.3' --json"]);
+    const disabled = box([{ ...older, enabled: false }]); await carry(disabled.link, tools);
+    expect(disabled.commands.slice(1)).toEqual(["paseo plugin update 'tools' --version '1.2.3' --json", "paseo plugin enable 'tools' --json", readConfig]);
+    const absent = box([]);
+    expect((await carry(absent.link, { ...tools, enabled: false }))[0]).toContain("disabled locally");
+    expect(absent.commands).toHaveLength(1);
+  });
+  test("skips an ID whose box source is another package, subdirectory, or Git", async () => {
+    for (const identity of [
+      { kind: "npm", packageName: "@other/tools", pluginPath: "." },
+      { kind: "npm", packageName: tools.packageName, pluginPath: "nested" },
+      { kind: "git", remote, pluginPath: "." },
+    ]) {
+      const b = box([installedNpm({ installation: { identity, currentRevision: "1.0.0" } })], { pluginsEnabled: false });
+      expect((await carry(b.link, tools))[0]).toContain("different source");
+      expect(b.commands).toEqual(["paseo plugin ls --json"]);
+    }
+    const git = box([installedNpm()]);
+    expect((await carry(git.link, { ...plugin, id: "tools" }))[0]).toContain("different source");
+  });
+});
+
+test("dry runs show npm plugins without registry URLs", async () => {
+  const f = npmFixture();
+  const lines: string[] = [];
+  const deps: SyncDependencies = {
+    publisher: () => "operator", readConfig: () => ({ version: 1, publisher: "operator", snapshotUrl: "snapshot.git",
+      integrations: { paseo: true }, host: { tailscale: "on", sshUser: "user" } }),
+    createLink: () => { throw new Error("must stay offline"); }, writeLine: (line) => lines.push(line),
+  };
+  const result = await runSync({ home: f.home, dryRun: true }, deps);
+  expect(result.boxes[0]?.plan.paseoPlugins?.plugins).toEqual([tools]);
+  expect(lines.join("\n")).toContain("Paseo plugins: tools@npm:@acme/tools@1.2.3 (enabled)");
+  expect(JSON.stringify(result) + lines.join("\n")).not.toContain("registry.example.com");
+});
+
+test("watch detects npm version changes with its real observer", async () => {
+  const f = npmFixture();
+  mkdirSync(join(f.home, ".ferry"));
+  writeFileSync(join(f.home, ".ferry/config.toml"), `version = 1\npublisher = ${JSON.stringify(hostname())}\nsnapshot_url = "snapshot.git"\n[host]\ntailscale = "box"\nssh_user = "user"\n[integrations]\npaseo = true\n`);
+  const controller = new AbortController();
+  let polls = 0, syncs = 0;
+  await runWatch({ home: f.home, signal: controller.signal, pollMs: 1, debounceMs: 1 }, {
+    sleep: async () => { if (++polls === 1) f.install("1.2.4"); if (polls > 5) controller.abort(); },
+    sync: async () => { syncs++; controller.abort(); }, writeLine: () => {},
+    readState: () => null, writeState: () => {},
+  });
+  expect(syncs).toBe(1);
 });

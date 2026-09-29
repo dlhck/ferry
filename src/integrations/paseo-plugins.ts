@@ -1,4 +1,4 @@
-/** Carry managed Git plugins through Paseo's CLI. Plugin files and settings stay on each host. */
+/** Carry managed Git and npm plugins through Paseo's CLI. Plugin files and settings stay on each host. */
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
@@ -8,10 +8,19 @@ import { CONFIG_FILE, PaseoError } from "./paseo.ts";
 import type { IntegrationLink } from "./types.ts";
 
 export type PaseoPlugin = {
+  readonly kind: "git";
   readonly id: string;
   readonly remote: string;
   readonly path: string;
   readonly commit: string;
+  readonly enabled: boolean;
+} | {
+  readonly kind: "npm";
+  readonly id: string;
+  readonly packageName: string;
+  readonly path: string;
+  /** The exact installed version from the lockfile, never a tag or range. */
+  readonly version: string;
   readonly enabled: boolean;
 };
 export type PaseoPlugins = {
@@ -49,6 +58,60 @@ function portableRemote(remote: string): boolean {
   } catch { return false; }
 }
 
+/** Paseo 0.10.1 accepts these npm names: lowercase `name` or `@scope/name`. */
+const NPM_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
+/** An exact semver version. Tags and ranges move, so Ferry never carries them. */
+const EXACT_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+function portablePath(path: string): boolean {
+  return path === "." || path.split("/").every((part) => /^[a-zA-Z0-9_.-]+$/.test(part) && part !== ".." && part !== ".");
+}
+
+function inside(parent: string, child: string): boolean {
+  const realParent = realpathSync(parent);
+  const realChild = realpathSync(child);
+  return realChild === realParent || realChild.startsWith(`${realParent}${sep}`);
+}
+
+/**
+ * Read an npm installation in Paseo's layout: `<id>/<uuid>/node_modules/<package>`.
+ * The version comes from the lockfile, as in Paseo. Ferry never reads or carries the resolved URL.
+ */
+function readNpmPlugin(home: string, id: string, configured: string, enabled: boolean): PaseoPlugin {
+  const root = join(home, ".paseo/plugins", id);
+  const parts = relative(root, resolve(configured)).split(sep);
+  const nameParts = parts[2]?.startsWith("@") ? 2 : 1;
+  const packageName = parts.slice(2, 2 + nameParts).join("/");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(parts[0] ?? "") ||
+      parts[1] !== "node_modules" || parts.some((part) => part === "..") || !NPM_NAME.test(packageName)) {
+    throw new PaseoError(`Paseo plugin ${id} is outside its managed npm installation`);
+  }
+  const path = parts.slice(2 + nameParts).join("/") || ".";
+  if (!portablePath(path)) throw new PaseoError(`Paseo plugin ${id} has a nonportable plugin path`);
+  const versionRoot = join(root, parts[0]!);
+  const packageRoot = join(versionRoot, "node_modules", packageName);
+  let version: unknown;
+  try {
+    if (!inside(root, versionRoot) || !inside(packageRoot, configured)) {
+      throw new Error("outside installation");
+    }
+    const lock: unknown = JSON.parse(readFileSync(join(versionRoot, "package-lock.json"), "utf8"));
+    const installed: unknown = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+    const packages = object(lock) && object(lock.packages) ? lock.packages : {};
+    const artifact = packages[`node_modules/${packageName}`];
+    version = object(artifact) ? artifact.version : undefined;
+    if (typeof version !== "string" || !object(installed) || installed.name !== packageName || installed.version !== version) {
+      throw new Error("mismatched artifacts");
+    }
+  } catch {
+    throw new PaseoError(`Ferry could not read the managed npm installation for Paseo plugin ${id}`);
+  }
+  if (!EXACT_VERSION.test(version) || carriedContentHits(id, Buffer.from(`${packageName}@${version}`)).length > 0) {
+    throw new PaseoError(`Paseo plugin ${id} has a nonportable or credential-bearing npm package`);
+  }
+  return { kind: "npm", id, packageName, path, version, enabled };
+}
+
 /** Paseo omits SSH URL usernames from its list output. */
 function listedRemote(remote: string): string {
   if (!remote.startsWith("ssh://")) return remote;
@@ -57,7 +120,7 @@ function listedRemote(remote: string): string {
   return url.href;
 }
 
-/** Read acquisition records and Git HEAD, rather than copying host-specific plugin paths. */
+/** Read acquisition records, Git HEAD, and npm lockfiles, rather than copying host-specific plugin paths. */
 export function readPaseoPlugins(home: string): PaseoPlugins {
   const config = readJson(join(home, ".paseo/config.json"));
   if (config.plugins === undefined) return { plugins: [], warnings: [] };
@@ -68,15 +131,21 @@ export function readPaseoPlugins(home: string): PaseoPlugins {
   for (const [id, source] of Object.entries(config.plugins)) {
     if (!/^[a-z][a-z0-9-]*$/.test(id)) throw new PaseoError("Paseo has an invalid plugin ID");
     const record = records[id];
-    if (!object(record) || (record.kind !== undefined && record.kind !== "git")) {
-      warnings.push(`Paseo plugin ${id} was skipped: only managed Git plugins can sync.`);
+    // Paseo 0.10.1 stores legacy Git records without a kind.
+    const kind = object(record) ? (record.kind === undefined ? "git" : record.kind) : undefined;
+    if (!object(record) || (kind !== "git" && kind !== "npm")) {
+      warnings.push(`Paseo plugin ${id} was skipped: only managed Git and npm plugins can sync.`);
       continue;
     }
     if (!object(source) || source.source !== "directory" || typeof source.path !== "string" ||
-        (source.enabled !== undefined && typeof source.enabled !== "boolean") ||
-        typeof record.remote !== "string") {
+        (source.enabled !== undefined && typeof source.enabled !== "boolean")) {
       throw new PaseoError(`Paseo plugin ${id} has invalid acquisition metadata`);
     }
+    if (kind === "npm") {
+      plugins.push(readNpmPlugin(home, id, source.path, source.enabled !== false));
+      continue;
+    }
+    if (typeof record.remote !== "string") throw new PaseoError(`Paseo plugin ${id} has invalid acquisition metadata`);
     if (!portableRemote(record.remote) || carriedContentHits(id, Buffer.from(record.remote)).length > 0) {
       throw new PaseoError(`Paseo plugin ${id} has a nonportable or credential-bearing Git remote`);
     }
@@ -110,7 +179,7 @@ export function readPaseoPlugins(home: string): PaseoPlugins {
     } catch {
       throw new PaseoError(`Ferry could not read the managed Git checkout for Paseo plugin ${id}`);
     }
-    plugins.push({ id, remote: record.remote, path, commit, enabled: source.enabled !== false });
+    plugins.push({ kind: "git", id, remote: record.remote, path, commit, enabled: source.enabled !== false });
   }
   return { plugins, warnings };
 }
@@ -147,7 +216,7 @@ export async function carryPaseoPlugins(link: IntegrationLink, source: PaseoPlug
   if (source.plugins.length === 0) return warnings;
   const run = async (command: string): Promise<string> => {
     const result = await link.run(command, { timeoutMs: 600_000 });
-    if (!result.ok) throw new PaseoError("Paseo plugin command failed on the box. Check paseo plugin ls and the box daemon's Git access.");
+    if (!result.ok) throw new PaseoError("Paseo plugin command failed on the box. Check paseo plugin ls and the box daemon's Git or npm registry access.");
     return result.stdout;
   };
   let installed: unknown;
@@ -161,8 +230,9 @@ export async function carryPaseoPlugins(link: IntegrationLink, source: PaseoPlug
     const current = installed.find((item) => item.id === plugin.id);
     const installation = current?.installation;
     const identity = object(installation) ? installation.identity : undefined;
-    if (current && (!object(identity) || identity.kind !== "git" ||
-        identity.remote !== listedRemote(plugin.remote) || identity.pluginPath !== plugin.path)) {
+    const sameSource = object(identity) && identity.kind === plugin.kind && identity.pluginPath === plugin.path &&
+      (plugin.kind === "git" ? identity.remote === listedRemote(plugin.remote) : identity.packageName === plugin.packageName);
+    if (current && !sameSource) {
       warnings.push(`Paseo plugin ${plugin.id} was skipped: the box has the same ID with a different source.`);
       continue;
     }
@@ -173,12 +243,16 @@ export async function carryPaseoPlugins(link: IntegrationLink, source: PaseoPlug
         warnings.push(`Paseo plugin ${plugin.id} was skipped: it is disabled locally and is not installed on the box.`);
         continue;
       }
-      const reference = `git:${plugin.remote}${plugin.path === "." ? "" : `:${plugin.path}`}`;
-      await run(`paseo plugin install ${quoteShell(reference)} --id ${id} --ref ${quoteShell(plugin.commit)} --json`);
+      // npm takes the exact version in the source. Paseo refuses --ref for npm.
+      const source = plugin.kind === "git" ? `git:${plugin.remote}` : `npm:${plugin.packageName}@${plugin.version}`;
+      const reference = `${source}${plugin.path === "." ? "" : `:${plugin.path}`}`;
+      const ref = plugin.kind === "git" ? ` --ref ${quoteShell(plugin.commit)}` : "";
+      await run(`paseo plugin install ${quoteShell(reference)} --id ${id}${ref} --json`);
     } else {
       if (!plugin.enabled && current.enabled) await run(`paseo plugin disable ${id} --json`);
-      if (installation.currentRevision !== plugin.commit) {
-        await run(`paseo plugin update ${id} --ref ${quoteShell(plugin.commit)} --json`);
+      const [revision, flag] = plugin.kind === "git" ? [plugin.commit, "--ref"] : [plugin.version, "--version"];
+      if (installation.currentRevision !== revision) {
+        await run(`paseo plugin update ${id} ${flag} ${quoteShell(revision)} --json`);
       }
       if (plugin.enabled && !current.enabled) await run(`paseo plugin enable ${id} --json`);
     }
