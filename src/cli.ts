@@ -909,7 +909,8 @@ status report, schema version 2. The ferry agent skill describes its fields.
 Install the skill with ferry skills add dlhck/ferry --skill ferry.
 
 --brief checks only the link, the logins, the MCP logins, and the tools of
-each box. It prints one line for each item that needs action, with the Ferry
+each box, and the hooks of this machine that run a home file Ferry does not
+carry. It prints one line for each item that needs action, with the Ferry
 command that fixes it. ferry watch writes the same report to
 ~/.ferry/status.json.`)
     .option("--brief", "check only the link, the logins, the MCP logins, and the tools, and print what needs action")

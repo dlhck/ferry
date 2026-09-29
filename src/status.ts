@@ -2,6 +2,7 @@ import type { ApplyAction, ApplyPlan } from "./apply.ts";
 import type { AuthProviderStatus, AuthStatusReport, McpLoginStatus } from "./auth-start.ts";
 import type { GitAuth } from "./config.ts";
 import { parseGitIdentity, type GitIdentity } from "./git-identity.ts";
+import type { UncarriedHookPath } from "./hook-paths.ts";
 import type { LinkError, LinkResult } from "./link.ts";
 import type { IntegrationHealth, IntegrationId } from "./integrations/types.ts";
 import type { DenyRuleDescription } from "./manifest.ts";
@@ -46,6 +47,8 @@ export type BoxStatusDependencies = {
   readonly tools?: {
     check(online: boolean): Promise<readonly ToolStatus[]>;
   };
+  /** The hook commands of the operator settings that refer to a home file the box will not have. */
+  readonly hookPaths?: () => readonly UncarriedHookPath[];
   /** The integrations that are enabled for this box only. */
   readonly integrations?: readonly {
     readonly id: IntegrationId;
@@ -155,10 +158,12 @@ export type StatusReport = {
 /**
  * One item of a box that needs action. `login`: a provider login. `mcp-login`:
  * an MCP server login, with the name `tool/server`. `tool`: a tool with the
- * state `drift`, `missing`, or `hidden`. `check-failed`: Ferry cannot read a part of the box.
+ * state `drift`, `missing`, or `hidden`. `hook`: a hook command that refers to
+ * a home file Ferry does not carry, with the name of that path.
+ * `check-failed`: Ferry cannot read a part of the box.
  */
 export type BriefIssue = {
-  readonly kind: "login" | "mcp-login" | "tool" | "check-failed";
+  readonly kind: "login" | "mcp-login" | "tool" | "hook" | "check-failed";
   readonly name: string;
   readonly state: string;
   readonly message: string;
@@ -281,7 +286,19 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
     }
   }
 
+  if (box.hookPaths) issues.push(...box.hookPaths().map(hookIssue));
+
   return { ...base, online: true, error: null, issues };
+}
+
+function hookIssue(hook: UncarriedHookPath): BriefIssue {
+  return {
+    kind: "hook",
+    name: hook.path,
+    state: "uncarried",
+    message: `Hook ${hook.at} in ${hook.file} runs ${hook.path}, and Ferry does not carry that file. Move it into ~/.claude/hooks.`,
+    command: null,
+  };
 }
 
 function toolIssue(tool: ToolStatus, flag: string): BriefIssue | null {

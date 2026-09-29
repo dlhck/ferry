@@ -67,7 +67,7 @@ const expectedMetadata = {
       name: "Claude",
       skillRoot: ".claude/skills",
       instructionFile: ".claude/CLAUDE.md",
-      extraRoots: [".claude/agents", ".claude/commands"],
+      extraRoots: [".claude/agents", ".claude/commands", ".claude/hooks"],
       settings: {
         file: ".claude/settings.json",
         format: "json",
@@ -573,5 +573,36 @@ describe("store file modes", () => {
     realGit(box, "fetch", "--quiet");
     realGit(box, "reset", "--quiet", "--hard", "@{upstream}");
     expect(executable(join(box, "skills", "runner", "scripts", "run.sh"))).toBe(false);
+  });
+
+  test("carries a Claude hook script to the box checkout, and the script runs there", async () => {
+    const root = makeHome();
+    const home = join(root, "home");
+    const remote = join(root, "snapshot.git");
+    const box = join(root, "box");
+    realGit(root, "init", "--quiet", "--bare", remote);
+
+    mkdirSync(join(home, ".claude", "hooks"), { recursive: true });
+    writeFileSync(join(home, ".claude", "hooks", "format.sh"), "#!/bin/sh\necho formatted\n", { mode: 0o755 });
+    chmodSync(join(home, ".claude", "hooks", "format.sh"), 0o755);
+    writeFileSync(
+      join(home, ".claude", "settings.json"),
+      JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "~/.claude/hooks/format.sh" }] }] } }),
+    );
+
+    const seed = readSeed(home, BUILTIN_HARNESSES);
+    if (!seed.ok) throw new Error("expected a seed");
+    expect(seed.leftovers).toEqual([]);
+    const store = await openStore(remote, seed, { home, harnesses: BUILTIN_HARNESSES });
+    realGit(store.path, "config", "user.name", "Ferry Operator");
+    realGit(store.path, "config", "user.email", "operator@example.com");
+    realGit(store.path, "config", "commit.gpgsign", "false");
+    expect((await store.publish(seed)).published).toBe(true);
+    expect(treeMode(store.path, "roots/.claude/hooks/format.sh")).toBe("100755");
+
+    realGit(root, "clone", "--quiet", remote, box);
+    const script = join(box, "roots", ".claude", "hooks", "format.sh");
+    expect(executable(script)).toBe(true);
+    expect(Bun.spawnSync([script]).stdout.toString()).toBe("formatted\n");
   });
 });
