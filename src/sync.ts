@@ -42,6 +42,7 @@ import {
   type PaseoPreferences,
 } from "./integrations/paseo.ts";
 import { carryPaseoPlugins, readPaseoPlugins, type PaseoPlugins } from "./integrations/paseo-plugins.ts";
+import { carryPaseoProviders, readPaseoProviders, type PaseoProviders } from "./integrations/paseo-providers.ts";
 import { denyRuleCause, linkFailure } from "./errors.ts";
 import { groupProgress, noProgress, plural, step, type Progress } from "./progress.ts";
 import { boxPathDirs, profileBlockCommand } from "./tools/path.ts";
@@ -119,6 +120,20 @@ export type SyncPlan = {
   readonly paseoProfiles: readonly string[] | null;
   /** Managed Git and npm sources and local skip reasons, or null when Paseo is off. */
   readonly paseoPlugins?: PaseoPlugins | null;
+  /** The local Paseo provider definitions and skip reasons, or null when Paseo is off. It never holds a value or a command. */
+  readonly paseoProviders?: {
+    readonly providers: readonly {
+      readonly id: string;
+      /** The names of the carried fields. */
+      readonly fields: readonly string[];
+      /** The model IDs of `models`, in order. */
+      readonly models: readonly string[];
+      /** True when a box that lacks the provider needs its command executable on the box PATH. */
+      readonly command: boolean;
+      readonly createBlocker: string | null;
+    }[];
+    readonly warnings: readonly string[];
+  } | null;
   /** The set Paseo preferences, or null when Paseo is off. It holds the length of the shared instructions, never the text. */
   readonly paseoPreferences?: {
     readonly metadataProviders: readonly MetadataProvider[] | null;
@@ -230,10 +245,12 @@ export async function runSync(
       await refuseChangedStoreCopies(home, source.config, source.seed);
       const profiles = source.boxes.some((box) => box.integrations.paseo === true) ? paseoProfiles(home) : null;
       let plugins: PaseoPlugins | null = null;
+      let providers: PaseoProviders | null = null;
       let preferences: PaseoPreferences | null = null;
       try {
         if (profiles !== null) {
           plugins = readPaseoPlugins(home);
+          providers = readPaseoProviders(home);
           preferences = readPaseoPreferences(home);
         }
       } catch (cause) {
@@ -247,6 +264,7 @@ export async function runSync(
           ...box,
           profiles: box.integrations.paseo === true ? profiles : null,
           plugins: box.integrations.paseo === true ? plugins : null,
+          providers: box.integrations.paseo === true ? providers : null,
           preferences: box.integrations.paseo === true ? preferences : null,
           pathDirs,
         })),
@@ -260,7 +278,8 @@ export async function runSync(
     : boxes.reduce((total, box) => {
         const plugins = box.plugins;
         const pluginStep = plugins && (plugins.plugins.length > 0 || plugins.warnings.length > 0) ? 1 : 0;
-        return total + BOX_STEPS + (box.profiles === null ? 0 : 2) + pluginStep + (hasPreferences(box.preferences) ? 1 : 0);
+        return total + BOX_STEPS + (box.profiles === null ? 0 : 2) + pluginStep +
+          (hasProviders(box.providers) ? 1 : 0) + (hasPreferences(box.preferences) ? 1 : 0);
       }, operatorSteps);
   if (planned !== (input.dryRun ? 1 : operatorSteps + BOX_STEPS)) progress.plan(planned);
   for (const leftover of seed.leftovers) {
@@ -419,9 +438,14 @@ export async function runSync(
 type SyncBox = ResolvedBox & {
   readonly profiles: readonly AgentProfile[] | null;
   readonly plugins: PaseoPlugins | null;
+  readonly providers: PaseoProviders | null;
   readonly preferences: PaseoPreferences | null;
   readonly pathDirs: readonly string[];
 };
+
+function hasProviders(providers: PaseoProviders | null): providers is PaseoProviders {
+  return providers !== null && (providers.providers.length > 0 || providers.warnings.length > 0);
+}
 
 function hasPreferences(preferences: PaseoPreferences | null): preferences is PaseoPreferences {
   return preferences !== null && (preferences.metadataProviders !== undefined || preferences.appendSystemPrompt !== undefined);
@@ -580,6 +604,24 @@ async function applyOnBox(context: {
         for (const warning of warnings) warn(`Warning: ${warning}`);
       } catch (cause) {
         warn(`Warning: Ferry could not carry the Paseo plugins: ${messageOf(cause)}. The core sync is complete.`);
+      }
+    }
+    // Provider definitions go before the profiles, so a profile can use a provider that this sync creates.
+    const providers = box.providers;
+    if (hasProviders(providers)) {
+      try {
+        const carry = await boxStep(
+          "Carrying Paseo providers",
+          () => carryPaseoProviders(link, providers),
+          (carry) => [
+            plural(carry.carried.length, "provider"),
+            carry.warnings.length > 0 && `${carry.warnings.length} skipped`,
+            carry.carried.length > 0 && !carry.changed && "no changes",
+          ].filter(Boolean).join(", "),
+        );
+        for (const warning of carry.warnings) warn(`Warning: ${warning}`);
+      } catch (cause) {
+        warn(`Warning: Ferry could not carry the Paseo providers: ${messageOf(cause)}. The core sync is complete.`);
       }
     }
     try {
@@ -765,6 +807,16 @@ function makePlan(
     storeUpdates: seed.storeUpdates,
     paseoProfiles: box.profiles === null ? null : box.profiles.map(profileName),
     paseoPlugins: box.plugins,
+    paseoProviders: box.providers === null ? null : {
+      providers: box.providers.providers.map((provider) => ({
+        id: provider.id,
+        fields: Object.keys(provider.fields),
+        models: ((provider.fields.models ?? []) as { readonly id: string }[]).map((model) => model.id),
+        command: provider.command !== null,
+        createBlocker: provider.createBlocker,
+      })),
+      warnings: box.providers.warnings,
+    },
     paseoPreferences: box.preferences === null ? null : {
       metadataProviders: box.preferences.metadataProviders ?? null,
       appendSystemPromptLength: box.preferences.appendSystemPrompt?.length ?? null,
@@ -844,10 +896,26 @@ function printPlan(plan: SyncPlan, gitAuth: GitAuth, writeLine: (line: string) =
         `Paseo plugins: ${plan.paseoPlugins.plugins.map((plugin) => `${plugin.id}@${plugin.kind === "git" ? plugin.commit : `npm:${plugin.packageName}@${plugin.version}`} (${plugin.enabled ? "enabled" : "disabled"})`).join(", ") || "none"}. Keep box-only plugins. Turn on the global plugin switch when an enabled plugin is current on the box, which also starts enabled box-only plugins. The box daemon needs Git access, and npm with registry access for npm plugins.`,
         ...plan.paseoPlugins.warnings,
       ]),
+      ...(plan.paseoProviders == null ? [] : providerLines(plan.paseoProviders)),
       ...(plan.paseoPreferences == null ? [] : [preferencesLine(plan.paseoPreferences)]),
       ...denyListLines(),
     ].join("\n"),
   );
+}
+
+/** The dry-run lines of the Paseo providers. They never hold a value or a command. */
+function providerLines(plan: NonNullable<SyncPlan["paseoProviders"]>): string[] {
+  const providers = plan.providers.map((provider) =>
+    `${provider.id} (${provider.fields.map((field) =>
+      field === "models" ? `models: ${provider.models.join(", ") || "none"}` : field).join(", ") || "no portable fields"})`);
+  return [
+    `Paseo providers: ${providers.join("; ") || "none"} -> merge into box ~/.paseo/config.json agents.providers, then paseo daemon reload. ` +
+      "Keep box env, command, params, enabled, order, and box-only providers. " +
+      "Create a provider that the box lacks only when it needs no env or params and its command executable is on the box PATH.",
+    ...plan.providers.flatMap((provider) => provider.createBlocker === null ? [] :
+      [`Paseo provider ${provider.id} is created only when the box defines it first: ${provider.createBlocker}.`]),
+    ...plan.warnings,
+  ];
 }
 
 /** The dry-run line of the Paseo preferences. It never holds the text of the shared instructions. */
