@@ -107,9 +107,31 @@ jobs:
           path: dist/${{ matrix.asset }}
           if-no-files-found: error
 
+  menubar:
+    name: Build ferry-menubar-macos.zip
+    needs: version
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # A universal app with an ad-hoc signature. See macos/build.sh.
+      - name: Build app
+        env:
+          FERRY_VERSION: ${{ needs.version.outputs.version }}
+        run: macos/build.sh
+
+      - name: Upload app
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ferry-menubar-macos.zip
+          path: dist/ferry-menubar-macos.zip
+          if-no-files-found: error
+
   attach:
     name: Attach binaries to release
-    needs: build
+    needs: [build, menubar]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -122,7 +144,7 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # install.sh verifies the downloaded binary against this file.
+      # install.sh and ferry menubar install verify the downloads against this file.
       - name: Write checksums
         working-directory: dist
         run: sha256sum ferry-* > SHA256SUMS

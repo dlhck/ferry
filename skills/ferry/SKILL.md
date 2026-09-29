@@ -312,6 +312,8 @@ With `--json`, Ferry never asks:
 | `watch install` | `{ manager: "launchd" or "systemd", path }` |
 | `tunnel install` | `{ manager: "launchd" or "systemd", path }` |
 | `tunnel uninstall` | `{ manager, path, removed }`. `removed` is `false` when the box had no service file. |
+| `menubar install` | `{ app, path, version, ferryPath }`. `path` is the launchd agent. `version` is the release of the app, or `null` with `--app`. |
+| `menubar uninstall` | `{ app, path, removed }`. `removed` is `false` when neither the app nor the agent was there. |
 | `uninstall` | `{ removed, restored }` |
 | `self-update` | `{ current, latest, updated }`. `updated` is `false` when `current` is the latest release. The output of the installer goes to stderr. |
 
@@ -323,4 +325,5 @@ With `--json`, Ferry never asks:
 - `ferry update --dry-run` prints the update plan for the agent tools on both machines.
 - `ferry init --dry-run` prints the init plan without writing or connecting.
 - `ferry watch` syncs accepted changes in the foreground. `ferry watch install` installs it as a user service.
+- On macOS, `ferry menubar install` installs a menu bar app that shows the report of `~/.ferry/status.json`. It needs `ferry watch`. A development build of Ferry needs `--app <path>`, a build of `macos/build.sh`. `ferry menubar uninstall` removes the app.
 - `ferry <command> --help` has the details and the config formats. For example, `ferry tools --help` shows the `[tools]` tables, `ferry update --help` shows the sudo rule for the daily update, and `ferry box add --help` shows the `git_auth = "box"` deploy key step.
