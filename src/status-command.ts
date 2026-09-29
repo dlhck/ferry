@@ -27,7 +27,14 @@ import {
   type RegistryResult,
 } from "./registry/load.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
-import { composeStatus, type BoxStatus, type BoxStatusDependencies, type StatusReport } from "./status.ts";
+import {
+  composeBriefStatus,
+  composeStatus,
+  type BoxStatus,
+  type BoxStatusDependencies,
+  type BriefStatusReport,
+  type StatusReport,
+} from "./status.ts";
 import { checkTools, type ToolStatus } from "./tools/check.ts";
 import { effectivePolicy } from "./tools/resolve.ts";
 import { RealGitRunner, Store, type TipReport } from "./store.ts";
@@ -73,6 +80,8 @@ export type StatusCommandDependencies = {
   readonly progress: Progress;
   /** The version of this Ferry. The Ferry row compares the box install with it. */
   readonly ferryVersion: string;
+  /** The start time of a brief check. */
+  readonly now: () => Date;
 };
 
 /** Read the selected boxes and return one report without changing any machine. The CLI prints it. */
@@ -98,6 +107,27 @@ export async function runStatusCommand(
   });
 
   return report;
+}
+
+/**
+ * Check the link, the logins, the MCP logins, and the tools of the selected
+ * boxes, and nothing more. The CLI prints the report, and the watch writes it
+ * to `~/.ferry/status.json`.
+ */
+export async function runBriefStatusCommand(
+  input: StatusCommandInput,
+  dependencies: Partial<StatusCommandDependencies> = {},
+): Promise<BriefStatusReport> {
+  const resolved = { ...defaultDependencies, ...dependencies };
+  const config = resolved.readConfig() ?? {};
+  const boxes = resolveBoxes(config, input.selection ?? []);
+  const registry = effectiveRegistry(config, resolved.loadRegistry);
+  const local = onceEach(resolved.local);
+  return composeBriefStatus(
+    boxes.map((box) => boxDependencies(box, config, registry, local, resolved)),
+    resolved.now(),
+    resolved.progress,
+  );
 }
 
 function boxDependencies(
@@ -186,6 +216,17 @@ export function formatStatus(report: StatusReport): string {
   return lines.join("\n");
 }
 
+/** One line for each box, then one line for each issue with its fix command. */
+export function formatBriefStatus(report: BriefStatusReport): string {
+  return report.boxes
+    .flatMap((box) => [
+      `Box ${box.name} (${box.host}): ${box.online ? "ONLINE" : `OFFLINE, ${box.error}`}`,
+      ...(box.online && box.issues.length === 0 ? ["  nothing to do"] : []),
+      ...box.issues.map((issue) => `  ${issue.name}: ${issue.message}${issue.command ? ` Run ${issue.command}` : ""}`),
+    ])
+    .join("\n");
+}
+
 function boxLines(box: BoxStatus, operator: GitIdentity | null): string[] {
   return [
     `Box ${box.name} (${box.host})`,
@@ -255,6 +296,7 @@ const defaultDependencies: StatusCommandDependencies = {
   integrations: INTEGRATIONS,
   progress: noProgress,
   ferryVersion: VERSION,
+  now: () => new Date(),
 };
 
 /** The SSH destination of a box, as the operator would type it. */

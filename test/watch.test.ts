@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,6 +17,7 @@ import { createPaseo } from "../src/integrations/paseo.ts";
 import type { Integration } from "../src/integrations/types.ts";
 import { runUpdateCommand } from "../src/update.ts";
 import { FerryError } from "../src/errors.ts";
+import type { BriefStatusReport } from "../src/status.ts";
 
 function accepted(identity: string): WatchObservation {
   return { ok: true, identity };
@@ -828,5 +829,139 @@ describe("watch daily update", () => {
     expect(boxCommands).toEqual(["a: claude update"]);
     expect(output).toContain("[b] Box offline, Ferry skips it: box-b.example is offline");
     expect(output.some((line) => line.startsWith("Watch update failed:") && line.includes("[b] box offline"))).toBe(true);
+  });
+});
+
+describe("watch status file", () => {
+  const MINUTE_MS = 60 * 1_000;
+  const report: BriefStatusReport = { schemaVersion: 1, checkedAt: "2026-09-29T10:00:00.000Z", boxes: [] };
+  const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  /** Run the watch for `polls` observations. `identities` gives the identity of each observation, then the last one repeats. */
+  function watchWithStatus(options: {
+    readonly identities: readonly string[];
+    readonly polls: number;
+    readonly now?: () => number;
+    readonly status?: () => Promise<BriefStatusReport>;
+    readonly home?: string;
+  }) {
+    const controller = new AbortController();
+    const record = { checks: 0, syncs: 0, written: [] as BriefStatusReport[], output: [] as string[], events: [] as unknown[] };
+    let scans = 0;
+    const run = runWatch(
+      { signal: controller.signal, pollMs: 1, debounceMs: 1, ...(options.home ? { home: options.home } : {}) },
+      {
+        observe: () => {
+          scans += 1;
+          if (scans > options.polls) controller.abort();
+          return accepted(options.identities[Math.min(scans, options.identities.length) - 1]!);
+        },
+        sync: async () => {
+          record.syncs += 1;
+        },
+        sleep: tick,
+        readBoxes: () => ["default"],
+        readState: () => null,
+        writeState: () => {},
+        writeLine: (line) => record.output.push(line),
+        emit: (event) => record.events.push(event),
+        now: options.now ?? (() => 0),
+        status:
+          options.status ??
+          (async () => {
+            record.checks += 1;
+            return report;
+          }),
+        ...(options.home ? {} : { writeStatusFile: (_home: string, written: BriefStatusReport) => record.written.push(written) }),
+      },
+    );
+    return { run, record };
+  }
+
+  test("writes the brief status to ~/.ferry/status.json at the start", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-watch-status-"));
+    try {
+      const { run } = watchWithStatus({ identities: ["one"], polls: 3, home });
+      await run;
+
+      expect(JSON.parse(readFileSync(join(home, ".ferry", "status.json"), "utf8"))).toEqual(report);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("checks one time in 5 minutes when nothing changes", async () => {
+    const { run, record } = watchWithStatus({ identities: ["one"], polls: 5 });
+    await run;
+
+    expect(record.checks).toBe(1);
+    expect(record.written).toEqual([report]);
+  });
+
+  test("checks again when 5 minutes passed", async () => {
+    let time = 0;
+    const { run, record } = watchWithStatus({
+      identities: ["one"],
+      polls: 3,
+      now: () => {
+        time += 3 * MINUTE_MS;
+        return time;
+      },
+    });
+    await run;
+
+    expect(record.checks).toBeGreaterThan(1);
+  });
+
+  test("checks again after a sync", async () => {
+    const { run, record } = watchWithStatus({ identities: ["one", "one", "two"], polls: 8 });
+    await run;
+
+    expect(record.syncs).toBe(1);
+    expect(record.checks).toBe(2);
+  });
+
+  test("a failed check prints a warning and an event, and the watch continues", async () => {
+    const { run, record } = watchWithStatus({
+      identities: ["one", "two"],
+      polls: 5,
+      status: async () => {
+        throw new Error("config unreadable");
+      },
+    });
+    await run;
+
+    expect(record.output).toContain("Watch status check failed: config unreadable");
+    expect(record.events).toContainEqual(expect.objectContaining({ type: "status-failed" }));
+    expect(record.written).toEqual([]);
+    expect(record.syncs).toBe(1);
+  });
+
+  test("writes no status file without the status dependency", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-watch-status-"));
+    const controller = new AbortController();
+    let scans = 0;
+    try {
+      await runWatch(
+        { home, signal: controller.signal, pollMs: 1, debounceMs: 1 },
+        {
+          observe: () => {
+            scans += 1;
+            if (scans > 2) controller.abort();
+            return accepted("one");
+          },
+          sync: async () => {},
+          sleep: tick,
+          readBoxes: () => ["default"],
+          readState: () => null,
+          writeState: () => {},
+          writeLine: () => {},
+        },
+      );
+
+      expect(existsSync(join(home, ".ferry", "status.json"))).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

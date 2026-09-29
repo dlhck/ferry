@@ -22,6 +22,7 @@ export const EVENT_TYPES = [
   "config-error",
   "update-started",
   "update-failed",
+  "status-failed",
   "watch-stopped",
   "following",
   "forward-opened",

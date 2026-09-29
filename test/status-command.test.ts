@@ -11,7 +11,9 @@ import type { Registry } from "../src/registry/load.ts";
 import type { ToolDescriptor } from "../src/registry/types.ts";
 import type { TipReport } from "../src/store.ts";
 import {
+  formatBriefStatus,
   formatStatus,
+  runBriefStatusCommand,
   runStatusCommand,
   type StatusCommandDependencies,
 } from "../src/status-command.ts";
@@ -1088,5 +1090,52 @@ describe("ferry status tools", () => {
       "  WARNING: cursor is not on the box. Run ferry install.",
     ]);
     expect(text).not.toMatch(/paseo|project/i);
+  });
+});
+
+describe("ferry status --brief", () => {
+  const now = () => new Date("2026-09-29T10:00:00.000Z");
+
+  test("checks the link, the logins, the MCP logins, and the tools, and reads nothing more", async () => {
+    const stack = fakeStack();
+
+    const report = await runBriefStatusCommand({}, { ...stack.dependencies, now });
+
+    expect(report.checkedAt).toBe("2026-09-29T10:00:00.000Z");
+    expect(report.boxes.map((box) => box.issues.map((issue) => issue.name))).toEqual([["codex", "pi", "codex/linear"]]);
+    expect(stack.reads).not.toContain("store.inspectTips");
+    expect(stack.reads).not.toContain("apply.inspect");
+    expect(stack.reads.some((read) => read.includes("sudo -n") || read.includes("--get-regexp") || read.includes(" status "))).toBe(false);
+    expect(stack.mutations).toEqual([]);
+  });
+
+  test("prints one line for each box and each issue, with the fix command", async () => {
+    const online = await runBriefStatusCommand({}, { ...fakeStack().dependencies, now });
+    const offline = await runBriefStatusCommand({}, { ...fakeStack(false).dependencies, now });
+
+    expect(formatBriefStatus(online)).toBe(
+      [
+        "Box default (ferry@box): ONLINE",
+        "  codex: codex needs a login. Run ferry auth codex --box default",
+        "  pi: SSH to the box, run pi, then use /login.",
+        "  codex/linear: codex/linear needs a login. Run ferry auth codex --mcp linear --box default",
+      ].join("\n"),
+    );
+    expect(formatBriefStatus(offline)).toBe("Box default (ferry@box): OFFLINE, Tailscale host box is offline");
+  });
+
+  test("status --brief --json prints the brief report in the envelope", async () => {
+    const lines: string[] = [];
+    const stack = fakeStack();
+    await buildProgram({
+      runBriefStatus: (input, dependencies) =>
+        runBriefStatusCommand(input, { ...stack.dependencies, ...dependencies, createLink: stack.dependencies.createLink!, now }),
+      writeLine: (line) => lines.push(line),
+      writeError: () => {},
+    }).parseAsync(["status", "--brief", "--json"], { from: "user" });
+
+    const envelope = JSON.parse(lines.join(""));
+    expect(envelope).toMatchObject({ command: "status", ok: true, result: { schemaVersion: 1, checkedAt: "2026-09-29T10:00:00.000Z" } });
+    expect(envelope.result.boxes[0].issues[0].command).toBe("ferry auth codex --box default");
   });
 });
