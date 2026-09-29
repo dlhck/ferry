@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { ApplyError, apply, planApply } from "../src/apply.ts";
+import { ApplyError, apply, planApply, type ApplyPlan } from "../src/apply.ts";
 import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 import type { LinkResult } from "../src/link.ts";
 
@@ -73,6 +73,22 @@ function makeCheckout(root: string, skills: readonly string[] = ["tdd", "unslop"
   return checkout;
 }
 
+/** A remote target is a box. Its instruction files link to the generated box file, not to the checkout. */
+function boxPlan(plan: ApplyPlan): ApplyPlan {
+  const checkoutInstructions = join(plan.checkout, "AGENTS.md");
+  const boxInstructions = join(plan.targetHome, ".ferry", "box", "AGENTS.md");
+  return {
+    ...plan,
+    actions: plan.actions.map((action) => {
+      if ("target" in action && action.target === checkoutInstructions) return { ...action, target: boxInstructions };
+      if ("expectedTarget" in action && action.expectedTarget === checkoutInstructions) {
+        return { ...action, expectedTarget: boxInstructions };
+      }
+      return action;
+    }),
+  };
+}
+
 describe("remote apply", () => {
   test("local and remote planning produce the same actions", async () => {
     const root = makeRoot("remote-plan");
@@ -101,7 +117,7 @@ describe("remote apply", () => {
       link,
     });
 
-    expect(remote).toEqual(local);
+    expect(remote).toEqual(boxPlan(local));
     expect(link.commands).toHaveLength(1);
   });
 
@@ -260,6 +276,53 @@ describe("remote apply", () => {
   });
 });
 
+describe("remote apply of the box instructions", () => {
+  test("moves an instruction link from the checkout to the generated box file", async () => {
+    const root = makeRoot("remote-box-instructions");
+    const checkout = makeCheckout(root, ["unslop"]);
+    const home = join(root, "home");
+    write(join(home, ".ferry", "box", "AGENTS.md"), "box header\n\nglobal instructions");
+    // A box from before the generated file links the instructions into the checkout.
+    symlinkSync(join(checkout, "AGENTS.md"), join(home, "AGENTS.md"));
+
+    const plan = await apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES, link: new ShellLink(root) });
+
+    expect(plan.actions).toContainEqual({
+      kind: "repair-symlink",
+      harness: "Shared agents",
+      path: join(home, "AGENTS.md"),
+      target: join(home, ".ferry", "box", "AGENTS.md"),
+    });
+    expect(readFileSync(join(home, "AGENTS.md"), "utf8")).toBe("box header\n\nglobal instructions");
+    expect(readFileSync(join(home, ".codex", "AGENTS.md"), "utf8")).toBe("box header\n\nglobal instructions");
+  });
+
+  test("an off harness also removes an instruction link into the checkout", async () => {
+    const root = makeRoot("remote-box-off-old");
+    const checkout = makeCheckout(root, ["unslop"]);
+    const home = join(root, "home");
+    const piInstructions = join(home, ".pi", "agent", "AGENTS.md");
+    mkdirSync(dirname(piInstructions), { recursive: true });
+    symlinkSync(join(checkout, "AGENTS.md"), piInstructions);
+
+    const plan = await apply({
+      checkout,
+      targetHome: home,
+      harnesses: BUILTIN_HARNESSES.filter((harness) => harness.id !== "pi"),
+      offHarnesses: BUILTIN_HARNESSES.filter((harness) => harness.id === "pi"),
+      dryRun: true,
+      link: new ShellLink(root),
+    });
+
+    expect(plan.actions).toContainEqual({
+      kind: "delete-managed-link",
+      harness: "Pi",
+      path: piInstructions,
+      expectedTarget: join(checkout, "AGENTS.md"),
+    });
+  });
+});
+
 describe("remote apply of Claude subagent and command roots", () => {
   test("links a root the checkout holds and plans the same actions as a local apply", async () => {
     const root = makeRoot("remote-roots");
@@ -282,7 +345,7 @@ describe("remote apply of Claude subagent and command roots", () => {
       link: new ShellLink(root),
     });
 
-    expect(remote).toEqual(local);
+    expect(remote).toEqual(boxPlan(local));
     expect(remote.actions).toContainEqual({
       kind: "create-symlink",
       harness: "Claude",
@@ -304,6 +367,7 @@ describe("remote apply of an off harness", () => {
     const home = join(root, "home");
     mkdirSync(home);
     const link = new ShellLink(root);
+    write(join(home, ".ferry", "box", "AGENTS.md"), "box header\n\nglobal instructions");
     await apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES, link });
     // An earlier Ferry linked store skills into .pi/agent/skills.
     const piSkill = join(home, ".pi", "agent", "skills", "tdd");
@@ -314,20 +378,18 @@ describe("remote apply of an off harness", () => {
     const elsewhere = join(root, "elsewhere");
     mkdirSync(elsewhere);
     symlinkSync(elsewhere, join(home, ".pi", "agent", "skills", "other"));
-    expect(realpathSync(join(home, ".pi", "agent", "AGENTS.md"))).toBe(realpathSync(join(checkout, "AGENTS.md")));
+    expect(realpathSync(join(home, ".pi", "agent", "AGENTS.md"))).toBe(realpathSync(join(home, ".ferry", "box", "AGENTS.md")));
 
     const input = { checkout, targetHome: home, harnesses: withoutHarness("pi"), offHarnesses: harness("pi") };
-    const local = planApply(input);
     const remote = await apply({ ...input, link });
 
-    expect(remote).toEqual(local);
     expect(remote.actions).toEqual([
       { kind: "delete-managed-name", harness: "Pi", path: piSkill, name: "tdd" },
       {
         kind: "delete-managed-link",
         harness: "Pi",
         path: join(home, ".pi", "agent", "AGENTS.md"),
-        expectedTarget: join(checkout, "AGENTS.md"),
+        expectedTarget: join(home, ".ferry", "box", "AGENTS.md"),
       },
     ]);
     expect(remote.unmanaged).toEqual([]);
@@ -336,7 +398,7 @@ describe("remote apply of an off harness", () => {
     expect(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8")).toBe("{}");
     expect(readFileSync(join(home, ".pi", "agent", "skills", "mine", "SKILL.md"), "utf8")).toBe("own skill");
     expect(realpathSync(join(home, ".pi", "agent", "skills", "other"))).toBe(realpathSync(elsewhere));
-    expect(realpathSync(join(home, ".codex", "AGENTS.md"))).toBe(realpathSync(join(checkout, "AGENTS.md")));
+    expect(realpathSync(join(home, ".codex", "AGENTS.md"))).toBe(realpathSync(join(home, ".ferry", "box", "AGENTS.md")));
 
     // A second sync finds nothing more to remove.
     expect((await apply({ ...input, link })).actions).toEqual([]);

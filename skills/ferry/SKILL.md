@@ -5,7 +5,7 @@ description: Rules for working with Ferry, the CLI that keeps a remote Linux age
 
 # Ferry
 
-Ferry copies the agent setup of the operator machine to a remote Linux box. The operator machine is the source of truth. A private git repository, the snapshot, carries the setup. Both machines have a checkout of it at `~/.ferry/store`, and the managed paths are symlinks into that checkout. The `ferry` command runs on the operator machine. The box has a box install of Ferry that runs only `ferry expose`.
+Ferry copies the agent setup of the operator machine to a remote Linux box. The operator machine is the source of truth. A private git repository, the snapshot, carries the setup. Both machines have a checkout of it at `~/.ferry/store`, and the managed paths are symlinks into that checkout. The `ferry` command runs on the operator machine. The box has a box install of Ferry that runs only `ferry expose` and `ferry whoami`.
 
 ## Rules
 
@@ -23,7 +23,9 @@ Ferry copies the agent setup of the operator machine to a remote Linux box. The 
 ## Find out where you are
 
 - The operator machine has `~/.ferry/config.toml` and the `ferry` command.
-- The box has `~/.ferry/store` and `~/.ferry/box.json`, but no `~/.ferry/config.toml`. On the box, `ferry` is a box install: only `ferry expose`, `ferry --version`, and the help run. A development build of Ferry ignores `~/.ferry/box.json`.
+- The box has `~/.ferry/store` and `~/.ferry/box.json`, but no `~/.ferry/config.toml`. On the box, `ferry` is a box install: only `ferry expose`, `ferry whoami`, `ferry --version`, and the help run. A development build of Ferry ignores `~/.ferry/box.json`.
+- On the box, the instruction files start with a header that names the box. On the operator machine, they have no header.
+- When you are not sure, run `ferry whoami --json`. It prints `role` (`operator` or `box`), `box`, the box name, and `managedPaths`.
 
 ## What Ferry manages
 
@@ -32,7 +34,7 @@ These paths are managed on both machines. Each one is a symlink into `~/.ferry/s
 | Item | Paths | Store target |
 | --- | --- | --- |
 | Skills | each entry in `~/.agents/skills`, `~/.claude/skills`, `~/.codex/skills`, `~/.pi/agent/skills`, `~/.cursor/skills`, and in custom `skill_root` entries of `~/.ferry/config.toml` | `~/.ferry/store/skills/<name>` |
-| Instruction file | `~/AGENTS.md`, `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.pi/agent/AGENTS.md`, and custom `instruction_file` entries | `~/.ferry/store/AGENTS.md` |
+| Instruction file | `~/AGENTS.md`, `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.pi/agent/AGENTS.md`, and custom `instruction_file` entries | `~/.ferry/store/AGENTS.md`. On the box: `~/.ferry/box/AGENTS.md`, which sync writes from it with the box header |
 | Claude subagents and commands | `~/.claude/agents`, `~/.claude/commands` (the whole directory) | `~/.ferry/store/roots/.claude/...` |
 
 Ferry does not manage the `.system` directory in a skill root. Codex owns it on each machine.
@@ -60,7 +62,7 @@ An agent that is off also turns off its harness (`.claude`, `.codex`, `.pi/agent
 
 ## Recognize a managed path
 
-Resolve the path. It is managed if the result is inside `~/.ferry/store`:
+Resolve the path. It is managed if the result is inside `~/.ferry/store`, or on the box, is `~/.ferry/box/AGENTS.md`:
 
 ```sh
 realpath ~/.claude/skills/some-skill
@@ -331,6 +333,7 @@ With `--json`, Ferry never asks:
 | `menubar install` | `{ app, path, version, ferryPath }`. `path` is the launchd agent. `version` is the release of the app, or `null` with `--app`. |
 | `menubar uninstall` | `{ app, path, removed }`. `removed` is `false` when neither the app nor the agent was there. |
 | `uninstall` | `{ removed, restored }` |
+| `whoami` | `{ role: "operator" or "box", box, managedPaths: { instructionFiles, skillRoots, roots } }`. `box` is `null` on the operator machine and before the first sync of a box. |
 | `self-update` | `{ current, latest, updated, services: [{ service, action, message }] }`. An action is `restarted`, `updated`, `skipped`, or `failed`. A failed service action is also in `warnings` and does not fail the binary update. `updated` is `false` when `current` is the latest release. The output of the installer goes to stderr. |
 
 ## Other commands

@@ -1477,7 +1477,7 @@ describe("box mode", () => {
         { renderError: (message) => errors.push(message), setExitCode: () => {} },
       );
       expect(errors).toEqual([
-        `This is a box install of Ferry (~/.ferry/box.json). Only ferry expose runs here. Run ferry ${args[0] === "box" || args[0] === "watch" || args[1] === "install" ? args.join(" ") : args[0]} on the operator machine.`,
+        `This is a box install of Ferry (~/.ferry/box.json). Only ferry expose and ferry whoami run here. Run ferry ${args[0] === "box" || args[0] === "watch" || args[1] === "install" ? args.join(" ") : args[0]} on the operator machine.`,
       ]);
     }
   });

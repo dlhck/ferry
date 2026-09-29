@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { writeBoxFilesCommand } from "../src/box-identity.ts";
 import { errorInfo } from "../src/output.ts";
 import {
   existsSync,
@@ -398,7 +399,7 @@ describe("runSync", () => {
             stderr: "",
           };
         }
-        events.push(command.includes(".profile") ? "write-path" : "update-box");
+        events.push(command.includes(".profile") ? "write-path" : command.includes(".ferry/box") ? "write-box-files" : "update-box");
         return {
           ok: true as const,
           address: "box.example.ts.net",
@@ -461,6 +462,7 @@ describe("runSync", () => {
       "resolve-home",
       "plan",
       "update-box",
+      "write-box-files",
       "apply",
       "write-path",
       "unlock",
@@ -473,6 +475,7 @@ describe("runSync", () => {
           "if [ -d '/srv/ferry/.ferry/store/.git' ]; then git -C '/srv/ferry/.ferry/store' status --porcelain=v1 -z --untracked-files=all && git -C '/srv/ferry/.ferry/store' fetch --quiet && git -C '/srv/ferry/.ferry/store' reset --quiet --hard 'abc123' && git -C '/srv/ferry/.ferry/store' clean --quiet --force -d; else mkdir -p '/srv/ferry/.ferry' && git clone 'git@example.test:operator/ferry-store.git' '/srv/ferry/.ferry/store'; fi",
         options: { agentForwarding: "git" },
       },
+      { command: writeBoxFilesCommand("/srv/ferry", "/srv/ferry/.ferry/store", "default"), options: undefined },
       { command: profileBlockCommand(BUILTIN_BOX_PATH_DIRS), options: undefined },
     ]);
     expect(applyInput).toMatchObject({
@@ -539,7 +542,7 @@ describe("runSync", () => {
     );
 
     expect(events).toEqual(["apply", "install-plugins", "read-settings", "write-settings", "unlock", "adopt"]);
-    const write = commands.find((call) => call.command.includes("mv "));
+    const write = commands.find((call) => call.command.includes("mv ") && !call.command.includes(".ferry/box"));
     expect(write?.command).toContain("/srv/ferry/.claude/settings.json");
     expect(write?.command).toContain('"review@team": true');
   });
@@ -1056,6 +1059,7 @@ describe("runSync progress", () => {
       "Publishing the snapshot           ✔ done     published abc123          0.1s",
       "Connecting to ferry@box           ✔ done                               0.1s",
       "Updating the box checkout         ✔ done     discarded 1 box change    0.1s",
+      "Writing the box instructions      ✔ done                               0.1s",
       "Applying the snapshot on the box  ✔ done     0 changes                 0.1s",
       "Installing Claude plugins         ✔ done     1 warning                 0.1s",
       "Merging settings on the box       ✔ done                               0.1s",
@@ -1105,6 +1109,8 @@ describe("runSync progress", () => {
       "start:Updating the box checkout",
       "done",
       "line:Discarded box change: /srv/ferry/.ferry/store/skills/x/SKILL.md",
+      "start:Writing the box instructions",
+      "done",
       "start:Applying the snapshot on the box",
       "done",
       "start:Installing Claude plugins",
@@ -2081,6 +2087,7 @@ describe("sync with more than one box", () => {
     expect(sync.steps.filter((step) => step.startsWith("[b] "))).toEqual([
       "[b] Connecting to dev@box-b.example",
       "[b] Updating the box checkout",
+      "[b] Writing the box instructions",
       "[b] Applying the snapshot on the box",
       "[b] Installing Claude plugins",
       "[b] Merging settings on the box",
@@ -2107,6 +2114,7 @@ describe("sync with more than one box", () => {
       "Publishing the snapshot",
       "Connecting to dev@box-b.example",
       "Updating the box checkout",
+      "Writing the box instructions",
       "Applying the snapshot on the box",
       "Installing Claude plugins",
       "Merging settings on the box",

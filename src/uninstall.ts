@@ -18,6 +18,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import type { ApplyPlan } from "./apply.ts";
+import { BOX_DIRECTORY, BOX_INSTRUCTIONS } from "./box-identity.ts";
 import { configPath } from "./config.ts";
 import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
 
@@ -203,6 +204,7 @@ export function runUninstall(input: UninstallInput): UninstallResult {
   restoreConfig(home, state.config);
   rmSync(join(home, ".ferry", "watch-state.json"), { force: true });
   rmSync(join(home, ".ferry", "update-state.json"), { force: true });
+  rmSync(join(home, BOX_DIRECTORY), { recursive: true, force: true });
   rmSync(statePath(home), { force: true });
 
   for (const directory of state.absentDirectories) removeEmpty(fromRelative(home, directory));
@@ -258,8 +260,10 @@ function discoverManagedLinks(
   for (const harness of harnesses) {
     if (harness.instructionFile) {
       const path = join(home, harness.instructionFile);
-      const target = join(checkout, "AGENTS.md");
-      if (isExpectedLink(path, target)) links.set(path, target);
+      // On a box, the instruction files link to the generated box file.
+      for (const target of [join(checkout, "AGENTS.md"), join(home, BOX_INSTRUCTIONS)]) {
+        if (isExpectedLink(path, target)) links.set(path, target);
+      }
     }
     for (const root of harness.extraRoots ?? []) {
       const path = join(home, root);
