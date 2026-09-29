@@ -152,6 +152,157 @@ export type StatusReport = {
   readonly errors: readonly StatusError[];
 };
 
+/**
+ * One item of a box that needs action. `login`: a provider login. `mcp-login`:
+ * an MCP server login, with the name `tool/server`. `tool`: a tool with the
+ * state `drift`, `missing`, or `hidden`. `check-failed`: Ferry cannot read a part of the box.
+ */
+export type BriefIssue = {
+  readonly kind: "login" | "mcp-login" | "tool" | "check-failed";
+  readonly name: string;
+  readonly state: string;
+  readonly message: string;
+  /** The Ferry command that fixes the issue, or null when a person must act on the box. */
+  readonly command: string | null;
+};
+
+export type BriefBoxStatus = {
+  readonly name: string;
+  readonly host: string;
+  readonly online: boolean;
+  /** Why the box is offline. */
+  readonly error: string | null;
+  /** Empty when the box is offline. */
+  readonly issues: readonly BriefIssue[];
+};
+
+/** The report of `ferry status --brief`, and the content of `~/.ferry/status.json`. */
+export type BriefStatusReport = {
+  readonly schemaVersion: 1;
+  /** When the check started, as an ISO 8601 time. */
+  readonly checkedAt: string;
+  readonly boxes: readonly BriefBoxStatus[];
+};
+
+/**
+ * Check only the link, the logins, the MCP logins, and the tools of each box.
+ * It reads no store, no apply plan, no git identity, and no sudo, so it is
+ * fast enough for the watch to run on a timer.
+ */
+export async function composeBriefStatus(
+  boxes: readonly BoxStatusDependencies[],
+  checkedAt: Date,
+  progress: Progress = noProgress,
+): Promise<BriefStatusReport> {
+  progress.plan(boxes.reduce((total, box) => total + 3 + (box.tools ? 1 : 0), 0));
+  const boxProgress = orderedProgress(progress, boxes.map((box) => box.name));
+  const results = await mapLimit(boxes, BOX_LIMIT, async (box, index) => {
+    try {
+      return await composeBriefBox(box, boxProgress.views[index]!);
+    } finally {
+      boxProgress.end(index);
+    }
+  });
+  return { schemaVersion: 1, checkedAt: checkedAt.toISOString(), boxes: results };
+}
+
+async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): Promise<BriefBoxStatus> {
+  const base = { name: box.name, host: box.host };
+  let error: string | null = null;
+  try {
+    const result = await inspect(progress, "Connecting to the box", () => box.link.probe());
+    if (!result.ok) error = result.error.message;
+  } catch (cause) {
+    error = dependencyError("operator", cause).message;
+  }
+  if (error !== null) {
+    progress.skip("Checking logins on the box", OFFLINE);
+    progress.skip("Checking MCP logins on the box", OFFLINE);
+    if (box.tools) progress.skip("Checking tools on the box", OFFLINE);
+    return { ...base, online: false, error, issues: [] };
+  }
+
+  const issues: BriefIssue[] = [];
+  const failed = (name: string, cause: unknown) =>
+    issues.push({ kind: "check-failed", name, state: "failed", message: dependencyError("box", cause).message, command: null });
+  const flag = `--box ${box.name}`;
+
+  try {
+    const { providers } = await inspect(progress, "Checking logins on the box", () => box.auth.status());
+    for (const provider of providers) {
+      const name = provider.provider;
+      switch (provider.status) {
+        case "authenticated":
+          break;
+        case "login-required":
+          issues.push({ kind: "login", name, state: provider.status, message: `${name} needs a login.`, command: `ferry auth ${shellArg(name)} ${flag}` });
+          break;
+        case "manual":
+          issues.push({ kind: "login", name, state: provider.status, message: provider.instruction, command: null });
+          break;
+        case "unavailable":
+          issues.push({ kind: "login", name, state: provider.status, message: `Ferry cannot check the ${name} login: ${provider.error.message}`, command: null });
+          break;
+      }
+    }
+  } catch (cause) {
+    failed("logins", cause);
+  }
+
+  try {
+    for (const status of await inspect(progress, "Checking MCP logins on the box", () => box.auth.mcpStatus())) {
+      if ("error" in status) {
+        failed(`${status.tool} MCP`, new Error(status.error.message));
+        continue;
+      }
+      for (const server of status.loginRequired) {
+        issues.push({
+          kind: "mcp-login",
+          name: `${status.tool}/${server}`,
+          state: "login-required",
+          message: `${status.tool}/${server} needs a login.`,
+          command: `ferry auth ${shellArg(status.tool)} --mcp ${shellArg(server)} ${flag}`,
+        });
+      }
+    }
+  } catch (cause) {
+    failed("MCP logins", cause);
+  }
+
+  if (box.tools) {
+    const check = box.tools;
+    try {
+      for (const tool of await step(progress, "Checking tools on the box", () => check.check(true))) {
+        const issue = toolIssue(tool, flag);
+        if (issue) issues.push(issue);
+      }
+    } catch (cause) {
+      failed("tools", cause);
+    }
+  }
+
+  return { ...base, online: true, error: null, issues };
+}
+
+function toolIssue(tool: ToolStatus, flag: string): BriefIssue | null {
+  const base = { kind: "tool", name: tool.id, state: tool.state } as const;
+  switch (tool.state) {
+    case "drift":
+      return { ...base, message: `${tool.id} is ${tool.box} on the box, and the target is ${tool.target}.`, command: `ferry update ${flag}` };
+    case "missing":
+      return { ...base, message: `${tool.id} is not on the box.`, command: `ferry install ${flag}` };
+    case "hidden":
+      return { ...base, message: `${tool.id}: ${tool.reason}.`, command: `ferry sync ${flag}` };
+    default:
+      return null;
+  }
+}
+
+/** A name in a fix command. The operator runs the command in a shell, so a name with other characters gets quotes. */
+function shellArg(value: string): string {
+  return /^[A-Za-z0-9._:\/-]+$/.test(value) ? value : `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
 /** Boxes that status inspects at the same time. */
 const BOX_LIMIT = 4;
 

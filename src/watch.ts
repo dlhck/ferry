@@ -12,11 +12,13 @@ import { StoreRefusal } from "./store.ts";
 import { runUpdateCommand } from "./update.ts";
 import { errorEvent, type OutputEvent } from "./output.ts";
 import { noProgress, type Progress } from "./progress.ts";
+import type { BriefStatusReport } from "./status.ts";
 
 const DEFAULT_POLL_MS = 500;
 const DEFAULT_DEBOUNCE_MS = 1_000;
 const DEFAULT_MAX_BACKOFF_MS = 60_000;
 const UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1_000;
+const STATUS_INTERVAL_MS = 5 * 60 * 1_000;
 
 export type WatchInput = {
   readonly home?: string;
@@ -89,6 +91,13 @@ export type WatchDependencies = {
   readonly now?: () => number;
   readonly readUpdateState?: (home: string) => number | null;
   readonly writeUpdateState?: (home: string, time: number) => void;
+  /**
+   * The brief status of all boxes. The watch runs it at the start, every 5
+   * minutes, and after each sync, and writes it to `~/.ferry/status.json`.
+   * Without it, the watch writes no status file.
+   */
+  readonly status?: () => Promise<BriefStatusReport>;
+  readonly writeStatusFile?: (home: string, report: BriefStatusReport) => void;
   /** The reporter for the default sync and update. */
   readonly progress?: Progress;
 };
@@ -137,6 +146,11 @@ export async function runWatch(
   const readUpdateState = dependencies.readUpdateState ?? readUpdateTime;
   const writeUpdateState = dependencies.writeUpdateState ?? writeUpdateTime;
   let updating: Promise<void> | null = null;
+  const status = dependencies.status;
+  const writeStatus = dependencies.writeStatusFile ?? writeStatusFile;
+  let checking: Promise<void> | null = null;
+  /** The time of the next status check. A sync sets it to 0, so the next cycle checks. */
+  let statusDue = 0;
 
   // The update runs next to the sync loop, so a slow update never delays a
   // sync. The start time is recorded first, so a restart does not run it again.
@@ -152,6 +166,18 @@ export async function runWatch(
       .catch((error) => note(`Watch update failed: ${messageOf(error)}`, errorEvent("update-failed", error)))
       .finally(() => {
         updating = null;
+      });
+  };
+
+  // The status check runs next to the sync loop, as the update does. It only reads the boxes.
+  const startDueStatus = () => {
+    if (status === undefined || checking || now() < statusDue) return;
+    statusDue = now() + STATUS_INTERVAL_MS;
+    checking = status()
+      .then((report) => writeStatus(home, report))
+      .catch((error) => note(`Watch status check failed: ${messageOf(error)}`, errorEvent("status-failed", error)))
+      .finally(() => {
+        checking = null;
       });
   };
 
@@ -203,6 +229,7 @@ export async function runWatch(
 
   while (!input.signal?.aborted) {
     startDueUpdate();
+    startDueStatus();
     await sleep(pollMs, input.signal);
     if (input.signal?.aborted) break;
     const changed = await observe(home);
@@ -268,6 +295,7 @@ export async function runWatch(
       if (error === undefined) {
         accepted[name] = identity;
         retries.delete(name);
+        statusDue = 0;
         note(`${prefix(name)}Synced Manifest ${identity.slice(0, 12)}.`, { type: "synced", box: name, manifest: identity });
       } else if (retryable(error)) {
         const previous = retries.get(name);
@@ -286,6 +314,7 @@ export async function runWatch(
     save();
   }
   await updating;
+  await checking;
   dependencies.emit?.({ type: "watch-stopped" });
 }
 
@@ -379,6 +408,15 @@ function writeUpdateTime(home: string, time: number): void {
   const temporary = `${path}.tmp`;
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(temporary, `${JSON.stringify({ version: 1, lastRun: time })}\n`, { mode: 0o600 });
+  renameSync(temporary, path);
+}
+
+/** Replace the status file in one rename, so a reader never sees half a file. */
+function writeStatusFile(home: string, report: BriefStatusReport): void {
+  const path = join(home, ".ferry", "status.json");
+  const temporary = `${path}.tmp`;
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(temporary, `${JSON.stringify(report)}\n`, { mode: 0o600 });
   renameSync(temporary, path);
 }
 

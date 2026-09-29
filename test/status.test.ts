@@ -4,7 +4,8 @@ import type { AuthStatusReport } from "../src/auth-start.ts";
 import type { LinkResult } from "../src/link.ts";
 import type { DenyRuleDescription } from "../src/manifest.ts";
 import type { TipReport } from "../src/store.ts";
-import { composeStatus, type BoxStatusDependencies, type StatusDependencies } from "../src/status.ts";
+import { composeBriefStatus, composeStatus, type BoxStatusDependencies, type StatusDependencies } from "../src/status.ts";
+import type { ToolStatus } from "../src/tools/check.ts";
 import { recordProgress } from "./fake-progress.ts";
 
 type Calls = {
@@ -665,5 +666,169 @@ describe("Status composer tools", () => {
       origin: "box",
       message: "box: box command timed out",
     });
+  });
+});
+
+describe("brief status", () => {
+  const checkedAt = new Date("2026-09-29T10:00:00.000Z");
+  const tool = (id: string, state: ToolStatus["state"], extra: Partial<ToolStatus> = {}): ToolStatus => ({
+    id,
+    mode: "always",
+    policy: "operator",
+    operator: "2.0.0",
+    target: "2.0.0",
+    box: "2.0.0",
+    state,
+    ...extra,
+  });
+
+  test("lists each login, MCP login, and tool that needs action, with its fix command", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const report = await composeBriefStatus(
+      [
+        box(calls, {
+          name: "a",
+          tools: {
+            check: async () => [
+              tool("gh", "ok"),
+              tool("node", "drift", { box: "1.0.0" }),
+              tool("bun", "missing", { box: null }),
+              tool("my tool", "hidden", { reason: "the login shell PATH does not find it" }),
+              tool("pi", "skipped", { reason: "no target" }),
+            ],
+          },
+        }),
+      ],
+      checkedAt,
+    );
+
+    expect(report).toEqual({
+      schemaVersion: 1,
+      checkedAt: "2026-09-29T10:00:00.000Z",
+      boxes: [
+        {
+          name: "a",
+          host: "ferry@build-box",
+          online: true,
+          error: null,
+          issues: [
+            { kind: "login", name: "codex", state: "login-required", message: "codex needs a login.", command: "ferry auth codex --box a" },
+            {
+              kind: "login",
+              name: "pi",
+              state: "manual",
+              message: "SSH to the box, run pi, then use /login in its interactive session.",
+              command: null,
+            },
+            {
+              kind: "mcp-login",
+              name: "claude/linear",
+              state: "login-required",
+              message: "claude/linear needs a login.",
+              command: "ferry auth claude --mcp linear --box a",
+            },
+            {
+              kind: "tool",
+              name: "node",
+              state: "drift",
+              message: "node is 1.0.0 on the box, and the target is 2.0.0.",
+              command: "ferry update --box a",
+            },
+            { kind: "tool", name: "bun", state: "missing", message: "bun is not on the box.", command: "ferry install --box a" },
+            {
+              kind: "tool",
+              name: "my tool",
+              state: "hidden",
+              message: "my tool: the login shell PATH does not find it.",
+              command: "ferry sync --box a",
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  test("quotes a name with other characters in the fix command", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const report = await composeBriefStatus(
+      [
+        box(calls, {
+          auth: {
+            status: async () => ({ providers: [{ provider: "my tool", status: "login-required" }] }),
+            mcpStatus: async () => [],
+          },
+        }),
+      ],
+      checkedAt,
+    );
+
+    expect(report.boxes[0]!.issues[0]!.command).toBe("ferry auth 'my tool' --box default");
+  });
+
+  test("reads only the link, the logins, the MCP logins, and the tools", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    await composeBriefStatus([box(calls)], checkedAt);
+
+    expect(calls.reads).toEqual(["link.probe", "auth.status", "auth.mcpStatus"]);
+    expect(calls.mutations).toEqual([]);
+  });
+
+  test("an offline box has its error and no issues, and Ferry checks nothing more on it", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const report = await composeBriefStatus(
+      [
+        box(calls, {
+          link: {
+            ...box(calls).link,
+            async probe() {
+              calls.reads.push("link.probe");
+              return { ok: false, error: { code: "host-offline", origin: "network", message: "Tailscale host box is offline" } };
+            },
+          },
+          tools: {
+            check: async () => {
+              calls.reads.push("tools.check");
+              return [];
+            },
+          },
+        }),
+      ],
+      checkedAt,
+    );
+
+    expect(report.boxes).toEqual([
+      { name: "default", host: "ferry@build-box", online: false, error: "Tailscale host box is offline", issues: [] },
+    ]);
+    expect(calls.reads).toEqual(["link.probe"]);
+  });
+
+  test("a check that fails is an issue, so the box never looks clean", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const report = await composeBriefStatus(
+      [
+        box(calls, {
+          auth: {
+            async status() {
+              throw new Error("login probe timed out");
+            },
+            async mcpStatus() {
+              return [{ tool: "codex", error: { code: "command-failed", origin: "box", message: "mcp list failed" } }];
+            },
+          },
+          tools: {
+            check: async () => {
+              throw new Error("tool command failed");
+            },
+          },
+        }),
+      ],
+      checkedAt,
+    );
+
+    expect(report.boxes[0]!.issues).toEqual([
+      { kind: "check-failed", name: "logins", state: "failed", message: "box: login probe timed out", command: null },
+      { kind: "check-failed", name: "codex MCP", state: "failed", message: "box: mcp list failed", command: null },
+      { kind: "check-failed", name: "tools", state: "failed", message: "box: tool command failed", command: null },
+    ]);
   });
 });

@@ -120,6 +120,8 @@ Each entry of `boxes` has these fields:
 
 Each section also has an `error` field. A `null` value with an error means Ferry could not read it. It does not mean false.
 
+`ferry status --brief --json` checks only the link, the logins, the MCP logins, and the tools. Its `result` is `{ schemaVersion: 1, checkedAt, boxes }`. Each box has `name`, `host`, `online`, `error` (why the box is offline), and `issues`. Each issue has `kind` (`login`, `mcp-login`, `tool`, or `check-failed`), `name`, `state`, `message`, and `command`, the Ferry command that fixes it, or `null` when a person must act on the box. `ferry watch` writes the same report to `~/.ferry/status.json` at the start, every 5 minutes, and after each sync. Read that file when it is recent, and run the command when it is old or missing.
+
 ## Sync
 
 `ferry sync` publishes the snapshot, updates the box checkout, links the managed paths, installs Claude plugins, merges the carried settings keys, and declares MCP servers.
@@ -241,6 +243,7 @@ A command that runs and exits prints exactly one JSON object:
 | `watch` | `content-refused` (error) | A deny rule or a clash refused the portable set. The watch waits for a change. |
 | `watch` | `config-error` (error) | The watch cannot read the config. It tries again in the next cycle. |
 | `watch` | `update-started`, `update-failed` (error) | The daily tool update. |
+| `watch` | `status-failed` (error) | The watch cannot write `~/.ferry/status.json`. It tries again in 5 minutes. |
 | `watch` | `watch-stopped` | The watch stopped after SIGINT or SIGTERM. |
 | `tunnel` | `forward-opened` | `name` (`null` for a plain tunnel), `localPort`, `box`, `remotePort`, and with `--follow` also `pid`, `cwd` |
 | `tunnel --follow` | `forward-closed` | the fields of `forward-opened` |
@@ -298,7 +301,7 @@ With `--json`, Ferry never asks:
 | `install` | `{ plan: [{ tool, policy, version, action, command, dependsOn }], gitIdentity: { name, email } or null }` |
 | `update` | `{ dryRun, boxes: [{ name, ok, error, offline, plan, integrations: [{ id, plan }] }], operator: [{ tool, command } or { tool, reason }], updated, failed }`. `updated` and `failed` name each update, such as `box gh`, `[a] box gh`, or `operator codex`. A box with `ok: false` has `error`: `box-offline`, or `update-failed` with its failed updates. Also on failure. |
 | `sync` | `{ dryRun, published, boxes: [{ name, ok, step, error, plan, applyPlan, discarded }] }`. `plan` is the sync plan of the box, `applyPlan` its link changes (`null` for a dry run or a failed box), and `discarded` the box checkout changes that the sync threw away. A box with `ok: false` has `step`, the step that failed, and `error`. With more than one box, also on failure. |
-| `status` | The status report. See [Read state](#read-state). |
+| `status` | The status report. With `--brief`, the brief report. See [Read state](#read-state). |
 | `auth` | Without a tool: `{ providers: [{ id, login: "startable", "manual", or "off" }] }`. With a tool: the last login result, `{ kind, provider, ... }`, where `kind` is `logged-in`, `already-done`, `device-url`, `printed-url`, `local-port-forward`, or `manual-ssh`. |
 | `tools` | `{ tools: [{ id, name, kind, install, policy: { policy, default }, boxes: [{ name, policy, default }], operatorVersion }] }` |
 | `skills add` | `{ argv }`, the `npx skills add` command that ran. |

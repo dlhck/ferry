@@ -71,12 +71,14 @@ import {
 import { Link, type LinkOptions } from "./link.ts";
 import { loadRegistry, type Registry } from "./registry/load.ts";
 import {
+  formatBriefStatus,
   formatStatus,
+  runBriefStatusCommand,
   runStatusCommand,
   type StatusCommandDependencies,
   type StatusCommandInput,
 } from "./status-command.ts";
-import type { StatusReport } from "./status.ts";
+import type { BriefStatusReport, StatusReport } from "./status.ts";
 import { runToolsCommand, toolsLines, type ToolsCommandDependencies, type ToolsReport } from "./tools/command.ts";
 import { boxPathDirs } from "./tools/path.ts";
 import { runWatch, type WatchDependencies, type WatchInput } from "./watch.ts";
@@ -156,6 +158,10 @@ type CliDependencies = {
     input: StatusCommandInput,
     dependencies?: Partial<StatusCommandDependencies>,
   ) => Promise<StatusReport>;
+  readonly runBriefStatus?: (
+    input: StatusCommandInput,
+    dependencies?: Partial<StatusCommandDependencies>,
+  ) => Promise<BriefStatusReport>;
   readonly runWatch?: (input: WatchInput, dependencies?: WatchDependencies) => Promise<void>;
   readonly runUninstall?: (input: UninstallInput) => UninstallResult;
   readonly installWatchService?: (
@@ -237,12 +243,14 @@ const JSON_RESULTS: Record<string, string> = {
   "tunnel install": "{ manager, path }",
   "tunnel uninstall": "{ manager, path, removed }",
   expose: "events exposed and exited. The output of the command goes to stderr",
-  status: "the status report, schema version 2",
+  status:
+    "the status report, schema version 2. With --brief, { schemaVersion: 1, checkedAt, boxes: [{ name, host, online, error, issues: [{ kind, name, state, message, command }] }] }",
   integrations: "{ boxes: [{ name, destination, integrations: [{ id, description, enabled, localVersion, localSource, connectSteps }] }] }",
   "integrations enable": "{ integration, action, dryRun, plan, output, enabled, connectSteps }",
   "integrations disable": "{ integration, action, dryRun, plan, output, enabled, connectSteps }",
   tools: "{ tools: [{ id, name, kind, install, policy: { policy, default }, boxes, operatorVersion }] }",
-  watch: "events watch-started, synced, sync-failed, sync-refused, content-refused, config-error, update-started, update-failed, watch-stopped",
+  watch:
+    "events watch-started, synced, sync-failed, sync-refused, content-refused, config-error, update-started, update-failed, status-failed, watch-stopped",
   "watch install": "{ manager, path }",
   "self-update": "{ current, latest, updated }. The output of the installer goes to stderr",
   "box list": "{ boxes: [{ name, transport, destination, default }] }",
@@ -856,9 +864,23 @@ ferry update; missing, run ferry install; hidden, a login shell on the box
 does not find the tool, run ferry sync; skipped, the tool has no target;
 unknown, Ferry cannot read the box version. With --json, result is the
 status report, schema version 2. The ferry agent skill describes its fields.
-Install the skill with ferry skills add dlhck/ferry --skill ferry.`)
-    .action(async () => {
+Install the skill with ferry skills add dlhck/ferry --skill ferry.
+
+--brief checks only the link, the logins, the MCP logins, and the tools of
+each box. It prints one line for each item that needs action, with the Ferry
+command that fixes it. ferry watch writes the same report to
+~/.ferry/status.json.`)
+    .option("--brief", "check only the link, the logins, the MCP logins, and the tools, and print what needs action")
+    .action(async (options: { brief?: boolean }) => {
       await withProgress(async (progress, writeLine) => {
+        if (options.brief === true) {
+          const result = await (dependencies.runBriefStatus ?? runBriefStatusCommand)(
+            { selection: boxNames() },
+            { createLink, progress },
+          );
+          report(result, (result) => writeLine(formatBriefStatus(result)));
+          return;
+        }
         const result = await (dependencies.runStatus ?? runStatusCommand)(
           { selection: boxNames() },
           { createLink, progress },
@@ -1005,7 +1027,11 @@ query, which can hold the login session. Give all three keys or none.`)
 The watch syncs all boxes one second after a change stays stable. A box that
 fails retries with its own backoff, up to 60 seconds. The watch reads the
 config in each cycle. With [update] watch = true, it also runs ferry update
-once each day. Run ferry update --help for the sudo rule on the box.`)
+once each day. Run ferry update --help for the sudo rule on the box.
+
+At the start, every 5 minutes, and after each sync, the watch runs
+ferry status --brief for all boxes and writes the report to
+~/.ferry/status.json.`)
     .action(async () => {
       // The watch syncs all boxes and reads the config in each cycle. It does not accept --box,
       // because one watch-state.json follows all boxes, and the watch service runs without flags.
@@ -1019,7 +1045,12 @@ once each day. Run ferry update --help for the sudo rule on the box.`)
             signal: controller.signal,
             dailyUpdate: config().update?.watch === true,
           },
-          { progress: plainReporter(), writeLine, ...events() },
+          {
+            progress: plainReporter(),
+            writeLine,
+            ...events(),
+            status: () => (dependencies.runBriefStatus ?? runBriefStatusCommand)({}, { createLink }),
+          },
         );
       } finally {
         process.off("SIGINT", stop);
