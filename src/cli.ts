@@ -289,7 +289,8 @@ export function buildProgram(dependencies: CliDependencies = {}): Command {
 }
 
 function createProgram(dependencies: CliDependencies): { program: Command; state: RunState } {
-  // Commands that need the registry resolve it when they run, so help never reads the config.
+  // Commands that need the registry resolve it when they run. The program build reads the config
+  // one time to add the operator commands of the integrations. A failed read does not stop the start.
   const config = () => (dependencies.readConfig ?? readConfig)() ?? {};
   const registry = () => resolveRegistry(config());
   /** Each box command puts the PATH directories of the registry tools in front of PATH. `ferry sync` adds them itself. */
