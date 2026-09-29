@@ -57,10 +57,12 @@ Use `--host <tailscale host> --ssh-user <user>` instead of `--ssh-destination` f
 | `ferry box list\|add\|remove\|default` | Manage several boxes and the default box. |
 | `ferry install` | Install gh, the agent CLIs, the tools of the config, and Ferry on a box. |
 | `ferry sync` | Publish the snapshot and apply it on all boxes, or on the boxes of `--box`. |
+| `ferry history` | List the last 20 snapshot commits and the paths each one changed. |
+| `ferry revert <commit>` | Undo one snapshot commit on this machine, including the carried settings keys, then sync all boxes. `--no-sync` skips the sync. `--dry-run` shows the plan. |
 | `ferry watch` | Sync each accepted change. `ferry watch install` runs it as a launchd or systemd user service. |
 | `ferry status` | Show the state of the snapshot and of each box. `--brief` shows only what needs action: offline boxes, logins, MCP logins, tool drift, and hooks that run a home file Ferry does not carry. |
 | `ferry doctor` | Check the SSH agent, push access to the snapshot, SSH and Tailscale to each box, the box deploy key, linger, and the installed services. It changes nothing, runs every check, and prints a fix for each failed check. |
-| `ferry menubar install\|uninstall` | On macOS, install a menu bar app that shows the report of `ferry status --brief` for each box. The app reads `~/.ferry/status.json`, so `ferry watch` must run. It also shows the ports of each running `ferry tunnel --follow`. On Linux, see [the waybar module](docs/linux-status-bar.md). |
+| `ferry menubar install\|uninstall` | On macOS, install a menu bar app that shows the report of `ferry status --brief` for each box. The app reads `~/.ferry/status.json`, so `ferry watch` must run. It also shows the ports of each running `ferry tunnel --follow`. It sends a macOS notification when a box goes offline, a login or MCP login needs a login, or a tool has drift. Turn off Notifications in the menu to stop them. Sync now runs `ferry sync`. On Linux, see [the waybar module](docs/linux-status-bar.md). |
 | `ferry auth <tool>` | Start a login for `gh`, `claude`, `codex`, `cursor`, or a config tool with login keys on the box. `--mcp <server>` logs in to an MCP server. `--mcp <tool>/<server>`, the name in `ferry status`, also works. |
 | `ferry update` | Update the agent tools on the boxes and on this machine. |
 | `ferry tools` | List the tools and their version policies. |
@@ -69,7 +71,7 @@ Use `--host <tailscale host> --ssh-user <user>` instead of `--ssh-destination` f
 | `ferry move <path>` | Continue a project on a box, back on this machine, or on another box. |
 | `ferry tunnel` | Open box ports, or ports of a host that the box can reach, on `127.0.0.1` of this machine. `ferry tunnel install` runs `--follow` for one box as a user service. |
 | `ferry expose` | On the box: run a dev server and announce its port to `ferry tunnel --follow`. |
-| `ferry integrations` | List, enable, or disable the Paseo integration of a box. |
+| `ferry integrations` | List, enable, or disable the Paseo integration of a box. The list shows the part of each integration: `box` for a box service, `operator` for commands and status checks on this machine. |
 | `ferry uninstall` | Remove Ferry from this machine and restore the paths that `init` changed. |
 
 `ferry <command> --help` has the options, the config formats, and the details of each command.

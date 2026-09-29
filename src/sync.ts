@@ -346,6 +346,15 @@ export async function runSync(
         async () => {
           const releaseStore = await takeStoreLock(dependencies, home);
           try {
+            // A revert can change the files while this sync waits for the lock. Then the seed is old, and a publish would undo the revert.
+            const current = (dependencies.readSeed ?? readManifest)(home, harnesses, { storeUpdates: true });
+            if (!current.ok || current.identity !== seed.identity) {
+              throw new SyncError(
+                "publish-failure",
+                "operator",
+                "the portable set changed while the sync waited for the store; run the sync again",
+              );
+            }
             const store = dependencies.openStore
               ? await dependencies.openStore(config.snapshotUrl, seed, {
                   home,
@@ -1109,7 +1118,7 @@ function acquireSyncLock(home: string, host: string): () => void {
 }
 
 /** Wait while another sync publishes. Only the publish holds this lock, so the wait is short. */
-async function acquireStoreLock(home: string): Promise<() => void> {
+export async function acquireStoreLock(home: string): Promise<() => void> {
   const path = join(home, ".ferry", "store.lock");
   for (;;) {
     const release = tryLock(path);

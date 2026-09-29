@@ -14,6 +14,7 @@ import {
   type SnapshotHostKeyApproval,
 } from "../src/init.ts";
 import { createPaseo } from "../src/integrations/paseo.ts";
+import { EXAMPLE_ID, operatorIntegration } from "./fake-integration.ts";
 import { denyRules } from "../src/manifest.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 import { Link } from "../src/link.ts";
@@ -219,12 +220,32 @@ describe("ferry --help", () => {
 
     expect(output).toEqual([
       "paseo  enabled  Paseo daemon on the box",
+      "  Parts: box",
       "  Local app: not found. The box version is not pinned.",
       "  Connect to the box:",
       "    Open Paseo Desktop.",
       "    Open Settings → Add host → Remote SSH.",
       "    Enter ssh://ploi@box.",
     ]);
+  });
+
+  test("adds the commands of an enabled operator part only when it can run on this machine", async () => {
+    const runs: string[] = [];
+    const program = (config: PartialOperatorConfig | null, available = true) =>
+      buildProgram({
+        readConfig: () => config,
+        integrations: [createPaseo({ platform: "win32" }), operatorIntegration({ available, runs })],
+        writeLine: () => {},
+      });
+    const names = (command: ReturnType<typeof buildProgram>) => command.commands.map((known) => known.name());
+    const enabled: PartialOperatorConfig = { integrations: { [EXAMPLE_ID]: true } };
+
+    await program(enabled).parseAsync(["example"], { from: "user" });
+
+    expect(runs).toEqual(["example"]);
+    expect(names(program(enabled, false))).not.toContain("example");
+    expect(names(program({ integrations: { paseo: true } }))).not.toContain("example");
+    expect(names(program(null))).toEqual(names(buildProgram({ readConfig: () => null })));
   });
 
   test("wires ferry tools to the registry tools of the config", async () => {
@@ -537,6 +558,46 @@ describe("ferry --help", () => {
     expect(received).toEqual({ selection: [] });
     expect(lines.map((line) => JSON.parse(line))).toEqual([
       { schemaVersion: 1, command: "status", ok: true, result: EMPTY_REPORT, warnings: [], error: null },
+    ]);
+  });
+
+  test("history --json puts the commits in the envelope", async () => {
+    const commits = [{ commit: "a".repeat(40), date: "2026-09-29T10:00:00Z", subject: "chore: update ferry snapshot", paths: ["AGENTS.md"] }];
+    const received: unknown[] = [];
+    const lines: string[] = [];
+    const program = buildProgram({
+      readConfig: () => null,
+      runHistory: async (input) => {
+        received.push(input);
+        return commits;
+      },
+      writeLine: (line) => lines.push(line),
+      writeError: () => {},
+    });
+
+    await program.parseAsync(["history", "--limit", "5", "--json"], { from: "user" });
+
+    expect(received).toEqual([{ limit: 5 }]);
+    expect(JSON.parse(lines[0] as string)).toMatchObject({ command: "history", ok: true, result: { commits } });
+  });
+
+  test("wires ferry revert with --dry-run and --no-sync", async () => {
+    const received: unknown[] = [];
+    const program = buildProgram({
+      readConfig: () => null,
+      runRevert: async (input) => {
+        received.push(input);
+        return { dryRun: true, commit: "a".repeat(40), subject: "s", tip: null, paths: [], settings: [], sync: null };
+      },
+      writeLine: () => {},
+    });
+
+    await program.parseAsync(["revert", "abc1234", "--dry-run"], { from: "user" });
+    await program.parseAsync(["revert", "abc1234", "--no-sync"], { from: "user" });
+
+    expect(received).toEqual([
+      { commit: "abc1234", dryRun: true, sync: true },
+      { commit: "abc1234", dryRun: false, sync: false },
     ]);
   });
 
@@ -999,6 +1060,7 @@ describe("--box", () => {
     expect(await lines(["integrations", "--box", "b"])).toEqual([
       "Box b",
       "  paseo  disabled  Paseo daemon on the box",
+      "    Parts: box",
       "    Local app: not found. The box version is not pinned.",
     ]);
   });

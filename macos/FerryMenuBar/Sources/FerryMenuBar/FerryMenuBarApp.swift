@@ -69,8 +69,17 @@ struct MenuContent: View {
                 }
             }
             Divider()
+            if let message = model.syncMessage {
+                Text(message)
+            }
+            Button(model.syncing ? "Syncing..." : "Sync now") { model.sync() }
+                .disabled(model.syncing)
             Button(model.refreshing ? "Refreshing..." : "Refresh now") { model.refresh() }
                 .disabled(model.refreshing)
+            Toggle("Notifications", isOn: $model.notificationsEnabled)
+            if let error = model.notificationError {
+                Text(error)
+            }
             Button("Quit") { NSApplication.shared.terminate(nil) }
                 .keyboardShortcut("q")
         }
