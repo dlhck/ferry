@@ -316,6 +316,8 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
         remove: "codex mcp remove {name}",
         // Add writes the config, then starts a login that waits for a callback.
         add: "timeout 20 codex mcp add {name} --url {url}",
+        addStdio: "timeout 20 codex mcp add {name} -- {command}",
+        getJson: "codex mcp get {name} --json",
       },
       list: "codex mcp list",
       loginRequired: "^(\\S+)\\s+https://\\S+\\s.*\\bNot logged in\\s*$",

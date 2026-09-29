@@ -1164,8 +1164,15 @@ describe("ferry status --brief", () => {
 
   test("checks the carried stdio MCP servers of the operator home on the box", async () => {
     const stack = fakeStack();
-    const mcp = { list: "codex mcp list", loginRequired: "^$", login: "codex mcp login {name}" };
+    const mcp = {
+      register: { get: "codex mcp get {name}", remove: "codex mcp remove {name}", add: "codex mcp add {name}", getJson: "codex mcp get {name} --json" },
+      list: "codex mcp list",
+      loginRequired: "^$",
+      login: "codex mcp login {name}",
+    };
     const read: unknown[] = [];
+    const envChecks: string[] = [];
+    const link = stack.dependencies.createLink!({} as never);
 
     const report = await runBriefStatusCommand(
       {},
@@ -1178,6 +1185,15 @@ describe("ferry status --brief", () => {
           tools: registry.tools.map((tool) => (tool.id === "codex" ? { ...tool, mcp } : tool)),
         }),
         createAuthStart: () => ({ status: async () => ({ providers: [] }), mcpStatus: async () => [] }),
+        // The box prints only the name of each missing key.
+        createLink: () => ({
+          ...link,
+          async run(command: string) {
+            if (!command.includes("jq")) return link.run(command);
+            envChecks.push(command);
+            return { ok: true as const, address: "100.64.0.8", stdout: "github\tGITHUB_TOKEN\n", stderr: "" };
+          },
+        }),
         readMcpSources: (home, harnesses) => {
           read.push([home, harnesses.map((harness) => harness.id)]);
           return [
@@ -1192,7 +1208,8 @@ describe("ferry status --brief", () => {
     );
 
     expect(read).toEqual([["/operator/home", ["codex"]]]);
-    expect(stack.reads.some((command) => command.includes("/box/home/.codex/config.toml"))).toBe(true);
+    expect(envChecks).toHaveLength(1);
+    expect(envChecks[0]).toContain("codex mcp get");
     expect(report.boxes[0]!.issues.filter((issue) => issue.kind === "mcp-server")).toEqual([
       {
         kind: "mcp-server",
