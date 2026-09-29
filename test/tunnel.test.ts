@@ -27,6 +27,7 @@ import {
   parsePortSpecs,
   runTunnel,
   type TunnelDependencies,
+  type TunnelFile,
   type TunnelInput,
 } from "../src/tunnel.ts";
 
@@ -60,6 +61,8 @@ function harness(link: FakeLink, overrides: Partial<TunnelDependencies> = {}) {
   const lines: string[] = [];
   const events: OutputEvent[] = [];
   const links: LinkOptions[] = [];
+  const files: TunnelFile[] = [];
+  const removed: string[] = [];
   let interrupt: (() => void) | undefined;
   const dependencies: TunnelDependencies = {
     createLink: (options) => {
@@ -77,9 +80,11 @@ function harness(link: FakeLink, overrides: Partial<TunnelDependencies> = {}) {
     controlPath: join(tmpdir(), "ferry-tunnel-test.sock"),
     reconnectMs: 0,
     emit: (event) => events.push(event),
+    writeTunnelFile: (file) => files.push(file),
+    removeTunnelFile: (box) => removed.push(box),
     ...overrides,
   };
-  return { dependencies, lines, events, links, interrupt: () => interrupt?.() };
+  return { dependencies, lines, events, links, files, removed, interrupt: () => interrupt?.() };
 }
 
 const stopped: ForwardResult = { ok: true, stopped: true, address: "dev@lab.example", stdout: "", stderr: "" };
@@ -470,6 +475,87 @@ describe("ferry tunnel --follow", () => {
     });
     expect(events).toContainEqual({ type: "following", box: "lab", reconnected: true });
     expect(masters[1]!.calls).toEqual(["forward 3000:3000", "exit"]);
+  });
+
+  test("writes the tunnel file on connect and after each change of the forwards, and removes it on Ctrl-C", async () => {
+    const master = new FakeMaster();
+    const { dependencies, lines, files, removed, interrupt } = harness(new FollowLink(() => master));
+
+    const running = runTunnel(followInput, dependencies);
+    await waitFor(() => lines.length > 0);
+    expect(files).toEqual([
+      { schemaVersion: 1, box: "lab", pid: process.pid, connected: true, updatedAt: expect.any(String), forwards: [] },
+    ]);
+    expect(new Date(files[0]!.updatedAt).toISOString()).toBe(files[0]!.updatedAt);
+
+    master.write(`${entry(11, 3000, "web")}${entry(12, 5173, "docs", "/srv/docs")}.\n`);
+    await waitFor(() => files.length === 2);
+    expect(files[1]).toMatchObject({
+      connected: true,
+      forwards: [
+        { name: "web", cwd: "/home/dev/app", boxPort: 3000, localPort: 3000 },
+        { name: "docs", cwd: "/srv/docs", boxPort: 5173, localPort: 5173 },
+      ],
+    });
+
+    master.write(`${entry(12, 5173, "docs", "/srv/docs")}.\n`);
+    await waitFor(() => files.length === 3);
+    expect(files[2]?.forwards).toEqual([{ name: "docs", cwd: "/srv/docs", boxPort: 5173, localPort: 5173 }]);
+    expect(removed).toEqual([]);
+
+    interrupt();
+    await running;
+    expect(files).toHaveLength(3);
+    expect(removed).toEqual(["lab"]);
+  });
+
+  test("leaves out the name and cwd that an entry does not have", async () => {
+    const master = new FakeMaster();
+    const { dependencies, lines, files, interrupt } = harness(new FollowLink(() => master));
+
+    const running = runTunnel(followInput, dependencies);
+    await waitFor(() => lines.length > 0);
+    master.write(`11\t${JSON.stringify({ port: 3000 })}\n.\n`);
+    await waitFor(() => files.length === 2);
+    interrupt();
+    await running;
+
+    expect(files[1]?.forwards).toEqual([{ boxPort: 3000, localPort: 3000 }]);
+  });
+
+  test("writes connected false with no forwards when the connection drops, and connected true again after the reconnect", async () => {
+    const masters = [new FakeMaster(), new FakeMaster()];
+    let index = 0;
+    const { dependencies, lines, files, removed, interrupt } = harness(new FollowLink(() => masters[index++]!));
+
+    const running = runTunnel(followInput, dependencies);
+    await waitFor(() => lines.length > 0);
+    masters[0]!.write(`${entry(11, 3000, "web")}.\n`);
+    await waitFor(() => files.length === 2);
+    masters[0]!.drop("Connection reset by peer");
+    await waitFor(() => lines.some((line) => line.startsWith("Connected again.")));
+    interrupt();
+    await running;
+
+    expect(files.map((file) => [file.connected, file.forwards.length])).toEqual([
+      [true, 0],
+      [true, 1],
+      [false, 0],
+      [true, 0],
+    ]);
+    expect(removed).toEqual(["lab"]);
+  });
+
+  test("a plain tunnel writes no tunnel file", async () => {
+    const { dependencies, files, removed, interrupt } = harness(new FakeLink(untilAborted));
+
+    const done = runTunnel({ ports: ["3000"], list: false, box: BOX }, dependencies);
+    await Bun.sleep(0);
+    interrupt();
+    await done;
+
+    expect(files).toEqual([]);
+    expect(removed).toEqual([]);
   });
 
   test("a master connection that does not start fails the command", async () => {

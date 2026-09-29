@@ -59,7 +59,7 @@ Use `--host <tailscale host> --ssh-user <user>` instead of `--ssh-destination` f
 | `ferry sync` | Publish the snapshot and apply it on all boxes, or on the boxes of `--box`. |
 | `ferry watch` | Sync each accepted change. `ferry watch install` runs it as a launchd or systemd user service. |
 | `ferry status` | Show the state of the snapshot and of each box. `--brief` shows only what needs action: offline boxes, logins, MCP logins, and tool drift. |
-| `ferry menubar install\|uninstall` | On macOS, install a menu bar app that shows the report of `ferry status --brief` for each box. The app reads `~/.ferry/status.json`, so `ferry watch` must run. |
+| `ferry menubar install\|uninstall` | On macOS, install a menu bar app that shows the report of `ferry status --brief` for each box. The app reads `~/.ferry/status.json`, so `ferry watch` must run. It also shows the ports of each running `ferry tunnel --follow`. |
 | `ferry auth <tool>` | Start a login for `gh`, `claude`, `codex`, `cursor`, or a config tool with login keys on the box. `--mcp <server>` logs in to an MCP server. `--mcp <tool>/<server>`, the name in `ferry status`, also works. |
 | `ferry update` | Update the agent tools on the boxes and on this machine. |
 | `ferry tools` | List the tools and their version policies. |
@@ -88,7 +88,7 @@ Add `--json` to any command for scripts and agents: stdout then has only JSON, a
 - **Several boxes.** `ferry box add <name>` adds a `[box.<name>]` table. `sync`, `status`, and `update` work on all boxes, or on the boxes of `--box`. See `ferry box --help`.
 - **Tools in config.** Define each tool in a `[tools.<id>]` table, with a version policy of `"operator"`, `"latest"`, or an exact version. The `auth_status`, `auth_login`, and `auth_hosts` keys let `ferry auth <id>` log the tool in. See `ferry tools --help`.
 - **Move a project.** `ferry move <path> --to-box <name>` and `--from-box <name>` carry a git project, with its untracked files, between machines. See `ferry move --help`.
-- **Box ports.** `ferry tunnel 3000` opens a box port here. `ferry expose` on the box and `ferry tunnel --follow` here open each dev server port on its own. See `ferry tunnel --help` and `ferry expose --help`.
+- **Box ports.** `ferry tunnel 3000` opens a box port here. `ferry expose` on the box and `ferry tunnel --follow` here open each dev server port on its own. `--follow` writes its forwards to `~/.ferry/tunnels/<box>.json` (`schemaVersion`, `box`, `pid`, `connected`, `updatedAt`, `forwards: [{ name, cwd, boxPort, localPort }]`), and removes the file when it stops. The menu bar app reads it. See `ferry tunnel --help` and `ferry expose --help`.
 - **Paseo.** `ferry integrations enable paseo` runs the Paseo daemon on a box and carries your Paseo agent profiles. See `ferry integrations enable --help`.
 - **Automatic sync.** `ferry watch install` syncs each change after one second. With `[update] watch = true`, it also updates the tools with the `"latest"` policy once a day. Every 5 minutes and after each sync, the watch writes `ferry status --brief --json` to `~/.ferry/status.json`. See `ferry watch install --help` and `ferry update --help`.
 
