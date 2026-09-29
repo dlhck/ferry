@@ -805,7 +805,7 @@ function printPlan(plan: SyncPlan, gitAuth: GitAuth, writeLine: (line: string) =
               : `Paseo agent profiles: ${plan.paseoProfiles.join(", ")} -> box ~/.paseo/config.json daemon.agentProfiles, then paseo daemon reload. Ferry skips each profile whose provider is not available on the box.`,
           ]),
       ...(plan.paseoPlugins == null ? [] : [
-        `Paseo Git plugins: ${plan.paseoPlugins.plugins.map((plugin) => `${plugin.id}@${plugin.commit} (${plugin.enabled ? "enabled" : "disabled"})`).join(", ") || "none"}. Keep box-only plugins and the global plugin switch. The box daemon needs Git access.`,
+        `Paseo Git plugins: ${plan.paseoPlugins.plugins.map((plugin) => `${plugin.id}@${plugin.commit} (${plugin.enabled ? "enabled" : "disabled"})`).join(", ") || "none"}. Keep box-only plugins. Turn on the global plugin switch when an enabled plugin is current on the box, which also starts enabled box-only plugins. The box daemon needs Git access.`,
         ...plan.paseoPlugins.warnings,
       ]),
       ...denyListLines(),
