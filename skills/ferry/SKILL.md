@@ -144,7 +144,7 @@ A skipped entry is expected. A refusal is a stop. Do not edit Ferry, its config,
 
 ## Logins
 
-`ferry auth <tool>` starts a vendor login on the box and prints a URL, and sometimes a code, that a person opens in a browser. Tools are `gh`, `claude`, `codex`, and `cursor`. `ferry auth` without a tool lists them. `ferry auth <tool> --mcp <server>` logs in to one MCP server on the box. `ferry auth --mcp <tool>/<server>` also works, with the name that `mcpLogins.loginRequired` gives.
+`ferry auth <tool>` starts a vendor login on the box and prints a URL, and sometimes a code, that a person opens in a browser. Tools are `gh`, `claude`, `codex`, `cursor`, and each `[tools.<id>]` table with the `auth_status`, `auth_login`, and `auth_hosts` keys. `ferry auth` without a tool lists them. `ferry auth <tool> --mcp <server>` logs in to one MCP server on the box. `ferry auth --mcp <tool>/<server>` also works, with the name that `mcpLogins.loginRequired` gives.
 
 Do not run these commands yourself. When `auth.loginRequired` or `mcpLogins.loginRequired` is not empty, tell the operator the command, for example `ferry auth claude --mcp linear`. Pi has no remote login. The operator runs `pi` on the box and uses `/login`. A tool with the policy `"off"` gets no login.
 

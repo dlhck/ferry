@@ -261,6 +261,16 @@ function configTool(id: string, definition: ToolDefinition): ToolDescriptor {
     recipe: { install: fill(definition.install), update: fill(definition.update ?? definition.install) },
     ...(definition.path ? { pathDirs: definition.path.map(plainPath) } : {}),
     ...(definition.depends ? { dependsOn: definition.depends } : {}),
+    // The config parser makes sure that a table has all three login keys or none.
+    ...(definition.auth_status && definition.auth_login && definition.auth_hosts
+      ? {
+          auth: {
+            probe: definition.auth_status,
+            login: definition.auth_login,
+            completion: { kind: "printed-url", allowedHosts: definition.auth_hosts, sessionInUrl: true },
+          },
+        }
+      : {}),
   };
 }
 

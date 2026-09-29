@@ -236,7 +236,7 @@ export class AuthStart {
       if (auth.fallback) return this.startFallback(provider, auth.fallback);
       return missingUrl(provider);
     }
-    const url = safeUrl(login.output, completion.allowedHosts);
+    const url = safeUrl(login.output, completion.allowedHosts, completion.sessionInUrl);
     if (!url) return missingUrl(provider);
     if (!completion.pastedCode) return { kind: "printed-url", provider, url };
     return login.dir ? { kind: "printed-url", provider, url, codeInput: `${login.dir}/in` } : missingUrl(provider);
@@ -537,7 +537,7 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-function safeUrl(output: string, allowedHosts: readonly string[]): string | null {
+function safeUrl(output: string, allowedHosts: readonly string[], sessionInUrl = false): string | null {
   for (const match of output.matchAll(/https:\/\/[^\s<>"']+/g)) {
     const candidate = match[0].replace(/[),.;]+$/, "");
     try {
@@ -545,7 +545,7 @@ function safeUrl(output: string, allowedHosts: readonly string[]): string | null
       if (!allowedHosts.some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`))) {
         continue;
       }
-      if (carriesSecret(url)) continue;
+      if (!sessionInUrl && carriesSecret(url)) continue;
       return url.toString();
     } catch {
       continue;

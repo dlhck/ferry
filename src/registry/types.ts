@@ -71,6 +71,12 @@ export type AuthCompletion =
        * the box. Without it, the login finishes without input.
        */
       readonly pastedCode?: string;
+      /**
+       * The URL carries the login session in its fragment or in a query key
+       * such as `sessionToken`, and ferry passes it on. Only a tool that the
+       * config defines sets it, because the operator names its hosts.
+       */
+      readonly sessionInUrl?: boolean;
     }
   /** The tool has no remote login ferry can drive. The operator finishes it by hand. */
   | { readonly kind: "manual"; readonly command: string; readonly instruction: string };
