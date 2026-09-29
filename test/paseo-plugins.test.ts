@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { carryPaseoPlugins, readPaseoPlugins, type PaseoPlugin } from "../src/integrations/paseo-plugins.ts";
@@ -292,6 +292,12 @@ describe("Paseo npm plugin discovery", () => {
     const f = npmFixture();
     f.install("latest-secret");
     expectRefused(f.home, "nonportable or credential-bearing npm package", "latest-secret");
+    for (const invalid of ["1.2.3-01", "1.2.3-alpha.01"]) {
+      f.install(invalid);
+      expectRefused(f.home, "nonportable or credential-bearing npm package", invalid);
+    }
+    f.install("1.2.3-0.alpha-01+001");
+    expect(readPaseoPlugins(f.home).plugins[0]).toMatchObject({ version: "1.2.3-0.alpha-01+001" });
     const token = `sk-ant-${"a1".repeat(12)}`;
     const leaked = npmFixture(`@acme/${token}`);
     expectRefused(leaked.home, "nonportable or credential-bearing npm package", token);
@@ -302,6 +308,15 @@ describe("Paseo npm plugin discovery", () => {
     expectRefused(f.home, "outside its managed npm installation", f.versionRoot);
     f.configure(true, "/tmp/other");
     expectRefused(f.home, "outside its managed npm installation", "/tmp/other");
+    for (const escaped of ["@acme/tools", "@acme"]) {
+      const linked = npmFixture();
+      const external = mkdtempSync(join(tmpdir(), "ferry-external-"));
+      homes.push(external);
+      const target = join(linked.versionRoot, "node_modules", escaped);
+      renameSync(target, join(external, "moved"));
+      symlinkSync(join(external, "moved"), target);
+      expectRefused(linked.home, "could not read the managed npm installation", external);
+    }
     const upper = npmFixture("@Acme/Tools");
     expectRefused(upper.home, "outside its managed npm installation", "Acme");
   });

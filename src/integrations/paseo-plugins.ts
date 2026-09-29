@@ -60,8 +60,9 @@ function portableRemote(remote: string): boolean {
 
 /** Paseo 0.10.1 accepts these npm names: lowercase `name` or `@scope/name`. */
 const NPM_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
-/** An exact semver version. Tags and ranges move, so Ferry never carries them. */
-const EXACT_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+/** An exact semver version. Tags and ranges move, so Ferry never carries them. Numeric prerelease parts have no leading zero. */
+const PRERELEASE_PART = "(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)";
+const EXACT_VERSION = new RegExp(`^(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)(?:-${PRERELEASE_PART}(?:\\.${PRERELEASE_PART})*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$`);
 
 function portablePath(path: string): boolean {
   return path === "." || path.split("/").every((part) => /^[a-zA-Z0-9_.-]+$/.test(part) && part !== ".." && part !== ".");
@@ -92,7 +93,7 @@ function readNpmPlugin(home: string, id: string, configured: string, enabled: bo
   const packageRoot = join(versionRoot, "node_modules", packageName);
   let version: unknown;
   try {
-    if (!inside(root, versionRoot) || !inside(packageRoot, configured)) {
+    if (!inside(root, versionRoot) || !inside(versionRoot, packageRoot) || !inside(packageRoot, configured)) {
       throw new Error("outside installation");
     }
     const lock: unknown = JSON.parse(readFileSync(join(versionRoot, "package-lock.json"), "utf8"));
