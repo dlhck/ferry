@@ -9,7 +9,7 @@ Ferry copies the agent setup of the operator machine to a remote Linux box. The 
 
 ## Rules
 
-1. On the box, do not edit a Ferry-managed file: a skill, an instruction file such as `AGENTS.md`, `~/.claude/agents`, `~/.claude/commands`, a carried Claude or Codex settings key, or a carried MCP declaration. Each sync resets the box checkout with `git reset --hard` and writes the carried keys again, so your change is lost. Tell the operator what to change on the operator machine instead.
+1. On the box, do not edit a Ferry-managed file: a skill, an instruction file such as `AGENTS.md`, `~/.claude/agents`, `~/.claude/commands`, a carried Claude or Codex settings key, or a carried MCP declaration. The `env` values of a carried stdio MCP server are the exception: set them on the box, and Ferry keeps them. Each sync resets the box checkout with `git reset --hard` and writes the carried keys again, so your change is lost. Tell the operator what to change on the operator machine instead.
 2. Read state with `ferry status --json` before you change anything.
 3. Add `--json` to each Ferry command whose output you read. Use the error `code`, not the message text. See [JSON output](#json-output).
 4. Run `ferry sync --dry-run` before `ferry sync`. Do not pass `--force` unless the operator tells you to.
@@ -43,6 +43,7 @@ These items are not symlinks. Sync writes them into box files:
 - Carried Codex settings keys: `model`, `model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`, `features`, and `web_search` in `~/.codex/config.toml`.
 - For both files, sync replaces the carried keys on the box. A key that the operator machine does not have is removed from the box. The box keeps its other keys. When a carried Codex key changes, sync writes `config.toml` again, and the comments in that file are lost.
 - Remote MCP servers: the name and HTTPS URL of each server in `mcpServers` of `~/.claude.json`, `[mcp_servers]` of `~/.codex/config.toml`, and `mcpServers` of `~/.cursor/mcp.json`. Sync declares them on the box. It replaces a box declaration with a different URL. It never removes a box server.
+- Stdio MCP servers from the same files: the name, `command`, `args`, and the names of the `env` keys, never their values. Sync writes the command and arguments into the MCP file of each harness on the box and keeps the `env` of the box entry. It never installs the command. A server whose command or arguments refer to a path in the operator home is not carried.
 
 Ferry never carries logins, credential files, tokens, request headers, `.env` files, session history, caches, databases, or whole settings files.
 
@@ -120,7 +121,7 @@ Each entry of `boxes` has these fields:
 
 Each section also has an `error` field. A `null` value with an error means Ferry could not read it. It does not mean false.
 
-`ferry status --brief --json` checks only the link, the logins, the MCP logins, and the tools. Its `result` is `{ schemaVersion: 1, checkedAt, boxes }`. Each box has `name`, `host`, `online`, `error` (why the box is offline), and `issues`. Each issue has `kind` (`login`, `mcp-login`, `tool`, or `check-failed`), `name`, `state`, `message`, and `command`, the Ferry command that fixes it, or `null` when a person must act on the box. `ferry watch` writes the same report to `~/.ferry/status.json` at the start, every 5 minutes, and after each sync. Read that file when it is recent, and run the command when it is old or missing.
+`ferry status --brief --json` checks only the link, the logins, the MCP logins, the carried stdio MCP servers, and the tools. Its `result` is `{ schemaVersion: 1, checkedAt, boxes }`. Each box has `name`, `host`, `online`, `error` (why the box is offline), and `issues`. Each issue has `kind` (`login`, `mcp-login`, `mcp-server`, `tool`, or `check-failed`), `name`, `state`, `message`, and `command`, the Ferry command that fixes it, or `null` when a person must act on the box. `ferry watch` writes the same report to `~/.ferry/status.json` at the start, every 5 minutes, and after each sync. Read that file when it is recent, and run the command when it is old or missing.
 
 ## Sync
 
@@ -135,7 +136,8 @@ Read these output lines:
 - `operator: Manifest refused publisher <host>: <reason>: <path>` means a deny rule refused a file. The sync stopped and nothing was published. The message names the file, never the value. Tell the operator the path and the reason. The operator removes the secret from the file or removes the file from the managed set.
 - A refusal that contains `clash <name>: <path>, <path>` means two harness roots hold different copies of a skill with the same name. The operator must keep one copy.
 - `Skipped hook: <reason>: <location>` means Ferry left out one hook, because its command refers to a home path that the box will not have. The sync continues without that hook. To carry it, the operator moves the script into a carried directory or onto `PATH` on both machines.
-- `Skipped MCP server: <reason>: <path>` means Ferry left out a local server (it has a `command`) or a server with a plain `http://` URL. The sync continues. Only remote HTTPS servers are carried.
+- `Skipped MCP server: <reason>: <path>` means Ferry left out a server with a plain `http://` URL, a server with neither a URL nor a `command`, or a stdio server whose command or arguments refer to a path in the operator home. The sync continues.
+- A stdio MCP server with a token or secret in its command or arguments stops the sync with the deny rule `mcp-argument`. The error names the server and the rule, never the value.
 - `Updated store skill <name> from <path>` means an installer put a newer copy of a skill in one harness root, and sync published it.
 - `Discarded box change: <path>` means sync threw away an edit on the box.
 - `Box plugins: ...` and `Box MCP: ...` are warnings. The sync continues.

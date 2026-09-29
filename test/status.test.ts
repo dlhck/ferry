@@ -748,6 +748,78 @@ describe("brief status", () => {
     });
   });
 
+  test("names the missing env keys, missing commands, and non-portable servers of the carried stdio MCP servers", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const report = await composeBriefStatus(
+      [
+        box(calls, {
+          auth: { status: async () => ({ providers: [] }), mcpStatus: async () => [] },
+          mcpServers: {
+            check: async () => [
+              { kind: "not-portable", harness: "claude", server: "local" },
+              { kind: "command-missing", harness: "cursor", server: "docs", command: "uvx" },
+              { kind: "env-missing", harness: "codex", server: "github", keys: ["GITHUB_TOKEN"], file: ".codex/config.toml" },
+              { kind: "env-missing", harness: "cursor", server: "db", keys: ["DB_URL", "DB_PASSWORD"], file: ".cursor/mcp.json" },
+            ],
+          },
+        }),
+      ],
+      checkedAt,
+    );
+
+    expect(report.boxes[0]!.issues).toEqual([
+      {
+        kind: "mcp-server",
+        name: "claude/local",
+        state: "not-portable",
+        message: "claude/local refers to a path in your home, so Ferry does not carry it. Use a command on the PATH or a path outside the home.",
+        command: null,
+      },
+      {
+        kind: "mcp-server",
+        name: "cursor/docs",
+        state: "command-missing",
+        message: "cursor/docs runs uvx, which is not on the box. Install uvx on the box, or add a tool for it to the registry.",
+        command: null,
+      },
+      {
+        kind: "mcp-server",
+        name: "codex/github",
+        state: "env-missing",
+        message: "codex/github needs GITHUB_TOKEN on the box. Set it in the env of github in ~/.codex/config.toml on the box.",
+        command: null,
+      },
+      {
+        kind: "mcp-server",
+        name: "cursor/db",
+        state: "env-missing",
+        message: "cursor/db needs DB_URL, DB_PASSWORD on the box. Set them in the env of db in ~/.cursor/mcp.json on the box.",
+        command: null,
+      },
+    ]);
+  });
+
+  test("a failed MCP server check is an issue", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const report = await composeBriefStatus(
+      [
+        box(calls, {
+          auth: { status: async () => ({ providers: [] }), mcpStatus: async () => [] },
+          mcpServers: {
+            check: async () => {
+              throw new Error("the box MCP file is not a JSON object");
+            },
+          },
+        }),
+      ],
+      checkedAt,
+    );
+
+    expect(report.boxes[0]!.issues).toEqual([
+      { kind: "check-failed", name: "MCP servers", state: "failed", message: "box: the box MCP file is not a JSON object", command: null },
+    ]);
+  });
+
   test("quotes a name with other characters in the fix command", async () => {
     const calls: Calls = { reads: [], mutations: [] };
     const report = await composeBriefStatus(

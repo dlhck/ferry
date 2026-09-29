@@ -6,7 +6,7 @@
 
 <img src="https://raw.githubusercontent.com/dlhck/ferry/main/docs/menubar.png" width="401" alt="The Ferry menu bar app on macOS. It shows five items on the box fsn1 that need action: two MCP logins, and three tools with the wrong version or not on the box.">
 
-Ferry keeps the agent setup of your machine in sync with one or more Linux boxes where remote agents run. Your machine is the source of truth. Ferry publishes your skills, `~/AGENTS.md`, Claude subagents and commands, some Claude and Codex settings, and remote MCP servers to a private git repository, the snapshot. Each box clones the snapshot and links its harness directories to it. Ferry also installs and updates the agent CLIs and your tools on each box, and starts logins there, but it never copies a login.
+Ferry keeps the agent setup of your machine in sync with one or more Linux boxes where remote agents run. Your machine is the source of truth. Ferry publishes your skills, `~/AGENTS.md`, Claude subagents and commands, some Claude and Codex settings, and remote and stdio MCP servers to a private git repository, the snapshot. Each box clones the snapshot and links its harness directories to it. Ferry also installs and updates the agent CLIs and your tools on each box, and starts logins there, but it never copies a login.
 
 ```
 your machine ── ferry sync ──> private snapshot repo ──> box a, box b, ...
@@ -58,7 +58,7 @@ Use `--host <tailscale host> --ssh-user <user>` instead of `--ssh-destination` f
 | `ferry install` | Install gh, the agent CLIs, the tools of the config, and Ferry on a box. |
 | `ferry sync` | Publish the snapshot and apply it on all boxes, or on the boxes of `--box`. |
 | `ferry watch` | Sync each accepted change. `ferry watch install` runs it as a launchd or systemd user service. |
-| `ferry status` | Show the state of the snapshot and of each box. `--brief` shows only what needs action: offline boxes, logins, MCP logins, and tool drift. |
+| `ferry status` | Show the state of the snapshot and of each box. `--brief` shows only what needs action: offline boxes, logins, MCP logins, stdio MCP servers that lack something on the box, and tool drift. |
 | `ferry menubar install\|uninstall` | On macOS, install a menu bar app that shows the report of `ferry status --brief` for each box. The app reads `~/.ferry/status.json`, so `ferry watch` must run. It also shows the ports of each running `ferry tunnel --follow`. |
 | `ferry auth <tool>` | Start a login for `gh`, `claude`, `codex`, `cursor`, or a config tool with login keys on the box. `--mcp <server>` logs in to an MCP server. `--mcp <tool>/<server>`, the name in `ferry status`, also works. |
 | `ferry update` | Update the agent tools on the boxes and on this machine. |
@@ -79,6 +79,7 @@ Add `--json` to any command for scripts and agents: stdout then has only JSON, a
 
 - Logins, credential files, tokens, API keys, `.env` files, and whole settings files never leave the machine that has them. A login starts on the box, and its token stays there.
 - Before each publish, Ferry checks the carried files against deny rules: secret file names, private keys, token content, secret keys in JSON, YAML, and TOML, and executables. A match stops the sync. The error names the file, never the value.
+- For a stdio MCP server, Ferry carries the command, the arguments, and the names of the `env` keys, never their values. Set the values in the `env` of the server on the box. Ferry keeps them. An argument that looks like a token or secret stops the sync. The error names the server and the rule. Ferry does not carry a server whose command or arguments refer to a path in your home, and it never installs a command. `ferry status --brief` names each missing env key, each command that is not on the box, and each server that Ferry did not carry.
 - Ferry forwards your SSH agent to a box only for the snapshot checks and updates and for the Claude plugin installs. A box with `git_auth = "box"` gets no agent and reads the snapshot with its own read-only deploy key. See `ferry box add --help`.
 - Boxes do not trust each other. Ferry connects to each box from your machine. `ferry move` between two boxes goes through your machine, with the same deny rules.
 - Ferry opens no public port and never turns off SSH host-key checks. It runs commands with your SSH user, so use a box and a user that you trust with the agents that run there.
