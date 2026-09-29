@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { runCli } from "../src/cli.ts";
 import {
   isNewer,
@@ -29,7 +29,14 @@ afterEach(async () => {
 
 /** Fakes that record each fetch, question, and command. */
 function fakes(options: { latest?: string | null; choice?: UpdateChoice; exitCode?: number; now?: number } = {}) {
-  const record = { fetches: 0, questions: [] as string[], runs: [] as (readonly string[])[], lines: [] as string[] };
+  const record = {
+    fetches: 0,
+    questions: [] as string[],
+    runs: [] as (readonly string[])[],
+    serviceRuns: [] as (readonly string[])[],
+    lines: [] as string[],
+    warnings: [] as string[],
+  };
   let now = options.now ?? 1_000;
   const dependencies: Partial<SelfUpdateDependencies> = {
     version: "0.4.0",
@@ -48,7 +55,12 @@ function fakes(options: { latest?: string | null; choice?: UpdateChoice; exitCod
       record.runs.push(argv);
       return options.exitCode ?? 0;
     },
+    runService: async (argv) => {
+      record.serviceRuns.push(argv);
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
     writeLine: (line) => record.lines.push(line),
+    warn: (line) => record.warnings.push(line),
   };
   return { record, dependencies, advance: (ms: number) => (now += ms) };
 }
@@ -69,6 +81,16 @@ describe("offerSelfUpdate", () => {
       "Updated Ferry to 0.5.0. Run the command again.",
       "Run ferry update to put Ferry 0.5.0 on the boxes.",
     ]);
+  });
+
+  test("an accepted update refreshes the installed services", async () => {
+    const update = serviceFakes("linux", {
+      [join(home, ".config/systemd/user/ferry-watch.service")]: systemdService(SCRIPT_BINARY, "watch"),
+    }, { choice: "update" });
+
+    expect(await offerSelfUpdate(update.dependencies)).toBe(true);
+    expect(update.record.serviceRuns).toEqual([["systemctl", "--user", "restart", "ferry-watch.service"]]);
+    expect(update.record.lines).toContain("Restarted the watch service.");
   });
 
   test("a failed update lets the old version run the command", async () => {
@@ -129,15 +151,142 @@ describe("offerSelfUpdate", () => {
 describe("runSelfUpdate", () => {
   test("installs a newer release without a question", async () => {
     const { record, dependencies } = fakes();
-    expect(await runSelfUpdate(dependencies)).toEqual({ current: "0.4.0", latest: "0.5.0", updated: true });
+    expect(await runSelfUpdate(dependencies)).toEqual({ current: "0.4.0", latest: "0.5.0", updated: true, services: [] });
     expect(record.questions).toEqual([]);
     expect(record.runs).toEqual([updateCommand("0.5.0", SCRIPT_BINARY)]);
+  });
+
+  test("prints nothing about services when none are installed", async () => {
+    const update = serviceFakes("linux", {});
+    expect((await runSelfUpdate(update.dependencies)).services).toEqual([]);
+    expect(update.record.serviceRuns).toEqual([]);
+    expect(update.record.lines).toEqual(["Updated Ferry to 0.5.0. Run ferry update to put it on the boxes."]);
+  });
+
+  for (const platform of ["darwin", "linux"] as const) {
+    test(`restarts the watch and two tunnel services on ${platform}`, async () => {
+      const files = platform === "darwin"
+        ? {
+            [join(home, "Library/LaunchAgents/dev.ferry.watch.plist")]: launchdService(SCRIPT_BINARY, "watch"),
+            [join(home, "Library/LaunchAgents/dev.ferry.tunnel.fsn1.plist")]: launchdService(SCRIPT_BINARY, "tunnel", "--follow", "--box", "fsn1"),
+            [join(home, "Library/LaunchAgents/dev.ferry.tunnel.hel1.plist")]: launchdService(SCRIPT_BINARY, "tunnel", "--follow", "--box", "hel1"),
+          }
+        : {
+            [join(home, ".config/systemd/user/ferry-watch.service")]: systemdService(SCRIPT_BINARY, "watch"),
+            [join(home, ".config/systemd/user/ferry-tunnel-fsn1.service")]: systemdService(SCRIPT_BINARY, "tunnel --follow --box fsn1"),
+            [join(home, ".config/systemd/user/ferry-tunnel-hel1.service")]: systemdService(SCRIPT_BINARY, "tunnel --follow --box hel1"),
+          };
+      const update = serviceFakes(platform, files);
+
+      expect((await runSelfUpdate(update.dependencies)).services).toEqual([
+        { service: "watch", action: "restarted", message: "Restarted the watch service." },
+        { service: "tunnel:fsn1", action: "restarted", message: "Restarted the tunnel service of fsn1." },
+        { service: "tunnel:hel1", action: "restarted", message: "Restarted the tunnel service of hel1." },
+      ]);
+      expect(update.record.serviceRuns).toEqual(platform === "darwin" ? [
+        ["launchctl", "kickstart", "-k", "gui/501/dev.ferry.watch"],
+        ["launchctl", "kickstart", "-k", "gui/501/dev.ferry.tunnel.fsn1"],
+        ["launchctl", "kickstart", "-k", "gui/501/dev.ferry.tunnel.hel1"],
+      ] : [
+        ["systemctl", "--user", "restart", "ferry-watch.service"],
+        ["systemctl", "--user", "restart", "ferry-tunnel-fsn1.service"],
+        ["systemctl", "--user", "restart", "ferry-tunnel-hel1.service"],
+      ]);
+    });
+  }
+
+  test("skips a service that runs another Ferry", async () => {
+    const update = serviceFakes("linux", {
+      [join(home, ".config/systemd/user/ferry-watch.service")]: systemdService("/home/op/src/ferry", "watch"),
+    });
+
+    expect((await runSelfUpdate(update.dependencies)).services).toEqual([{
+      service: "watch",
+      action: "skipped",
+      message: "Skipped the watch service: it runs /home/op/src/ferry.",
+    }]);
+    expect(update.record.serviceRuns).toEqual([]);
+  });
+
+  test("recognizes the bun and script form as this Ferry", async () => {
+    const bun = "/home/op/.bun/bin/bun";
+    const script = "/home/op/src/ferry/src/cli.ts";
+    const update = serviceFakes("linux", {
+      [join(home, ".config/systemd/user/ferry-watch.service")]: systemdService(`${bun}\" \"${script}`, "watch"),
+    }, { execPath: bun, scriptPath: script });
+
+    expect((await runSelfUpdate(update.dependencies)).services[0]?.action).toBe("restarted");
+  });
+
+  test("runs the new Ferry to update an installed release menu bar app", async () => {
+    const plist = join(home, "Library/LaunchAgents/dev.ferry.menubar.plist");
+    const update = serviceFakes("darwin", { [plist]: menuBarService("release") }, { json: true });
+    const dependencies = {
+      ...update.dependencies,
+      runService: async (argv: readonly string[]) => {
+        update.record.serviceRuns.push(argv);
+        return { exitCode: 0, stdout: JSON.stringify({ ok: true, result: {}, warnings: [], error: null }), stderr: "" };
+      },
+    };
+
+    expect((await runSelfUpdate(dependencies)).services).toEqual([{
+      service: "menubar",
+      action: "updated",
+      message: "Updated the menu bar app to 0.5.0.",
+    }]);
+    expect(update.record.serviceRuns).toEqual([[SCRIPT_BINARY, "menubar", "install", "--json"]]);
+  });
+
+  test("skips a menu bar app installed from --app", async () => {
+    const plist = join(home, "Library/LaunchAgents/dev.ferry.menubar.plist");
+    const update = serviceFakes("darwin", { [plist]: menuBarService("local") });
+
+    expect((await runSelfUpdate(update.dependencies)).services).toEqual([{
+      service: "menubar",
+      action: "skipped",
+      message: "Skipped the menu bar app: --app installed a local build.",
+    }]);
+    expect(update.record.serviceRuns).toEqual([]);
+  });
+
+  test("replaces a legacy menu bar app and says its source was not recorded", async () => {
+    const plist = join(home, "Library/LaunchAgents/dev.ferry.menubar.plist");
+    const update = serviceFakes("darwin", { [plist]: "<key>Label</key><string>dev.ferry.menubar</string>" });
+
+    expect((await runSelfUpdate(update.dependencies)).services).toEqual([{
+      service: "menubar",
+      action: "updated",
+      message: "Updated the menu bar app to 0.5.0. Its service did not record whether --app installed it.",
+    }]);
+    expect(update.record.serviceRuns).toEqual([[SCRIPT_BINARY, "menubar", "install"]]);
+  });
+
+  test("a failed restart is a warning and does not fail the update", async () => {
+    const update = serviceFakes("linux", {
+      [join(home, ".config/systemd/user/ferry-watch.service")]: systemdService(SCRIPT_BINARY, "watch"),
+    });
+    const dependencies = {
+      ...update.dependencies,
+      runService: async (argv: readonly string[]) => {
+        update.record.serviceRuns.push(argv);
+        return { exitCode: 1, stdout: "", stderr: "unit failed" };
+      },
+    };
+
+    const result = await runSelfUpdate(dependencies);
+    expect(result.updated).toBe(true);
+    expect(result.services).toEqual([{
+      service: "watch",
+      action: "failed",
+      message: "Warning: Could not restart the watch service: unit failed",
+    }]);
+    expect(update.record.warnings).toEqual(["Warning: Could not restart the watch service: unit failed"]);
   });
 
   test("reads the latest release also within a day, and does nothing when this is the latest", async () => {
     const { record, dependencies } = fakes({ latest: "0.4.0" });
     await runSelfUpdate(dependencies);
-    expect(await runSelfUpdate(dependencies)).toEqual({ current: "0.4.0", latest: "0.4.0", updated: false });
+    expect(await runSelfUpdate(dependencies)).toEqual({ current: "0.4.0", latest: "0.4.0", updated: false, services: [] });
     expect(record.fetches).toBe(2);
     expect(record.runs).toEqual([]);
     expect(record.lines.at(-1)).toBe("Ferry 0.4.0 is the latest version.");
@@ -232,7 +381,7 @@ describe("ferry CLI", () => {
       ...quiet,
       isInteractive: () => true,
       offerSelfUpdate: offer,
-      runSelfUpdate: async () => ({ current: "0.4.0", latest: "0.4.0", updated: false }),
+      runSelfUpdate: async () => ({ current: "0.4.0", latest: "0.4.0", updated: false, services: [] }),
     });
     expect(offers).toEqual([]);
   });
@@ -240,13 +389,66 @@ describe("ferry CLI", () => {
   test("self-update --json prints the result", async () => {
     const out: string[] = [];
     await runCli(["self-update", "--json"], {
-      runSelfUpdate: async () => ({ current: "0.4.0", latest: "0.5.0", updated: true }),
+      runSelfUpdate: async () => ({ current: "0.4.0", latest: "0.5.0", updated: true, services: [] }),
       writeLine: (line) => out.push(line),
     });
     expect(JSON.parse(out[0] ?? "")).toMatchObject({
       command: "self-update",
       ok: true,
-      result: { current: "0.4.0", latest: "0.5.0", updated: true },
+      result: { current: "0.4.0", latest: "0.5.0", updated: true, services: [] },
     });
   });
+
+  test("self-update --json puts a failed service action in warnings", async () => {
+    const out: string[] = [];
+    await runCli(["self-update", "--json"], {
+      runSelfUpdate: async (dependencies) => {
+        dependencies?.warn?.("Warning: Could not restart the watch service: unit failed");
+        return {
+          current: "0.4.0",
+          latest: "0.5.0",
+          updated: true,
+          services: [{
+            service: "watch",
+            action: "failed",
+            message: "Warning: Could not restart the watch service: unit failed",
+          }],
+        };
+      },
+      writeLine: (line) => out.push(line),
+    });
+
+    expect(JSON.parse(out[0] ?? "").warnings).toEqual(["Warning: Could not restart the watch service: unit failed"]);
+  });
 });
+
+function serviceFakes(
+  platform: "darwin" | "linux",
+  files: Readonly<Record<string, string>>,
+  options: { choice?: UpdateChoice; execPath?: string; scriptPath?: string; json?: boolean } = {},
+) {
+  const update = fakes({ choice: options.choice });
+  Object.assign(update.dependencies, {
+    platform,
+    uid: 501,
+    execPath: options.execPath ?? SCRIPT_BINARY,
+    scriptPath: options.scriptPath ?? "/home/op/src/ferry/src/cli.ts",
+    json: options.json ?? false,
+    exists: (path: string) => files[path] !== undefined,
+    readFile: (path: string) => files[path] ?? "",
+    readDirectory: (path: string) => Object.keys(files).filter((file) => dirname(file) === path).map((file) => basename(file)),
+  });
+  return update;
+}
+
+function launchdService(...args: string[]): string {
+  return `<key>ProgramArguments</key><array>${args.map((arg) => `<string>${arg}</string>`).join("")}</array>`;
+}
+
+function systemdService(executable: string, args: string): string {
+  return `ExecStart=\"${executable}\" ${args}\n`;
+}
+
+function menuBarService(source: "local" | "release"): string {
+  return `<key>Label</key><string>dev.ferry.menubar</string><key>FERRY_MENUBAR_SOURCE</key><string>${source}</string>`;
+}
