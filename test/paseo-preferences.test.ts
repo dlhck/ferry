@@ -132,6 +132,39 @@ test("sync carries the preferences and reports a failure without blocking the co
   }
 });
 
+test("a failed box command never puts its message, the instruction text, or another value into the output", async () => {
+  const path = home({ daemon: { appendSystemPrompt: prompt } });
+  const session = "session-" + "q7Z-hunter-2x";
+  const failing: readonly ((command: string) => boolean)[] = [
+    (command) => command.includes("cat '.paseo/config.json'"),
+    (command) => command.includes("appendSystemPrompt"),
+    (command) => command === "paseo daemon reload",
+  ];
+  for (const fails of failing) {
+    const lines: string[] = [];
+    const warnings: string[] = [];
+    const result = await runSync({ home: path, publish: false }, {
+      publisher: () => "operator",
+      readConfig: () => ({ version: 1, publisher: "operator", snapshotUrl: "snapshot.git",
+        host: { tailscale: "box", sshUser: "user" }, integrations: { paseo: true } }),
+      createLink: () => ({ run: async (command) => {
+        // A remote shell can echo the failed command, which holds the instruction text.
+        if (fails(command)) return { ok: false, error: { origin: "box", code: "command-failed", message: `${command} ${session}` } };
+        return { ok: true, address: "box", stdout: command.startsWith("printf") ? "/home/user\n" : command.includes("cat '.paseo/config.json'") ? "M" : "", stderr: "" };
+      } }),
+      apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
+      acquireLock: () => () => {}, adopt: () => {}, writePlan: () => {}, writeLine: (line) => lines.push(line),
+      warn: (line) => warnings.push(line),
+    });
+    expect(result.boxes[0]?.failure).toBeUndefined();
+    expect(warnings.some((line) => line.includes("could not carry the Paseo preferences"))).toBe(true);
+    for (const output of [warnings.join("\n"), lines.join("\n"), JSON.stringify(result)]) {
+      expect(output).not.toContain(prompt);
+      expect(output).not.toContain(session);
+    }
+  }
+});
+
 test("watch detects preference-only changes with its real observer", async () => {
   const path = home({ daemon: { appendSystemPrompt: prompt } });
   mkdirSync(join(path, ".ferry"));

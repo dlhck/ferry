@@ -704,12 +704,18 @@ export async function carryPaseoPreferences(link: IntegrationLink, preferences: 
   }
   if (providers === undefined && appendSystemPrompt === undefined) return { warnings, changed: false };
 
-  const current = await boxRun(link, readCommand(CONFIG_FILE), `Ferry could not read ~/${CONFIG_FILE} on the box`);
+  // The write command holds the instruction text, and a box can echo a failed command. Report only the action.
+  const run = async (command: string, what: string): Promise<string> => {
+    const result = await link.run(command);
+    if (!result.ok) throw new PaseoError(what);
+    return result.stdout;
+  };
+  const current = await run(readCommand(CONFIG_FILE), `Ferry could not read ~/${CONFIG_FILE} on the box`);
   const text = current.startsWith("F") ? current.slice(1) : null;
   const merged = mergePreferences(text, providers, appendSystemPrompt);
   if (merged === text) return { warnings, changed: false };
-  await boxRun(link, writeCommand(CONFIG_FILE, merged), `Ferry could not write ~/${CONFIG_FILE} on the box`);
-  await boxRun(link, RELOAD_COMMAND, "paseo daemon reload failed on the box");
+  await run(writeCommand(CONFIG_FILE, merged), `Ferry could not write the Paseo preferences to ~/${CONFIG_FILE} on the box`);
+  await run(RELOAD_COMMAND, "paseo daemon reload failed on the box after Ferry wrote the Paseo preferences");
   return { warnings, changed: true };
 }
 
