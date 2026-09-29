@@ -113,11 +113,12 @@ The relay is off by default. Set `paseo_relay` in `[box.<name>.integrations]` to
 
 ## Agent skill
 
-The [`skills/ferry`](skills/ferry/SKILL.md) skill tells agents how to work with Ferry on both machines, for example not to edit a Ferry-managed file on the box. Install it on this machine, then run `ferry sync`:
+The [`skills/ferry`](skills/ferry/SKILL.md) skill tells agents how to work with Ferry on both machines, for example not to edit a Ferry-managed file on the box. Each Ferry build has the skill of its version, so Ferry installs it without network access.
 
-```sh
-ferry skills add dlhck/ferry --skill ferry
-```
+- `ferry init` writes the skill to `~/.agents/skills/ferry`. The snapshot carries it to the boxes.
+- `ferry self-update` writes the skill of the new version. Existing installs get the skill at their next self-update.
+- If the skill folder has local changes, or another tool wrote it, Ferry does not change it and prints a note. To get the bundled skill again, remove the folder and run `ferry self-update` or `ferry init`.
+- `ferry init --no-skill` does not install the skill. Ferry records the choice in `~/.ferry/skill.json`, and `ferry self-update` then skips the skill too. Run `ferry init` without the flag to turn the skill on again.
 
 ## Development
 
