@@ -179,7 +179,7 @@ ferry skills add dlhck/ferry --skill ferry
 
 ## Integrations
 
-An integration runs one extra service on the box. Paseo is the only integration. It is off by default. When it is off, Ferry prints nothing about it.
+An integration adds a service on the box, commands on the operator machine, or both. Paseo runs a service on the box. Sherlock adds commands on the operator machine. Each one is off by default. When it is off, Ferry prints nothing about it.
 
 - `ferry integrations` lists each integration, shows if it is enabled, and shows the local app version that the box gets. It changes nothing.
 - `ferry integrations enable paseo`, `ferry integrations disable paseo`, and the Paseo step of `ferry update` need the operator. Run them with `--dry-run` only, and tell the operator the command. An update restarts the Paseo daemon and stops the agents that run on the box.
@@ -202,6 +202,16 @@ When Paseo is enabled for a box, its `ferry status` block has an `Integrations` 
 | `Listen:`, `state.listen`, `state.relay` | The daemon must listen on `127.0.0.1:6767` with the relay off. |
 | `Providers:`, `state.providers` | The agent providers on the box. Sync skips a profile whose provider is `unavailable`. |
 | `WARNING` lines, `warnings` | A problem that the operator must fix, such as a version difference or a daemon that is not running. Tell the operator. |
+
+### Sherlock
+
+[Sherlock](https://github.com/michaelbromley/sherlock) is a read-only database query CLI on the operator machine. `ferry sherlock` exists only when `[integrations] sherlock = true` and `sherlock` is on the PATH. Without `sherlock`, `ferry integrations enable sherlock` stops and prints the install command.
+
+- `ferry sherlock add <name> [--box <box>] --target <target> --type <type> [--database <name>] [--username <user>] [--ssl <mode>] [--password-stdin | --password-env <var>] [--force]` runs `sherlock connection add` with `--tunnel-command "ferry tunnel --box <box> <target>:{{port}}"`. The target is a box port, such as `5432`, or a host and port that the box can reach, such as `db.example:5432`.
+- Do not type a password into a command. On a terminal, Ferry asks for it. Else tell the operator to run the command, or use `--password-env`.
+- Then query with `sherlock -c <name> ...`. Sherlock opens the tunnel on the first query and closes it when idle.
+- Ferry records `{ name, box, target }` in `~/.ferry/sherlock.json`. Do not edit it.
+- Full `ferry status` has `Integrations on this machine:` with one line `<name>  <box>:<target>  <state>` for each recorded connection that `sherlock connection list` still has. `ferry status --json` has `integrations.sherlock.state.connections: [{ name, box, target, state, error }]`. `state` is `reachable`, `unreachable` (the box cannot connect to the target), `box-offline`, or `unknown-box`. `--brief` does not check Sherlock.
 
 ## JSON output
 

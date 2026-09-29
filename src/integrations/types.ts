@@ -9,7 +9,7 @@ import type { IntegrationsConfig } from "../config.ts";
 import type { Link } from "../link.ts";
 import type { Progress } from "../progress.ts";
 
-export type IntegrationId = "paseo";
+export type IntegrationId = "paseo" | "sherlock";
 
 /** The box commands of an integration need only `run`. Tests inject a fake. */
 export type IntegrationLink = Pick<Link, "run">;
@@ -76,6 +76,8 @@ export interface IntegrationBoxPart {
 export interface IntegrationOperatorPart {
   /** True when the integration can run on this machine, for example when its executable is on the PATH. */
   available(): boolean;
+  /** The command that installs the integration on this machine. `ferry integrations enable` stops with it when `available()` is false. */
+  readonly install?: string;
   /** Add the commands of the integration to the Ferry CLI. Ferry calls it only when the integration is enabled and available. */
   registerCommands?(program: Command): void;
   /** Check the integration on this machine for `ferry status`. Ferry calls it only when the integration is enabled and available. */

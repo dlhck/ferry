@@ -70,7 +70,7 @@ export type MoveDependencies = {
 };
 
 /** The line for `--remove`. Ferry never removes the source project from an integration. */
-const SOURCE_HINTS: Record<IntegrationId, (path: string, side: string) => string> = { paseo: paseoSourceHint };
+const SOURCE_HINTS: Partial<Record<IntegrationId, (path: string, side: string) => string>> = { paseo: paseoSourceHint };
 
 export class MoveError extends Error {
   constructor(message: string) {
@@ -353,7 +353,10 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       writeLine(warning);
     }
     if (input.remove) {
-      for (const integration of enabled(sourceBox ?? destinationBox)) writeLine(SOURCE_HINTS[integration.id](`~/${rel}`, source.label));
+      for (const integration of enabled(sourceBox ?? destinationBox)) {
+        const hint = SOURCE_HINTS[integration.id];
+        if (hint) writeLine(hint(`~/${rel}`, source.label));
+      }
     }
     return { ...result, trash };
   } finally {
