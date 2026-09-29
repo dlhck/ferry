@@ -95,6 +95,38 @@ describe("operator config", () => {
     expect(() => readConfig(home)).toThrow("invalid boolean");
   });
 
+  test("reads the [status] limits", () => {
+    const home = homeWithConfig([...BASE, "", "[status]", "disk_free_percent = 15", "disk_free_gib = 2.5", "memory_available_percent = 0"]);
+
+    expect(readConfig(home)?.status).toEqual({ diskFreePercent: 15, diskFreeGiB: 2.5, memoryAvailablePercent: 0 });
+    expect(readConfig(homeWithConfig(BASE))?.status).toBeUndefined();
+  });
+
+  test("refuses a [status] limit that is not a number, or a percent above 100", () => {
+    expect(() => readConfig(homeWithConfig([...BASE, "", "[status]", 'disk_free_gib = "5"']))).toThrow(
+      "invalid value for disk_free_gib in [status]",
+    );
+    expect(() => readConfig(homeWithConfig([...BASE, "", "[status]", "disk_free_gib = -1"]))).toThrow("Use a number of 0 or more.");
+    expect(() => readConfig(homeWithConfig([...BASE, "", "[status]", "memory_available_percent = 101"]))).toThrow(
+      "Use a number from 0 to 100.",
+    );
+    expect(() => readConfig(homeWithConfig([...BASE, "", "[status]", "load = 2"]))).toThrow("unknown key load in [status]");
+  });
+
+  test("writing the config keeps the [status] limits", () => {
+    const home = homeWithConfig(BASE);
+
+    writeConfig({
+      version: 1,
+      publisher: "operator",
+      snapshotUrl: "snapshot.git",
+      host: { tailscale: "box", sshUser: "ferry" },
+      status: { diskFreeGiB: 2.5, memoryAvailablePercent: 5 },
+    }, home);
+
+    expect(readConfig(home)?.status).toEqual({ diskFreeGiB: 2.5, memoryAvailablePercent: 5 });
+  });
+
   test("writing the config keeps the watch update switch", () => {
     const home = homeWithConfig(BASE);
 

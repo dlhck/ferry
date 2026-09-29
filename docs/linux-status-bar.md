@@ -26,13 +26,18 @@ The module shows the number of items that need action. Its tooltip lists the ite
           "message": "claude/linear needs a login.",
           "command": "ferry auth claude --mcp linear --box box-a"
         }
-      ]
+      ],
+      "resources": {
+        "disk": { "totalKiB": 104857600, "freeKiB": 52428800 },
+        "memory": { "totalKiB": 16777216, "availableKiB": 8388608 },
+        "load": { "one": 0.5, "five": 0.4, "fifteen": 0.3, "cpus": 8 }
+      }
     }
   ]
 }
 ```
 
-`command` is `null` when a person must act on the box. An offline box has `online: false`, the reason in `error`, and no issues.
+`command` is `null` when a person must act on the box. An offline box has `online: false`, the reason in `error`, no issues, and `resources: null`. Low disk or memory is an issue of the kind `resource`, so the script counts it.
 
 ## States
 

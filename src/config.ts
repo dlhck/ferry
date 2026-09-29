@@ -17,6 +17,7 @@ export type OperatorConfig = {
   readonly host: OperatorHostConfig;
   readonly harness?: readonly unknown[];
   readonly update?: UpdateConfig;
+  readonly status?: StatusLimitsConfig;
   readonly integrations?: IntegrationsConfig;
   readonly tools?: ToolsConfig;
 };
@@ -104,6 +105,25 @@ export type IntegrationsConfig = {
 /** `watch` turns on the daily tool update in `ferry watch`. */
 export type UpdateConfig = { readonly watch?: boolean };
 
+/**
+ * The `[status]` limits of `ferry status --brief`. It reports a box when the
+ * free disk of its home file system is below both `diskFreePercent` and
+ * `diskFreeGiB`, or its available memory is below `memoryAvailablePercent`.
+ * A limit of 0 turns its part of the check off.
+ */
+export type StatusLimitsConfig = {
+  readonly diskFreePercent?: number;
+  readonly diskFreeGiB?: number;
+  readonly memoryAvailablePercent?: number;
+};
+
+/** TOML key to parsed property for the `[status]` table. */
+const STATUS_KEYS = {
+  disk_free_percent: "diskFreePercent",
+  disk_free_gib: "diskFreeGiB",
+  memory_available_percent: "memoryAvailablePercent",
+} as const;
+
 export type OperatorHostConfig =
   | {
       readonly transport?: "tailscale";
@@ -131,6 +151,7 @@ export type PartialOperatorConfig = {
   };
   readonly harness?: readonly unknown[];
   readonly update?: UpdateConfig;
+  readonly status?: StatusLimitsConfig;
   readonly integrations?: IntegrationsConfig;
   readonly tools?: ToolsConfig;
 };
@@ -148,6 +169,7 @@ const SECTION_KEYS: Record<string, readonly string[]> = {
   "[host]": ["transport", "tailscale", "ssh_user", "destination"],
   "[[harness]]": Object.keys(HARNESS_KEYS),
   "[update]": ["watch"],
+  "[status]": Object.keys(STATUS_KEYS),
   "[integrations]": ["paseo", "paseo_relay", "paseo_auto_archive", "sherlock"],
   "[tools]": BUILTIN_TOOLS.map((tool) => tool.id),
 };
@@ -203,6 +225,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     };
     harness: Record<string, string>[];
     update?: { watch?: boolean };
+    status?: Record<string, number>;
     integrations?: IntegrationsConfig;
     tools?: Record<string, ToolPolicy | Record<string, unknown>>;
   } = { host: {}, harness: [] };
@@ -226,7 +249,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       hasHost = true;
       continue;
     }
-    if (line === "[update]" || line === "[integrations]" || line === "[tools]") {
+    if (line === "[update]" || line === "[status]" || line === "[integrations]" || line === "[tools]") {
       section = line;
       harness = null;
       tool = null;
@@ -301,6 +324,15 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     if (key === "version") {
       if (section !== "" || encoded !== "1") throw new ConfigError(`unsupported config at ${path}`);
       config.version = 1;
+      continue;
+    }
+    if (section === "[status]") {
+      const value = /^\d+(?:\.\d+)?$/.test(encoded) ? Number(encoded) : NaN;
+      const percent = key.endsWith("_percent");
+      if (!(value >= 0) || (percent && value > 100)) {
+        throw new ConfigError(`invalid value for ${key} in [status] of ${path}. Use a number${percent ? " from 0 to 100" : " of 0 or more"}.`);
+      }
+      config.status = { ...config.status, [STATUS_KEYS[key as keyof typeof STATUS_KEYS]]: value };
       continue;
     }
     if (section === "[update]" || section === "[integrations]") {
@@ -505,6 +537,7 @@ export function writeConfig(config: OperatorConfig | BoxesOperatorConfig, home =
       ...(config.update?.watch !== undefined
         ? ["[update]", `watch = ${config.update.watch}`, ""]
         : []),
+      ...statusLines(config.status),
       ...integrationLines(config.integrations, "integrations"),
       ...toolLines(config.tools ?? {}),
       ...("boxes" in config ? config.boxes.flatMap(boxLines) : []),
@@ -512,6 +545,13 @@ export function writeConfig(config: OperatorConfig | BoxesOperatorConfig, home =
     { mode: 0o600 },
   );
   renameSync(temporaryPath, path);
+}
+
+function statusLines(config: StatusLimitsConfig | undefined): string[] {
+  const lines = Object.entries(STATUS_KEYS).flatMap(([key, property]) =>
+    config?.[property] === undefined ? [] : [`${key} = ${config[property]}`],
+  );
+  return lines.length === 0 ? [] : ["[status]", ...lines, ""];
 }
 
 function integrationLines(config: IntegrationsConfig | undefined, table: string): string[] {
