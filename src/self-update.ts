@@ -166,7 +166,10 @@ async function refreshInstalledServices(
   return results;
 }
 
-function installedServices(dependencies: SelfUpdateDependencies): readonly {
+/** The installed watch and tunnel services. `ferry doctor` also reads them. */
+export function installedServices(
+  dependencies: Pick<SelfUpdateDependencies, "platform" | "home" | "exists" | "readDirectory">,
+): readonly {
   service: UserService;
   box?: string;
   path: string;
@@ -306,12 +309,14 @@ async function updateMenuBar(
   };
 }
 
-function currentFerryCommand(dependencies: SelfUpdateDependencies): readonly string[] {
+/** The command that runs this Ferry: the binary, or Bun and the Ferry script. */
+export function currentFerryCommand(dependencies: Pick<SelfUpdateDependencies, "execPath" | "scriptPath">): readonly string[] {
   if (!/^bun(?:\.[^.]+)?$/.test(basename(dependencies.execPath))) return [dependencies.execPath];
   return dependencies.scriptPath === undefined ? [dependencies.execPath] : [dependencies.execPath, dependencies.scriptPath];
 }
 
-function serviceFerryCommand(
+/** The Ferry command of a service file, without the service arguments, or null when Ferry cannot read it. */
+export function serviceFerryCommand(
   body: string,
   serviceArgs: readonly string[],
   platform: NodeJS.Platform,
@@ -342,7 +347,7 @@ function menuBarSource(body: string): "local" | "release" | null {
   return source === "local" || source === "release" ? source : null;
 }
 
-function sameCommand(left: readonly string[], right: readonly string[]): boolean {
+export function sameCommand(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((part, index) => part === right[index]);
 }
 
