@@ -3,6 +3,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import type { IntegrationId } from "./integrations/types.ts";
 import type { LinkOptions } from "./link.ts";
 import { BUILTIN_TOOLS } from "./registry/builtin.ts";
 import type { ToolPolicy } from "./registry/types.ts";
@@ -92,10 +93,12 @@ export function toolPolicy(tools: ToolsConfig | undefined, id: string): ToolPoli
   return typeof entry === "string" ? entry : entry?.version;
 }
 
-/** Paseo and its relay are off unless their keys are true. */
+/** Paseo, its relay, and the carry of its auto-archive switch are off unless their keys are true. */
 export type IntegrationsConfig = {
   readonly paseo?: boolean;
   readonly paseo_relay?: boolean;
+  readonly paseo_auto_archive?: boolean;
+  readonly sherlock?: boolean;
 };
 
 /** `watch` turns on the daily tool update in `ferry watch`. */
@@ -145,7 +148,7 @@ const SECTION_KEYS: Record<string, readonly string[]> = {
   "[host]": ["transport", "tailscale", "ssh_user", "destination"],
   "[[harness]]": Object.keys(HARNESS_KEYS),
   "[update]": ["watch"],
-  "[integrations]": ["paseo", "paseo_relay"],
+  "[integrations]": ["paseo", "paseo_relay", "paseo_auto_archive", "sherlock"],
   "[tools]": BUILTIN_TOOLS.map((tool) => tool.id),
 };
 
@@ -579,7 +582,7 @@ export function withBoxes(
  * complete. With `box`, the key goes into `[box.<box>.integrations]` of a
  * config with box tables. Else it goes into `[integrations]`.
  */
-export function setIntegration(id: "paseo", enabled: boolean, home = homedir(), box?: string): void {
+export function setIntegration(id: IntegrationId, enabled: boolean, home = homedir(), box?: string): void {
   const config = readConfig(home);
   if (box !== undefined && config?.boxes) {
     const boxes = config.boxes.map((entry) =>

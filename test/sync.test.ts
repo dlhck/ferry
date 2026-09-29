@@ -332,8 +332,9 @@ describe("runSync", () => {
             Stop: [
               {
                 hooks: [
-                  { type: "command", command: "~/.claude/hooks/notify.sh" },
-                  { type: "command", command: "jq ." },
+                  { type: "command", command: "~/bin/notify.sh" },
+                  { type: "command", command: "~/.claude/hooks/format.sh" },
+                  { type: "command", command: "paseo hooks claude stop" },
                 ],
               },
             ],
@@ -355,7 +356,7 @@ describe("runSync", () => {
 
       expect(result.dryRun).toBe(true);
       expect(lines).toEqual([
-        `Skipped hook: hook hooks.Stop[0].hooks[0].command refers to ~/.claude/hooks/notify.sh, outside the managed set: ${join(home, ".claude", "settings.json")}`,
+        `Skipped hook: hook hooks.Stop[0].hooks[0].command refers to ~/bin/notify.sh, outside the managed set: ${join(home, ".claude", "settings.json")}`,
       ]);
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -598,7 +599,7 @@ describe("runSync", () => {
         join(home, ".claude.json"),
         JSON.stringify({
           mcpServers: {
-            repl: { command: "node", env: { KEY: "value" } },
+            repl: { command: join(home, "bin", "repl"), env: { KEY: "value" } },
             linear: { type: "http", url: "https://mcp.linear.app/mcp" },
           },
         }),
@@ -617,7 +618,7 @@ describe("runSync", () => {
       );
 
       expect(lines).toEqual([
-        `Skipped MCP server: MCP server repl is not a remote HTTPS server: ${join(home, ".claude.json")}`,
+        `Skipped MCP server: MCP server repl refers to a path in the home, which the box does not have: ${join(home, ".claude.json")}`,
       ]);
       expect(printed[0]?.mcpServers).toEqual(["claude/linear"]);
     } finally {

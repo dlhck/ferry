@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { readPaseoPreferences } from "../src/integrations/paseo.ts";
+import { boxPaseoPreferences, readPaseoPreferences } from "../src/integrations/paseo.ts";
 import { runSync, type SyncDependencies } from "../src/sync.ts";
 import { runWatch } from "../src/watch.ts";
 
@@ -51,7 +51,16 @@ describe("Paseo preference discovery", () => {
     }
     expect(refusal(home({ agents: { metadataGeneration: { providers: {} } } }))).toContain("agents.metadataGeneration.providers");
     expect(refusal(home({ daemon: { appendSystemPrompt: null } }))).toContain("daemon.appendSystemPrompt");
+    expect(refusal(home({ daemon: { autoArchiveAfterMerge: "yes" } }))).toContain("daemon.autoArchiveAfterMerge");
     expect(refusal(home({ agents: [] }))).toContain("agents");
+  });
+
+  test("reads the auto-archive switch and keeps it only for a box with paseo_auto_archive", () => {
+    const preferences = readPaseoPreferences(home({ daemon: { appendSystemPrompt: prompt, autoArchiveAfterMerge: false } }));
+    expect(preferences).toEqual({ appendSystemPrompt: prompt, autoArchiveAfterMerge: false });
+    expect(boxPaseoPreferences(preferences, { paseo: true })).toEqual({ appendSystemPrompt: prompt });
+    expect(boxPaseoPreferences(preferences, { paseo: true, paseo_auto_archive: false })).toEqual({ appendSystemPrompt: prompt });
+    expect(boxPaseoPreferences(preferences, { paseo: true, paseo_auto_archive: true })).toEqual(preferences);
   });
 
   test("refuses secrets in the shared instructions without the text or the value", () => {
@@ -85,7 +94,8 @@ test("dry runs show the preferences only for enabled boxes, without the instruct
     createLink: () => { throw new Error("must stay offline"); }, writeLine: (line) => lines.push(line),
   };
   const result = await runSync({ home: path, dryRun: true }, deps);
-  expect(result.boxes[0]?.plan.paseoPreferences).toEqual({ metadataProviders: providers, appendSystemPromptLength: prompt.length });
+  expect(result.boxes[0]?.plan.paseoPreferences)
+    .toEqual({ metadataProviders: providers, appendSystemPromptLength: prompt.length, autoArchiveAfterMerge: null });
   expect(result.boxes[1]?.plan.paseoPreferences).toBeNull();
   expect(JSON.stringify(result)).not.toContain(prompt);
   expect(lines.join("\n")).not.toContain(prompt);
@@ -177,4 +187,59 @@ test("watch detects preference-only changes with its real observer", async () =>
     readState: () => null, writeState: () => {},
   });
   expect(syncs).toBe(1);
+});
+
+function autoArchiveSync(path: string, autoArchive: boolean | undefined) {
+  const commands: string[] = [];
+  const run = runSync({ home: path, publish: false }, {
+    publisher: () => "operator",
+    readConfig: () => ({ version: 1, publisher: "operator", snapshotUrl: "snapshot.git",
+      host: { tailscale: "box", sshUser: "user" },
+      integrations: autoArchive === undefined ? { paseo: true } : { paseo: true, paseo_auto_archive: autoArchive } }),
+    createLink: () => ({ run: async (command) => {
+      commands.push(command);
+      const box = JSON.stringify({ daemon: { listen: "127.0.0.1:6767", autoArchiveAfterMerge: false } });
+      return { ok: true, address: "box", stdout: command.startsWith("printf") ? "/home/user\n" : command.includes("cat '.paseo/config.json'") ? `F${box}` : "", stderr: "" };
+    } }),
+    apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
+    acquireLock: () => () => {}, adopt: () => {}, writePlan: () => {}, writeLine: () => {}, warn: () => {},
+  });
+  return run.then(() => commands);
+}
+
+test("sync does not change the box auto-archive switch without paseo_auto_archive", async () => {
+  const path = home({ daemon: { autoArchiveAfterMerge: true } });
+  for (const setting of [undefined, false]) {
+    const commands = await autoArchiveSync(path, setting);
+    expect(commands.some((command) => command.includes("autoArchiveAfterMerge"))).toBe(false);
+    expect(commands).not.toContain("paseo daemon reload");
+  }
+});
+
+test("sync writes the local auto-archive switch with paseo_auto_archive and reloads the daemon", async () => {
+  const commands = await autoArchiveSync(home({ daemon: { autoArchiveAfterMerge: true } }), true);
+  const write = commands.find((command) => command.includes("autoArchiveAfterMerge"));
+  expect(write).toContain('"autoArchiveAfterMerge": true');
+  expect(write).toContain('"listen": "127.0.0.1:6767"');
+  expect(commands).toContain("paseo daemon reload");
+  expect(commands.some((command) => command.includes("restart"))).toBe(false);
+});
+
+test("a box override turns the auto-archive carry on for one box in the dry run", async () => {
+  const path = home({ daemon: { autoArchiveAfterMerge: true } });
+  const lines: string[] = [];
+  const result = await runSync({ home: path, dryRun: true }, {
+    publisher: () => "operator",
+    readConfig: () => ({
+      version: 1, publisher: "operator", snapshotUrl: "snapshot.git", integrations: { paseo: true },
+      boxes: [
+        { name: "on", host: { tailscale: "on", sshUser: "user" }, integrations: { paseo_auto_archive: true } },
+        { name: "off", host: { tailscale: "off", sshUser: "user" } },
+      ],
+    }),
+    createLink: () => { throw new Error("must stay offline"); }, writeLine: (line) => lines.push(line),
+  });
+  expect(result.boxes[0]?.plan.paseoPreferences?.autoArchiveAfterMerge).toBe(true);
+  expect(result.boxes[1]?.plan.paseoPreferences?.autoArchiveAfterMerge).toBeNull();
+  expect(lines.join("\n")).toContain("daemon.autoArchiveAfterMerge true");
 });

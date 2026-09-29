@@ -65,6 +65,11 @@ const DENY_RULES = {
     reason: "remote MCP server declaration with headers, environment values, arguments, or a credential",
     verdict: "refuse",
   },
+  "mcp-argument": {
+    code: "mcp-argument",
+    reason: "stdio MCP server command or argument with a token or secret",
+    verdict: "refuse",
+  },
   "mcp-name": {
     code: "mcp-name",
     reason: "MCP server name with characters other than letters, digits, dot, underscore, and hyphen",
@@ -95,7 +100,12 @@ const DENY_RULES = {
   },
   "mcp-local": {
     code: "mcp-local",
-    reason: "local or non-HTTPS MCP server; only remote HTTPS servers are carried",
+    reason: "MCP server that is neither a remote HTTPS server nor a stdio command",
+    verdict: "skip",
+  },
+  "mcp-path": {
+    code: "mcp-path",
+    reason: "stdio MCP server whose command or arguments refer to a path in the operator home",
     verdict: "skip",
   },
 } as const satisfies Record<string, DenyRule>;
@@ -222,10 +232,30 @@ export type SeedRoot = { readonly path: string; readonly files: readonly SeedFil
 export type SeedSettings = { readonly harness: string; readonly bytes: Uint8Array };
 
 /** One remote MCP server. Ferry carries nothing else from a declaration. */
-export type McpServer = { readonly name: string; readonly type: "http" | "sse"; readonly url: string };
+export type RemoteMcpServer = { readonly name: string; readonly type: "http" | "sse"; readonly url: string };
 
-/** The remote MCP servers one harness declares. `harness` is the harness id. */
+/**
+ * One stdio MCP server. `env` holds the names of its environment keys, never
+ * their values. The box sets the values.
+ */
+export type StdioMcpServer = {
+  readonly name: string;
+  readonly type: "stdio";
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly env: readonly string[];
+};
+
+export type McpServer = RemoteMcpServer | StdioMcpServer;
+
+/** The carried MCP servers one harness declares. `harness` is the harness id. */
 export type SeedMcp = { readonly harness: string; readonly servers: readonly McpServer[] };
+
+/**
+ * The carried MCP servers of one harness, and the names of its stdio servers
+ * that Ferry does not carry because they refer to a path in the operator home.
+ */
+export type McpSource = SeedMcp & { readonly nonPortable: readonly string[] };
 
 /** Something ferry found and did not import. Init prints these. */
 export type Leftover = Note & { readonly path: string };
@@ -238,7 +268,7 @@ export type Seed = {
   readonly roots: readonly SeedRoot[];
   /** The carried settings keys of each harness whose settings file exists. */
   readonly settings: readonly SeedSettings[];
-  /** The remote MCP servers of each harness that declares at least one. */
+  /** The carried MCP servers of each harness that declares at least one. */
   readonly mcp: readonly SeedMcp[];
   /** Content hash of the whole seed. Changes when any skill or byte changes. */
   readonly identity: string;
@@ -349,7 +379,7 @@ export function readSeed(
   const mcp: SeedMcp[] = [];
   for (const harness of harnesses) {
     if (!harness.mcp) continue;
-    const servers = readMcp(home, harness.mcp, forbidden, leftovers);
+    const { servers } = readMcp(home, harness.mcp, forbidden, leftovers);
     if (servers.length > 0) mcp.push({ harness: harness.id, servers });
   }
 
@@ -721,23 +751,43 @@ function readSettings(
 }
 
 /**
- * Read the remote MCP servers from the declared key of an MCP file. The file
- * never leaves the machine, and a server keeps only its name, type, and URL.
- * A local or non-HTTPS server is noted in `leftovers`. A remote server with
- * headers, environment values, arguments, or a credential refuses the seed.
+ * Read the MCP servers of each harness without the rest of the seed, for a
+ * status check. A refused server is left out.
+ */
+export function readMcpSources(home: string, harnesses: readonly HarnessDescriptor[]): McpSource[] {
+  const sources: McpSource[] = [];
+  for (const harness of harnesses) {
+    if (!harness.mcp) continue;
+    const { servers, nonPortable } = readMcp(home, harness.mcp, [], []);
+    if (servers.length > 0 || nonPortable.length > 0) sources.push({ harness: harness.id, servers, nonPortable });
+  }
+  return sources;
+}
+
+/**
+ * Read the remote and stdio MCP servers from the declared key of an MCP file.
+ * The file never leaves the machine. A remote server keeps only its name,
+ * type, and URL. A stdio server keeps its command, its arguments, and the
+ * names of its environment keys, never their values. Another server, and a
+ * stdio server that refers to a path in the home, is noted in `leftovers`. A
+ * remote server with headers, environment values, arguments, or a credential,
+ * and a stdio server with a token or secret in its command or arguments,
+ * refuse the seed.
  */
 function readMcp(
   home: string,
   mcp: NonNullable<HarnessDescriptor["mcp"]>,
   forbidden: ForbiddenHit[],
   leftovers: Leftover[],
-): McpServer[] {
+): { servers: McpServer[]; nonPortable: string[] } {
+  const servers: McpServer[] = [];
+  const nonPortable: string[] = [];
   const path = join(home, mcp.file);
   let text: string;
   try {
     text = readFileSync(path, "utf8");
   } catch {
-    return [];
+    return { servers, nonPortable };
   }
   let parsed: unknown;
   try {
@@ -747,19 +797,19 @@ function readMcp(
   }
   if (!isRecord(parsed)) {
     forbidden.push(note(path, NOTES["invalid-settings"]));
-    return [];
+    return { servers, nonPortable };
   }
 
-  const servers: McpServer[] = [];
   const declared = parsed[mcp.key];
   const entries = isRecord(declared) ? Object.entries(declared) : [];
   for (const [name, declaration] of entries.sort(([a], [b]) => compare(a, b))) {
     const remote = isRecord(declaration) ? remoteServer(declaration) : null;
-    if (!remote) {
+    const stdio = isRecord(declaration) && !remote ? stdioServer(declaration) : null;
+    if (!remote && !stdio) {
       leftovers.push({
         path,
         code: DENY_RULES["mcp-local"].code,
-        reason: `MCP server ${name} is not a remote HTTPS server`,
+        reason: `MCP server ${name} is neither a remote HTTPS server nor a stdio command`,
       });
       continue;
     }
@@ -771,7 +821,30 @@ function readMcp(
       });
       continue;
     }
-    const url = new URL(remote.url);
+    if (stdio) {
+      const words = [stdio.command, ...stdio.args];
+      const rules = argumentRules(path, words);
+      if (rules.length > 0) {
+        forbidden.push({
+          path,
+          code: DENY_RULES["mcp-argument"].code,
+          reason: `MCP server ${name} has a command or argument that matches the ${rules.join(", ")} rule`,
+        });
+        continue;
+      }
+      if (words.some((word) => word.split(COMMAND_SEPARATORS).some((part) => part === home || part.startsWith(`${home}/`)))) {
+        nonPortable.push(name);
+        leftovers.push({
+          path,
+          code: DENY_RULES["mcp-path"].code,
+          reason: `MCP server ${name} refers to a path in the home, which the box does not have`,
+        });
+        continue;
+      }
+      servers.push({ name, ...stdio });
+      continue;
+    }
+    const url = new URL(remote!.url);
     const credential =
       MCP_CREDENTIAL_KEYS.some((key) => hasKey(declaration, key)) ||
       url.username !== "" ||
@@ -786,13 +859,48 @@ function readMcp(
       });
       continue;
     }
-    servers.push({ name, ...remote });
+    servers.push({ name, ...remote! });
   }
-  return servers;
+  return { servers, nonPortable };
+}
+
+/**
+ * The command, arguments, and environment key names of a stdio declaration,
+ * else `null`. Codex lists forwarded keys in `env_vars`; they count as keys too.
+ */
+function stdioServer(declaration: Record<string, unknown>): Omit<StdioMcpServer, "name"> | null {
+  const { type, url, command, args = [], env = {}, env_vars: envVars = [] } = declaration;
+  if ((type !== undefined && type !== "stdio") || url !== undefined) return null;
+  if (typeof command !== "string" || command === "") return null;
+  if (!Array.isArray(args) || !args.every((arg): arg is string => typeof arg === "string")) return null;
+  if (!isRecord(env) || !Array.isArray(envVars) || !envVars.every((key): key is string => typeof key === "string")) return null;
+  const keys = [...new Set([...Object.keys(env), ...envVars])].sort(compare);
+  return { type: "stdio", command, args, env: keys };
+}
+
+/**
+ * The codes of the secret rules that the words of a stdio command match: a
+ * token pattern, or a secret key with a value as `--key=value`, `key=value`,
+ * or `--key value`. The codes never hold the value.
+ */
+function argumentRules(path: string, words: readonly string[]): string[] {
+  const rules = new Set(tokenHits(path, Buffer.from(words.join("\n"))).map((hit) => hit.code));
+  words.forEach((word, index) => {
+    const pair = word.match(/^-{0,2}([\w-]+)=(.*)$/);
+    const flag = word.match(/^--?([\w-]+)$/);
+    const next = words[index + 1];
+    if (
+      (pair && isSecretKey(pair[1]!) && isSecretValue(pair[2]!)) ||
+      (flag && isSecretKey(flag[1]!) && next !== undefined && !next.startsWith("-") && isSecretValue(next))
+    ) {
+      rules.add(DENY_RULES["secret-field"].code);
+    }
+  });
+  return [...rules];
 }
 
 /** The type and URL of a declaration with an HTTPS URL and an HTTP or SSE transport, else `null`. */
-function remoteServer(declaration: Record<string, unknown>): Omit<McpServer, "name"> | null {
+function remoteServer(declaration: Record<string, unknown>): Omit<RemoteMcpServer, "name"> | null {
   const { type, url } = declaration;
   if (type !== undefined && type !== "http" && type !== "sse" && type !== "streamable_http") {
     return null;
@@ -879,7 +987,7 @@ function hookPathHits(
  * never passes, because the box home has a different path. Programs on PATH,
  * `$CLAUDE_PROJECT_DIR` paths, and absolute paths outside the home pass.
  */
-function unmanagedWords(
+export function unmanagedWords(
   command: string,
   home: string,
   harnesses: readonly HarnessDescriptor[],
@@ -897,7 +1005,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** Every string `command` property under `value`, with its JSON location. */
-function hookCommands(value: unknown, at: string): { at: string; command: string }[] {
+export function hookCommands(value: unknown, at: string): { at: string; command: string }[] {
   if (typeof value !== "object" || value === null) return [];
   const found: { at: string; command: string }[] = [];
   for (const [key, child] of Object.entries(value)) {

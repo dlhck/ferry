@@ -64,6 +64,12 @@ export async function runIntegrationCommand(
       `Unknown integration ${input.name}. Known integrations: ${resolved.integrations.map((known) => known.id).join(", ")}.`,
     );
   }
+  const install = integration.operator?.install;
+  if (input.action === "enable" && install !== undefined && !integration.operator!.available()) {
+    throw new IntegrationCommandError(
+      `${integration.name} is not available on this machine. Install it, then run ferry integrations enable ${integration.id} again:\n  ${install}`,
+    );
+  }
   const config = resolved.readConfig();
   const target = resolveLinkOptions(config?.host);
   const host = completeHostConfig(config?.host);

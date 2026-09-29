@@ -152,17 +152,24 @@ export type ToolUpdate = {
 };
 
 /**
- * How ferry declares, lists, and logs in remote MCP servers with the CLI of a
- * harness. The tool id is the harness id. In a command, `{name}`, `{url}`, and
- * `{type}` are replaced with shell-quoted values.
+ * How ferry declares, lists, and logs in MCP servers with the CLI of a
+ * harness. The tool id is the harness id. In a command, `{name}`, `{url}`,
+ * `{type}`, and `{json}` are replaced with shell-quoted values.
  */
 export type ToolMcp = {
   /**
-   * Commands that register one server. `get` prints the server URL when the
-   * server is declared. Without them, ferry merges the server into the MCP
-   * file of the harness.
+   * Commands that register one remote server. `get` prints the server URL
+   * when the server is declared. Without them, ferry merges the server into
+   * the MCP file of the harness. `addJson` adds one stdio server from its
+   * declaration in `{json}`. Without it, ferry merges stdio servers into the
+   * MCP file of the harness.
    */
-  readonly register?: { readonly get: string; readonly remove: string; readonly add: string };
+  readonly register?: {
+    readonly get: string;
+    readonly remove: string;
+    readonly add: string;
+    readonly addJson?: string;
+  };
   /** Lists the declared servers and their login state. */
   readonly list: string;
   /** Regular expression source for one `list` line of a server that needs a login. Group 1 is the name. */

@@ -105,8 +105,9 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
     name: "Claude",
     skillRoot: ".claude/skills",
     instructionFile: ".claude/CLAUDE.md",
-    // Subagents and custom commands are plain markdown files.
-    extraRoots: [".claude/agents", ".claude/commands"],
+    // Subagents and custom commands are plain markdown files. Hook scripts
+    // keep their executable bit, and the deny rules apply to them.
+    extraRoots: [".claude/agents", ".claude/commands", ".claude/hooks"],
     // The plugin declarations, permissions, hooks, commit attribution, and
     // model preferences. The box installs the plugins. Keys such as env and
     // apiKeyHelper can hold secrets, so they stay on this machine.
@@ -255,6 +256,8 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
         get: "claude mcp get {name}",
         remove: "claude mcp remove --scope user {name}",
         add: "claude mcp add --transport {type} --scope user {name} {url}",
+        // Claude rewrites ~/.claude.json while it runs, so stdio servers go through the CLI too.
+        addJson: "claude mcp add-json --scope user {name} {json}",
       },
       list: "claude mcp list",
       loginRequired: "^(.+): \\S+ \\(\\w+\\) - ! Needs authentication$",

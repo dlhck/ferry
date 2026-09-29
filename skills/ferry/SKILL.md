@@ -9,7 +9,7 @@ Ferry copies the agent setup of the operator machine to a remote Linux box. The 
 
 ## Rules
 
-1. On the box, do not edit a Ferry-managed file: a skill, an instruction file such as `AGENTS.md`, `~/.claude/agents`, `~/.claude/commands`, a carried Claude or Codex settings key, or a carried MCP declaration. Each sync resets the box checkout with `git reset --hard` and writes the carried keys again, so your change is lost. Tell the operator what to change on the operator machine instead.
+1. On the box, do not edit a Ferry-managed file: a skill, an instruction file such as `AGENTS.md`, `~/.claude/agents`, `~/.claude/commands`, a carried Claude or Codex settings key, or a carried MCP declaration. The `env` values of a carried stdio MCP server are the exception: set them on the box, and Ferry keeps them. Each sync resets the box checkout with `git reset --hard` and writes the carried keys again, so your change is lost. Tell the operator what to change on the operator machine instead.
 2. Read state with `ferry status --json` before you change anything.
 3. Add `--json` to each Ferry command whose output you read. Use the error `code`, not the message text. See [JSON output](#json-output).
 4. Run `ferry sync --dry-run` before `ferry sync`. Do not pass `--force` unless the operator tells you to.
@@ -43,6 +43,7 @@ These items are not symlinks. Sync writes them into box files:
 - Carried Codex settings keys: `model`, `model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`, `features`, and `web_search` in `~/.codex/config.toml`.
 - For both files, sync replaces the carried keys on the box. A key that the operator machine does not have is removed from the box. The box keeps its other keys. When a carried Codex key changes, sync writes `config.toml` again, and the comments in that file are lost.
 - Remote MCP servers: the name and HTTPS URL of each server in `mcpServers` of `~/.claude.json`, `[mcp_servers]` of `~/.codex/config.toml`, and `mcpServers` of `~/.cursor/mcp.json`. Sync declares them on the box. It replaces a box declaration with a different URL. It never removes a box server.
+- Stdio MCP servers from the same files: the name, `command`, `args`, and the names of the `env` keys, never their values. Sync adds them with `claude mcp add-json` for Claude and writes them into the MCP file of Codex and Cursor Agent. It keeps the `env` of the box entry. It never installs the command. A server whose command or arguments refer to a path in the operator home is not carried.
 
 Ferry never carries logins, credential files, tokens, request headers, `.env` files, session history, caches, databases, or whole settings files.
 
@@ -120,7 +121,7 @@ Each entry of `boxes` has these fields:
 
 Each section also has an `error` field. A `null` value with an error means Ferry could not read it. It does not mean false.
 
-`ferry status --brief --json` checks only the link, the logins, the MCP logins, and the tools. Its `result` is `{ schemaVersion: 1, checkedAt, boxes }`. Each box has `name`, `host`, `online`, `error` (why the box is offline), and `issues`. Each issue has `kind` (`login`, `mcp-login`, `tool`, or `check-failed`), `name`, `state`, `message`, and `command`, the Ferry command that fixes it, or `null` when a person must act on the box. `ferry watch` writes the same report to `~/.ferry/status.json` at the start, every 5 minutes, and after each sync. Read that file when it is recent, and run the command when it is old or missing.
+`ferry status --brief --json` checks only the link, the logins, the MCP logins, the carried stdio MCP servers, the tools, and the hooks that run a home file Ferry does not carry. Its `result` is `{ schemaVersion: 1, checkedAt, boxes }`. Each box has `name`, `host`, `online`, `error` (why the box is offline), and `issues`. Each issue has `kind` (`login`, `mcp-login`, `mcp-server`, `tool`, `hook`, or `check-failed`), `name`, `state`, `message`, and `command`, the Ferry command that fixes it, or `null` when a person must act on the box. `ferry watch` writes the same report to `~/.ferry/status.json` at the start, every 5 minutes, and after each sync. Read that file when it is recent, and run the command when it is old or missing.
 
 ## Sync
 
@@ -135,7 +136,8 @@ Read these output lines:
 - `operator: Manifest refused publisher <host>: <reason>: <path>` means a deny rule refused a file. The sync stopped and nothing was published. The message names the file, never the value. Tell the operator the path and the reason. The operator removes the secret from the file or removes the file from the managed set.
 - A refusal that contains `clash <name>: <path>, <path>` means two harness roots hold different copies of a skill with the same name. The operator must keep one copy.
 - `Skipped hook: <reason>: <location>` means Ferry left out one hook, because its command refers to a home path that the box will not have. The sync continues without that hook. To carry it, the operator moves the script into a carried directory or onto `PATH` on both machines.
-- `Skipped MCP server: <reason>: <path>` means Ferry left out a local server (it has a `command`) or a server with a plain `http://` URL. The sync continues. Only remote HTTPS servers are carried.
+- `Skipped MCP server: <reason>: <path>` means Ferry left out a server with a plain `http://` URL, a server with neither a URL nor a `command`, or a stdio server whose command or arguments refer to a path in the operator home. The sync continues.
+- A stdio MCP server with a token or secret in its command or arguments stops the sync with the deny rule `mcp-argument`. The error names the server and the rule, never the value.
 - `Updated store skill <name> from <path>` means an installer put a newer copy of a skill in one harness root, and sync published it.
 - `Discarded box change: <path>` means sync threw away an edit on the box.
 - `Box plugins: ...` and `Box MCP: ...` are warnings. The sync continues.
@@ -182,7 +184,7 @@ ferry skills add dlhck/ferry --skill ferry
 
 ## Integrations
 
-An integration runs one extra service on the box. Paseo is the only integration. It is off by default. When it is off, Ferry prints nothing about it.
+An integration adds a service on the box, commands on the operator machine, or both. Paseo runs a service on the box. Sherlock adds commands on the operator machine. Each one is off by default. When it is off, Ferry prints nothing about it.
 
 - `ferry integrations` lists each integration, shows if it is enabled, and shows the local app version that the box gets. It changes nothing.
 - `ferry integrations enable paseo`, `ferry integrations disable paseo`, and the Paseo step of `ferry update` need the operator. Run them with `--dry-run` only, and tell the operator the command. An update restarts the Paseo daemon and stops the agents that run on the box.
@@ -205,6 +207,16 @@ When Paseo is enabled for a box, its `ferry status` block has an `Integrations` 
 | `Listen:`, `state.listen`, `state.relay` | The daemon must listen on `127.0.0.1:6767` with the relay off. |
 | `Providers:`, `state.providers` | The agent providers on the box. Sync skips a profile whose provider is `unavailable`. |
 | `WARNING` lines, `warnings` | A problem that the operator must fix, such as a version difference or a daemon that is not running. Tell the operator. |
+
+### Sherlock
+
+[Sherlock](https://github.com/michaelbromley/sherlock) is a read-only database query CLI on the operator machine. `ferry sherlock` exists only when `[integrations] sherlock = true` and `sherlock` is on the PATH. Without `sherlock`, `ferry integrations enable sherlock` stops and prints the install command.
+
+- `ferry sherlock add <name> [--box <box>] --target <target> --type <type> [--database <name>] [--username <user>] [--ssl <mode>] [--password-stdin | --password-env <var>] [--force]` runs `sherlock connection add` with `--tunnel-command "ferry tunnel --box <box> <target>:{{port}}"`. The target is a box port, such as `5432`, or a host and port that the box can reach, such as `db.example:5432`.
+- Do not type a password into a command. On a terminal, Ferry asks for it. Else tell the operator to run the command, or use `--password-env`.
+- Then query with `sherlock -c <name> ...`. Sherlock opens the tunnel on the first query and closes it when idle.
+- Ferry records `{ name, box, target }` in `~/.ferry/sherlock.json`. Do not edit it.
+- Full `ferry status` has `Integrations on this machine:` with one line `<name>  <box>:<target>  <state>` for each recorded connection that `sherlock connection list` still has. `ferry status --json` has `integrations.sherlock.state.connections: [{ name, box, target, state, error }]`. `state` is `reachable`, `unreachable` (the box cannot connect to the target), `box-offline`, or `unknown-box`. `--brief` does not check Sherlock.
 
 ## JSON output
 
@@ -312,6 +324,7 @@ With `--json`, Ferry never asks:
 | `tunnel --list` | `{ box, listeners: [{ port, address, process }] }` |
 | `integrations` | `{ boxes: [{ name, destination, integrations: [{ id, description, enabled, localVersion, localSource, connectSteps }] }] }`. `name` is `null` for a `[host]` config. |
 | `integrations enable`, `integrations disable` | `{ integration, action, dryRun, plan, output, enabled, connectSteps }`. `enabled` is the new config value, or `null` for a dry run. |
+| `sherlock add` | `{ name, box, target, tunnelCommand }`. With `--json`, it needs `--password-stdin` or `--password-env`. |
 | `watch install` | `{ manager: "launchd" or "systemd", path }` |
 | `tunnel install` | `{ manager: "launchd" or "systemd", path }` |
 | `tunnel uninstall` | `{ manager, path, removed }`. `removed` is `false` when the box had no service file. |
