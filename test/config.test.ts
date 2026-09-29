@@ -115,6 +115,19 @@ describe("operator config", () => {
     expect(readConfig(homeWithConfig(BASE))?.integrations).toBeUndefined();
   });
 
+  test("reads paseo_auto_archive with a box override and keeps it on a config write", () => {
+    const home = homeWithConfig([
+      'version = 1', 'publisher = "operator"', 'snapshot_url = "snapshot.git"',
+      "[integrations]", "paseo = true", "paseo_auto_archive = true",
+      "[box.a]", 'transport = "ssh"', 'destination = "user@a.example"',
+      "[box.a.integrations]", "paseo_auto_archive = false",
+      "[box.b]", 'transport = "ssh"', 'destination = "user@b.example"',
+    ]);
+    setIntegration("paseo", true, home, "b");
+    expect(resolveBoxes(readConfig(home)!).map((box) => box.integrations.paseo_auto_archive)).toEqual([false, true]);
+    expect(readFileSync(configPath(home), "utf8")).toContain("paseo_auto_archive = true");
+  });
+
   test("refuses an unknown integration name", () => {
     const home = homeWithConfig([...BASE, "", "[integrations]", "zed = true"]);
 

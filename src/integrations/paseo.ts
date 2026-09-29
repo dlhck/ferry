@@ -598,14 +598,17 @@ export type PaseoPreferences = {
   readonly metadataProviders?: readonly MetadataProvider[];
   /** `daemon.appendSystemPrompt`. */
   readonly appendSystemPrompt?: string;
+  /** `daemon.autoArchiveAfterMerge`. Ferry carries it only to a box with `paseo_auto_archive = true`. */
+  readonly autoArchiveAfterMerge?: boolean;
 };
 
 const METADATA_PROVIDERS = "agents.metadataGeneration.providers";
 const APPEND_SYSTEM_PROMPT = "daemon.appendSystemPrompt";
+const AUTO_ARCHIVE = "daemon.autoArchiveAfterMerge";
 
 /**
- * Read the metadata providers and the shared instructions from the local Paseo
- * config. A missing file or key gives an absent field. Throw a PaseoError for a
+ * Read the metadata providers, the shared instructions, and the auto-archive
+ * switch from the local Paseo config. A missing file or key gives an absent field. Throw a PaseoError for a
  * value that the Paseo schema rejects, or that holds a token or a secret. The
  * error never holds the instruction text or a value.
  */
@@ -635,11 +638,15 @@ export function readPaseoPreferences(home: string): PaseoPreferences {
   }
   const providers = generation?.providers;
   const prompt = daemon?.appendSystemPrompt;
+  const autoArchive = daemon?.autoArchiveAfterMerge;
   if (providers !== undefined && (!Array.isArray(providers) || !providers.every(isMetadataProvider))) {
     throw new PaseoError(`${METADATA_PROVIDERS} in ${path} is not a list of provider entries with a provider, an optional model, and an optional thinkingOptionId`);
   }
   if (prompt !== undefined && typeof prompt !== "string") {
     throw new PaseoError(`${APPEND_SYSTEM_PROMPT} in ${path} is not a string`);
+  }
+  if (autoArchive !== undefined && typeof autoArchive !== "boolean") {
+    throw new PaseoError(`${AUTO_ARCHIVE} in ${path} is not true or false`);
   }
   const refused = (field: string, hits: readonly { readonly reason: string }[]) => {
     if (hits.length > 0) {
@@ -652,7 +659,19 @@ export function readPaseoPreferences(home: string): PaseoPreferences {
   return {
     ...(providers === undefined ? {} : { metadataProviders: providers as MetadataProvider[] }),
     ...(prompt === undefined ? {} : { appendSystemPrompt: prompt }),
+    ...(autoArchive === undefined ? {} : { autoArchiveAfterMerge: autoArchive }),
   };
+}
+
+/**
+ * The preferences for one box. The auto-archive switch changes the workspace
+ * lifecycle on the box, so it stays only when the box config has
+ * `paseo_auto_archive = true`.
+ */
+export function boxPaseoPreferences(preferences: PaseoPreferences, config: IntegrationsConfig): PaseoPreferences {
+  if (config.paseo_auto_archive === true) return preferences;
+  const { autoArchiveAfterMerge: _autoArchive, ...rest } = preferences;
+  return rest;
 }
 
 function isMetadataProvider(value: unknown): boolean {
@@ -672,12 +691,14 @@ export type PreferenceCarry = {
 /**
  * Put the set preferences into the box Paseo config, and keep all other box
  * keys. Skip each metadata provider that is not available on the box. When no
- * local provider is available, keep the box list. Paseo reloads both fields
+ * local provider is available, keep the box list. Paseo reloads all three fields
  * without a restart. With no set field, it runs no box command.
  */
 export async function carryPaseoPreferences(link: IntegrationLink, preferences: PaseoPreferences): Promise<PreferenceCarry> {
-  const { metadataProviders, appendSystemPrompt } = preferences;
-  if (metadataProviders === undefined && appendSystemPrompt === undefined) return { warnings: [], changed: false };
+  const { metadataProviders, appendSystemPrompt, autoArchiveAfterMerge } = preferences;
+  if (metadataProviders === undefined && appendSystemPrompt === undefined && autoArchiveAfterMerge === undefined) {
+    return { warnings: [], changed: false };
+  }
 
   const warnings: string[] = [];
   let providers = metadataProviders;
@@ -701,7 +722,9 @@ export async function carryPaseoPreferences(link: IntegrationLink, preferences: 
     }
     providers = kept.length === 0 ? undefined : kept;
   }
-  if (providers === undefined && appendSystemPrompt === undefined) return { warnings, changed: false };
+  if (providers === undefined && appendSystemPrompt === undefined && autoArchiveAfterMerge === undefined) {
+    return { warnings, changed: false };
+  }
 
   // The write command holds the instruction text, and a box can echo a failed command. Report only the action.
   const run = async (command: string, what: string): Promise<string> => {
@@ -711,7 +734,7 @@ export async function carryPaseoPreferences(link: IntegrationLink, preferences: 
   };
   const current = await run(readCommand(CONFIG_FILE), `Ferry could not read ~/${CONFIG_FILE} on the box`);
   const text = current.startsWith("F") ? current.slice(1) : null;
-  const merged = mergePreferences(text, providers, appendSystemPrompt);
+  const merged = mergePreferences(text, providers, appendSystemPrompt, autoArchiveAfterMerge);
   if (merged === text) return { warnings, changed: false };
   await run(writeCommand(CONFIG_FILE, merged), `Ferry could not write the Paseo preferences to ~/${CONFIG_FILE} on the box`);
   await run(RELOAD_COMMAND, "paseo daemon reload failed on the box after Ferry wrote the Paseo preferences");
@@ -723,6 +746,7 @@ function mergePreferences(
   box: string | null,
   providers: readonly MetadataProvider[] | undefined,
   prompt: string | undefined,
+  autoArchive: boolean | undefined,
 ): string {
   let config: unknown = {};
   if (box !== null && box.trim() !== "") {
@@ -737,9 +761,13 @@ function mergePreferences(
       (agents !== undefined && (!isObject(agents) || (agents.metadataGeneration !== undefined && !isObject(agents.metadataGeneration))))) {
     throw new PaseoError(`~/${CONFIG_FILE} on the box is not a JSON object with daemon, agents, and agents.metadataGeneration objects`);
   }
+  const daemon = {
+    ...(prompt === undefined ? {} : { appendSystemPrompt: prompt }),
+    ...(autoArchive === undefined ? {} : { autoArchiveAfterMerge: autoArchive }),
+  };
   const merged = {
     ...config,
-    ...(prompt === undefined ? {} : { daemon: { ...(config.daemon as object | undefined), appendSystemPrompt: prompt } }),
+    ...(Object.keys(daemon).length === 0 ? {} : { daemon: { ...(config.daemon as object | undefined), ...daemon } }),
     ...(providers === undefined ? {} : {
       agents: {
         ...(agents as Record<string, unknown> | undefined),

@@ -32,6 +32,7 @@ import { installBoxPlugins, mergeBoxSettings } from "./box-settings.ts";
 import { registerBoxMcp } from "./box-mcp.ts";
 import {
   carryAgentProfiles,
+  boxPaseoPreferences,
   carryPaseoPreferences,
   profileName,
   readAgentProfiles,
@@ -143,6 +144,8 @@ export type SyncPlan = {
   readonly paseoPreferences?: {
     readonly metadataProviders: readonly MetadataProvider[] | null;
     readonly appendSystemPromptLength: number | null;
+    /** Null unless the box has `paseo_auto_archive = true` and the local config sets the value. */
+    readonly autoArchiveAfterMerge: boolean | null;
   } | null;
   /**
    * The portable local Paseo terminal profiles and skip reasons, or null when Paseo is off or the
@@ -285,7 +288,7 @@ export async function runSync(
           profiles: box.integrations.paseo === true ? profiles : null,
           plugins: box.integrations.paseo === true ? plugins : null,
           providers: box.integrations.paseo === true ? providers : null,
-          preferences: box.integrations.paseo === true ? preferences : null,
+          preferences: box.integrations.paseo === true && preferences !== null ? boxPaseoPreferences(preferences, box.integrations) : null,
           terminals: box.integrations.paseo === true ? terminals : null,
           pathDirs,
         })),
@@ -484,7 +487,7 @@ function hasTerminals(terminals: PaseoTerminalProfiles): terminals is NonNullabl
 }
 
 function hasPreferences(preferences: PaseoPreferences | null): preferences is PaseoPreferences {
-  return preferences !== null && (preferences.metadataProviders !== undefined || preferences.appendSystemPrompt !== undefined);
+  return preferences !== null && Object.keys(preferences).length > 0;
 }
 
 /** The box steps after the connect: checkout update, Apply, plugins, settings, MCP, PATH, and Paseo. */
@@ -874,6 +877,7 @@ function makePlan(
     paseoPreferences: box.preferences === null ? null : {
       metadataProviders: box.preferences.metadataProviders ?? null,
       appendSystemPromptLength: box.preferences.appendSystemPrompt?.length ?? null,
+      autoArchiveAfterMerge: box.preferences.autoArchiveAfterMerge ?? null,
     },
     paseoTerminalProfiles: box.terminals === null ? null : {
       profiles: box.terminals.profiles.map((profile) => ({
@@ -995,8 +999,8 @@ function terminalProfileLines(plan: NonNullable<SyncPlan["paseoTerminalProfiles"
 
 /** The dry-run line of the Paseo preferences. It never holds the text of the shared instructions. */
 function preferencesLine(preferences: NonNullable<SyncPlan["paseoPreferences"]>): string {
-  const { metadataProviders: providers, appendSystemPromptLength: length } = preferences;
-  if (providers === null && length === null) return "Paseo preferences: none set locally. Ferry keeps the box values.";
+  const { metadataProviders: providers, appendSystemPromptLength: length, autoArchiveAfterMerge: autoArchive } = preferences;
+  if (providers === null && length === null && autoArchive === null) return "Paseo preferences: none set locally. Ferry keeps the box values.";
   const fields = [
     providers !== null && `agents.metadataGeneration.providers ${
       providers.length === 0
@@ -1006,6 +1010,7 @@ function preferencesLine(preferences: NonNullable<SyncPlan["paseoPreferences"]>)
     length !== null && `daemon.appendSystemPrompt ${
       length === 0 ? "empty (clears the box instructions)" : `${plural(length, "character")}, text not shown. It changes the instructions of each agent on the box`
     }`,
+    autoArchive !== null && `daemon.autoArchiveAfterMerge ${autoArchive}`,
   ].filter(Boolean);
   return `Paseo preferences: ${fields.join("; ")} -> box ~/.paseo/config.json, then paseo daemon reload. Ferry skips each metadata provider that is not available on the box. An unset local field keeps the box value.`;
 }
