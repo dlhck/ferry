@@ -37,6 +37,7 @@ import {
   refreshUnitPath,
   type AgentProfile,
 } from "./integrations/paseo.ts";
+import { carryPaseoPlugins, readPaseoPlugins, type PaseoPlugins } from "./integrations/paseo-plugins.ts";
 import { denyRuleCause, linkFailure } from "./errors.ts";
 import { groupProgress, noProgress, plural, step, type Progress } from "./progress.ts";
 import { boxPathDirs, profileBlockCommand } from "./tools/path.ts";
@@ -112,6 +113,8 @@ export type SyncPlan = {
   readonly storeUpdates: readonly StoreUpdate[];
   /** The names of the local Paseo agent profiles, or `null` when the Paseo integration is off. */
   readonly paseoProfiles: readonly string[] | null;
+  /** Managed Git sources and local skip reasons, or null when Paseo is off. */
+  readonly paseoPlugins?: PaseoPlugins | null;
   /** The box PATH directories, relative to the home, for the `~/.profile` block and the Paseo unit. */
   readonly pathDirs: readonly string[];
   /** The harnesses whose agent CLI is off for the box. Apply removes only Ferry's links there. */
@@ -217,6 +220,12 @@ export async function runSync(
       const source = inspectSyncSource(home, dependencies, input.boxes);
       await refuseChangedStoreCopies(home, source.config, source.seed);
       const profiles = source.boxes.some((box) => box.integrations.paseo === true) ? paseoProfiles(home) : null;
+      let plugins: PaseoPlugins | null = null;
+      try {
+        if (profiles !== null) plugins = readPaseoPlugins(home);
+      } catch (cause) {
+        throw new SyncError("manifest-refusal", "operator", messageOf(cause), { cause });
+      }
       // A box tools override changes only a version policy, so all boxes have the PATH directories of the registry.
       const pathDirs = pathDirsOf(source.registry);
       return {
@@ -224,6 +233,7 @@ export async function runSync(
         boxes: source.boxes.map((box) => ({
           ...box,
           profiles: box.integrations.paseo === true ? profiles : null,
+          plugins: box.integrations.paseo === true ? plugins : null,
           pathDirs,
         })),
       };
@@ -233,7 +243,11 @@ export async function runSync(
   );
   const planned = input.dryRun
     ? 1
-    : boxes.reduce((total, box) => total + BOX_STEPS + (box.profiles === null ? 0 : 2), operatorSteps);
+    : boxes.reduce((total, box) => {
+        const plugins = box.plugins;
+        const pluginStep = plugins && (plugins.plugins.length > 0 || plugins.warnings.length > 0) ? 1 : 0;
+        return total + BOX_STEPS + (box.profiles === null ? 0 : 2) + pluginStep;
+      }, operatorSteps);
   if (planned !== (input.dryRun ? 1 : operatorSteps + BOX_STEPS)) progress.plan(planned);
   for (const leftover of seed.leftovers) {
     const label = leftover.code === "hook-path" ? "hook" : leftover.code === "mcp-local" ? "MCP server" : null;
@@ -390,6 +404,7 @@ export async function runSync(
 /** A selected box with its Paseo profiles (`null` when Paseo is off for it) and its PATH directories. */
 type SyncBox = ResolvedBox & {
   readonly profiles: readonly AgentProfile[] | null;
+  readonly plugins: PaseoPlugins | null;
   readonly pathDirs: readonly string[];
 };
 
@@ -539,6 +554,15 @@ async function applyOnBox(context: {
 
   // The Paseo steps run last and only warn on failure, so the Paseo daemon never blocks the core sync.
   if (profiles !== null) {
+    const plugins = box.plugins;
+    if (plugins && (plugins.plugins.length > 0 || plugins.warnings.length > 0)) {
+      try {
+        const warnings = await boxStep("Carrying Paseo Git plugins", () => carryPaseoPlugins(link, plugins));
+        for (const warning of warnings) warn(`Warning: ${warning}`);
+      } catch (cause) {
+        warn(`Warning: Ferry could not carry the Paseo plugins: ${messageOf(cause)}. The core sync is complete.`);
+      }
+    }
     try {
       const carry = await boxStep(
         "Carrying Paseo agent profiles",
@@ -708,6 +732,7 @@ function makePlan(
     mcpServers: seed.mcp.filter(on).flatMap((entry) => entry.servers.map((server) => `${entry.harness}/${server.name}`)),
     storeUpdates: seed.storeUpdates,
     paseoProfiles: box.profiles === null ? null : box.profiles.map(profileName),
+    paseoPlugins: box.plugins,
     pathDirs: box.pathDirs,
     offHarnesses: off.map((harness) => harness.id),
   };
@@ -779,6 +804,10 @@ function printPlan(plan: SyncPlan, gitAuth: GitAuth, writeLine: (line: string) =
               ? "Paseo agent profiles: no profiles"
               : `Paseo agent profiles: ${plan.paseoProfiles.join(", ")} -> box ~/.paseo/config.json daemon.agentProfiles, then paseo daemon reload. Ferry skips each profile whose provider is not available on the box.`,
           ]),
+      ...(plan.paseoPlugins == null ? [] : [
+        `Paseo Git plugins: ${plan.paseoPlugins.plugins.map((plugin) => `${plugin.id}@${plugin.commit} (${plugin.enabled ? "enabled" : "disabled"})`).join(", ") || "none"}. Keep box-only plugins and the global plugin switch. The box daemon needs Git access.`,
+        ...plan.paseoPlugins.warnings,
+      ]),
       ...denyListLines(),
     ].join("\n"),
   );
