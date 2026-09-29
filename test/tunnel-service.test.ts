@@ -23,6 +23,7 @@ function recorder(ok = true) {
     commands,
     run: async (command: ServiceCommand) => {
       commands.push(command);
+      if (command[1] === "print") return { ok: false, stderr: "not loaded" };
       return { ok, stderr: ok ? "" : "not loaded" };
     },
   };
@@ -74,8 +75,10 @@ describe("tunnel service installer", () => {
     expect(readFileSync(a.path, "utf8")).toContain("<string>a</string>");
     expect(fake.commands).toEqual([
       ["launchctl", "bootout", "gui/501/dev.ferry.tunnel.a"],
+      ["launchctl", "print", "gui/501/dev.ferry.tunnel.a"],
       ["launchctl", "bootstrap", "gui/501", a.path],
       ["launchctl", "bootout", "gui/501/dev.ferry.tunnel.lab"],
+      ["launchctl", "print", "gui/501/dev.ferry.tunnel.lab"],
       ["launchctl", "bootstrap", "gui/501", lab.path],
     ]);
   });

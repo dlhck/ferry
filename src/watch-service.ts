@@ -18,6 +18,8 @@ export type WatchServiceInput = {
 
 export type WatchServiceDependencies = {
   readonly run?: (command: ServiceCommand, allowFailure?: boolean) => Promise<ServiceCommandResult>;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly now?: () => number;
 };
 
 export type WatchServiceResult = {
@@ -55,6 +57,9 @@ const WATCH_SERVICE: UserService = {
   restart: "on-failure",
 };
 
+const LAUNCHD_REMOVAL_POLL_MS = 200;
+const LAUNCHD_REMOVAL_TIMEOUT_MS = 5_000;
+
 export async function installWatchService(
   input: WatchServiceInput = {},
   dependencies: WatchServiceDependencies = {},
@@ -75,6 +80,8 @@ export async function installUserService(
   const environmentPath = input.path ?? process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
   const sshAuthSock = input.sshAuthSock ?? process.env.SSH_AUTH_SOCK;
   const run = dependencies.run ?? runCommand;
+  const sleep = dependencies.sleep ?? ((milliseconds: number) => Bun.sleep(milliseconds));
+  const now = dependencies.now ?? Date.now;
   requireSafeAbsolute(service, executable, "Ferry executable");
   const command = [executable];
   if (basename(executable) === "bun") {
@@ -92,7 +99,9 @@ export async function installUserService(
     const log = join(home, "Library", "Logs", service.log);
     mkdirSync(dirname(log), { recursive: true });
     writeService(path, launchdService(service, command, environmentPath, sshAuthSock, log));
-    await run(["launchctl", "bootout", `gui/${uid}/${service.label}`], true);
+    const target = `gui/${uid}/${service.label}`;
+    await run(["launchctl", "bootout", target], true);
+    await waitForLaunchdRemoval(service.label, target, run, sleep, now);
     await checked(run, ["launchctl", "bootstrap", `gui/${uid}`, path]);
     return { manager: "launchd", path };
   }
@@ -106,6 +115,22 @@ export async function installUserService(
   }
 
   throw new Error(`ferry ${service.command} install does not support ${platform}`);
+}
+
+async function waitForLaunchdRemoval(
+  label: string,
+  target: string,
+  run: NonNullable<WatchServiceDependencies["run"]>,
+  sleep: NonNullable<WatchServiceDependencies["sleep"]>,
+  now: NonNullable<WatchServiceDependencies["now"]>,
+): Promise<void> {
+  const deadline = now() + LAUNCHD_REMOVAL_TIMEOUT_MS;
+  while ((await run(["launchctl", "print", target], true)).ok) {
+    if (now() >= deadline) {
+      throw new Error(`launchd did not remove ${label} within 5 seconds. Run launchctl bootout ${target} and retry.`);
+    }
+    await sleep(LAUNCHD_REMOVAL_POLL_MS);
+  }
 }
 
 /** Stop the service and remove its file. `removed` is false when the file was not there. The launchd log stays. */

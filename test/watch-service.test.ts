@@ -30,7 +30,12 @@ describe("watch service installer", () => {
         path: "/opt/homebrew/bin:/usr/bin:/bin",
         sshAuthSock: "/private/tmp/agent.sock",
       },
-      { run: async (command) => { commands.push(command); return { ok: true, stderr: "" }; } },
+      {
+        run: async (command) => {
+          commands.push(command);
+          return command[1] === "print" ? { ok: false, stderr: "Could not find service" } : { ok: true, stderr: "" };
+        },
+      },
     );
 
     const body = readFileSync(result.path, "utf8");
@@ -39,8 +44,107 @@ describe("watch service installer", () => {
     expect(body).toContain("SSH_AUTH_SOCK");
     expect(commands).toEqual([
       ["launchctl", "bootout", "gui/501/dev.ferry.watch"],
+      ["launchctl", "print", "gui/501/dev.ferry.watch"],
       ["launchctl", "bootstrap", "gui/501", result.path],
     ]);
+  });
+
+  test("waits for launchd to remove the old job before loading the new one", async () => {
+    const sourceHome = home();
+    const commands: ServiceCommand[] = [];
+    const sleeps: number[] = [];
+    let printCalls = 0;
+    let loaded = true;
+
+    const result = await installWatchService(
+      {
+        home: sourceHome,
+        platform: "darwin",
+        executable: "/Applications/Ferry/bin/ferry",
+        uid: 501,
+      },
+      {
+        run: async (command) => {
+          commands.push(command);
+          if (command[1] === "print") {
+            printCalls += 1;
+            loaded = printCalls <= 2;
+            return { ok: loaded, stderr: loaded ? "" : "Could not find service" };
+          }
+          if (command[1] === "bootstrap" && loaded) return { ok: false, stderr: "Bootstrap failed: 5: Input/output error" };
+          return { ok: true, stderr: "" };
+        },
+        sleep: async (milliseconds) => { sleeps.push(milliseconds); },
+        now: () => 0,
+      },
+    );
+
+    expect(result.manager).toBe("launchd");
+    expect(commands).toEqual([
+      ["launchctl", "bootout", "gui/501/dev.ferry.watch"],
+      ["launchctl", "print", "gui/501/dev.ferry.watch"],
+      ["launchctl", "print", "gui/501/dev.ferry.watch"],
+      ["launchctl", "print", "gui/501/dev.ferry.watch"],
+      ["launchctl", "bootstrap", "gui/501", result.path],
+    ]);
+    expect(sleeps).toEqual([200, 200]);
+  });
+
+  test("fails when launchd does not remove the old job before the timeout", async () => {
+    const sourceHome = home();
+    const commands: ServiceCommand[] = [];
+    let now = 0;
+
+    await expect(installWatchService(
+      {
+        home: sourceHome,
+        platform: "darwin",
+        executable: "/Applications/Ferry/bin/ferry",
+        uid: 501,
+      },
+      {
+        run: async (command) => {
+          commands.push(command);
+          return { ok: true, stderr: "" };
+        },
+        sleep: async (milliseconds) => { now += milliseconds; },
+        now: () => now,
+      },
+    )).rejects.toThrow(
+      "launchd did not remove dev.ferry.watch within 5 seconds. Run launchctl bootout gui/501/dev.ferry.watch and retry.",
+    );
+    expect(commands.at(-1)).toEqual(["launchctl", "print", "gui/501/dev.ferry.watch"]);
+    expect(commands.some((command) => command[1] === "bootstrap")).toBe(false);
+  });
+
+  test("loads at once when launchd reports no old job", async () => {
+    const sourceHome = home();
+    const commands: ServiceCommand[] = [];
+    const sleeps: number[] = [];
+
+    const result = await installWatchService(
+      {
+        home: sourceHome,
+        platform: "darwin",
+        executable: "/Applications/Ferry/bin/ferry",
+        uid: 501,
+      },
+      {
+        run: async (command) => {
+          commands.push(command);
+          return command[1] === "print" ? { ok: false, stderr: "Could not find service" } : { ok: true, stderr: "" };
+        },
+        sleep: async (milliseconds) => { sleeps.push(milliseconds); },
+        now: () => 0,
+      },
+    );
+
+    expect(commands).toEqual([
+      ["launchctl", "bootout", "gui/501/dev.ferry.watch"],
+      ["launchctl", "print", "gui/501/dev.ferry.watch"],
+      ["launchctl", "bootstrap", "gui/501", result.path],
+    ]);
+    expect(sleeps).toEqual([]);
   });
 
   test("runs the Ferry script with bun in a launchd service", async () => {
@@ -55,7 +159,7 @@ describe("watch service installer", () => {
         uid: 501,
         path: "/opt/homebrew/bin:/usr/bin:/bin",
       },
-      { run: async () => ({ ok: true, stderr: "" }) },
+      { run: async (command) => command[1] === "print" ? { ok: false, stderr: "Could not find service" } : { ok: true, stderr: "" } },
     );
 
     expect(readFileSync(result.path, "utf8")).toContain(`  <array>
@@ -91,7 +195,8 @@ describe("watch service installer", () => {
 
   test("keeps the file names and the content of the watch service", async () => {
     const sourceHome = home();
-    const run = async () => ({ ok: true, stderr: "" });
+    const run = async (command: ServiceCommand) =>
+      command[1] === "print" ? { ok: false, stderr: "Could not find service" } : { ok: true, stderr: "" };
     const input = { home: sourceHome, executable: "/usr/local/bin/ferry", uid: 501, path: "/usr/bin:/bin", sshAuthSock: "/tmp/agent.sock" };
 
     const launchd = await installWatchService({ ...input, platform: "darwin" }, { run });
