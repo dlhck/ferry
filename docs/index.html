@@ -809,15 +809,15 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
   <div class="rules">
     <div>
       <h3>Checked before each publish</h3>
-      <p>Ferry checks the carried files against deny rules: secret file names, private keys, token content, secret keys in JSON, YAML and TOML, and executables. A match stops the sync. The error names the file, never the value.</p>
+      <p>Deny rules catch secret files, private keys, tokens, secret config keys and executables. A match stops the sync. The error names the file, never the value.</p>
     </div>
     <div>
       <h3>Boxes do not trust each other</h3>
-      <p>Ferry connects to each box from your machine.</p>
+      <p>Ferry connects to each box from your machine. <code>ferry move</code> from one box to another goes through your machine too, and the same deny rules apply.</p>
     </div>
     <div>
       <h3>No new doors</h3>
-      <p>Ferry opens no public port. It never turns off SSH host-key checks.</p>
+      <p>Ferry opens no public port and never turns off SSH host-key checks. It forwards your SSH agent only for snapshot checks, updates and Claude plugin installs.</p>
     </div>
   </div>
 
