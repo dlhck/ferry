@@ -1,12 +1,15 @@
 import { BOX_FERRY_VERSION_COMMAND } from "../src/box-ferry.ts";
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ApplyPlan, RemoteApplyInput } from "../src/apply.ts";
 import type { AuthStatusReport } from "../src/auth-start.ts";
 import { buildProgram } from "../src/cli.ts";
 import { createPaseo } from "../src/integrations/paseo.ts";
 import type { Integration, IntegrationHealth } from "../src/integrations/types.ts";
 import type { LinkResult } from "../src/link.ts";
-import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
+import { BUILTIN_HARNESSES, BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 import type { Registry } from "../src/registry/load.ts";
 import type { ToolDescriptor } from "../src/registry/types.ts";
 import type { TipReport } from "../src/store.ts";
@@ -1158,6 +1161,84 @@ describe("ferry status --brief", () => {
     expect(stack.reads).not.toContain("apply.inspect");
     expect(stack.reads.some((read) => read.includes("sudo -n") || read.includes("--get-regexp") || read.includes(" status "))).toBe(false);
     expect(stack.mutations).toEqual([]);
+  });
+
+  test("names a hook of the operator settings that runs an uncarried home file", async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "ferry-brief-hooks-")));
+    try {
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(
+        join(home, ".claude", "settings.json"),
+        JSON.stringify({
+          hooks: {
+            Stop: [
+              {
+                hooks: [
+                  { type: "command", command: "~/bin/notify.sh" },
+                  { type: "command", command: "~/.claude/hooks/format.sh" },
+                  { type: "command", command: "paseo hooks claude stop" },
+                ],
+              },
+            ],
+          },
+        }),
+      );
+
+      const report = await runBriefStatusCommand({}, {
+        ...fakeStack().dependencies,
+        home: () => home,
+        loadRegistry: () => ({ ok: true as const, harnesses: BUILTIN_HARNESSES, tools: registry.tools }),
+        now,
+      });
+
+      expect(report.boxes[0]!.issues.filter((issue) => issue.kind === "hook").map((issue) => issue.name)).toEqual([
+        "~/bin/notify.sh",
+      ]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("checks the carried stdio MCP servers of the operator home on the box", async () => {
+    const stack = fakeStack();
+    const mcp = { list: "codex mcp list", loginRequired: "^$", login: "codex mcp login {name}" };
+    const read: unknown[] = [];
+
+    const report = await runBriefStatusCommand(
+      {},
+      {
+        ...stack.dependencies,
+        now,
+        loadRegistry: () => ({
+          ok: true as const,
+          harnesses: [{ ...registry.harnesses[0]!, mcp: { file: ".codex/config.toml", format: "toml" as const, key: "mcp_servers" } }],
+          tools: registry.tools.map((tool) => (tool.id === "codex" ? { ...tool, mcp } : tool)),
+        }),
+        createAuthStart: () => ({ status: async () => ({ providers: [] }), mcpStatus: async () => [] }),
+        readMcpSources: (home, harnesses) => {
+          read.push([home, harnesses.map((harness) => harness.id)]);
+          return [
+            {
+              harness: "codex",
+              servers: [{ name: "github", type: "stdio", command: "github-mcp", args: [], env: ["GITHUB_TOKEN"] }],
+              nonPortable: [],
+            },
+          ];
+        },
+      },
+    );
+
+    expect(read).toEqual([["/operator/home", ["codex"]]]);
+    expect(stack.reads.some((command) => command.includes("/box/home/.codex/config.toml"))).toBe(true);
+    expect(report.boxes[0]!.issues.filter((issue) => issue.kind === "mcp-server")).toEqual([
+      {
+        kind: "mcp-server",
+        name: "codex/github",
+        state: "env-missing",
+        message: "codex/github needs GITHUB_TOKEN on the box. Set it in the env of github in ~/.codex/config.toml on the box.",
+        command: null,
+      },
+    ]);
   });
 
   test("prints one line for each box and each issue, with the fix command", async () => {
