@@ -108,8 +108,30 @@ const expectedMetadata = {
       skillRoot: ".pi/agent/skills",
       ownSkills: false,
       instructionFile: ".pi/agent/AGENTS.md",
+      settings: {
+        file: ".pi/agent/settings.json",
+        format: "json",
+        keys: [
+          "defaultProvider",
+          "defaultModel",
+          "defaultThinkingLevel",
+          "enabledModels",
+          "thinkingBudgets",
+          "enableSkillCommands",
+        ],
+      },
     },
-    { id: "cursor", name: "Cursor Agent", skillRoot: ".cursor/skills", ownSkills: false },
+    {
+      id: "cursor",
+      name: "Cursor Agent",
+      skillRoot: ".cursor/skills",
+      ownSkills: false,
+      settings: {
+        file: ".cursor/cli-config.json",
+        format: "json",
+        keys: ["model", "maxMode", "hasChangedDefaultModel", "attribution"],
+      },
+    },
   ],
 };
 

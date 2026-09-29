@@ -79,6 +79,7 @@ import {
   type StatusCommandInput,
 } from "./status-command.ts";
 import type { BriefStatusReport, StatusReport } from "./status.ts";
+import { failedChecks, formatDoctor, runDoctor, type DoctorDependencies, type DoctorInput, type DoctorReport } from "./doctor.ts";
 import { runToolsCommand, toolsLines, type ToolsCommandDependencies, type ToolsReport } from "./tools/command.ts";
 import { boxPathDirs } from "./tools/path.ts";
 import { runWatch, type WatchDependencies, type WatchInput } from "./watch.ts";
@@ -165,6 +166,7 @@ type CliDependencies = {
     input: StatusCommandInput,
     dependencies?: Partial<StatusCommandDependencies>,
   ) => Promise<StatusReport>;
+  readonly runDoctor?: (input: DoctorInput, dependencies?: Partial<DoctorDependencies>) => Promise<DoctorReport>;
   readonly runBriefStatus?: (
     input: StatusCommandInput,
     dependencies?: Partial<StatusCommandDependencies>,
@@ -254,6 +256,8 @@ const JSON_RESULTS: Record<string, string> = {
   expose: "events exposed and exited. The output of the command goes to stderr",
   status:
     "the status report, schema version 2. With --brief, { schemaVersion: 1, checkedAt, boxes: [{ name, host, online, error, issues: [{ kind, name, state, message, command }] }] }",
+  doctor:
+    "{ schemaVersion: 1, ok, checks: [{ id, box, status, message, fix }] }, also on failure. status is ok, failed, or skipped",
   integrations: "{ boxes: [{ name, destination, integrations: [{ id, description, enabled, localVersion, localSource, connectSteps }] }] }",
   "integrations enable": "{ integration, action, dryRun, plan, output, enabled, connectSteps }",
   "integrations disable": "{ integration, action, dryRun, plan, output, enabled, connectSteps }",
@@ -769,13 +773,32 @@ reconnect. With --follow, the local port is the box port when it is free, else
 the next free port, and Ferry connects again 5 seconds after a drop. Run
 ferry tunnel install to run --follow as a user service.
 
+Put a host before the box port to forward to a host that the box can reach,
+such as a database that accepts connections only from the box network. A
+numeric first part is a box port. The box resolves the host name. Put an IPv6
+address in brackets. Ferry first checks that the box can connect to the host,
+and stops with an error when it cannot.
+
+  5432                   127.0.0.1:5432 on the box, local port 5432
+  5432:15432             127.0.0.1:5432 on the box, local port 15432
+  db.example:5432        db.example:5432 from the box, local port 5432
+  db.example:5432:15432  db.example:5432 from the box, local port 15432
+  [fd00::1]:5432         [fd00::1]:5432 from the box, local port 5432
+
+A plain tunnel works as the child process of another program. It never
+prompts: OpenSSH runs in batch mode. The local port accepts connections after
+the SSH connection is ready. SIGTERM closes the tunnel with exit code 0.
+
 --follow writes its forwards to ~/.ferry/tunnels/<box>.json when it connects,
 after each change, and when the connection drops. The menu bar app reads the
 file. Fields: schemaVersion (1), box, pid, connected (false after a drop, with
 no forwards), updatedAt, and forwards: [{ name, cwd, boxPort, localPort }].
 name and cwd are missing when the entry of ferry expose has none. Ferry
 removes the file when --follow stops on Ctrl-C or SIGTERM.`)
-    .argument("[ports...]", "box port, or box:local to pick another local port, such as 3000 or 3000:4000")
+    .argument(
+      "[ports...]",
+      "box port, box:local to pick another local port, or host:port[:local] for a host that the box can reach, such as 3000, 3000:4000, or db.example:5432",
+    )
     .option("--list", "list the TCP ports that listen on the box, with process names")
     .option("--follow", "open a forward for each port that ferry expose announces on the box, and close it when the port goes away")
     .action(async (ports: string[], options: { list?: boolean; follow?: boolean }) => {
@@ -905,6 +928,37 @@ command that fixes it. ferry watch writes the same report to
           { createLink, progress },
         );
         report(result, (result) => writeLine(formatStatus(result)));
+      });
+    });
+
+  program
+    .command("doctor")
+    .summary("Check SSH, Tailscale, snapshot access, linger, and services, and print a fix for each failure")
+    .description(`Check SSH, Tailscale, snapshot access, linger, and services, and print a fix for each failure.
+
+Ferry runs each check, also after a check fails, and changes nothing. It
+checks that the SSH agent has a key, that this machine can read the snapshot
+and push to it (git push --dry-run), and that the installed watch and tunnel
+services run this Ferry. For each box, it checks that the box responds over
+SSH with host key checks on, that Tailscale reaches a Tailscale box, that the
+box can read the snapshot with the forwarded agent or the deploy key of
+git_auth = "box", and that linger is on when a Ferry service runs on the box.
+
+The exit code is 1 when a check fails. With --json, result has one entry for
+each check, also on failure.`)
+    .action(async () => {
+      const result = await withProgress((progress) =>
+        (dependencies.runDoctor ?? runDoctor)({ selection: boxNames() }, { createLink, progress }),
+      );
+      if (result.ok) {
+        report(result, (result) => writeLine(formatDoctor(result)));
+        return;
+      }
+      if (!json()) writeLine(formatDoctor(result));
+      failedResult = result;
+      const count = failedChecks(result);
+      throw new FerryError("failed", `${count} of ${result.checks.length} checks failed.`, {
+        hint: "Run the fix of each failed check, then run ferry doctor again.",
       });
     });
 
@@ -1248,7 +1302,7 @@ git_auth = "box" in its [box.<name>] table and run ferry init --box <name>.`)
     .argument("<name>", "box name")
     .action((name: string) => report(runBoxDefault({ name }, { readConfig: config, writeConfig: (value) => writeConfig(value), writeLine })));
 
-  for (const name of ["init", "install", "update", "auth", "sync", "move", "tunnel", "status", "integrations", "tools"]) {
+  for (const name of ["init", "install", "update", "auth", "sync", "move", "tunnel", "status", "doctor", "integrations", "tools"]) {
     const command = program.commands.find((known) => known.name() === name);
     if (command) boxCommands.add(command);
   }

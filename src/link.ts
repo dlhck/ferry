@@ -103,10 +103,15 @@ export type ForwardOptions = {
   readonly signal?: AbortSignal;
 };
 
-export type TunnelPort = { readonly localPort: number; readonly remotePort: number };
+export type TunnelPort = {
+  readonly localPort: number;
+  readonly remotePort: number;
+  /** The host that the box connects to. The box resolves it. The default is `127.0.0.1`. */
+  readonly remoteHost?: string;
+};
 
 export type TunnelOptions = {
-  /** Each local port forwards to `127.0.0.1` on the box, in one OpenSSH connection. */
+  /** Each local port forwards to its remote host on the box, in one OpenSSH connection. */
   readonly ports: readonly TunnelPort[];
   /** The tunnel has no timeout. It is stopped and returns `ForwardStopped` when this signal aborts. */
   readonly signal?: AbortSignal;
@@ -218,7 +223,35 @@ export class Link {
   }
 
   /**
-   * Forward several local ports to `127.0.0.1` on the box in one OpenSSH
+   * Open one TCP connection from the box to `host:port` and close it, with
+   * `ssh -W`. A connection that stays open until the timeout is a success.
+   * A failure from the box has origin `box`.
+   */
+  async reach(target: { readonly host: string; readonly port: number }): Promise<LinkResult> {
+    const invalid = this.validateConfig();
+    if (invalid) return invalid;
+
+    const resolved = await this.resolve();
+    if (!resolved.ok) return resolved;
+
+    let execution: HostCommandResult;
+    try {
+      execution = await this.adapter.run({
+        argv: ["ssh", ...this.sshOptions(), "-W", `${bracketHost(target.host)}:${target.port}`, resolved.destination],
+        timeoutMs: this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
+      });
+    } catch (error) {
+      return failure("ssh-start-failed", "operator", messageOf(error, "could not start OpenSSH"));
+    }
+    if (execution.timedOut || execution.exitCode === 0) return success(resolved.address, execution);
+    // OpenSSH prints `channel 0: open failed: ...` when the box cannot open the connection.
+    const detail = /open failed: (.*)/.exec(execution.stderr)?.[1]?.trim();
+    if (detail) return failure("forward-failed", "box", detail);
+    return failure("ssh-failed", "network", outputMessage(execution, "OpenSSH could not reach the box"));
+  }
+
+  /**
+   * Forward several local ports to their remote hosts on the box in one OpenSSH
    * connection, until the signal aborts or the connection drops. Keepalives
    * let OpenSSH notice a dropped connection.
    */
@@ -239,7 +272,7 @@ export class Link {
       "-o",
       "ServerAliveCountMax=3",
       ...this.sshOptions(),
-      ...options.ports.flatMap((port) => ["-L", `127.0.0.1:${port.localPort}:127.0.0.1:${port.remotePort}`]),
+      ...options.ports.flatMap((port) => ["-L", localForward(port)]),
       resolved.destination,
     ];
     return this.runForward(resolved.address, argv, Number.POSITIVE_INFINITY, options.signal);
@@ -299,7 +332,7 @@ export class Link {
       }
       return success(address, execution);
     };
-    const spec = (port: TunnelPort) => ["-L", `127.0.0.1:${port.localPort}:127.0.0.1:${port.remotePort}`];
+    const spec = (port: TunnelPort) => ["-L", localForward(port)];
 
     let ended = false;
     void closed.then(() => {
@@ -571,6 +604,15 @@ function validateTunnel(options: TunnelOptions): LinkFailure | null {
     return failure("invalid-config", "operator", "port numbers must be integers from 1 through 65535");
   }
   return null;
+}
+
+/** The `-L` spec of a port. OpenSSH needs an IPv6 address in brackets. */
+function localForward(port: TunnelPort): string {
+  return `127.0.0.1:${port.localPort}:${bracketHost(port.remoteHost ?? "127.0.0.1")}:${port.remotePort}`;
+}
+
+function bracketHost(host: string): string {
+  return host.includes(":") ? `[${host}]` : host;
 }
 
 function validPort(port: number): boolean {
