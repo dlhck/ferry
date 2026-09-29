@@ -98,6 +98,7 @@ function dependencies(
     readonly confirm?: () => Promise<boolean | symbol | undefined>;
     readonly boxFails?: readonly string[];
     readonly localFails?: readonly string[];
+    readonly installedPaths?: Readonly<Record<string, string>>;
   } = {},
 ): { recorder: Recorder; deps: Partial<UpdateCommandDependencies> } {
   const recorder: Recorder = { box: [], local: [], output: [] };
@@ -137,10 +138,11 @@ function dependencies(
             const stdout = localVersions[read];
             return { exitCode: stdout === undefined ? 127 : 0, stdout: stdout ?? "", stderr: "", timedOut: false };
           }
-          const probe = /^command -v (\S+)$/.exec(script);
+          const probe = /command -v '?([^')\s]+)'?/.exec(script);
           if (probe) {
             const found = installed.includes(probe[1] ?? "");
-            return { exitCode: found ? 0 : 1, stdout: "", stderr: "", timedOut: false };
+            const path = options.installedPaths?.[probe[1] ?? ""] ?? `/usr/local/bin/${probe[1]}`;
+            return { exitCode: found ? 0 : 1, stdout: found ? `${path}\n` : "", stderr: "", timedOut: false };
           }
           recorder.local.push(script);
           const failed = options.localFails?.includes(script) === true;
@@ -198,10 +200,26 @@ describe("update plan", () => {
     expect(Object.fromEntries(BUILTIN_TOOLS.map((tool) => [tool.id, tool.update]))).toEqual({
       gh: { command: "sudo apt update && sudo apt install gh -y" },
       claude: { command: "claude update", binary: "claude" },
-      codex: { command: "codex update", binary: "codex" },
+      codex: {
+        command: "codex update",
+        binary: "codex",
+        operatorSkip: { pathIncludes: ".app/Contents/Resources/", reason: "bundled with the Codex app" },
+      },
       pi: { command: "pi update", binary: "pi" },
       cursor: { command: "cursor-agent update", binary: "cursor-agent" },
     });
+  });
+
+  test("skips the Codex CLI bundled with the macOS app", async () => {
+    const codex = BUILTIN_TOOLS.find((tool) => tool.id === "codex")!;
+    const { deps } = dependencies({
+      installed: ["codex"],
+      installedPaths: { codex: "/Applications/Codex.app/Contents/Resources/codex" },
+    });
+
+    await expect(planOperator([codex], deps.local!)).resolves.toEqual([
+      { tool: "codex", reason: "bundled with the Codex app" },
+    ]);
   });
 });
 

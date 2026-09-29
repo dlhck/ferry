@@ -246,7 +246,11 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
     boxVersion: "codex --version",
     pathDirs: [".local/bin"],
     install: { command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh" },
-    update: { command: "codex update", binary: "codex" },
+    update: {
+      command: "codex update",
+      binary: "codex",
+      operatorSkip: { pathIncludes: ".app/Contents/Resources/", reason: "bundled with the Codex app" },
+    },
     auth: {
       probe: "codex login status",
       login: "codex login --device-auth",

@@ -753,7 +753,9 @@ describe("watch daily update", () => {
             local: {
               run: async (command) => {
                 const script = command.argv.at(-1) ?? "";
-                if (script.startsWith("command -v ")) return { exitCode: 0, stdout: "", stderr: "", timedOut: false };
+                if (script.includes("command -v ")) {
+                  return { exitCode: 0, stdout: "/usr/local/bin/claude\n", stderr: "", timedOut: false };
+                }
                 if (!script.includes('cd "$HOME"')) localCommands.push(script);
                 return { exitCode: 0, stdout: "2.0.0", stderr: "", timedOut: false };
               },
