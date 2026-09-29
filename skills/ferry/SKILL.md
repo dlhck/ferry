@@ -43,7 +43,7 @@ These items are not symlinks. Sync writes them into box files:
 - Carried Codex settings keys: `model`, `model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`, `features`, and `web_search` in `~/.codex/config.toml`.
 - For both files, sync replaces the carried keys on the box. A key that the operator machine does not have is removed from the box. The box keeps its other keys. When a carried Codex key changes, sync writes `config.toml` again, and the comments in that file are lost.
 - Remote MCP servers: the name and HTTPS URL of each server in `mcpServers` of `~/.claude.json`, `[mcp_servers]` of `~/.codex/config.toml`, and `mcpServers` of `~/.cursor/mcp.json`. Sync declares them on the box. It replaces a box declaration with a different URL. It never removes a box server.
-- Stdio MCP servers from the same files: the name, `command`, `args`, and the names of the `env` keys, never their values. Sync writes the command and arguments into the MCP file of each harness on the box and keeps the `env` of the box entry. It never installs the command. A server whose command or arguments refer to a path in the operator home is not carried.
+- Stdio MCP servers from the same files: the name, `command`, `args`, and the names of the `env` keys, never their values. Sync adds them with `claude mcp add-json` for Claude and writes them into the MCP file of Codex and Cursor Agent. It keeps the `env` of the box entry. It never installs the command. A server whose command or arguments refer to a path in the operator home is not carried.
 
 Ferry never carries logins, credential files, tokens, request headers, `.env` files, session history, caches, databases, or whole settings files.
 

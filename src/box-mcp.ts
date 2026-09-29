@@ -29,9 +29,11 @@ const BOX_ENV_KEYS = ["env", "env_vars"];
 /** Codex waits in `mcp add` for a login callback, so each server gets more time than one command. */
 const REGISTER_TIMEOUT_MS = 600_000;
 
-/** Replace `{name}`, `{url}`, and `{type}` in an MCP command with shell-quoted values. */
-export function mcpCommand(template: string, server: Partial<RemoteMcpServer>): string {
-  return template.replace(/\{(name|url|type)\}/g, (_, key: keyof RemoteMcpServer) =>
+type McpCommandValues = Partial<Record<"name" | "url" | "type" | "json", string>>;
+
+/** Replace `{name}`, `{url}`, `{type}`, and `{json}` in an MCP command with shell-quoted values. */
+export function mcpCommand(template: string, server: McpCommandValues): string {
+  return template.replace(/\{(name|url|type|json)\}/g, (_, key: keyof McpCommandValues) =>
     quoteShell(String(server[key] ?? "")),
   );
 }
@@ -62,6 +64,7 @@ export async function registerBoxMcp(input: {
   };
   const warnings: string[] = [];
   for (const { entry, recipe } of entries) {
+    const file = input.harnesses.find((harness) => harness.id === entry.harness)?.mcp;
     let servers = entry.servers;
     if (recipe.register) {
       const remote = entry.servers.filter((server): server is RemoteMcpServer => server.type !== "stdio");
@@ -69,9 +72,14 @@ export async function registerBoxMcp(input: {
       servers = entry.servers.filter((server) => server.type === "stdio");
     }
     if (servers.length === 0) continue;
-    const file = input.harnesses.find((harness) => harness.id === entry.harness)?.mcp;
+    const path = file && posix.join(input.remoteHome, file.file);
+    if (recipe.register?.addJson) {
+      const stdio = servers.filter((server): server is StdioMcpServer => server.type === "stdio");
+      warnings.push(...(await registerStdioWithCli(entry.harness, stdio, recipe, path && file ? { path, file } : null, input.link, advance)));
+      continue;
+    }
     advance(servers.length);
-    if (file) await mergeMcpFile(posix.join(input.remoteHome, file.file), file, servers, input.link);
+    if (path && file) await mergeMcpFile(path, file, servers, input.link);
   }
   return warnings;
 }
@@ -176,6 +184,50 @@ async function registerWithCli(
       }
       if (kind === "S") warnings.push(`could not declare ${entry.harness} MCP server ${name}`);
     }
+  }
+  return warnings;
+}
+
+/**
+ * Add stdio servers with the `addJson` command of the harness CLI, one box
+ * command for each server. The harness owns its MCP file, so ferry only reads
+ * it: a box entry with the carried command and arguments is left alone, and a
+ * changed entry keeps the `env` of the box entry.
+ */
+async function registerStdioWithCli(
+  harness: string,
+  servers: readonly StdioMcpServer[],
+  recipe: ToolMcp,
+  box: { readonly path: string; readonly file: McpFile } | null,
+  link: BoxSettingsLink,
+  advance: (servers: number) => void,
+): Promise<string[]> {
+  const register = recipe.register as NonNullable<ToolMcp["register"]>;
+  const binary = mcpBinary(recipe);
+  const declared = box ? (await readMcpFile(box.path, box.file, link)).servers : {};
+  const warnings: string[] = [];
+  for (const server of servers) {
+    advance(1);
+    const current = record(declared[server.name]);
+    const args = Array.isArray(current.args) ? current.args : [];
+    if (current.command === server.command && Bun.deepEquals(args, server.args)) continue;
+    const json = JSON.stringify({
+      type: "stdio",
+      command: server.command,
+      args: server.args,
+      ...(Object.hasOwn(current, "env") ? { env: current.env } : {}),
+    });
+    const script = [
+      `command -v ${binary} >/dev/null 2>&1 || { printf 'C\\n'; exit 0; }`,
+      `${mcpCommand(register.remove, server)} >/dev/null 2>&1`,
+      `${mcpCommand(register.addJson as string, { name: server.name, json })} </dev/null >/dev/null 2>&1 || printf 'S\\n'`,
+    ].join("\n");
+    const result = await checked(link, `sh -c ${quoteShell(script)}`);
+    if (result.stdout.startsWith("C")) {
+      warnings.push(`the ${binary} CLI is not on the box PATH; no ${harness} MCP server was declared`);
+      return warnings;
+    }
+    if (result.stdout.startsWith("S")) warnings.push(`could not declare ${harness} MCP server ${server.name}`);
   }
   return warnings;
 }
