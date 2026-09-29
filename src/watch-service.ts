@@ -25,7 +25,7 @@ export type WatchServiceResult = {
   readonly path: string;
 };
 
-type ServiceCommandResult = { readonly ok: boolean; readonly stderr: string };
+export type ServiceCommandResult = { readonly ok: boolean; readonly stderr: string };
 
 /** One Ferry user service: its names for launchd and systemd, and the Ferry arguments that it runs. */
 export type UserService = {
@@ -39,8 +39,10 @@ export type UserService = {
   readonly unit: string;
   readonly description: string;
   readonly args: readonly string[];
-  /** The systemd `Restart=` value. launchd restarts the service each time it exits. */
-  readonly restart: "on-failure" | "always";
+  /** The systemd `Restart=` value. launchd restarts the service each time it exits, except for `"no"`. */
+  readonly restart: "no" | "on-failure" | "always";
+  /** More environment variables of the service, after PATH and SSH_AUTH_SOCK. */
+  readonly environment?: Readonly<Record<string, string>>;
 };
 
 const WATCH_SERVICE: UserService = {
@@ -82,6 +84,7 @@ export async function installUserService(
   }
   requireSafe(service, environmentPath, "PATH");
   if (sshAuthSock) requireSafeAbsolute(service, sshAuthSock, "SSH_AUTH_SOCK");
+  for (const [name, value] of Object.entries(service.environment ?? {})) requireSafe(service, `${name}=${value}`, name);
 
   if (platform === "darwin") {
     if (uid === undefined) throw new Error("launchd setup needs the current user id");
@@ -152,9 +155,9 @@ function launchdService(
   sshAuthSock: string | undefined,
   log: string,
 ): string {
-  const socket = sshAuthSock
-    ? `\n    <key>SSH_AUTH_SOCK</key>\n    <string>${xml(sshAuthSock)}</string>`
-    : "";
+  const environment = Object.entries({ ...(sshAuthSock ? { SSH_AUTH_SOCK: sshAuthSock } : {}), ...service.environment })
+    .map(([name, value]) => `\n    <key>${xml(name)}</key>\n    <string>${xml(value)}</string>`)
+    .join("");
   const args = [...command, ...service.args].map((arg) => `\n    <string>${xml(arg)}</string>`).join("");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -168,7 +171,7 @@ function launchdService(
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <${service.restart === "no" ? "false" : "true"}/>
   <key>StandardOutPath</key>
   <string>${xml(log)}</string>
   <key>StandardErrorPath</key>
@@ -176,7 +179,7 @@ function launchdService(
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>${xml(environmentPath)}</string>${socket}
+    <string>${xml(environmentPath)}</string>${environment}
   </dict>
 </dict>
 </plist>
@@ -189,7 +192,9 @@ function systemdService(
   environmentPath: string,
   sshAuthSock: string | undefined,
 ): string {
-  const socket = sshAuthSock ? `Environment="SSH_AUTH_SOCK=${systemd(sshAuthSock)}"\n` : "";
+  const environment = Object.entries({ ...(sshAuthSock ? { SSH_AUTH_SOCK: sshAuthSock } : {}), ...service.environment })
+    .map(([name, value]) => `Environment="${name}=${systemd(value)}"\n`)
+    .join("");
   // The arguments are fixed words and box names, so they need no quotes.
   const commandLine = command.map((arg) => `"${systemd(arg)}"`).join(" ");
   return `[Unit]
@@ -202,7 +207,7 @@ ExecStart=${commandLine} ${service.args.join(" ")}
 Restart=${service.restart}
 RestartSec=5
 Environment="PATH=${systemd(environmentPath)}"
-${socket}
+${environment}
 [Install]
 WantedBy=default.target
 `;
@@ -215,7 +220,7 @@ function writeService(path: string, body: string): void {
   renameSync(temporary, path);
 }
 
-async function checked(
+export async function checked(
   run: NonNullable<WatchServiceDependencies["run"]>,
   command: ServiceCommand,
 ): Promise<void> {
@@ -223,7 +228,7 @@ async function checked(
   if (!result.ok) throw new Error(`${command[0]} failed: ${result.stderr || "unknown error"}`);
 }
 
-async function runCommand(command: ServiceCommand, allowFailure = false): Promise<ServiceCommandResult> {
+export async function runCommand(command: ServiceCommand, allowFailure = false): Promise<ServiceCommandResult> {
   const child = Bun.spawn([...command], { stdout: "ignore", stderr: "pipe" });
   const [status, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
   const result = { ok: status === 0, stderr: stderr.trim() };
