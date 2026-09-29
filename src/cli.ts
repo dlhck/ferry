@@ -926,8 +926,9 @@ paseo: Ferry installs Node 22 or later and the Paseo CLI at the version of the
 local Paseo app, then starts the user service ferry-paseo.service. The daemon
 listens on 127.0.0.1:6767 with the relay off by default. It has no password, so use it
 only on a box with one user. To connect Paseo Desktop, add the Remote SSH host
-ssh://<box destination>. With Paseo on, sync carries the Paseo agent profiles
-and managed Git and npm plugins, and move registers the project in Paseo on the box.
+ssh://<box destination>. With Paseo on, sync carries the Paseo agent profiles,
+managed Git and npm plugins, agents.metadataGeneration.providers, and
+daemon.appendSystemPrompt, and move registers the project in Paseo on the box.
 
 For relay pairing, set paseo_relay = true in [integrations] of
 ~/.ferry/config.toml. A [box.<name>.integrations] table can override it.
