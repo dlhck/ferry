@@ -8,6 +8,7 @@
 
 import * as prompts from "@clack/prompts";
 import { planBoxFerry } from "./box-ferry.ts";
+import { quoteShell } from "./box-settings.ts";
 import { resolveBoxes, type ResolvedBox } from "./boxes.ts";
 import {
   completeHostConfig,
@@ -34,7 +35,7 @@ const PROBE_TIMEOUT_MS = 10_000;
 /** A tool on the operator machine: its update command, or why ferry skips it. */
 export type OperatorUpdate =
   | { readonly tool: string; readonly command: string }
-  | { readonly tool: string; readonly reason: "no own update command" | "not installed" | "off" };
+  | { readonly tool: string; readonly reason: string };
 
 export type UpdateCommandInput = {
   readonly yes: boolean;
@@ -113,10 +114,15 @@ export async function planOperator(
       operator.push({ tool: tool.id, reason: "off" });
     } else if (tool.update?.binary === undefined) {
       operator.push({ tool: tool.id, reason: "no own update command" });
-    } else if (!(await isInstalled(local, tool.update.binary))) {
-      operator.push({ tool: tool.id, reason: "not installed" });
     } else {
-      operator.push({ tool: tool.id, command: tool.update.command });
+      const path = await installedPath(local, tool.update.binary);
+      if (path === null) {
+        operator.push({ tool: tool.id, reason: "not installed" });
+      } else if (tool.update.operatorSkip !== undefined && path.includes(tool.update.operatorSkip.pathIncludes)) {
+        operator.push({ tool: tool.id, reason: tool.update.operatorSkip.reason });
+      } else {
+        operator.push({ tool: tool.id, command: tool.update.command });
+      }
     }
   }
   return operator;
@@ -379,12 +385,26 @@ function registryTools(config: PartialOperatorConfig): readonly ToolDescriptor[]
   return registry.tools;
 }
 
-async function isInstalled(local: HostAdapter, binary: string): Promise<boolean> {
+/** The resolved executable path, or null when the executable is not on PATH. */
+async function installedPath(local: HostAdapter, binary: string): Promise<string | null> {
   try {
-    const result = await local.run({ argv: ["sh", "-c", `command -v ${binary}`], timeoutMs: PROBE_TIMEOUT_MS });
-    return result.exitCode === 0;
+    const command = [
+      `ferry_binary=$(command -v ${quoteShell(binary)}) || exit 1`,
+      'while [ -L "$ferry_binary" ]; do',
+      '  ferry_link=$(readlink "$ferry_binary") || exit 1',
+      '  case "$ferry_link" in',
+      '    /*) ferry_binary="$ferry_link" ;;',
+      '    *) ferry_binary="$(dirname "$ferry_binary")/$ferry_link" ;;',
+      "  esac",
+      "done",
+      'ferry_dir=$(cd "$(dirname "$ferry_binary")" && pwd -P) || exit 1',
+      'printf "%s/%s\\n" "$ferry_dir" "$(basename "$ferry_binary")"',
+    ].join("\n");
+    const result = await local.run({ argv: ["sh", "-c", command], timeoutMs: PROBE_TIMEOUT_MS });
+    if (result.exitCode !== 0 || result.timedOut) return null;
+    return result.stdout.trim() || null;
   } catch {
-    return false;
+    return null;
   }
 }
 

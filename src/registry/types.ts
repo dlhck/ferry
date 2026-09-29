@@ -122,6 +122,11 @@ export type ToolUpdate = {
    * `command` works only on the box, such as an apt command.
    */
   readonly binary?: string;
+  /**
+   * Skip the operator update when the resolved executable path contains this
+   * text. The program that bundles the executable owns its update.
+   */
+  readonly operatorSkip?: { readonly pathIncludes: string; readonly reason: string };
 };
 
 /**
