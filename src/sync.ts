@@ -113,7 +113,7 @@ export type SyncPlan = {
   readonly storeUpdates: readonly StoreUpdate[];
   /** The names of the local Paseo agent profiles, or `null` when the Paseo integration is off. */
   readonly paseoProfiles: readonly string[] | null;
-  /** Managed Git sources and local skip reasons, or null when Paseo is off. */
+  /** Managed Git and npm sources and local skip reasons, or null when Paseo is off. */
   readonly paseoPlugins?: PaseoPlugins | null;
   /** The box PATH directories, relative to the home, for the `~/.profile` block and the Paseo unit. */
   readonly pathDirs: readonly string[];
@@ -557,7 +557,7 @@ async function applyOnBox(context: {
     const plugins = box.plugins;
     if (plugins && (plugins.plugins.length > 0 || plugins.warnings.length > 0)) {
       try {
-        const warnings = await boxStep("Carrying Paseo Git plugins", () => carryPaseoPlugins(link, plugins));
+        const warnings = await boxStep("Carrying Paseo plugins", () => carryPaseoPlugins(link, plugins));
         for (const warning of warnings) warn(`Warning: ${warning}`);
       } catch (cause) {
         warn(`Warning: Ferry could not carry the Paseo plugins: ${messageOf(cause)}. The core sync is complete.`);
@@ -805,7 +805,7 @@ function printPlan(plan: SyncPlan, gitAuth: GitAuth, writeLine: (line: string) =
               : `Paseo agent profiles: ${plan.paseoProfiles.join(", ")} -> box ~/.paseo/config.json daemon.agentProfiles, then paseo daemon reload. Ferry skips each profile whose provider is not available on the box.`,
           ]),
       ...(plan.paseoPlugins == null ? [] : [
-        `Paseo Git plugins: ${plan.paseoPlugins.plugins.map((plugin) => `${plugin.id}@${plugin.commit} (${plugin.enabled ? "enabled" : "disabled"})`).join(", ") || "none"}. Keep box-only plugins. Turn on the global plugin switch when an enabled plugin is current on the box, which also starts enabled box-only plugins. The box daemon needs Git access.`,
+        `Paseo plugins: ${plan.paseoPlugins.plugins.map((plugin) => `${plugin.id}@${plugin.kind === "git" ? plugin.commit : `npm:${plugin.packageName}@${plugin.version}`} (${plugin.enabled ? "enabled" : "disabled"})`).join(", ") || "none"}. Keep box-only plugins. Turn on the global plugin switch when an enabled plugin is current on the box, which also starts enabled box-only plugins. The box daemon needs Git access, and npm with registry access for npm plugins.`,
         ...plan.paseoPlugins.warnings,
       ]),
       ...denyListLines(),
