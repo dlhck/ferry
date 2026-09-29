@@ -43,6 +43,11 @@ import {
 } from "./integrations/paseo.ts";
 import { carryPaseoPlugins, readPaseoPlugins, type PaseoPlugins } from "./integrations/paseo-plugins.ts";
 import { carryPaseoProviders, readPaseoProviders, type PaseoProviders } from "./integrations/paseo-providers.ts";
+import {
+  carryPaseoTerminalProfiles,
+  readPaseoTerminalProfiles,
+  type PaseoTerminalProfiles,
+} from "./integrations/paseo-terminal-profiles.ts";
 import { denyRuleCause, linkFailure } from "./errors.ts";
 import { groupProgress, noProgress, plural, step, type Progress } from "./progress.ts";
 import { boxPathDirs, profileBlockCommand } from "./tools/path.ts";
@@ -138,6 +143,19 @@ export type SyncPlan = {
   readonly paseoPreferences?: {
     readonly metadataProviders: readonly MetadataProvider[] | null;
     readonly appendSystemPromptLength: number | null;
+  } | null;
+  /**
+   * The portable local Paseo terminal profiles and skip reasons, or null when Paseo is off or the
+   * local config does not set the list. It never holds an argument.
+   */
+  readonly paseoTerminalProfiles?: {
+    readonly profiles: readonly {
+      readonly id: string;
+      readonly name: string;
+      readonly command: string;
+      readonly argCount: number;
+    }[];
+    readonly warnings: readonly string[];
   } | null;
   /** The box PATH directories, relative to the home, for the `~/.profile` block and the Paseo unit. */
   readonly pathDirs: readonly string[];
@@ -247,11 +265,13 @@ export async function runSync(
       let plugins: PaseoPlugins | null = null;
       let providers: PaseoProviders | null = null;
       let preferences: PaseoPreferences | null = null;
+      let terminals: PaseoTerminalProfiles = null;
       try {
         if (profiles !== null) {
           plugins = readPaseoPlugins(home);
           providers = readPaseoProviders(home);
           preferences = readPaseoPreferences(home);
+          terminals = readPaseoTerminalProfiles(home);
         }
       } catch (cause) {
         throw new SyncError("manifest-refusal", "operator", messageOf(cause), { cause });
@@ -266,6 +286,7 @@ export async function runSync(
           plugins: box.integrations.paseo === true ? plugins : null,
           providers: box.integrations.paseo === true ? providers : null,
           preferences: box.integrations.paseo === true ? preferences : null,
+          terminals: box.integrations.paseo === true ? terminals : null,
           pathDirs,
         })),
       };
@@ -279,7 +300,8 @@ export async function runSync(
         const plugins = box.plugins;
         const pluginStep = plugins && (plugins.plugins.length > 0 || plugins.warnings.length > 0) ? 1 : 0;
         return total + BOX_STEPS + (box.profiles === null ? 0 : 2) + pluginStep +
-          (hasProviders(box.providers) ? 1 : 0) + (hasPreferences(box.preferences) ? 1 : 0);
+          (hasProviders(box.providers) ? 1 : 0) + (hasPreferences(box.preferences) ? 1 : 0) +
+          (hasTerminals(box.terminals) ? 1 : 0);
       }, operatorSteps);
   if (planned !== (input.dryRun ? 1 : operatorSteps + BOX_STEPS)) progress.plan(planned);
   for (const leftover of seed.leftovers) {
@@ -440,11 +462,16 @@ type SyncBox = ResolvedBox & {
   readonly plugins: PaseoPlugins | null;
   readonly providers: PaseoProviders | null;
   readonly preferences: PaseoPreferences | null;
+  readonly terminals: PaseoTerminalProfiles;
   readonly pathDirs: readonly string[];
 };
 
 function hasProviders(providers: PaseoProviders | null): providers is PaseoProviders {
   return providers !== null && (providers.providers.length > 0 || providers.warnings.length > 0);
+}
+
+function hasTerminals(terminals: PaseoTerminalProfiles): terminals is NonNullable<PaseoTerminalProfiles> {
+  return terminals !== null && (terminals.profiles.length > 0 || terminals.warnings.length > 0);
 }
 
 function hasPreferences(preferences: PaseoPreferences | null): preferences is PaseoPreferences {
@@ -656,6 +683,24 @@ async function applyOnBox(context: {
         warn(`Warning: Ferry could not carry the Paseo preferences: ${messageOf(cause)}. The sync is complete.`);
       }
     }
+    // The command check uses the new unit PATH, so the terminal profiles go before the PATH refresh.
+    const terminals = box.terminals;
+    if (hasTerminals(terminals)) {
+      try {
+        const carry = await boxStep(
+          "Carrying Paseo terminal profiles",
+          () => carryPaseoTerminalProfiles(link, terminals, pathDirs),
+          (carry) => [
+            plural(carry.carried.length, "profile"),
+            carry.warnings.length > 0 && `${carry.warnings.length} skipped`,
+            carry.carried.length > 0 && !carry.changed && "no changes",
+          ].filter(Boolean).join(", "),
+        );
+        for (const warning of carry.warnings) warn(`Warning: ${warning}`);
+      } catch (cause) {
+        warn(`Warning: Ferry could not carry the Paseo terminal profiles: ${messageOf(cause)}. The sync is complete.`);
+      }
+    }
     // The restart also applies the profiles, so it runs after the carry.
     try {
       const restarted = await boxStep(
@@ -821,6 +866,15 @@ function makePlan(
       metadataProviders: box.preferences.metadataProviders ?? null,
       appendSystemPromptLength: box.preferences.appendSystemPrompt?.length ?? null,
     },
+    paseoTerminalProfiles: box.terminals === null ? null : {
+      profiles: box.terminals.profiles.map((profile) => ({
+        id: profile.id,
+        name: profile.name,
+        command: profile.command,
+        argCount: profile.args?.length ?? 0,
+      })),
+      warnings: box.terminals.warnings,
+    },
     pathDirs: box.pathDirs,
     offHarnesses: off.map((harness) => harness.id),
   };
@@ -898,6 +952,7 @@ function printPlan(plan: SyncPlan, gitAuth: GitAuth, writeLine: (line: string) =
       ]),
       ...(plan.paseoProviders == null ? [] : providerLines(plan.paseoProviders)),
       ...(plan.paseoPreferences == null ? [] : [preferencesLine(plan.paseoPreferences)]),
+      ...(plan.paseoTerminalProfiles == null ? [] : terminalProfileLines(plan.paseoTerminalProfiles)),
       ...denyListLines(),
     ].join("\n"),
   );
@@ -914,6 +969,17 @@ function providerLines(plan: NonNullable<SyncPlan["paseoProviders"]>): string[] 
       "Create a provider that the box lacks only when it needs no env or params and its command executable is on the box PATH.",
     ...plan.providers.flatMap((provider) => provider.createBlocker === null ? [] :
       [`Paseo provider ${provider.id} is created only when the box defines it first: ${provider.createBlocker}.`]),
+    ...plan.warnings,
+  ];
+}
+
+/** The dry-run lines of the Paseo terminal profiles. They never hold an argument. */
+function terminalProfileLines(plan: NonNullable<SyncPlan["paseoTerminalProfiles"]>): string[] {
+  const profiles = plan.profiles.map((profile) => `${profile.name} (${profile.command}, ${plural(profile.argCount, "argument")})`);
+  return [
+    `Paseo terminal profiles: ${profiles.join(", ") || "none"} -> merge by ID into box ~/.paseo/config.json daemon.terminalProfiles, then paseo daemon reload. ` +
+      "Keep box-only profiles, the Paseo defaults when the box has no list, and the other box fields of each profile. " +
+      "Ferry skips each profile whose command is not on the PATH of ferry-paseo.service on the box.",
     ...plan.warnings,
   ];
 }

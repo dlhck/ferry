@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { readPaseoPlugins } from "./integrations/paseo-plugins.ts";
 import { readPaseoProviders } from "./integrations/paseo-providers.ts";
+import { readPaseoTerminalProfiles } from "./integrations/paseo-terminal-profiles.ts";
 import { readPaseoPreferences } from "./integrations/paseo.ts";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -374,6 +375,9 @@ async function observeSource(home: string): Promise<WatchObservation> {
     // Only set preferences change the identity, so an existing identity stays the same without them.
     const preferences = readPaseoPreferences(home);
     if (Object.keys(preferences).length > 0) hash.update(JSON.stringify(preferences));
+    // Only a set terminal profile list changes the identity.
+    const terminals = readPaseoTerminalProfiles(home);
+    if (terminals !== null) hash.update(JSON.stringify(terminals));
     return { ok: true, identity: hash.digest("hex") };
   } catch (error) {
     const message = messageOf(error);

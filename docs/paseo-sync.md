@@ -1,6 +1,6 @@
 # Paseo sync
 
-With the Paseo integration enabled for a box, `ferry sync` carries agent profiles, managed Git and npm plugins, provider definitions, metadata model preferences, and shared system instructions from the operator machine. These go directly to the box. They are not stored in the snapshot repository. `ferry watch` detects changes to plugin commits, npm versions, enabled states, provider definitions, and the two preferences.
+With the Paseo integration enabled for a box, `ferry sync` carries agent profiles, managed Git and npm plugins, provider definitions, metadata model preferences, shared system instructions, and portable terminal profiles from the operator machine. These go directly to the box. They are not stored in the snapshot repository. `ferry watch` detects changes to plugin commits, npm versions, enabled states, provider definitions, the two preferences, and terminal profiles.
 
 ## Git and npm plugins
 
@@ -64,6 +64,27 @@ Ferry reads two fields from `~/.paseo/config.json` and writes them into the box 
 
 Project scripts, setup, and metadata instructions stay in each project's `paseo.json`, which travels with the project in Git.
 
+## Terminal profiles
+
+Ferry reads `daemon.terminalProfiles` from `~/.paseo/config.json` and merges the portable profiles by `id` into `daemon.terminalProfiles` of the box `~/.paseo/config.json`. Then it runs `paseo daemon reload`. Paseo 0.10.1 applies the list on reload without a restart. Paseo starts a profile's command directly, without a shell, with the PATH of `ferry-paseo.service`.
+
+| Field | Carried |
+| --- | --- |
+| `id`, `name`, `command`, `args`, `icon` | Yes. `args` can hold the prompt placeholder `{{{prompt}}}`. |
+| `env` and all other fields | No. Ferry skips a local profile that has one of them. |
+
+- Ferry carries a profile only when its command is a bare executable name. It does not map a path such as `/bin/zsh` or `/opt/homebrew/bin/claude` to a name. Use the bare name in the local profile. Both daemons find it through their own PATH.
+- A shell or interpreter, such as `bash`, `zsh`, `node`, or `python3`, is carried only alone or with `-l`, `-i`, `--login`, `--interactive`, `--noprofile`, or `--norc`. Ferry skips `sh -c`, `node -e`, `python -c`, a script file, and all other arguments to these commands.
+- Ferry skips a profile when an argument or a flag value is a path, a file name, a `file:` URL, text with spaces, a URL with a user, password, query, or fragment, a loopback or non-HTTP URL, or looks like a credential. It does not parse shell syntax.
+- Before it writes, Ferry checks each command with `command -v` on the box, with the PATH that `ferry-paseo.service` gets from this sync. It skips a profile whose command is not an executable file on that PATH. Ferry runs no profile command.
+- A box profile with the same ID gets the local `id`, `name`, `command`, `args`, and `icon`, and keeps its other box fields, such as `env`. A carried field that the local profile does not set is removed from the box profile.
+- Box-only profiles keep their position. New profiles go at the end. Removing a local profile does not remove its box copy. An empty local list adds nothing and removes nothing.
+- When the box does not set `daemon.terminalProfiles`, Paseo shows its four default profiles. Paseo has no command that returns this resolved list, so Ferry starts the merge from a copy of the Paseo 0.10.1 defaults: `claude`, `codex`, `opencode`, and `pi`. The box keeps them. A later Paseo version with other defaults gets the 0.10.1 defaults when Ferry writes the list for the first time.
+- With no local list, no portable profile, or no command on the box, Ferry writes nothing. It also writes nothing when the merged list equals the box list.
+- Ferry refuses the sync before it publishes or connects to a box when a profile does not match the Paseo schema, repeats an ID, or holds a token in a carried field. The error names the profile by its position, never by a value.
+- Warnings and errors never show arguments, other field names, or box output. `ferry sync --dry-run` and its `--json` plan show each profile's ID, name, command, number of arguments, and skip reasons.
+- Terminal profiles are carried after the preferences and before the PATH of `ferry-paseo.service` is updated. A terminal profile failure produces a warning and does not block the core sync.
+
 ## Other sync candidates
 
 Research checked on 2026-09-29 against Paseo 0.10.1 and current upstream documentation. The entries below are proposals, not implemented sync behavior.
@@ -71,7 +92,6 @@ Research checked on 2026-09-29 against Paseo 0.10.1 and current upstream documen
 | Candidate | Recommendation | Required handling |
 | --- | --- | --- |
 | Workspace label names and colors | Next candidate | Merge by Paseo's normalized, case-insensitive label name. Preserve box-only labels and workspace assignments. Local color wins for a matching name. Treat a rename as a new definition unless explicit rename history is available. |
-| Terminal profiles | Conditional | Commands must exist on the target OS. Reject credentials and local absolute paths. Do not copy environment blocks without a field-level policy. |
 | Auto-archive after merge | Small candidate | Carry `daemon.autoArchiveAfterMerge` only with an explicit setting, since it changes workspace lifecycle. |
 | Project scripts, setup, and metadata instructions | Use project Git | These already live in `paseo.json`. Carry them with the project rather than maintaining a second copy in host sync. |
 | Schedules | Explicit migration only | Map project paths, verify providers, and select one execution host. Copying an active schedule can run a task twice. |
@@ -96,3 +116,5 @@ The daemon caches the catalog and commits label changes with workspace transacti
 - [Custom provider definitions](https://paseo.sh/docs/custom-providers.md)
 - [Project worktree configuration](https://paseo.sh/docs/worktrees.md)
 - [Schedules](https://paseo.sh/docs/schedules.md)
+- [Reloadable configuration, including terminal profiles](https://paseo.sh/docs/configuration)
+- [Terminal profile defaults and prompt placeholder](https://github.com/getpaseo/paseo/blob/main/packages/protocol/src/terminal-profiles.ts)
