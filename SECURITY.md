@@ -31,5 +31,5 @@ These problems are out of scope:
 
 - The security of the vendor CLIs (`gh`, Claude Code, Codex, Pi, Cursor Agent) and their install scripts.
 - The security of the box itself, its SSH server, or Tailscale.
-- An attacker who already controls the operator machine or the SSH user on the box.
+- An attacker who already controls the operator machine or the SSH user on the box. The rule "no credential leaves the machine that has it" holds for a box that runs an honest Ferry. For `ferry move --from-box` and `ferry adopt --from-box`, the Ferry on the box checks each file and sends only the bytes that pass. This protects against mistakes and against files that change during the command. It does not protect against a box account that an attacker controls: that Ferry can give any answer and any bytes. The operator machine applies its own deny rules to the bytes that arrive, before it writes them to the destination or sends them to another box.
 - Content that you put into your own snapshot repository on purpose.

@@ -7,10 +7,11 @@
  * root, or an untracked directory in the skills of the box checkout.
  *
  * The Ferry on the box runs the Manifest deny rules on the skill with `ferry
- * scan`. A skill with a file that a rule refuses stays on the box, and Adopt
- * copies no file of it. Else Adopt copies the files that pass with tar over
- * Link, compares each one with the SHA-256 of the scan, and writes them to a
- * local harness skill root as a real directory. The next `ferry sync`
+ * scan`. It reads each file one time and gives the bytes that it checked. A
+ * skill with a file that a rule refuses stays on the box, and Adopt copies no
+ * file of it. Else Adopt takes the files that pass, applies the rules of this
+ * machine to them, and writes them to a local harness skill root as a real
+ * directory. The next `ferry sync`
  * publishes it and links it into the
  * store, as it does for each new local skill. Ferry then moves the box copy to
  * `~/.ferry/backups` on the box, so that the sync can link the published skill
@@ -40,11 +41,10 @@ import { CODEX_SYSTEM_SKILLS, readSeed, TOKEN_ERE } from "./manifest.ts";
 import { noProgress, step, type Progress } from "./progress.ts";
 import { BUILTIN_HARNESSES } from "./registry/builtin.ts";
 import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
-import { changedFiles, isInside, scanOnBox } from "./scan.ts";
+import { packOnBox, writePack } from "./scan.ts";
 
 /** The skills of the snapshot checkout, relative to the home. */
 const STORE_SKILLS = ".ferry/store/skills";
-const TRANSFER_TIMEOUT_MS = 15 * 60_000;
 
 /** One skill that is only on the box. Each path is `~/<root>/<name>` on the box. */
 export type BoxSkill = { readonly name: string; readonly paths: readonly string[] };
@@ -202,40 +202,24 @@ export async function runAdoptFromBox(
   const storeCopy = join(home, STORE_SKILLS, name);
   const replaces = exists(storeCopy);
 
-  // The box applies the same rules as a publish, before a file of the skill leaves it.
-  const scan = await step(progress, `Checking ${name} on box ${box.name}`, () =>
-    scanOnBox(link, `box ${box.name}`, { kind: "skill", root: source.slice(2) }),
+  // The box reads each file of the skill one time, applies the rules of a publish to those bytes, and gives exactly
+  // those bytes. When a rule refuses a file, the box gives no file of the skill.
+  const pack = await step(progress, `Copying ${name} from box ${box.name}`, () =>
+    packOnBox(link, `box ${box.name}`, { kind: "skill", root: source.slice(2) }),
   );
-  if (scan.forbidden.length > 0) {
-    const hits = scan.forbidden.map((hit) => `${hit.code} ${hit.reason}: ${hit.path}`);
+  if (pack.refused.length > 0) {
+    const hits = pack.refused.map((hit) => `${hit.code} ${hit.reason}: ${hit.path}`);
     throw new FerryError(
       "deny-rule-match",
       `Ferry refused ${name} from box ${box.name}, and copied nothing to this machine: ${hits.join("; ")}`,
     );
   }
-  const checked = scan.files.filter((file) => isInside(file.path));
-  if (checked.length === 0) throw new FerryError("refused", `${source} on box ${box.name} has no file that Ferry carries.`);
-  const skipped = scan.skipped.map((entry) => ({ path: entry.path, code: entry.code, reason: entry.reason }));
+  if (pack.files.length === 0) throw new FerryError("refused", `${source} on box ${box.name} has no file that Ferry carries.`);
+  const skipped = pack.skipped.map((entry) => ({ path: entry.path, code: entry.code, reason: entry.reason }));
 
   const stage = mkdtempSync(join(tmpdir(), "ferry-adopt-"));
   try {
-    await step(progress, `Copying ${name} from box ${box.name}`, async () => {
-      // -h copies the file behind a link in the skill, which is the file that the scan read.
-      const encoded = await link.run(`cd "$HOME"/${quoteShell(source.slice(2))} && tar -h --null -cf - -T - | base64`, {
-        input: new TextEncoder().encode(checked.map((file) => `${file.path}\0`).join("")),
-        timeoutMs: TRANSFER_TIMEOUT_MS,
-      });
-      if (!encoded.ok) throw new FerryError("box-command-failed", `Ferry could not read ${source} on box ${box.name}: ${encoded.error.message}`);
-      mkdirSync(join(stage, "box", name), { recursive: true });
-      const extracted = Bun.spawnSync(["tar", "-xf", "-", "-C", join(stage, "box", name)], {
-        stdin: Buffer.from(encoded.stdout, "base64"),
-      });
-      if (extracted.exitCode !== 0) throw new Error(`Ferry could not unpack the box skill: ${extracted.stderr.toString().trim()}`);
-      const changed = changedFiles(join(stage, "box", name), checked);
-      if (changed.length > 0) {
-        throw new FerryError("refused", `${changed.join(", ")} of ${name} changed on box ${box.name} after the check. Run the command again.`);
-      }
-    });
+    writePack(join(stage, "box", name), pack.files);
 
     // The rules of this machine run again on the copy. They find a hit only when the Ferry on the box has other rules.
     const seed = readSeed(join(stage, "box"), [{ id: "box", name: "box", skillRoot: "." }]);

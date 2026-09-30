@@ -2,7 +2,7 @@
  * Sessions finds the agent sessions of a project in the session stores that
  * the harness descriptors name, and stages them for the destination home.
  * `ferry move` lists the files, applies the deny rules to them on the source
- * machine, and then copies and stages only the sessions that it carries.
+ * machine, and then stages only the sessions in the pack of the source.
  *
  * A store has one of two layouts. Claude keeps one directory for each project
  * path under `~/.claude/projects`. Codex keeps all sessions under
@@ -15,7 +15,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { quoteShell } from "./box-settings.ts";
 import type { HarnessDescriptor, SessionStore } from "./registry/types.ts";
-import { changedFiles } from "./scan.ts";
 
 /** A file of a session. Both paths are relative to the home. */
 export type SessionFile = { readonly source: string; readonly target: string };
@@ -92,33 +91,29 @@ export function groupSessions(
 }
 
 /**
- * Copy the files of `sessions` from the source home and stage them for the
- * project `targetProject`. `fetch` copies home-relative paths from the source
- * home to a new local directory and returns that directory. `sha256` has the
- * hash of each source file from the scan. A session with a file that is not
- * the scanned bytes is not staged, and `changed` names it. The caller removes
- * `stage`.
+ * Stage the files of `sessions` for the project `targetProject`. `fetched` is
+ * a local directory with the files of the pack of the source, at their paths
+ * relative to the source home, and `present` names them. A session with a file
+ * that the pack does not have, or whose id the source did not give, is not
+ * staged, and `changed` names it. The caller removes `stage`.
  */
-export async function stageSessions(options: {
+export function stageSessions(options: {
   readonly sessions: readonly Session[];
-  readonly sha256: ReadonlyMap<string, string>;
+  readonly fetched: string;
+  readonly present: ReadonlySet<string>;
   readonly targetProject: string;
-  readonly fetch: (paths: readonly string[]) => Promise<string>;
-}): Promise<StagedSessions> {
+}): StagedSessions {
   const stage = mkdtempSync(join(tmpdir(), "ferry-sessions-"));
-  let fetched: string | null = null;
   try {
-    fetched = await options.fetch(options.sessions.flatMap((session) => session.files.map((file) => file.source)));
     const staged: Session[] = [];
     const changed: Session[] = [];
     for (const session of options.sessions) {
-      const scanned = session.files.map((file) => ({ path: file.source, sha256: options.sha256.get(file.source) ?? "" }));
-      if (changedFiles(fetched, scanned).length > 0) {
+      if (session.id === UNKNOWN_ID || session.files.some((file) => !options.present.has(file.source))) {
         changed.push(session);
         continue;
       }
       for (const file of session.files) {
-        const from = join(fetched, file.source);
+        const from = join(options.fetched, file.source);
         const to = join(stage, file.target);
         const bytes = readFileSync(from);
         mkdirSync(dirname(to), { recursive: true });
@@ -131,8 +126,6 @@ export async function stageSessions(options: {
   } catch (error) {
     rmSync(stage, { recursive: true, force: true });
     throw error;
-  } finally {
-    if (fetched) rmSync(fetched, { recursive: true, force: true });
   }
 }
 

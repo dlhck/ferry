@@ -141,7 +141,7 @@ import {
 } from "./update.ts";
 import { isReleaseVersion, VERSION } from "./version.ts";
 import { redactTokens, redactUrlCredentials } from "./manifest.ts";
-import { parseScanRequest, runScan } from "./scan.ts";
+import { packLines, parseScanRequest, runScan } from "./scan.ts";
 import { offerSelfUpdate, offersSelfUpdate, runSelfUpdate, type SelfUpdateDependencies } from "./self-update.ts";
 
 const DESCRIPTION = `Ferry keeps a remote Linux agent box in the same shape as this machine.
@@ -853,9 +853,10 @@ destination. A session file there stays, unless the source has the same file.
 Ferry skips a session that fails the deny rules and names the file and the
 rule. The source keeps its sessions.
 
-The deny rules run on the source machine. With --from-box, the Ferry on the
-box runs them, and Ferry copies only the files that pass. So the box needs a
-release of Ferry from ferry install or ferry update. --dry-run copies no file.`)
+The deny rules run on the source machine. It reads each file one time and
+sends only the bytes that pass. With --from-box, the Ferry on the box does
+this, so the box needs a release of Ferry from ferry install or ferry update.
+--dry-run copies no file.`)
     .argument("<path>", "project folder inside the home directory")
     .option("--from-box <name>", "move the project from this box. Without --to-box, the destination is this machine")
     .option("--to-box <name>", "move the project to this box. Without it and --from-box, Ferry uses default_box or the only box")
@@ -1479,10 +1480,13 @@ on the box. This command runs on the operator machine and on a box install.`)
   // adopt --from-box and move --from-box run this command of the Ferry on the box, so that the box checks a file before it leaves the box.
   program
     .command("scan", { hidden: true })
-    .description("Apply the deny rules to files of this machine. Reads one JSON request on stdin. Prints paths, rule hits, and hashes, never file content")
+    .description("Apply the deny rules to files of this machine. Reads one JSON request on stdin. A scan prints paths, rule hits, and hashes, never file content. A pack also prints the bytes of each file that passes")
     .action(async () => {
       const request = parseScanRequest(await (dependencies.readStdin ?? (() => Bun.stdin.text()))());
-      report(runScan(request, (dependencies.home ?? homedir)()), (result) => writeLine(JSON.stringify(result)));
+      const home = (dependencies.home ?? homedir)();
+      // A pack is one JSON line for each part, so that one file is in memory at a time.
+      if (request.pack) for (const line of packLines(request, home)) writeOut(line);
+      else report(runScan(request, home), (result) => writeLine(JSON.stringify(result)));
     });
 
   // move --from-box sends the output of each box command through this filter, so that a name with a token stays on the box.
