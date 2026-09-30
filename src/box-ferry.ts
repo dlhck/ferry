@@ -2,7 +2,7 @@
  * Ferry on the box. `ferry install` and `ferry update` put the Ferry version
  * of this machine on each box, with the release installer, and write the
  * box-mode marker `~/.ferry/box.json`. A Ferry binary that finds the marker
- * runs only the box commands (`ferry expose`, `--version`, and help).
+ * runs only the box commands (`ferry expose`, `ferry whoami`, `--version`, and help).
  *
  * A development build has no release. Ferry then puts no Ferry on the box,
  * so the box never gets a version that differs from this machine.

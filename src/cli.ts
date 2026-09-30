@@ -52,6 +52,7 @@ import {
   type PartialOperatorConfig,
 } from "./config.ts";
 import { BOX_MARKER } from "./box-ferry.ts";
+import { whoami, whoamiLines } from "./box-identity.ts";
 import { installBundledSkill } from "./bundled-skill.ts";
 import { BoxRequiredError, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import {
@@ -178,6 +179,8 @@ type CliDependencies = {
   readonly runExpose?: (input: ExposeInput, dependencies?: Partial<ExposeDependencies>) => Promise<number>;
   /** True when this is a box install. The default is `isBoxMode`. */
   readonly isBoxMode?: () => boolean;
+  /** The home that `ferry whoami` reads. The default is the user home. */
+  readonly home?: () => string;
   /** True when stdin and stdout are a terminal, so Ferry can ask to update itself. */
   readonly isInteractive?: () => boolean;
   /** Asks to update Ferry. True when the update ran and the command must stop. The default is `offerSelfUpdate`. */
@@ -229,6 +232,9 @@ type CliDependencies = {
 
 /** The commands that stay running and print one event for each line with --json. */
 const STREAM_COMMANDS = new Set(["watch", "tunnel", "expose"]);
+
+/** The commands that a box install runs. */
+const BOX_INSTALL_COMMANDS = new Set(["expose", "whoami"]);
 
 const JSON_HELP = `JSON output (--json):
   stdout has only JSON. Progress and the text lines go to stderr. Ferry
@@ -294,6 +300,7 @@ const JSON_RESULTS: Record<string, string> = {
   "watch install": "{ manager, path }",
   "menubar install": "{ app, path, version, ferryPath }. version is null with --app",
   "menubar uninstall": "{ app, path, removed }",
+  whoami: '{ role: "operator" or "box", box, managedPaths: { instructionFiles, skillRoots, roots } }. box is null on the operator machine and before the first sync of a box',
   "self-update":
     "{ current, latest, updated, services: [{ service, action, message }], skill }. skill is the message of the skill update, or null. The output of the installer goes to stderr",
   "box list": "{ boxes: [{ name, transport, destination, default }] }",
@@ -430,10 +437,11 @@ function createProgram(dependencies: CliDependencies): { program: Command; state
   program.hook("preAction", async (_program, action) => {
     active = commandPath(action);
     // A box install runs only the box commands. Commander prints the version and help before this hook.
-    if (action !== program && action.name() !== "expose" && (dependencies.isBoxMode ?? isBoxMode)()) {
+    const boxMode = (dependencies.isBoxMode ?? isBoxMode)();
+    if (action !== program && !BOX_INSTALL_COMMANDS.has(active) && boxMode) {
       throw new FerryError(
         "usage",
-        `This is a box install of Ferry (~/${BOX_MARKER}). Only ferry expose runs here. Run ferry ${commandPath(action)} on the operator machine.`,
+        `This is a box install of Ferry (~/${BOX_MARKER}). Only ferry expose and ferry whoami run here. Run ferry ${commandPath(action)} on the operator machine.`,
       );
     }
     const names = boxNames();
@@ -449,8 +457,8 @@ function createProgram(dependencies: CliDependencies): { program: Command; state
     }
     const offers = offersSelfUpdate({
       json: json(),
-      // `self-update` does the check itself.
-      streaming: STREAM_COMMANDS.has(active) || active === "self-update",
+      // `self-update` does the check itself. `ferry update` puts Ferry on a box, so a box install never asks.
+      streaming: STREAM_COMMANDS.has(active) || active === "self-update" || boxMode,
       interactive: (dependencies.isInteractive ?? isInteractive)(),
       env: process.env,
     });
@@ -577,7 +585,7 @@ Add a custom harness in ~/.ferry/config.toml. A repeat init keeps it:
 Ferry prints the plan for each tool and asks before it runs a command on the
 box. gh and jq come from apt, so Debian or Ubuntu is the tested target. Ferry on the
 box is the version of this machine. It is a box install that runs only
-ferry expose. Run ferry tools --help for the tool config.`)
+ferry expose and ferry whoami. Run ferry tools --help for the tool config.`)
     .option("--yes", "run without a confirmation prompt")
     .action(async (options: { yes?: boolean }) => {
       const result = await withProgress((progress, writeLine) =>
@@ -1396,6 +1404,23 @@ with --json, with CI set, or with FERRY_NO_UPDATE_CHECK=1.`)
         ...(json() ? { run: runToStderr } : {}),
       };
       report(await (dependencies.runSelfUpdate ?? runSelfUpdate)(selfUpdateDependencies));
+    });
+
+  program
+    .command("whoami")
+    .description(`Print the role of this machine: the operator machine or a Ferry box.
+
+On a box, Ferry also prints the box name from the last ferry sync. The
+operator machine is the source of truth. On a box, change a Ferry-managed
+file on the operator machine, not on the box. This command runs on the
+operator machine and on a box install.`)
+    .action(() => {
+      const result = whoami({
+        home: (dependencies.home ?? homedir)(),
+        boxMode: (dependencies.isBoxMode ?? isBoxMode)(),
+        harnesses: registry().harnesses,
+      });
+      report(result, (result) => whoamiLines(result).forEach((line) => writeLine(line)));
     });
 
   // self-update runs this command of the new Ferry, because only the new binary has the new skill.

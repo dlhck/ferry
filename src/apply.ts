@@ -23,6 +23,7 @@ import {
   type TargetInspection,
   type TargetInspectionRequest,
 } from "./apply-remote.ts";
+import { BOX_INSTRUCTIONS } from "./box-identity.ts";
 import type { Link } from "./link.ts";
 import { CODEX_SYSTEM_SKILLS } from "./manifest.ts";
 import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
@@ -43,6 +44,10 @@ export type ApplyInput = {
   readonly timestamp?: string;
 };
 
+/**
+ * A remote target is a box. On a box, the instruction files link to the
+ * generated `~/.ferry/box/AGENTS.md`, which sync writes before Apply.
+ */
 export type RemoteApplyInput = ApplyInput & {
   readonly link: Pick<Link, "run">;
 };
@@ -129,6 +134,7 @@ export function planApply(input: ApplyInput): ApplyPlan {
     timestamp,
     inspectLocalTarget(request),
     join,
+    join(checkout, "AGENTS.md"),
   );
 }
 
@@ -176,6 +182,7 @@ async function applyRemote(input: RemoteApplyInput): Promise<ApplyPlan> {
     timestamp,
     inspection,
     posix.join,
+    posix.join(targetHome, BOX_INSTRUCTIONS),
   );
   if (input.dryRun) return plan;
   refusePlan(plan);
@@ -258,6 +265,8 @@ function planInspection(
   timestamp: string,
   inspection: TargetInspection,
   joinPath: (...paths: string[]) => string,
+  /** The link target of the instruction files: the checkout AGENTS.md, or the generated box file. */
+  instructions: string,
 ): ApplyPlan {
   const storeSkills = joinPath(checkout, "skills");
   // An older snapshot can still hold the Codex system skills. Links to them are leftovers.
@@ -298,7 +307,6 @@ function planInspection(
   }
 
   if (inspection.instructionExists) {
-    const instructions = joinPath(checkout, "AGENTS.md");
     for (const harness of harnesses) {
       if (!harness.instructionFile) continue;
       planLink(
@@ -339,14 +347,17 @@ function planInspection(
       // The other entries of an off harness are not Ferry's, so the plan does not list them as unmanaged.
       planRemovedNames(harness.name, root, storeSkills, snapshotNames, inspection.roots.get(root) ?? [], actions, [], joinPath, true);
     }
+    // An instruction link from before the generated box file points into the checkout.
     const links = [
-      ...(harness.instructionFile ? [[harness.instructionFile, joinPath(checkout, "AGENTS.md")] as const] : []),
-      ...(harness.extraRoots ?? []).map((root) => [root, joinPath(checkout, "roots", root)] as const),
+      ...(harness.instructionFile
+        ? [[harness.instructionFile, [instructions, joinPath(checkout, "AGENTS.md")]] as const]
+        : []),
+      ...(harness.extraRoots ?? []).map((root) => [root, [joinPath(checkout, "roots", root)]] as const),
     ];
-    for (const [path, target] of links) {
+    for (const [path, targets] of links) {
       const state = inspection.paths.get(joinPath(targetHome, path));
-      if (state?.kind === "symlink" && state.resolvedLink === target) {
-        actions.push({ kind: "delete-managed-link", harness: harness.name, path: joinPath(targetHome, path), expectedTarget: target });
+      if (state?.kind === "symlink" && targets.includes(state.resolvedLink)) {
+        actions.push({ kind: "delete-managed-link", harness: harness.name, path: joinPath(targetHome, path), expectedTarget: state.resolvedLink });
       }
     }
   }

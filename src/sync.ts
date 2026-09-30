@@ -6,6 +6,7 @@ import { hostname, homedir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { apply as applyStore, type ApplyPlan, type RemoteApplyInput } from "./apply.ts";
+import { BOX_INSTRUCTIONS, writeBoxFilesCommand } from "./box-identity.ts";
 import {
   completeHostConfig,
   ConfigMissingError,
@@ -539,6 +540,21 @@ async function applyOnBox(context: {
   for (const path of discarded) {
     writeLine(`Discarded box change: ${posix.join(required(plan.remoteCheckout), path)}`);
   }
+
+  // The instruction links of the box point at the generated file, so it must be there before Apply.
+  await boxStep("Writing the box instructions", async () => {
+    const result = await link.run(
+      writeBoxFilesCommand(required(plan.remoteHome), required(plan.remoteCheckout), box.name),
+    );
+    if (!result.ok) {
+      throw new SyncError(
+        "apply-failure",
+        "box",
+        `could not write ~/${BOX_INSTRUCTIONS} on ${plan.box}: ${result.error.origin}/${result.error.code}: ${result.error.message}`,
+        { cause: linkFailure(result.error) },
+      );
+    }
+  });
 
   let applyPlan: ApplyPlan;
   try {
