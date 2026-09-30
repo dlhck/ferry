@@ -253,6 +253,9 @@ describe("Paseo enable", () => {
     // The daemon self-update runs npm -g, which must find the Ferry install.
     expect(UNIT_FILE).toContain("Environment=NPM_CONFIG_PREFIX=%h/.local\n");
     expect(UNIT_FILE).toContain("Restart=on-failure\nRestartSec=5\n");
+    // One process that the OOM killer kills does not stop the service. Ferry sets no memory limit.
+    expect(UNIT_FILE).toContain("[Service]\nOOMPolicy=continue\n");
+    expect(UNIT_FILE).not.toContain("MemoryMax");
     expect(UNIT_FILE).toContain("[Install]\nWantedBy=default.target\n");
   });
 
@@ -500,7 +503,7 @@ describe("Paseo unit PATH", () => {
     const box = fakeBox();
     touch(join(box.home, UNIT_PATH), unitFile(BUILTIN_BOX_PATH_DIRS));
 
-    expect(await refreshUnitPath(box, dirs)).toBe(true);
+    expect(await refreshUnitPath(box, dirs)).toMatchObject({ detail: "restarted" });
 
     expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(unitFile(dirs));
     expect(box.log()).toEqual(["systemctl daemon-reload", "systemctl restart ferry-paseo.service"]);
@@ -510,7 +513,7 @@ describe("Paseo unit PATH", () => {
     const box = fakeBox();
     touch(join(box.home, UNIT_PATH), unitFile(dirs));
 
-    expect(await refreshUnitPath(box, dirs)).toBe(false);
+    expect(await refreshUnitPath(box, dirs)).toEqual({ detail: "no changes", note: null });
 
     expect(box.log()).toEqual([]);
     expect(box.commands).toHaveLength(1);
@@ -538,7 +541,7 @@ describe("Paseo box output", () => {
     const box = fakeBox();
     touch(join(box.home, UNIT_PATH), withSecret(unitFile(dirs)));
 
-    expect(await refreshUnitPath(box, dirs)).toBe(false);
+    expect(await refreshUnitPath(box, dirs)).toEqual({ detail: "no changes", note: null });
 
     expect(box.outputs).toEqual(["unchanged\n", ""]);
     expect(crossed(box)).not.toContain(SECRET);
@@ -550,7 +553,7 @@ describe("Paseo box output", () => {
     const box = fakeBox();
     touch(join(box.home, UNIT_PATH), withSecret(unitFile(BUILTIN_BOX_PATH_DIRS, true)));
 
-    expect(await refreshUnitPath(box, dirs)).toBe(true);
+    expect(await refreshUnitPath(box, dirs)).toMatchObject({ detail: "restarted" });
 
     expect(box.outputs).toEqual(["updated\n", ""]);
     expect(crossed(box)).not.toContain(SECRET);
@@ -565,7 +568,7 @@ describe("Paseo box output", () => {
     const path = unit.split("\n").find((line) => line.startsWith("Environment=PATH="));
     touch(join(box.home, UNIT_PATH), unit.replace(`${path}\n`, ""));
 
-    expect(await refreshUnitPath(box, dirs)).toBe(true);
+    expect(await refreshUnitPath(box, dirs)).toMatchObject({ detail: "restarted" });
 
     expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(unit.replace(`${path}\n`, "").replace("[Service]\n", `[Service]\n${path}\n`));
     expect(crossed(box)).not.toContain(SECRET);
@@ -607,6 +610,98 @@ describe("Paseo box output", () => {
     expect(box.log()).not.toContain("systemctl restart ferry-paseo.service");
     expect(box.outputs).toContain("created\n");
     expect(box.outputs).toContain("unchanged\n");
+  });
+
+  /** A unit that Ferry wrote before it set the OOM policy. */
+  const withoutPolicy = (unit: string) => unit.replace("OOMPolicy=continue\n", "");
+  const ADDED = "systemd applied the line without a restart of the Paseo daemon. " +
+    "When a process of an agent runs out of memory, the daemon and the other agents continue.";
+
+  test("a sync adds the OOM policy line to a unit without it, reloads systemd, and does not restart the daemon", async () => {
+    const box = fakeBox();
+    touch(join(box.home, UNIT_PATH), withoutPolicy(withSecret(unitFile(dirs, true))));
+
+    expect(await refreshUnitPath(box, dirs)).toEqual({
+      detail: "OOMPolicy=continue added, no restart",
+      note: `Ferry added OOMPolicy=continue to ferry-paseo.service on the box. ${ADDED}`,
+    });
+
+    expect(box.outputs).toEqual(["policy\n", ""]);
+    expect(crossed(box)).not.toContain(SECRET);
+    // The unit is now the text that enable writes, with the line of the operator.
+    expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(withSecret(unitFile(dirs, true)));
+    expect(existsSync(join(box.home, `${UNIT_PATH}.ferry-tmp`))).toBe(false);
+    expect(box.log()).toEqual(["systemctl daemon-reload"]);
+
+    expect(await refreshUnitPath(box, dirs)).toEqual({ detail: "no changes", note: null });
+    expect(box.log()).toEqual(["systemctl daemon-reload"]);
+  });
+
+  test("a sync sets the PATH line and the OOM policy line in one write, with one restart", async () => {
+    const box = fakeBox();
+    touch(join(box.home, UNIT_PATH), withoutPolicy(withSecret(unitFile(BUILTIN_BOX_PATH_DIRS))));
+
+    expect(await refreshUnitPath(box, dirs)).toMatchObject({ detail: "restarted" });
+
+    expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(withSecret(unitFile(dirs)));
+    expect(box.log()).toEqual(["systemctl daemon-reload", "systemctl restart ferry-paseo.service"]);
+  });
+
+  test("a sync keeps the OOMPolicy value that the operator set in the unit or in a drop-in file", async () => {
+    for (const own of ["OOMPolicy=stop", "  OOMPolicy = kill"]) {
+      const box = fakeBox();
+      const unit = withSecret(unitFile(dirs)).replace("OOMPolicy=continue", own);
+      touch(join(box.home, UNIT_PATH), unit);
+
+      expect(await refreshUnitPath(box, dirs)).toEqual({ detail: "no changes", note: null });
+
+      expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(unit);
+      expect(box.log()).toEqual([]);
+    }
+    // systemd reads a drop-in file after the unit, so its value has priority. Ferry does not change the file.
+    const box = fakeBox();
+    const dropIn = join(box.home, `${UNIT_PATH}.d/local.conf`);
+    touch(dropIn, "[Service]\nOOMPolicy=stop\n");
+    touch(join(box.home, UNIT_PATH), withoutPolicy(unitFile(dirs)));
+
+    await refreshUnitPath(box, dirs);
+
+    expect(readFileSync(dropIn, "utf8")).toBe("[Service]\nOOMPolicy=stop\n");
+    expect(box.log()).toEqual(["systemctl daemon-reload"]);
+  });
+
+  test("enable adds the OOM policy line to an existing unit and does not restart the daemon", async () => {
+    const box = fakeBox();
+    touch(join(box.home, UNIT_PATH), withoutPolicy(unitFile(BUILTIN_BOX_PATH_DIRS)));
+
+    const lines = await paseoWith("0.9.2").box.enable(box, noProgress);
+
+    expect(box.outputs).toContain("policy\n");
+    expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(unitFile(BUILTIN_BOX_PATH_DIRS));
+    expect(box.log()).toContain("systemctl daemon-reload");
+    expect(box.log()).not.toContain("systemctl restart ferry-paseo.service");
+    expect(lines).toContain(`Ferry added OOMPolicy=continue to ferry-paseo.service. ${ADDED}`);
+  });
+
+  test("enable restarts the daemon when the unit differs by the OOM policy line and by another line", async () => {
+    const box = fakeBox();
+    touch(join(box.home, UNIT_PATH), withoutPolicy(unitFile(BUILTIN_BOX_PATH_DIRS, true)));
+
+    await paseoWith("0.9.2").box.enable(box, noProgress);
+
+    expect(box.outputs).toContain("changed\n");
+    expect(box.log()).toContain("systemctl restart ferry-paseo.service");
+  });
+
+  test("enable does not restart the daemon after a sync added the OOM policy line", async () => {
+    const box = fakeBox();
+    touch(join(box.home, UNIT_PATH), withoutPolicy(unitFile(BUILTIN_BOX_PATH_DIRS)));
+
+    await refreshUnitPath(box, BUILTIN_BOX_PATH_DIRS);
+    await paseoWith("0.9.2").box.enable(box, noProgress);
+
+    expect(box.outputs).toContain("unchanged\n");
+    expect(box.log()).not.toContain("systemctl restart ferry-paseo.service");
   });
 
   test("the output of paseo daemon status and paseo daemon reload stays on the box", async () => {

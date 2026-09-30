@@ -58,6 +58,16 @@ const LISTEN = "127.0.0.1:6767";
 /** The system directories at the end of the PATH of ferry-paseo.service. */
 export const SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const INSTALL_TIMEOUT_MS = 10 * 60 * 1_000;
+/**
+ * Each agent of the daemon runs in the cgroup of the unit. With the systemd
+ * default `stop`, one process that the OOM killer kills stops the whole
+ * service. With `continue`, only that process ends. It is the first line of
+ * `[Service]`, where a sync also adds it to a unit that has no such line.
+ */
+const OOM_LINE = "OOMPolicy=continue";
+/** The end of the line that Ferry prints after it added the OOM policy line to an existing unit. */
+const OOM_APPLIED =
+  "systemd applied the line without a restart of the Paseo daemon. When a process of an agent runs out of memory, the daemon and the other agents continue.";
 
 /** The daemon gets the same PATH as a Ferry box command, so agents find the same tools. */
 export function unitFile(pathDirs: readonly string[], relay = false): string {
@@ -68,6 +78,7 @@ export function unitFile(pathDirs: readonly string[], relay = false): string {
     "After=network-online.target",
     "",
     "[Service]",
+    OOM_LINE,
     "Type=simple",
     "ExecStart=%h/.local/bin/paseo daemon run",
     unitPathLine(pathDirs),
@@ -121,29 +132,39 @@ const LINGER_COMMAND = [
 ].join(" || ");
 /**
  * The box script that writes the unit from its standard input. It prints
- * `created` for a new unit, `unchanged` for the same text, and `changed` for
- * another text. A unit on the box can hold an `Environment=` line with a
- * credential, so the box compares the two texts and Ferry never reads the unit.
+ * `created` for a new unit, `unchanged` for the same text, `policy` for a text
+ * that differs only by the `OOMPolicy=continue` line, and `changed` for
+ * another text. systemd applies the OOM policy of a running service on
+ * `daemon-reload`, so `policy` needs no restart. A unit on the box can hold an
+ * `Environment=` line with a credential, so the box compares the two texts and
+ * Ferry never reads the unit.
  */
 const UNIT_WRITE_COMMAND = [
   `f=${quoteShell(UNIT_PATH)}`,
   "umask 077",
   `mkdir -p "$(dirname "$f")" && cat > "$f.ferry-tmp" || { rm -f "$f.ferry-tmp"; exit 1; }`,
-  `if [ ! -e "$f" ]; then state=created; elif cmp -s "$f.ferry-tmp" "$f"; then state=unchanged; else state=changed; fi`,
+  `if [ ! -e "$f" ]; then state=created; elif cmp -s "$f.ferry-tmp" "$f"; then state=unchanged`,
+  `elif grep -vxF ${OOM_LINE} "$f.ferry-tmp" | cmp -s - "$f"; then state=policy; else state=changed; fi`,
   `mv "$f.ferry-tmp" "$f" || { rm -f "$f.ferry-tmp"; exit 1; }`,
   'echo "$state"',
 ].join("\n");
 /**
  * An awk program that prints the unit with the PATH line `FERRY_PATH_LINE`.
- * With `FERRY_REPLACE=1`, the line replaces the first PATH line. Else it goes
- * after the `[Service]` line. awk exits with 3 when it finds no place.
+ * With `FERRY_PATH=replace`, the line replaces the first PATH line. With
+ * `add`, it goes after the first `[Service]` line. With `keep`, the PATH line
+ * stays. With `FERRY_OOM=1`, the OOM policy line goes after the first
+ * `[Service]` line. awk exits with 3 when it finds no place for the PATH line.
  */
-const PATH_LINE_AWK = [
-  'BEGIN { want = ENVIRON["FERRY_PATH_LINE"]; replace = ENVIRON["FERRY_REPLACE"] == 1 }',
-  "!done && replace && /^Environment=PATH=/ { print want; done = 1; next }",
+const UNIT_LINES_AWK = [
+  'BEGIN { want = ENVIRON["FERRY_PATH_LINE"]; path = ENVIRON["FERRY_PATH"]; oom = ENVIRON["FERRY_OOM"] == 1 }',
+  'path == "replace" && /^Environment=PATH=/ { print want; path = "keep"; next }',
   "{ print }",
-  '!done && !replace && $0 == "[Service]" { print want; done = 1 }',
-  "END { if (!done) exit 3 }",
+  '!service && $0 == "[Service]" {',
+  "  service = 1",
+  `  if (oom) print "${OOM_LINE}"`,
+  '  if (path == "add") { print want; path = "keep" }',
+  "}",
+  'END { if (path != "keep") exit 3 }',
 ].join("\n");
 // The stderr of `paseo daemon status` stays on the box. Ferry keeps only the named fields of the JSON.
 const STATUS_COMMAND = `systemctl --user is-active --quiet ${UNIT} && paseo daemon status --json 2>/dev/null`;
@@ -359,7 +380,7 @@ export function createPaseo(options: PaseoOptions = {}): BoxIntegration & Operat
         ...unitFile(BUILTIN_BOX_PATH_DIRS, config?.paseo_relay === true).trimEnd().split("\n").map((line) => `  #   ${line}`),
         ...indent(START_COMMAND),
         `  # If an existing unit changed: ${RESTART_COMMAND}`,
-        "A changed unit restarts the daemon and stops its agents.",
+        `A changed unit restarts the daemon and stops its agents. A unit that differs only by the ${OOM_LINE} line gets no restart.`,
         ...indent(LINGER_COMMAND),
         ...indent(`${STATUS_COMMAND}   # repeat until localDaemon is running, for ${Math.round(startTimeoutMs / 1_000)} s`),
         ...indent(PROJECTS_COMMAND),
@@ -404,6 +425,8 @@ export function createPaseo(options: PaseoOptions = {}): BoxIntegration & Operat
       if (written === "changed") {
         await step(progress, `Restarting ${UNIT}`, () => boxRun(link, RESTART_COMMAND, `Ferry could not restart ${UNIT}`));
         lines.push("The service config changed, so Ferry restarted the Paseo daemon. The restart stopped its agents.");
+      } else if (written === "policy") {
+        lines.push(`Ferry added ${OOM_LINE} to ${UNIT}. ${OOM_APPLIED}`);
       }
       // The daemon runs without linger until the user logs out, so a linger failure is a warning.
       const linger = await step(progress, "Turning on linger for the box user", async () => {
@@ -585,34 +608,59 @@ async function runVersion(host: HostAdapter, argv: readonly string[]): Promise<s
   }
 }
 
+/** What a sync did to the unit: the detail of the sync step, and a line for the operator, or null. */
+export type UnitRefresh = { readonly detail: string; readonly note: string | null };
+
+/** The part of the sync plan line for the box PATH that names the unit. */
+export const UNIT_PLAN =
+  ` and the PATH of ${UNIT}. A PATH change restarts the Paseo daemon and stops its agents. ` +
+  `A unit without an OOMPolicy line gets ${OOM_LINE} without a restart`;
+
 /**
- * Set the PATH line of the unit to `pathDirs` on the box, then reload systemd
- * and restart the daemon. The restart stops the agents that run on the box, so
- * it happens only when the PATH changed. Returns true after a restart.
+ * Set the PATH line of the unit to `pathDirs` on the box, and add the OOM
+ * policy line to a unit that has a `[Service]` line and no `OOMPolicy` line.
+ * Then the box reloads systemd. It restarts the daemon only when the PATH
+ * changed, because the restart stops the agents that run on the box. systemd
+ * applies the OOM policy of a running service on `daemon-reload`. An
+ * `OOMPolicy` value that the operator set in the unit stays, and a value in a
+ * drop-in file has priority over the unit.
  * The unit can hold an `Environment=` line with a credential, so the box
- * compares and edits the PATH line itself and keeps each other line. It prints
- * `missing`, `unchanged`, `updated`, or `failed`. Ferry never reads the unit.
+ * compares and edits the lines itself and keeps each other line. It prints
+ * `missing`, `unchanged`, `policy`, `updated`, or `failed`. Ferry never reads
+ * the unit.
  */
-export async function refreshUnitPath(link: IntegrationLink, pathDirs: readonly string[]): Promise<boolean> {
+export async function refreshUnitPath(link: IntegrationLink, pathDirs: readonly string[]): Promise<UnitRefresh> {
   const script = [
     `f=${quoteShell(UNIT_PATH)}`,
     `want=${quoteShell(unitPathLine(pathDirs))}`,
     '[ -f "$f" ] || { echo missing; exit 0; }',
-    'grep -qxF -e "$want" "$f" 2>/dev/null && { echo unchanged; exit 0; }',
-    `replace=0; grep -q '^Environment=PATH=' "$f" 2>/dev/null && replace=1`,
+    `path=keep; grep -qxF -e "$want" "$f" 2>/dev/null || { path=add; grep -q '^Environment=PATH=' "$f" 2>/dev/null && path=replace; }`,
+    `oom=0; grep -qxF '[Service]' "$f" 2>/dev/null && ! grep -q '^[[:space:]]*OOMPolicy[[:space:]]*=' "$f" 2>/dev/null && oom=1`,
+    '[ "$path" = keep ] && [ "$oom" = 0 ] && { echo unchanged; exit 0; }',
     "umask 077",
-    `if FERRY_PATH_LINE="$want" FERRY_REPLACE="$replace" awk ${quoteShell(PATH_LINE_AWK)} "$f" > "$f.ferry-tmp" 2>/dev/null && mv "$f.ferry-tmp" "$f" 2>/dev/null; then`,
-    `  systemctl --user daemon-reload >/dev/null && ${RESTART_COMMAND} >/dev/null || exit 1`,
-    "  echo updated",
+    `if FERRY_PATH_LINE="$want" FERRY_PATH="$path" FERRY_OOM="$oom" awk ${quoteShell(UNIT_LINES_AWK)} "$f" > "$f.ferry-tmp" 2>/dev/null && mv "$f.ferry-tmp" "$f" 2>/dev/null; then`,
+    '  if [ "$path" = keep ]; then',
+    "    systemctl --user daemon-reload >/dev/null || exit 1",
+    "    echo policy",
+    "  else",
+    `    systemctl --user daemon-reload >/dev/null && ${RESTART_COMMAND} >/dev/null || exit 1`,
+    "    echo updated",
+    "  fi",
     "else",
     '  rm -f "$f.ferry-tmp"; echo failed',
     "fi",
   ].join("\n");
-  const status = (await boxRun(link, script, `Ferry could not restart ${UNIT}`)).trim();
+  const status = (await boxRun(link, script, `Ferry could not reload or restart ${UNIT}`)).trim();
   if (status === "missing") throw new PaseoError(`~/${UNIT_PATH} is not on the box. Run ferry integrations enable paseo`);
-  if (status === "unchanged") return false;
+  if (status === "unchanged") return { detail: "no changes", note: null };
+  if (status === "policy") {
+    return { detail: `${OOM_LINE} added, no restart`, note: `Ferry added ${OOM_LINE} to ${UNIT} on the box. ${OOM_APPLIED}` };
+  }
   if (status !== "updated") throw new PaseoError(`Ferry could not write the PATH line of ~/${UNIT_PATH} on the box`);
-  return true;
+  return {
+    detail: "restarted",
+    note: `The box PATH changed, so Ferry updated ${UNIT} and restarted the Paseo daemon. The restart stopped the agents that ran on the box.`,
+  };
 }
 
 /** A jq test: the input is an object, and the value at each path is an object or is not set. */

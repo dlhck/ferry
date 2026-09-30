@@ -1391,9 +1391,12 @@ describe("sync with the Paseo integration", () => {
             if (command.startsWith("printf")) stdout = "/srv/ferry\n";
             else if (command.includes("paseo daemon status")) stdout = status;
             else if (command.includes("ferry-paseo.service")) {
-              // The box compares the PATH line and prints a status word.
-              const line = (options.unit ?? unitFile(BUILTIN_BOX_PATH_DIRS)).split("\n").find((text) => text.startsWith("Environment=PATH="));
-              stdout = options.unit === null ? "missing\n" : command.includes(`want='${line}'`) ? "unchanged\n" : "updated\n";
+              // The box compares the PATH line, looks for an OOMPolicy line, and prints a status word.
+              const unit = options.unit ?? unitFile(BUILTIN_BOX_PATH_DIRS);
+              const line = unit.split("\n").find((text) => text.startsWith("Environment=PATH="));
+              stdout = options.unit === null ? "missing\n"
+                : !command.includes(`want='${line}'`) ? "updated\n"
+                : unit.includes("\nOOMPolicy=") ? "unchanged\n" : "policy\n";
             }
             else if (command.includes(".paseo/config.json")) stdout = "W\n";
             return { ok: true as const, address: "box", stdout, stderr: "" };
@@ -1492,6 +1495,19 @@ describe("sync with the Paseo integration", () => {
     expect(sync.lines.some((line) => line.includes("restart"))).toBe(false);
   });
 
+  test("adds the OOM policy line to a unit without it, and does not restart the daemon", async () => {
+    const dirs = [...BUILTIN_BOX_PATH_DIRS, ".bun/bin"];
+    const sync = run(paseoHome(null), { config: bunConfig, unit: unitFile(dirs).replace("OOMPolicy=continue\n", "") });
+    await sync.result;
+
+    expect(sync.events.slice(-4, -2)).toEqual(["start:Updating the Paseo unit PATH", "done:OOMPolicy=continue added, no restart"]);
+    expect(sync.lines).toContain(
+      "Ferry added OOMPolicy=continue to ferry-paseo.service on the box. systemd applied the line without a restart of the Paseo daemon. " +
+        "When a process of an agent runs out of memory, the daemon and the other agents continue.",
+    );
+    expect(sync.lines.some((line) => line.includes("restarted"))).toBe(false);
+  });
+
   test("warns and completes the sync when the unit is not on the box", async () => {
     const sync = run(paseoHome(null), { config: bunConfig, unit: null });
     await sync.result;
@@ -1515,7 +1531,8 @@ describe("sync with the Paseo integration", () => {
     const on = await printed(bunConfig);
     expect(on.plan.pathDirs).toEqual([".local/bin", ".pi/agent/bin", ".bun/bin"]);
     expect(on.output).toContain(
-      "Box PATH: ~/.local/bin, ~/.pi/agent/bin, ~/.bun/bin -> the ferry block of ~/.profile and the PATH of ferry-paseo.service. A PATH change restarts the Paseo daemon and stops its agents",
+      "Box PATH: ~/.local/bin, ~/.pi/agent/bin, ~/.bun/bin -> the ferry block of ~/.profile and the PATH of ferry-paseo.service. A PATH change restarts the Paseo daemon and stops its agents. " +
+        "A unit without an OOMPolicy line gets OOMPolicy=continue without a restart\n",
     );
     const off = await printed({ ...bunConfig, integrations: { paseo: false } });
     expect(off.output).toContain("Box PATH: ~/.local/bin, ~/.pi/agent/bin, ~/.bun/bin -> the ferry block of ~/.profile\n");

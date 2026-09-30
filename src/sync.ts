@@ -39,6 +39,7 @@ import {
   readAgentProfiles,
   readPaseoPreferences,
   refreshUnitPath,
+  UNIT_PLAN,
   type AgentProfile,
   type MetadataProvider,
   type PaseoPreferences,
@@ -757,16 +758,12 @@ async function applyOnBox(context: {
     }
     // The restart also applies the profiles, so it runs after the carry.
     try {
-      const restarted = await boxStep(
+      const refresh = await boxStep(
         "Updating the Paseo unit PATH",
         () => refreshUnitPath(link, pathDirs),
-        (restarted) => (restarted ? "restarted" : "no changes"),
+        (refresh) => refresh.detail,
       );
-      if (restarted) {
-        warn(
-          "The box PATH changed, so Ferry updated ferry-paseo.service and restarted the Paseo daemon. The restart stopped the agents that ran on the box.",
-        );
-      }
+      if (refresh.note !== null) warn(refresh.note);
     } catch (cause) {
       warn(`Warning: Ferry could not update the PATH of ferry-paseo.service: ${messageOf(cause)}. The sync is complete.`);
     }
@@ -1014,7 +1011,7 @@ function printPlan(plan: SyncPlan, gitAuth: GitAuth, writeLine: (line: string) =
       }`,
       `MCP servers: declare on the box, and keep the other box servers: ${plan.mcpServers.join(", ") || "none"}`,
       `Box PATH: ${plan.pathDirs.map((dir) => `~/${dir}`).join(", ")} -> the ferry block of ~/.profile${
-        plan.paseoProfiles === null ? "" : " and the PATH of ferry-paseo.service. A PATH change restarts the Paseo daemon and stops its agents"
+        plan.paseoProfiles === null ? "" : UNIT_PLAN
       }`,
       `Store updates from a harness root: ${
         plan.storeUpdates.map((update) => `${update.name} (${update.path})`).join(", ") || "none"
