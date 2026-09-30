@@ -36,6 +36,7 @@ import { FerryError } from "./errors.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
 import { BUILTIN_HARNESSES } from "./registry/builtin.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
+import { sessionContentHits } from "./session-scan.ts";
 import { stageSessions } from "./sessions.ts";
 
 export type MoveInput = {
@@ -581,8 +582,9 @@ async function preflight(
 
 /**
  * Stage the sessions of the project and apply the deny rules to each file. A
- * hit refuses the whole session. With `allowSecrets`, a session whose files
- * fail only the token or secret-field rules is carried.
+ * transcript also gets the session scan, which reads each record. A hit
+ * refuses the whole session. With `allowSecrets`, a session whose files fail
+ * only the token or secret-field rules is carried.
  */
 async function sessionPreflight(
   input: MoveInput,
@@ -613,7 +615,7 @@ async function sessionPreflight(
       const bytes = readFileSync(join(staged.stage!, file.target));
       const path = `~/${file.source}`;
       const nameHit = carriedNameHit(file.source);
-      const found = nameHit ? [nameHit] : carriedContentHits(file.source, bytes);
+      const found = nameHit ? [nameHit] : [...carriedContentHits(file.source, bytes), ...sessionContentHits(file.source, bytes)];
       if (nameHit || found.some((hit) => ALWAYS_REFUSED.has(hit.code))) blocked = true;
       hits.push(...found.map((hit) => ({ ...hit, path })));
       files.push({ path: file.target, sha256: createHash("sha256").update(bytes).digest("hex"), secrets: [] });

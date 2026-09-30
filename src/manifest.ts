@@ -197,7 +197,7 @@ const CONFIG_EXTS = { ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml":
  * Group 1 is the key, group 2 the value. The match does not see a key in a
  * flow mapping such as `{ password: value }`, or a value on the next line.
  */
-const CONFIG_LINE = /^\s*(?:-\s+)?["']?([\w-]+)["']?\s*[:=]\s*(.*)$/;
+export const CONFIG_LINE = /^\s*(?:-\s+)?["']?([\w-]+)["']?\s*[:=]\s*(.*)$/;
 /** Mach-O magic numbers, thin and universal, as the first four bytes of the file. */
 const MACHO_MAGICS = new Set(["feedface", "feedfacf", "cefaedfe", "cffaedfe", "cafebabe", "cafebabf"]);
 /** A carried MCP server name reaches remote shell commands, so it may hold only these characters. */
@@ -629,7 +629,7 @@ function secretLineKeys(text: string): string[] {
   });
 }
 
-function secretKeyHits(path: string, keys: readonly string[]): ForbiddenHit[] {
+export function secretKeyHits(path: string, keys: readonly string[]): ForbiddenHit[] {
   return [...new Set(keys)].map((key) => ({
     path,
     code: DENY_RULES["secret-field"].code,
@@ -647,13 +647,13 @@ function secretKeys(value: unknown): string[] {
   );
 }
 
-function isSecretKey(key: string): boolean {
+export function isSecretKey(key: string): boolean {
   const normal = key.toLowerCase().replace(/[-_]/g, "");
   return SECRET_KEYS.has(normal) || SECRET_WORDS.some((word) => normal.includes(word));
 }
 
 /** A non-empty string that is not a placeholder by the token placeholder rule. */
-function isSecretValue(value: string): boolean {
+export function isSecretValue(value: string): boolean {
   return value !== "" && !PLACEHOLDER_BODY.test(value);
 }
 
