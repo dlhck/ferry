@@ -901,6 +901,7 @@ this, so the box needs a release of Ferry from ferry install or ferry update.
               writeLine,
               progress,
               warn,
+              lockBox: boxLocker((dependencies.home ?? homedir)(), config, "move"),
               // With --json, Ferry asks nothing, so files with secrets need --yes.
               ...(json() ? { interactive: false } : {}),
             },

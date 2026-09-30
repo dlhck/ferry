@@ -31,6 +31,12 @@
  * A session file on the destination stays, unless the source has the same
  * file. Ferry never removes a source session.
  *
+ * After the plan and the confirmation, a move holds the box lock of each box
+ * that it reads or changes, until it ends. So a sync, `ferry update`, or
+ * `ferry box remove --uninstall` does not run on that box during the move. The
+ * lock reads the config again: a box that left the config, or that has a new
+ * target, stops the move before it changes a box. A dry run takes no lock.
+ *
  * Every source and destination step is a `sh` command string. The operator
  * machine runs it with `sh -c`. The box runs it through Link.
  */
@@ -66,6 +72,7 @@ import {
   type ScanRequest,
 } from "./scan.ts";
 import { groupSessions, listSessionFiles, stageSessions, UNKNOWN_ID, type Session } from "./sessions.ts";
+import { boxLockError, type BoxLocker } from "./sync.ts";
 
 export type MoveInput = {
   /** The project path on the operator machine, or the same path for the source box with `fromBox`. */
@@ -111,6 +118,11 @@ export type MoveDependencies = {
   /** True when Ferry can ask a question on a terminal. */
   readonly interactive: boolean;
   readonly confirm: (message: string) => Promise<boolean | symbol | undefined>;
+  /**
+   * Takes the box lock of a box, from `boxLocker`. The move stops when a box
+   * does not give its lock. Without it, the move takes no lock.
+   */
+  readonly lockBox?: BoxLocker;
 };
 
 /** The line for `--remove`. Ferry never removes the source project from an integration. */
@@ -312,6 +324,7 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
   // The local directories with the bytes of the carried files and of the staged sessions, from the pack of the source.
   let stage: string | null = null;
   let sessionStage: string | null = null;
+  const locks: (() => void)[] = [];
   try {
     writeLine(input.dryRun ? "Move plan (no changes will be made):" : "Move plan:");
     writeLine(`Source: ${source.label} ~/${rel}`);
@@ -389,6 +402,13 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
         writeLine("Move cancelled.");
         return null;
       }
+    }
+
+    // The plan and the confirmation can take a long time, so a box can leave the config, or a sync can start, before this point.
+    for (const box of [sourceBox, destinationBox]) {
+      const lock = box === null ? undefined : dependencies.lockBox?.(box);
+      if (typeof lock === "function") locks.push(lock);
+      else if (lock !== undefined) throw boxLockError(lock);
     }
 
     // After the confirmation, the source packs the files: it reads each one one time, checks those bytes, and gives them.
@@ -565,6 +585,7 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
     }
     return { ...result(carry, carriedSessions), trash };
   } finally {
+    for (const release of locks) release();
     if (stage) rmSync(stage, { recursive: true, force: true });
     if (sessionStage) rmSync(sessionStage, { recursive: true, force: true });
   }

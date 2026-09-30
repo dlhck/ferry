@@ -20,6 +20,9 @@ import { createPaseo } from "../src/integrations/paseo.ts";
 import type { Integration, MovedSession } from "../src/integrations/types.ts";
 import { runMove, type MoveDependencies, type MoveInput, type MoveResult } from "../src/move.ts";
 import { projectDirectoryName } from "../src/sessions.ts";
+import { boxLocker } from "../src/sync.ts";
+import { resolveTargetBox } from "../src/boxes.ts";
+import type { PartialOperatorConfig } from "../src/config.ts";
 import { errorInfo } from "../src/output.ts";
 import { installBoxFerry } from "./box-ferry-shim.ts";
 import { recordProgress } from "./fake-progress.ts";
@@ -1400,6 +1403,172 @@ describe("ferry move and a credential in the origin URL", () => {
     expect(result.lines).toContain(`Clone: ${w.origin} at branch main`);
     expect(result.lines).not.toContain(NOTE);
     expect(app).toBe(join(w.operator, "Developer/app"));
+  });
+});
+
+describe("ferry move and the box lock", () => {
+  const HOST = () => ({ host: { transport: "ssh" as const, destination: "user@box.example" } });
+  const BOXES = () => ({
+    boxes: [
+      { name: "a", host: { transport: "ssh" as const, destination: "user@a.example" } },
+      { name: "b", host: { transport: "ssh" as const, destination: "user@b.example" } },
+    ],
+  });
+  /** Try to take the lock of box `name`, as a sync or another command does. Returns "free" and gives the lock back, or "busy". */
+  function probe(w: World, config: () => PartialOperatorConfig, name?: string): "free" | "busy" {
+    const lock = boxLocker(w.operator, config, "test")(resolveTargetBox(config(), name));
+    if (typeof lock !== "function") return "busy";
+    lock();
+    return "free";
+  }
+  function twoBoxes(w: World) {
+    const boxB = join(w.root, "box-b");
+    mkdirSync(boxB);
+    const commandsB: { command: string; options: RunOptions }[] = [];
+    const linkB = boxLink(boxB, w.bin, commandsB);
+    const createLink = ((options: { destination?: string }) => (options.destination === "user@a.example" ? w.link : linkB)) as MoveDependencies["createLink"];
+    return { boxB, commandsB, createLink };
+  }
+
+  test("holds the lock of the destination box while it changes the box, and gives it back", async () => {
+    const w = world();
+    const app = project(w, w.operator);
+    write(join(app, "AGENTS.md"), "# Agents\n");
+    const seen: string[] = [];
+    const watching: Pick<Link, "run"> = {
+      run: (command, options) => {
+        if (command.includes("git clone") || command.startsWith("tar -xf")) seen.push(probe(w, HOST));
+        return w.link.run(command, options);
+      },
+    };
+
+    const result = await move(w, { path: "Developer/app" }, { readConfig: HOST, createLink: () => watching, lockBox: boxLocker(w.operator, HOST, "move") });
+
+    expect(result.error).toBeNull();
+    expect(seen).toEqual(["busy", "busy"]);
+    expect(probe(w, HOST)).toBe("free");
+  });
+
+  test("holds the lock of the source box while the box packs the files", async () => {
+    const w = world();
+    const boxApp = project(w, w.box);
+    write(join(boxApp, "AGENTS.md"), "# Agents\n");
+    const seen: string[] = [];
+    const watching: Pick<Link, "run"> = {
+      run: (command, options = {}) => {
+        if (isPack(options)) seen.push(probe(w, HOST));
+        return w.link.run(command, options);
+      },
+    };
+
+    const result = await move(w, { path: "Developer/app", fromBox: "default" }, { readConfig: HOST, createLink: () => watching, lockBox: boxLocker(w.operator, HOST, "move") });
+
+    expect(result.error).toBeNull();
+    expect(seen).toEqual(["busy"]);
+    expect(probe(w, HOST)).toBe("free");
+  });
+
+  test("fails with sync-busy when a sync or another command holds the lock, before it changes a box", async () => {
+    const w = world();
+    const app = project(w, w.operator);
+    write(join(app, "AGENTS.md"), "# Agents\n");
+    const held = boxLocker(w.operator, HOST, "update")(resolveTargetBox(HOST()));
+
+    const result = await move(w, { path: "Developer/app" }, { readConfig: HOST, lockBox: boxLocker(w.operator, HOST, "move") });
+    if (typeof held === "function") held();
+
+    expect(typeof held).toBe("function");
+    expect(errorInfo(result.error).code).toBe("sync-busy");
+    expect(result.error?.message).toBe("operator: box default is busy: a sync or another Ferry command is active for it");
+    expect(w.commands.some(({ command }) => command.includes("git clone") || command.startsWith("tar -xf"))).toBe(false);
+    expect(existsSync(join(w.box, "Developer"))).toBe(false);
+    expect(probe(w, HOST)).toBe("free");
+  });
+
+  test("refuses a box that left the config after the preflight, and changes nothing", async () => {
+    const w = world();
+    const app = project(w, w.operator);
+    write(join(app, "AGENTS.md"), "# Agents\n");
+    let config: PartialOperatorConfig = HOST();
+
+    const result = await move(w, { path: "Developer/app" }, {
+      readConfig: () => config,
+      lockBox: boxLocker(w.operator, () => config, "move"),
+      writeLine: (line) => {
+        // ferry box remove and ferry box add run while the move prints its plan.
+        if (line === "Move plan:") config = { boxes: [{ name: "other", host: { transport: "ssh", destination: "user@other.example" } }] };
+      },
+    });
+
+    expect(errorInfo(result.error).code).toBe("refused");
+    expect(result.error?.message).toBe("box default left the config during the move. Ferry did not change the box.");
+    expect(existsSync(join(w.box, "Developer"))).toBe(false);
+    expect(probe(w, HOST)).toBe("free");
+  });
+
+  test("gives the lock back when the move fails and when the operator declines", async () => {
+    const w = world();
+    const app = project(w, w.operator);
+    write(join(app, ".env"), "AWS_ACCESS_KEY_ID=AK" + "IA" + "Q2W3E4R5T6Y7U8I9\n");
+    const failing: Pick<Link, "run"> = {
+      run: (command, options) =>
+        command.includes("git clone")
+          ? Promise.resolve({ ok: false, error: { code: "command-failed", origin: "box", message: "disk full" } })
+          : w.link.run(command, options),
+    };
+    const lockBox = boxLocker(w.operator, HOST, "move");
+
+    const failed = await move(w, { path: "Developer/app" }, { readConfig: HOST, createLink: () => failing, lockBox });
+    const declined = await move(w, { path: "Developer/app", includeEnv: true, allowSecrets: true }, { readConfig: HOST, lockBox, interactive: true, confirm: async () => false });
+
+    expect(failed.error?.message).toBe("The clone failed: disk full");
+    expect(declined.value).toBeNull();
+    expect(probe(w, HOST)).toBe("free");
+  });
+
+  test("a move between boxes takes the lock of each box, and gives the first back when the second is busy", async () => {
+    const w = world();
+    const boxApp = project(w, w.box);
+    write(join(boxApp, "AGENTS.md"), "# Agents\n");
+    const t = twoBoxes(w);
+    const lockBox = boxLocker(w.operator, BOXES, "move");
+    const seen: string[] = [];
+    const held = boxLocker(w.operator, BOXES, "update")(resolveTargetBox(BOXES(), "b"));
+
+    const busy = await move(w, { path: "Developer/app", fromBox: "a", toBox: "b" }, { readConfig: BOXES, createLink: t.createLink, lockBox });
+    const afterBusy = [probe(w, BOXES, "a"), probe(w, BOXES, "b")];
+    if (typeof held === "function") held();
+    const watching = ((options: { destination?: string }) => {
+      const link = t.createLink(options as Parameters<MoveDependencies["createLink"]>[0]);
+      return {
+        run: (command: string, runOptions: RunOptions = {}) => {
+          if (isPack(runOptions) || command.includes("git clone")) seen.push(`${probe(w, BOXES, "a")} ${probe(w, BOXES, "b")}`);
+          return link.run(command, runOptions);
+        },
+      };
+    }) as MoveDependencies["createLink"];
+    const moved = await move(w, { path: "Developer/app", fromBox: "a", toBox: "b" }, { readConfig: BOXES, createLink: watching, lockBox });
+
+    expect(errorInfo(busy.error).code).toBe("sync-busy");
+    expect(busy.error?.message).toBe("operator: box b is busy: a sync or another Ferry command is active for it");
+    expect(afterBusy).toEqual(["free", "busy"]);
+    expect(moved.error).toBeNull();
+    expect(seen).toEqual(["busy busy", "busy busy"]);
+    expect([probe(w, BOXES, "a"), probe(w, BOXES, "b")]).toEqual(["free", "free"]);
+    expect(existsSync(join(t.boxB, "Developer/app/AGENTS.md"))).toBe(true);
+  });
+
+  test("--dry-run takes no lock", async () => {
+    const w = world();
+    const app = project(w, w.operator);
+    write(join(app, "AGENTS.md"), "# Agents\n");
+    const held = boxLocker(w.operator, HOST, "update")(resolveTargetBox(HOST()));
+
+    const result = await move(w, { path: "Developer/app", dryRun: true }, { readConfig: HOST, lockBox: boxLocker(w.operator, HOST, "move") });
+    if (typeof held === "function") held();
+
+    expect(result.error).toBeNull();
+    expect(result.lines).toContain("Carry: AGENTS.md");
   });
 });
 
