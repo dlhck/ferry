@@ -11,6 +11,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -295,6 +296,22 @@ describe("ferry adopt --from-box", () => {
     );
     expect(crossed(w, token)).toBe(false);
     expect(w.received.some((output) => output.includes(Buffer.from(token).toString("hex")))).toBe(false);
+  });
+
+  test("leaves out a file of more than 128 MiB and tells the operator to copy it by hand", async () => {
+    const w = world();
+    write(join(w.box, ".claude", "skills", "draft", "SKILL.md"), "# Draft\n");
+    write(join(w.box, ".claude", "skills", "draft", "model.bin"), "");
+    truncateSync(join(w.box, ".claude", "skills", "draft", "model.bin"), 128 * 1024 * 1024 + 1);
+
+    const { value, error, lines } = await adopt(w, { name: "draft" });
+
+    expect(error).toBeNull();
+    expect(value?.files.map((file) => file.path)).toEqual(["SKILL.md"]);
+    expect(value?.skipped).toEqual([{ path: "model.bin", code: "too-large", reason: "too large for Ferry to check" }]);
+    expect(lines).toContain("Skip: model.bin (too large for Ferry to check)");
+    expect(lines).toContain("Ferry does not read a file of more than 128 MiB. Copy model.bin from box a by hand.");
+    expect(existsSync(join(w.operator, ".claude", "skills", "draft", "model.bin"))).toBe(false);
   });
 
   test("the box reads each file one time: a file that gets a secret before the box reads it stays on the box", async () => {

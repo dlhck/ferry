@@ -58,6 +58,7 @@ import { noProgress, plural, step, type Progress } from "./progress.ts";
 import { BUILTIN_HARNESSES } from "./registry/builtin.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
 import {
+  MAX_FILE_BYTES,
   packOnBox,
   recheckPack,
   runPack,
@@ -675,12 +676,19 @@ async function preflight(
       ? await source.scan({ kind: "files", root: rel, paths: wanted, allowSecrets: input.allowSecrets })
       : { carry: [], refused: [] };
   const carry = scanned.carry.filter((file) => wanted.includes(file.path));
-  refused.push(...scanned.refused);
-
-  if (input.remove && refused.length > 0) {
-    problems.push(
-      `--remove needs every local-only file carried, and Ferry refuses ${refused.length}. Move them by hand or leave out --remove.`,
+  // The source does not read a file over the size limit, so no rule refuses it. It stays there, and the plan skips it.
+  const large = scanned.refused.filter((hit) => hit.code === "too-large");
+  refused.push(...scanned.refused.filter((hit) => hit.code !== "too-large"));
+  skipped.push(...large);
+  if (large.length > 0) {
+    notes.push(
+      `Ferry does not read a file of more than ${MAX_FILE_BYTES / 1024 / 1024} MiB. Copy ${large.map((hit) => hit.path).join(", ")} by hand.`,
     );
+  }
+
+  const kept = refused.length + large.length;
+  if (input.remove && kept > 0) {
+    problems.push(`--remove needs every local-only file carried, and Ferry refuses ${kept}. Move them by hand or leave out --remove.`);
   }
   return { git, carry, refused, skipped, notes, problems };
 }
@@ -736,7 +744,8 @@ async function sessionPreflight(
       continue;
     }
     refused.push(...hits);
-    const hint = input.allowSecrets || blocked ? "" : " Add --allow-secrets to carry it.";
+    const large = hits.some((hit) => hit.code === "too-large");
+    const hint = large ? " Copy it by hand." : input.allowSecrets || blocked ? "" : " Add --allow-secrets to carry it.";
     const what = session.id === null ? "the memory file" : "the session of";
     for (const hit of hits) warnings.push(`WARNING: Ferry skips ${what} ${hit.path} (${hit.reason}).${hint}`);
   }

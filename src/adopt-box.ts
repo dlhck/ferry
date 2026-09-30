@@ -41,7 +41,7 @@ import { CODEX_SYSTEM_SKILLS, readSeed, TOKEN_ERE } from "./manifest.ts";
 import { noProgress, step, type Progress } from "./progress.ts";
 import { BUILTIN_HARNESSES } from "./registry/builtin.ts";
 import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
-import { packOnBox, writePack } from "./scan.ts";
+import { MAX_FILE_BYTES, packOnBox, writePack } from "./scan.ts";
 
 /** The skills of the snapshot checkout, relative to the home. */
 const STORE_SKILLS = ".ferry/store/skills";
@@ -265,6 +265,10 @@ export async function runAdoptFromBox(
       for (const line of diff.replace(/\n$/, "").split("\n")) writeLine(line);
     }
     for (const entry of skipped) writeLine(`Skip: ${entry.path} (${entry.reason})`);
+    const large = skipped.filter((entry) => entry.code === "too-large").map((entry) => entry.path);
+    if (large.length > 0) {
+      writeLine(`Ferry does not read a file of more than ${MAX_FILE_BYTES / 1024 / 1024} MiB. Copy ${large.join(", ")} from box ${box.name} by hand.`);
+    }
 
     if (!input.yes) {
       if (!dependencies.interactive) {

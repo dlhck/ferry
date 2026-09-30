@@ -962,7 +962,9 @@ Put a host before the box port to forward to a host that the box can reach,
 such as a database that accepts connections only from the box network. A
 numeric first part is a box port. The box resolves the host name. Put an IPv6
 address in brackets. Ferry first checks that the box can connect to the host,
-and stops with an error when it cannot.
+and stops with an error when it cannot. On a box without bash, timeout, or
+/dev/tcp, Ferry cannot always make this check. Then it prints a warning and
+opens the tunnel.
 
   5432                   127.0.0.1:5432 on the box, local port 5432
   5432:15432             127.0.0.1:5432 on the box, local port 15432
