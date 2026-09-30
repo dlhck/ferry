@@ -213,6 +213,70 @@ describe("sessionContentHits", () => {
     for (const text of passes) expect([text, reasons(jsonl(toolResult(text)))]).toEqual([text, []]);
   });
 
+  test("a value with a reference in a longer literal is a literal", () => {
+    const word = "hunt" + "er";
+    const json = (value: string) => reasons(jsonl(toolUse("Write", { file_path: "a.json", content: JSON.stringify({ password: value }) })));
+    const hits: [string, string][] = [
+      [`PASSWORD='${word}\${suffix}'`, "PASSWORD"],
+      [`PASSWORD='${word}$SUFFIX'`, "PASSWORD"],
+      [`PASSWORD="${word}\${SUFFIX}"`, "PASSWORD"],
+      [`PASSWORD="\${PREFIX}${word}"`, "PASSWORD"],
+      [`PASSWORD=${word}\${SUFFIX}`, "PASSWORD"],
+      [`password: "${word}{{suffix}}"`, "password"],
+      [`password = "{{a}}${word}{{b}}"`, "password"],
+      [`password = "$(id -u)${word}$(id -g)"`, "password"],
+      [`tool --password "${word}\${SUFFIX}"`, "password"],
+      [`tool --password '${word} \${SUFFIX}'`, "password"],
+      // An escape makes the next character a literal.
+      [`PASSWORD="\\$NOT_A_VARIABLE"`, "PASSWORD"],
+      [`PASSWORD="\\\${NOT_A_VARIABLE}"`, "PASSWORD"],
+      [`password = "a\\"b"`, "password"],
+      [`password = "\\"${word}\\""`, "password"],
+      // A string with a prefix letter is a quoted string.
+      [`password = b"${word}"`, "password"],
+      [`password = r'${word}'`, "password"],
+      [`password = f"${word}{suffix}"`, "password"],
+    ];
+
+    for (const [text, key] of hits) {
+      expect([text, reasons(jsonl(toolResult(text)))]).toEqual([text, [`key ${key} holds a password or secret`]]);
+    }
+    for (const value of [`${word}\${suffix}`, `\${prefix}${word}`, `${word}{{suffix}}`, `${word}$SUFFIX`, `$(id)${word}`]) {
+      expect([value, json(value)]).toEqual([value, ["key password holds a password or secret"]]);
+    }
+  });
+
+  test("a value that is one reference or one command substitution is not a literal, in each kind of quote", () => {
+    const json = (value: string) => reasons(jsonl(toolUse("Write", { file_path: "a.json", content: JSON.stringify({ password: value }) })));
+    const passes = [
+      "PASSWORD=$OTHER",
+      "PASSWORD=${OTHER}",
+      "PASSWORD=${OTHER:-}",
+      "PASSWORD=$A$B",
+      'PASSWORD="$OTHER"',
+      'PASSWORD="${OTHER}"',
+      "PASSWORD='$OTHER'",
+      "PASSWORD='${OTHER}'",
+      "PASSWORD=$(cat password.txt)",
+      'PASSWORD="$(cat password.txt)"',
+      "PASSWORD=`cat password.txt`",
+      'PASSWORD="`cat password.txt`"',
+      'export API_TOKEN="$(vault read -field=token secret/app)" && run',
+      "token: ${{ secrets.TOKEN }}",
+      "token: '${{ secrets.TOKEN }}'",
+      'password: "{{ password }}"',
+      "password = f\"{password}\"",
+      'password = "{password}"',
+      'tool --password "$(cat password.txt)" --verbose',
+      "tool --token `cat token.txt`",
+    ];
+
+    for (const text of passes) expect([text, reasons(jsonl(toolResult(text)))]).toEqual([text, []]);
+    for (const value of ["$OTHER", "${OTHER}", "{{ password }}", "${{ secrets.X }}", "$(cat password.txt)", "`cat password.txt`", "{password}"]) {
+      expect([value, json(value)]).toEqual([value, []]);
+    }
+  });
+
   test("a vendor token fires in any form, because the token patterns do not change", () => {
     const token = "gh" + "p_" + "c".repeat(36);
     const bytes = jsonl(toolResult(`token = get_token("${token}")`));

@@ -39,7 +39,7 @@ export type DenyRuleDescription = {
  * a box whose number is lower than this one, because older rules can pass a
  * file that this machine refuses.
  */
-export const DENY_RULES_VERSION = 1;
+export const DENY_RULES_VERSION = 2;
 
 const DENY_RULES = {
   dotenv: { code: "dotenv", reason: "environment file", verdict: "refuse" },
