@@ -8,7 +8,6 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { apply as applyStore, type ApplyPlan, type RemoteApplyInput } from "./apply.ts";
 import { BOX_INSTRUCTIONS, boxInstructionsInput, readBoxInstructions, writeBoxFilesCommand } from "./box-identity.ts";
 import {
-  completeHostConfig,
   ConfigMissingError,
   readConfig as readOperatorConfig,
   resolveLinkOptions,
@@ -1321,12 +1320,8 @@ function pathDirsOf(registry: Registry): readonly string[] {
 type SyncOperatorConfig = Pick<OperatorConfig, "version" | "publisher" | "snapshotUrl">;
 
 function completeConfig(config: PartialOperatorConfig | null): SyncOperatorConfig {
-  if (
-    config?.version !== 1 ||
-    !config.publisher ||
-    !config.snapshotUrl ||
-    (!config.boxes && !completeHostConfig(config.host))
-  ) {
+  // A config without a box passes. `resolveBoxes` refuses it with the message for it.
+  if (config?.version !== 1 || !config.publisher || !config.snapshotUrl) {
     throw new SyncError("invalid-config", "operator", "Ferry config is incomplete. Run ferry init.", {
       cause: new ConfigMissingError("Ferry config is incomplete."),
     });

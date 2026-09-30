@@ -146,6 +146,43 @@ describe("ferry box list", () => {
   });
 });
 
+/** The config after `ferry box remove --uninstall` of the last box. */
+const NO_BOX_CONFIG = HOST_CONFIG.replace('[host]\ntransport = "ssh"\ndestination = "dev@box-a.example"\n\n', "");
+
+describe("a config without a box", () => {
+  test("box list has no box and names ferry box add", () => {
+    const { deps } = dependencies(makeHome(NO_BOX_CONFIG));
+
+    const result = runBoxList(deps);
+
+    expect(result).toEqual({ boxes: [] });
+    expect(boxListLines(result)).toEqual(["The config has no box. Add a box with ferry box add <name>."]);
+  });
+
+  test("box add adds the first box without a question, and keeps the rest of the config", async () => {
+    const home = makeHome(NO_BOX_CONFIG);
+    const { deps, confirms } = dependencies(home);
+
+    const result = await runBoxAdd({ name: "lab", sshDestination: "dev@box-b.example", yes: false }, deps);
+
+    expect(result).toMatchObject({ name: "lab", migrated: false });
+    expect(confirms).toEqual([]);
+    expect(configText(home)).toBe(
+      NO_BOX_CONFIG + ["", "[box.lab]", 'transport = "ssh"', 'destination = "dev@box-b.example"', ""].join("\n"),
+    );
+    expect(runBoxList(deps).boxes).toEqual([{ name: "lab", transport: "ssh", destination: "dev@box-b.example", default: true }]);
+  });
+
+  test("box remove and box default name ferry box add", async () => {
+    const home = makeHome(NO_BOX_CONFIG);
+
+    expect(() => runBoxDefault({ name: "a" }, dependencies(home).deps)).toThrow("Ferry config has no box. Add a box with ferry box add <name>.");
+    await expect(
+      runBoxRemove({ name: "a" }, { ...dependencies(home).deps, uninstallTunnelService: async () => {} }),
+    ).rejects.toThrow("Ferry config has no box. Add a box with ferry box add <name>.");
+  });
+});
+
 describe("ferry box add", () => {
   test("checks the new box like init, then adds its table and keeps the other boxes", async () => {
     const home = makeHome(BOXES_CONFIG);
@@ -489,7 +526,9 @@ describe("ferry box remove", () => {
   test("refuses the last box, and keeps its tunnel service", async () => {
     const oneBox = makeHome(BOXES_CONFIG.replace('default_box = "a"\n', "").split("[box.b]")[0]);
     const service = tunnelService(oneBox, "a");
-    await expect(runBoxRemove({ name: "a" }, removal(oneBox).deps)).rejects.toThrow("box a is the last box");
+    await expect(runBoxRemove({ name: "a" }, removal(oneBox).deps)).rejects.toThrow(
+      "box a is the last box. Ferry needs one box at least. Add another box first. To remove Ferry from the box and the box from the config, run ferry box remove a --uninstall.",
+    );
     expect(existsSync(service)).toBe(true);
 
     const host = makeHome(HOST_CONFIG);

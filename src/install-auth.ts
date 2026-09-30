@@ -9,6 +9,7 @@ import {
   type AuthStartResult,
 } from "./auth-start.ts";
 import { planBoxFerry } from "./box-ferry.ts";
+import { hasNoBox, missingBoxMessage } from "./boxes.ts";
 import { readConfig, resolveLinkOptions, type PartialOperatorConfig, type ToolsConfig } from "./config.ts";
 import {
   readOperatorGitIdentity,
@@ -397,7 +398,7 @@ function loadTarget(
 
   const target = resolveLinkOptions(config?.host);
   if (!target) {
-    fail("operator/invalid-config", "Ferry config has no complete host. Run ferry init.", writeLine);
+    fail("operator/invalid-config", hasNoBox(config) ? missingBoxMessage(config) : "Ferry config has no complete host. Run ferry init.", writeLine);
   }
   return { target, config };
 }

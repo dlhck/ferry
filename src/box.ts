@@ -1,7 +1,7 @@
 /** `ferry box list`, `ferry box add`, `ferry box remove`, and `ferry box default`. */
 
 import { boxUninstallLines, commitBoxUninstall, planBoxUninstall, type BoxUninstallPlan } from "./box-uninstall.ts";
-import { resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
+import { hasNoBox, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import {
   ConfigError,
   ConfigMissingError,
@@ -111,10 +111,10 @@ const MIGRATED_BOX = "default";
 
 type Dependencies<Keys extends keyof BoxCommandDependencies> = Pick<BoxCommandDependencies, Keys>;
 
-/** Each box: name, transport, destination, and whether a command without --box uses it. */
+/** Each box: name, transport, destination, and whether a command without --box uses it. A config without a box has none. */
 export function runBoxList(dependencies: Dependencies<"readConfig">): BoxListResult {
   const config = readComplete(dependencies.readConfig);
-  const boxes = resolveBoxes(config);
+  const boxes = hasNoBox(config) ? [] : resolveBoxes(config);
   const target = boxes.length === 1 ? boxes[0]?.name : config.defaultBox;
   return {
     boxes: boxes.map((box) => ({
@@ -128,6 +128,7 @@ export function runBoxList(dependencies: Dependencies<"readConfig">): BoxListRes
 
 /** One line per box, as a table. */
 export function boxListLines(result: BoxListResult): string[] {
+  if (result.boxes.length === 0) return ["The config has no box. Add a box with ferry box add <name>."];
   const rows = [
     ["Box", "Transport", "Destination", "Default"],
     ...result.boxes.map((box) => [box.name, box.transport, box.destination, box.default ? "yes" : ""]),
@@ -140,17 +141,18 @@ export function boxListLines(result: BoxListResult): string[] {
  * Check a new box like `ferry init` does, then write its `[box.<name>]` table.
  * A `[host]` config becomes `[box.default]` plus the new box, with
  * `default_box = "default"`, so single-target commands still reach the old host.
+ * A config without a box gets the new box as its only box.
  * Returns null when the operator cancels at the prompt.
  */
 export async function runBoxAdd(input: BoxAddInput, dependencies: BoxCommandDependencies): Promise<BoxAddResult | null> {
   if (!isBoxName(input.name)) throw new ConfigError(invalidName(input.name));
   const host = hostOf(input);
   const config = readComplete(dependencies.readConfig);
-  const existing = resolveBoxes(config);
+  const existing = hasNoBox(config) ? [] : resolveBoxes(config);
   if (existing.some((box) => box.name === input.name)) {
     throw new ConfigError(`box ${input.name} is already in the config. Use another name, or ferry box remove ${input.name} first.`);
   }
-  const migrate = config.boxes === undefined;
+  const migrate = config.boxes === undefined && existing.length > 0;
   dependencies.writeLine(`Add box ${input.name}: ${transport(host)} ${destination(host)}`);
   if (migrate) {
     dependencies.writeLine(
@@ -198,11 +200,16 @@ export async function runBoxAdd(input: BoxAddInput, dependencies: BoxCommandDepe
 /**
  * Remove the tunnel service of the box from the operator machine, and write
  * the config without the box. Ferry does not connect to the box and does not
- * change it.
+ * change it. It refuses the last box, because the box keeps Ferry.
  */
 export async function runBoxRemove(input: { readonly name: string }, dependencies: BoxRemoveDependencies): Promise<BoxRemoveResult> {
   const config = readComplete(dependencies.readConfig);
-  removableBox(config, input.name);
+  const box = resolveBoxes(config, [input.name])[0]!;
+  if (isLastBox(config)) {
+    throw new ConfigError(
+      `box ${box.name} is the last box. Ferry needs one box at least. Add another box first. To remove Ferry from the box and the box from the config, run ferry box remove ${box.name} --uninstall.`,
+    );
+  }
   return removeFromOperator(config, input.name, dependencies, "Ferry did not change the box.");
 }
 
@@ -211,6 +218,10 @@ export async function runBoxRemove(input: { readonly name: string }, dependencie
  * the box name, remove Ferry from the box, then write the config without the
  * box. A box that Ferry cannot read, or a failed removal, leaves the config as
  * it is. Returns null when the operator does not type the box name.
+ *
+ * The box can be the last box, also the box `default` of a `[host]` config.
+ * Then the config has no box after the removal, and each command that needs a
+ * box fails until `ferry box add` adds one.
  *
  * Ferry holds the box lock from before it connects until the config has no
  * box, so a sync cannot write the links on the box again. A sync for the box
@@ -221,7 +232,13 @@ export async function runBoxUninstall(
   input: { readonly name: string; readonly yes: boolean; readonly dryRun: boolean },
   dependencies: BoxUninstallDependencies,
 ): Promise<BoxUninstallResult | null> {
-  const box = removableBox(readComplete(dependencies.readConfig), input.name);
+  const config = readComplete(dependencies.readConfig);
+  const box = resolveBoxes(config, [input.name])[0]!;
+  if (isLastBox(config)) {
+    dependencies.writeLine(
+      `Box ${box.name} is the last box. After the removal, the config has no box. Then ferry sync, ferry status, and ferry watch fail until you add a box with ferry box add <name>.`,
+    );
+  }
   if (input.dryRun) return uninstallBox(box, input, dependencies);
   const release = acquireBoxLock(dependencies.home, box);
   try {
@@ -284,13 +301,9 @@ async function uninstallBox(
   return { ...removed, uninstall: { dryRun: false, plan, remaining } };
 }
 
-/** The box, when the config can lose it. Throws for an unknown box and for the last box. */
-function removableBox(config: PartialOperatorConfig, name: string): ResolvedBox {
-  const box = resolveBoxes(config, [name])[0]!;
-  if ((config.boxes ?? []).length <= 1) {
-    throw new ConfigError(`box ${box.name} is the last box. Ferry needs one box at least. Add another box first.`);
-  }
-  return box;
+/** True for a config with one box. A `[host]` config has one box. */
+function isLastBox(config: PartialOperatorConfig): boolean {
+  return (config.boxes ?? []).length <= 1;
 }
 
 /** The file of the tunnel user service of the box on the operator machine, or null when the box has no service. */
@@ -308,7 +321,8 @@ function instructionFileOf(home: string, name: string): string | null {
 /**
  * Remove the tunnel service of the box from the operator machine, then write
  * the config without the box. The per-box instruction file stays, because it
- * is the text of the operator.
+ * is the text of the operator. Without the last box, the config has no
+ * `[host]` table and no box table, and the rest of the config stays.
  */
 async function removeFromOperator(
   config: PartialOperatorConfig,
@@ -332,11 +346,12 @@ async function removeFromOperator(
     }
   }
   const wasDefault = config.defaultBox === name;
-  dependencies.writeConfig(
-    withBoxes(config, (config.boxes ?? []).filter((entry) => entry.name !== name), wasDefault ? undefined : config.defaultBox),
-  );
+  const boxes = (config.boxes ?? []).filter((entry) => entry.name !== name);
+  dependencies.writeConfig(withBoxes(config, boxes, wasDefault ? undefined : config.defaultBox));
   dependencies.writeLine(`Removed box ${name} from the config.${note === "" ? "" : ` ${note}`}`);
-  if (wasDefault) warn(`Warning: box ${name} was the default_box. Ferry removed default_box. Set a new one with ferry box default <name>.`);
+  if (boxes.length === 0) {
+    warn("Warning: the config has no box now. ferry sync, ferry status, and ferry watch fail until you add a box with ferry box add <name>.");
+  } else if (wasDefault) warn(`Warning: box ${name} was the default_box. Ferry removed default_box. Set a new one with ferry box default <name>.`);
   const instructionFile = instructionFileOf(dependencies.home, name);
   if (instructionFile !== null) {
     dependencies.writeLine(

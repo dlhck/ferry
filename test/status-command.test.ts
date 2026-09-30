@@ -229,6 +229,15 @@ async function status(
 }
 
 describe("ferry status command", () => {
+  test("names ferry box add for a config without a box", async () => {
+    const dependencies = {
+      ...fakeStack().dependencies,
+      readConfig: () => ({ version: 1 as const, publisher: "operator", snapshotUrl: "snapshot.git", host: {} }),
+    };
+
+    await expect(runStatusCommand({}, dependencies)).rejects.toThrow("Ferry config has no box. Add a box with ferry box add <name>.");
+  });
+
   test("an off agent has the state off, no login check, and only the clean-up of its harness, in text and JSON", async () => {
     const stack = fakeStack();
     let applyInput: RemoteApplyInput | undefined;

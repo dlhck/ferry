@@ -31,6 +31,18 @@ describe("install command", () => {
     { tool: "bun", policy: "operator", version: null, action: "skip-not-on-operator", dependsOn: [] },
   ];
 
+  test("names ferry box add for a config without a box, and ferry init for a host that is not complete", async () => {
+    const { host: _host, ...noBox } = config;
+    const install = (readConfig: InstallCommandDependencies["readConfig"]) =>
+      runInstallCommand({ yes: true }, { ...installDependencies({ plan }), readConfig }).catch((error) => error);
+
+    const error = await install(() => ({ ...noBox, host: {} }));
+    expect(error.message).toBe("operator/invalid-config: Ferry config has no box. Add a box with ferry box add <name>.");
+    expect((await install(() => ({ ...noBox, host: { tailscale: "builder" } }))).message).toBe(
+      "operator/invalid-config: Ferry config has no complete host. Run ferry init.",
+    );
+  });
+
   test("prints the exact plan before confirmation", async () => {
     const output: string[] = [];
     let outputAtPrompt: readonly string[] = [];

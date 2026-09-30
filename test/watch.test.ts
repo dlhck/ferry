@@ -24,6 +24,43 @@ function accepted(identity: string): WatchObservation {
 }
 
 describe("watch", () => {
+  test("names ferry box add once for a config without a box, and does not sync", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-watch-no-box-"));
+    const controller = new AbortController();
+    const lines: string[] = [];
+    let scans = 0;
+    let syncs = 0;
+    try {
+      mkdirSync(join(home, ".ferry"));
+      writeFileSync(join(home, ".ferry/config.toml"), 'version = 1\npublisher = "operator"\nsnapshot_url = "snapshot.git"\n');
+
+      await runWatch(
+        { home, signal: controller.signal, pollMs: 1, debounceMs: 2 },
+        {
+          observe: () => {
+            scans += 1;
+            if (scans === 4) controller.abort();
+            return accepted(String(scans));
+          },
+          sync: async () => {
+            syncs += 1;
+          },
+          sleep: async () => {},
+          readState: () => null,
+          writeState: () => {},
+          writeLine: (line) => lines.push(line),
+        },
+      );
+
+      expect(lines.filter((line) => line.startsWith("Watch cannot read the config"))).toEqual([
+        "Watch cannot read the config: Ferry config has no box. Add a box with ferry box add <name>.",
+      ]);
+      expect(syncs).toBe(0);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("does not sync unchanged content after startup", async () => {
     const controller = new AbortController();
     let scans = 0;

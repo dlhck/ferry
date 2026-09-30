@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { resolveBoxes, resolveTargetBox } from "../src/boxes.ts";
-import type { PartialOperatorConfig } from "../src/config.ts";
+import { hasNoBox, resolveBoxes, resolveTargetBox } from "../src/boxes.ts";
+import { ConfigMissingError, type PartialOperatorConfig } from "../src/config.ts";
 
 const HOST_CONFIG: PartialOperatorConfig = {
   version: 1,
@@ -98,7 +98,19 @@ describe("resolveBoxes", () => {
   });
 
   test("refuses a config without a complete box", () => {
-    expect(() => resolveBoxes({ version: 1, host: { tailscale: "box" } })).toThrow("no complete box");
+    expect(() => resolveBoxes({ version: 1, host: { tailscale: "box" } })).toThrow("Ferry config has no complete box. Run ferry init.");
+    expect(() => resolveBoxes({})).toThrow("Ferry config has no complete box. Run ferry init.");
+  });
+
+  test("names ferry box add for a complete config without a box", () => {
+    const config: PartialOperatorConfig = { version: 1, publisher: "operator", snapshotUrl: "snapshot.git", host: {}, integrations: { paseo: true } };
+
+    expect(hasNoBox(config)).toBe(true);
+    expect(hasNoBox(HOST_CONFIG)).toBe(false);
+    expect(hasNoBox(BOXES_CONFIG)).toBe(false);
+    expect(() => resolveBoxes(config)).toThrow(ConfigMissingError);
+    expect(() => resolveBoxes(config)).toThrow("Ferry config has no box. Add a box with ferry box add <name>.");
+    expect(() => resolveTargetBox(config, "a")).toThrow("Ferry config has no box. Add a box with ferry box add <name>.");
   });
 });
 
