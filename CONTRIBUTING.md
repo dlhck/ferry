@@ -41,6 +41,8 @@ The `commit-msg` hook runs `strip-clanker-attribution`. It removes AI tool attri
 - Keep one change in one pull request.
 - Add or change a test for each behaviour change.
 - Update `README.md` when a command, flag, or carried path changes.
+- After a change to the help text of a command, run `bun scripts/docs-commands.ts` and commit `docs/commands.md`. Do not edit that file by hand. A test fails when it differs from the help text.
+- GitHub Pages builds the docs site from `docs/` with its built-in Jekyll. Each Markdown file there is a page, and `docs/_data/nav.yml` has the page list. You do not need a local server.
 - A change to what Ferry carries, or to the deny rules, needs a clear reason in the pull request. Ferry must never carry a credential to the box.
 - A change to a deny rule or to the session scanner must raise `DENY_RULES_VERSION` in `src/manifest.ts`. Ferry refuses the check of a box with a lower number.
 
