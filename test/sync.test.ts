@@ -1416,7 +1416,7 @@ describe("sync with the Paseo integration", () => {
     const sync = run(paseoHome([reviewer, pilot]));
     await sync.result;
 
-    expect(sync.events).toContain("plan:12");
+    expect(sync.events).toContain("plan:13");
     expect(sync.events.slice(-2)).toEqual(["start:Adopting published local skills", "done:"]);
     expect(sync.events.slice(-8, -2)).toEqual([
       "start:Writing the box PATH",

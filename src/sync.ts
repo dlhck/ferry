@@ -245,8 +245,8 @@ export class BoxesSyncError extends SyncError {
 /** The number of boxes that sync at the same time. */
 const BOX_LIMIT = 4;
 
-/** Box steps without the Paseo steps: connect, update, Apply, plugins, settings, MCP, PATH. */
-const BOX_STEPS = 7;
+/** Box steps without the Paseo steps: connect, update, box instructions, Apply, plugins, settings, MCP, PATH. */
+const BOX_STEPS = 8;
 
 export async function runSync(
   input: SyncInput,
