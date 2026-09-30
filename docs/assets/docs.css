@@ -1,0 +1,100 @@
+/* The docs pages. The tokens, the header, and the footer match index.html. */
+:root{
+  --paper:#F1EADB;
+  --paper-2:#E7DDC8;
+  --paper-3:#DCCFB4;
+  --ink:#13233A;
+  --ink-2:#3C4A5E;
+  --rule:rgba(19,35,58,.16);
+  --brass:#8A5A0E;
+  --brass-bright:#C8902F;
+  --red:#A8351F;
+  --night:#13233A;
+  --display:'Young Serif', Georgia, 'Times New Roman', serif;
+  --sans:'Hanken Grotesk', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --mono:'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius:14px;
+}
+*,*::before,*::after{box-sizing:border-box}
+html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
+@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto}}
+body{
+  margin:0;background:var(--paper);color:var(--ink);
+  font:400 1.0625rem/1.6 var(--sans);
+  -webkit-font-smoothing:antialiased;
+}
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:100;opacity:.33;mix-blend-mode:multiply;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .45 0 0 0 0 .38 0 0 0 0 .27 0 0 0 .35 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+a{color:var(--brass);text-decoration-thickness:1px;text-underline-offset:.2em}
+a:hover{color:var(--ink)}
+:focus-visible{outline:2.5px solid var(--brass-bright);outline-offset:3px;border-radius:4px}
+code,kbd,pre{font-family:var(--mono)}
+img{max-width:100%;height:auto}
+.skip{position:absolute;left:-9999px;top:0}
+.skip:focus{left:1rem;top:1rem;z-index:200;background:var(--ink);color:var(--paper);padding:.5rem .8rem;border-radius:8px}
+.wrap{width:min(1160px,100% - 2.5rem);margin-inline:auto}
+
+/* header */
+.top{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:1.4rem 0 1.2rem;border-bottom:1.5px solid var(--ink)}
+.brand{display:inline-flex;align-items:center;gap:.6rem;color:var(--ink);text-decoration:none;font:400 1.5rem/1 var(--display)}
+.brand svg{width:34px;height:22px}
+.top nav{display:flex;gap:1.4rem;flex-wrap:wrap;font-weight:500;font-size:.95rem}
+.top nav a{color:var(--ink);text-decoration:none;padding:.25rem 0;border-bottom:1.5px solid transparent}
+.top nav a:hover,.top nav a[aria-current]{border-bottom-color:var(--brass-bright)}
+
+/* page shell */
+.shell{display:grid;grid-template-columns:15rem minmax(0,1fr);gap:clamp(1.5rem,4vw,3.5rem);align-items:start;padding-top:clamp(1.5rem,4vw,2.75rem)}
+.side{position:sticky;top:1.5rem;font-size:.97rem}
+.side-title{margin:0 0 .6rem;font:600 .75rem/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-2)}
+.side ul{list-style:none;margin:0;padding:0;border-top:1.5px solid var(--ink)}
+.side li{border-bottom:1px solid var(--rule)}
+.side a{display:block;padding:.5rem .6rem;color:var(--ink);text-decoration:none;font-weight:500}
+.side a:hover{background:var(--paper-2)}
+.side a[aria-current="page"]{background:var(--night);color:var(--paper)}
+@media (max-width:860px){
+  .shell{grid-template-columns:minmax(0,1fr)}
+  .side{position:static}
+  .side ul{display:flex;flex-wrap:wrap;gap:.35rem;border-top:0}
+  .side li{border:0}
+  .side a{border:1.5px solid var(--ink);border-radius:7px;padding:.3rem .6rem;font-size:.9rem}
+}
+
+/* content */
+.doc{min-width:0;max-width:48rem}
+.doc h1,.doc h2,.doc h3{font-family:var(--display);font-weight:400;letter-spacing:-.01em;text-wrap:balance}
+.doc h1{font-size:clamp(2rem,4.4vw,2.9rem);line-height:1.08;margin:0 0 1.2rem}
+.doc h2{font-size:clamp(1.4rem,2.6vw,1.75rem);line-height:1.15;margin:2.6rem 0 .8rem;padding-top:1.4rem;border-top:1px solid var(--rule)}
+.doc h3{font-size:1.2rem;line-height:1.25;margin:1.9rem 0 .6rem}
+.doc h4{font:600 1rem/1.3 var(--sans);margin:1.5rem 0 .4rem}
+.doc p,.doc ul,.doc ol,.doc table,.doc pre,.doc blockquote{margin:0 0 1.1rem}
+.doc ul,.doc ol{padding-left:1.3rem}
+.doc li{margin:.3rem 0}
+.doc li > ul,.doc li > ol{margin:.3rem 0 0}
+.doc :not(pre) > code{font-size:.88em;background:var(--paper-2);padding:.08em .35em;border-radius:5px;overflow-wrap:anywhere}
+.doc pre{background:var(--night);color:var(--paper);border-radius:var(--radius);padding:1.05rem 1.2rem;font-size:.84rem;line-height:1.7;overflow-x:auto}
+.doc pre code{font-size:inherit;background:none;padding:0}
+.doc .highlight{margin:0}
+.doc table{display:block;overflow-x:auto;border-collapse:collapse;font-size:.95rem}
+.doc th,.doc td{text-align:left;vertical-align:top;padding:.55rem .9rem .55rem 0;border-top:1px solid var(--rule)}
+.doc thead th{border-top:1.5px solid var(--ink);font:600 .72rem/1.6 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--ink-2)}
+.doc blockquote{margin-left:0;padding:.1rem 0 .1rem 1rem;border-left:3px solid var(--brass-bright);color:var(--ink-2)}
+.doc hr{border:0;border-top:1px solid var(--rule);margin:2rem 0}
+
+.pager{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:3rem}
+.pager a{display:block;border:1.5px solid var(--ink);border-radius:var(--radius);padding:.8rem 1rem;color:var(--ink);text-decoration:none;font-weight:600}
+.pager a:hover{background:var(--paper-2)}
+.pager span{display:block;font:500 .7rem/1.6 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--ink-2)}
+.pager .next{grid-column:2;text-align:right}
+@media (max-width:560px){.pager{grid-template-columns:minmax(0,1fr)}.pager .next{grid-column:1;text-align:left}}
+
+/* footer */
+.foot{margin-top:clamp(4rem,9vw,7rem);background:var(--night);color:#C9D3DE;padding:3rem 0 2.5rem;position:relative;overflow:hidden}
+.foot svg.waves{position:absolute;left:0;right:0;top:-1px;width:100%;height:18px}
+.foot-grid{display:flex;flex-wrap:wrap;justify-content:space-between;gap:1.5rem 3rem;align-items:end}
+.foot .brand{color:var(--paper);font-size:2rem}
+.foot p{margin:.6rem 0 0;max-width:30rem}
+.foot nav{display:flex;flex-wrap:wrap;gap:.6rem 1.4rem;font-weight:600}
+.foot a{color:var(--paper)}
+.foot a:hover{color:#E0B25A}

@@ -1,0 +1,28 @@
+# GitHub Pages builds this directory with its built-in Jekyll. No workflow and no theme.
+# index.html and og.html have no front matter, so Jekyll copies them unchanged.
+title: Ferry
+description: Documentation for Ferry, the CLI that keeps your agent setup in sync with your Linux boxes.
+url: https://dlhck.github.io
+baseurl: /ferry
+
+markdown: kramdown
+kramdown:
+  input: GFM
+
+# Each plugin is in the GitHub Pages dependency list. GitHub Pages turns them on by default.
+# The list is here so that a local build does the same.
+plugins:
+  - jekyll-default-layout
+  - jekyll-optional-front-matter
+  - jekyll-relative-links
+  - jekyll-titles-from-headings
+
+# A Markdown file without front matter is a page. Its first heading is its title.
+titles_from_headings:
+  strip_title: false
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
