@@ -17,9 +17,23 @@ The box `~/.paseo/config.json` can hold credentials, such as the `env` block of 
 
 You can add an `Environment=` line with a credential to `~/.config/systemd/user/ferry-paseo.service` on the box. Ferry never reads this file into the operator machine.
 
-- Each sync sends the `Environment=PATH=` line to the box. The box compares the line with its unit and sends back one word: `unchanged`, `updated`, `missing`, or `failed`.
+- Each sync sends the `Environment=PATH=` line to the box. The box compares the line with its unit, looks for an `OOMPolicy` line, and sends back one word: `unchanged`, `policy`, `updated`, `missing`, or `failed`.
 - When the PATH changed, the box replaces only that line and keeps each other line, also a line that you added. Then it runs `systemctl --user daemon-reload` and restarts the daemon. A unit without a PATH line gets the line after `[Service]`. A unit without a `[Service]` line stays as it is, and the sync warns.
-- `ferry integrations enable paseo` sends the complete unit to the box. The box compares it with its file and sends back `created`, `unchanged`, or `changed`. The new unit replaces the whole file, so a line that you added is gone after enable. Add it again, or put it in a drop-in file such as `~/.config/systemd/user/ferry-paseo.service.d/local.conf`, which Ferry does not change.
+- When the unit has no `OOMPolicy` line, the box adds `OOMPolicy=continue` after `[Service]` and runs `systemctl --user daemon-reload`. `policy` means that only this line was new. Then the daemon does not restart. See [When an agent process runs out of memory](#when-an-agent-process-runs-out-of-memory).
+- `ferry integrations enable paseo` sends the complete unit to the box. The box compares it with its file and sends back `created`, `unchanged`, `policy`, or `changed`. The new unit replaces the whole file, so a line that you added is gone after enable. Add it again, or put it in a drop-in file such as `~/.config/systemd/user/ferry-paseo.service.d/local.conf`, which Ferry does not change. Ferry restarts the daemon only for `changed`. `policy` means that the old unit differs from the new unit only by the `OOMPolicy=continue` line.
+
+## When an agent process runs out of memory
+
+Each agent of the Paseo daemon runs in the cgroup of `ferry-paseo.service`. The unit that Ferry writes has `OOMPolicy=continue` and `Restart=on-failure`.
+
+- When the kernel OOM killer kills a process of an agent, only that process ends. systemd logs the event, and the daemon and the other agents continue. The agent that lost the process can fail its turn.
+- Without the line, systemd uses its default `stop`. Then one killed process stops the whole service with the result `oom-kill`, and each agent on the box loses its turn.
+- When the OOM killer kills the daemon process itself, `Restart=on-failure` starts the daemon again after 5 seconds. The agents stop.
+- Ferry sets no `MemoryMax`. A fixed limit does not fit all boxes.
+
+A box that you enabled before Ferry wrote this line gets it from the next `ferry sync`, or from `ferry integrations enable paseo`. The two commands run `systemctl --user daemon-reload` and do not restart the daemon for this line. systemd reads the policy of a service at the time of the OOM event, so the reload applies the line to the running daemon. This was tested with systemd 259: a running service with the default policy got the line and a reload, kept its main process, and stayed active after an OOM kill in its cgroup. `systemctl --user show ferry-paseo.service -p OOMPolicy` shows the value in use.
+
+A sync adds the line only to a unit that has no `OOMPolicy` line, so a value that you set in the unit stays until the next enable. A value in a drop-in file has priority over the unit, and Ferry does not change a drop-in file. To keep the systemd default, put `OOMPolicy=stop` in a drop-in file, then run `systemctl --user daemon-reload` on the box.
 
 ## Paseo output stays on the box
 

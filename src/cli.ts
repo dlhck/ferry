@@ -1196,6 +1196,10 @@ Enable writes the whole ferry-paseo.service again, so a line that you added
 to it by hand is gone. Put such a line in a drop-in file on the box, for
 example ~/.config/systemd/user/ferry-paseo.service.d/local.conf.
 
+The service has OOMPolicy=continue. When the kernel kills an agent process
+that ran out of memory, the daemon and the other agents continue. Enable and
+sync add the line to an older service without a restart of the daemon.
+
 To carry daemon.autoArchiveAfterMerge, set paseo_auto_archive = true in
 [integrations] of ~/.ferry/config.toml. A [box.<name>.integrations] table can
 override it. Sync applies it with paseo daemon reload, without a restart.
