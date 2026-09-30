@@ -758,7 +758,8 @@ describe("brief status", () => {
           auth: { status: async () => ({ providers: [] }), mcpStatus: async () => [] },
           mcpServers: {
             check: async () => [
-              { kind: "not-portable", harness: "claude", server: "local" },
+              { kind: "not-portable", harness: "claude", server: "local", reason: "home-path" },
+              { kind: "not-portable", harness: "cursor", server: "wrapped", reason: "inline-script" },
               { kind: "command-missing", harness: "cursor", server: "docs", command: "uvx" },
               { kind: "env-missing", harness: "codex", server: "github", keys: ["GITHUB_TOKEN"], file: ".codex/config.toml" },
               { kind: "env-missing", harness: "cursor", server: "db", keys: ["DB_URL", "DB_PASSWORD"], file: ".cursor/mcp.json" },
@@ -776,6 +777,14 @@ describe("brief status", () => {
         name: "claude/local",
         state: "not-portable",
         message: "claude/local refers to a path in your home, so Ferry does not carry it. Use a command on the PATH or a path outside the home.",
+        command: null,
+      },
+      {
+        kind: "mcp-server",
+        name: "cursor/wrapped",
+        state: "not-portable",
+        message:
+          "cursor/wrapped runs an inline shell or interpreter script, which Ferry cannot check, so Ferry does not carry it. Put the script in a file that Ferry carries, or run the server through a tool on the PATH.",
         command: null,
       },
       {
