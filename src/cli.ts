@@ -141,7 +141,7 @@ import {
 } from "./update.ts";
 import { isReleaseVersion, VERSION } from "./version.ts";
 import { redactTokens, redactUrlCredentials } from "./manifest.ts";
-import { packLines, parseScanRequest, runScan } from "./scan.ts";
+import { packLines, parseScanRequest, redactPackLine, runScan } from "./scan.ts";
 import { offerSelfUpdate, offersSelfUpdate, runSelfUpdate, type SelfUpdateDependencies } from "./self-update.ts";
 
 const DESCRIPTION = `Ferry keeps a remote Linux agent box in the same shape as this machine.
@@ -422,7 +422,9 @@ function createProgram(dependencies: CliDependencies): { program: Command; state
       const options = args.slice(0, args.includes("--") ? args.indexOf("--") : args.length);
       // A command that stays running prints events, also for an error before it starts. `tunnel --list` runs and exits.
       const events = STREAM_COMMANDS.has(command) && !(command === "tunnel" && options.includes("--list"));
-      writeOut(JSON.stringify(events ? errorEvent("error", error) : failureEnvelope(command, error, warnings, failedResult)));
+      // An error text can have a path or a URL of this machine. A token or a credential in it does not go in the output.
+      const text = JSON.stringify(events ? errorEvent("error", error) : failureEnvelope(command, error, warnings, failedResult));
+      writeOut(redactUrlCredentials(redactTokens(text)));
     },
   };
   program
@@ -1489,7 +1491,11 @@ on the box. This command runs on the operator machine and on a box install.`)
       const home = (dependencies.home ?? homedir)();
       // A pack is one JSON line for each part, so that one file is in memory at a time.
       if (request.pack) for (const line of packLines(request, home)) writeOut(line);
-      else report(runScan(request, home), (result) => writeLine(JSON.stringify(result)));
+      else {
+        // The result leaves this machine. A name that no rule took out gets the mark of the token filter.
+        const result = runScan(request, home);
+        writeOut(redactPackLine(JSON.stringify(json() ? successEnvelope(active ?? "scan", result, warnings) : result)));
+      }
     });
 
   // move --from-box sends the output of each box command through this filter, so that a name with a token stays on the box.

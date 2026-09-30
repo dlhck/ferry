@@ -24,6 +24,7 @@ import {
   packLines,
   packOnBox,
   parseScanRequest,
+  redactPackLine,
   recheckPack,
   runPack,
   runScan,
@@ -357,7 +358,7 @@ describe("the scan on a box", () => {
     expect(box.calls).toEqual([
       {
         command:
-          'if [ -f "$HOME/.ferry/box.json" ] && [ -x "$HOME/.local/bin/ferry" ]; then "$HOME/.local/bin/ferry" --json scan; else echo MISSING; fi; true',
+          'if [ -f "$HOME/.ferry/box.json" ] && [ -x "$HOME/.local/bin/ferry" ]; then "$HOME/.local/bin/ferry" --json scan 2>/dev/null; else echo MISSING; fi; true',
         input: '{"kind":"skill","root":".claude/skills/demo"}',
       },
     ]);
@@ -739,6 +740,94 @@ describe("the size limit of a checked file", () => {
     expect(scanned.refused).toEqual([changed("status")]);
     expect(sessions).toEqual({ files: [], refused: [changed("self/status")], skipped: [] });
     expect(whole.files.map((file) => file.path)).toEqual(["status"]);
+  });
+});
+
+describe("a file that Ferry cannot read", () => {
+  // The owner can open a file of mode 000 only as root, and then these cases do not apply.
+  const asUser = process.getuid?.() !== 0;
+  const UNREADABLE = "Ferry cannot read the file";
+
+  test.skipIf(!asUser)("a file with a token in its name is refused before Ferry opens it, so no error names it", () => {
+    const root = home();
+    write(join(root, "skill/SKILL.md"), "# Demo\n");
+    write(join(root, `skill/${TOKEN}.txt`), "notes\n", 0o000);
+    const sessions = `.claude/projects/app/${TOKEN}.jsonl`;
+    write(join(root, sessions), "{}\n", 0o000);
+
+    const scan = runScan({ kind: "skill", root: "skill" }, root);
+    const lines = [...packLines({ kind: "skill", root: "skill" }, root)];
+    const files = runPack({ kind: "files", root: "skill", paths: [`${TOKEN}.txt`], secrets: [] }, root);
+    const packed = runPack({ kind: "sessions", paths: [sessions], secrets: [], project: join(root, "app") }, root);
+
+    const named = { path: ".", code: "token-name", reason: "a file or directory in . has a token in its name" };
+    expect(scan.forbidden).toEqual([named]);
+    expect(lines.map((line) => JSON.parse(line))).toEqual([{ pack: 1, rules: DENY_RULES_VERSION }, { refused: named }, { end: 0 }]);
+    expect(files.refused).toEqual([named]);
+    expect(packed.refused.map((hit) => hit.code)).toEqual(["token-name"]);
+    expect(JSON.stringify([scan, lines, files, packed])).not.toContain(TOKEN);
+  });
+
+  test.skipIf(!asUser)("a file of mode 000 is a hit with its path, not an error with the text of the system", () => {
+    const root = home();
+    write(join(root, "skill/SKILL.md"), "# Demo\n");
+    write(join(root, "skill/locked.md"), "notes\n", 0o000);
+    write(join(root, ".claude/projects/app/locked.jsonl"), "{}\n", 0o000);
+
+    const skill = runScan({ kind: "skill", root: "skill" }, root);
+    const pack = runPack({ kind: "skill", root: "skill" }, root);
+    const files = runScan({ kind: "files", root: "skill", paths: ["SKILL.md", "locked.md"], allowSecrets: false }, root);
+    const sessions = runScan({ kind: "sessions", paths: [".claude/projects/app/locked.jsonl"], project: join(root, "app") }, root);
+
+    expect(skill.forbidden).toEqual([{ path: "locked.md", code: "unreadable", reason: UNREADABLE }]);
+    expect(pack.files).toEqual([]);
+    expect(pack.refused).toEqual([{ path: "locked.md", code: "unreadable", reason: UNREADABLE }]);
+    expect(files.carry.map((file) => file.path)).toEqual(["SKILL.md"]);
+    expect(files.refused).toEqual([{ path: "locked.md", code: "unreadable", reason: UNREADABLE }]);
+    expect(sessions.files.map((file) => [file.blocked, file.hits])).toEqual([
+      [true, [{ path: ".claude/projects/app/locked.jsonl", code: "unreadable", reason: UNREADABLE }]],
+    ]);
+    expect(JSON.stringify([skill, pack, files, sessions])).not.toContain("EACCES");
+  });
+
+  test.skipIf(!asUser)("a directory that Ferry cannot list is a hit, and with a token in its name the hit names only its parent", () => {
+    const root = home();
+    write(join(root, "skill/SKILL.md"), "# Demo\n");
+    write(join(root, `skill/docs/${TOKEN}/a.md`), "a\n");
+    write(join(root, "skill/locked/a.md"), "a\n");
+    write(join(root, "gone/SKILL.md"), "# Gone\n");
+    chmodSync(join(root, `skill/docs/${TOKEN}`), 0o000);
+    chmodSync(join(root, "skill/locked"), 0o000);
+    chmodSync(join(root, "gone"), 0o000);
+    try {
+      const skill = runScan({ kind: "skill", root: "skill" }, root);
+      const gone = runScan({ kind: "skill", root: "gone" }, root);
+      const missing = runScan({ kind: "skill", root: "missing" }, root);
+
+      expect(skill.forbidden).toEqual([
+        { path: "locked", code: "unreadable", reason: UNREADABLE },
+        { path: "docs", code: "token-name", reason: "a file or directory in docs has a token in its name" },
+      ]);
+      expect(gone).toMatchObject({ files: [], forbidden: [{ path: ".", code: "unreadable", reason: UNREADABLE }] });
+      expect(missing).toMatchObject({ files: [], forbidden: [{ path: ".", code: "unreadable", reason: UNREADABLE }] });
+      expect(JSON.stringify([skill, gone, missing])).not.toContain(TOKEN);
+    } finally {
+      for (const path of [`skill/docs/${TOKEN}`, "skill/locked", "gone"]) chmodSync(join(root, path), 0o755);
+    }
+  });
+
+  test("a line of a pack that is not file data has a mark in the place of a token, and file data stays as it is", () => {
+    const root = home();
+    const body = Buffer.from(`${"A".repeat(30)}KIA${"B".repeat(30)}`, "base64");
+    writeFileSync(join(root, "data.bin"), body);
+
+    const lines = [...packLines({ kind: "files", root: ".", paths: ["data.bin"], secrets: [] }, root)];
+
+    // The base64 text of these bytes has the form of an AWS key id. The filter must not change it.
+    expect(JSON.parse(lines[2]!)).toEqual({ data: body.toString("base64") });
+    expect(redactPackLine(JSON.stringify({ refused: { path: "x", code: "unreadable", reason: `EACCES: open '${TOKEN}'` } }))).toBe(
+      JSON.stringify({ refused: { path: "x", code: "unreadable", reason: "EACCES: open '[token]'" } }),
+    );
   });
 });
 
