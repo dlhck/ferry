@@ -1032,7 +1032,7 @@ describe("runSync progress", () => {
           let stdout = "";
           if (command.startsWith("printf")) stdout = "/srv/ferry\n";
           else if (command.includes("git clone")) return update;
-          else if (command.includes("broken@team")) stdout = "P\tbroken@team\tnot found\n";
+          else if (command.includes("broken@team")) stdout = "F\n";
           else if (command.includes("settings.json")) stdout = "M";
           return { ok: true as const, address: "box", stdout, stderr: "" };
         },
@@ -1122,7 +1122,7 @@ describe("runSync progress", () => {
       "count:1/2",
       "count:2/2",
       "done",
-      "line:Box plugins: could not install plugin broken@team: not found",
+      "line:Box plugins: could not install plugin broken@team: claude plugin install failed on the box. Run it on the box to see the error.",
       "start:Merging settings on the box",
       "done",
       "start:Declaring MCP servers",

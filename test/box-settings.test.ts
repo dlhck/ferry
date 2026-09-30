@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { recordProgress } from "./fake-progress.ts";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -13,6 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { parse as parseToml } from "smol-toml";
 import {
   BoxSettingsError,
   installBoxPlugins,
@@ -441,6 +443,136 @@ describe("mergeBoxSettings", () => {
   });
 });
 
+describe("mergeBoxSettings with quoted keys and hostile TOML", () => {
+  const SECRET = `sk-${"t".repeat(40)}`;
+  const CODEX_KEYS = BUILTIN_HARNESSES.find((harness) => harness.id === "codex")?.settings?.keys ?? [];
+  const MODEL = { model: "new" };
+  const FEATURES = { features: { new_flag: true } };
+
+  function box(text: string, value: Record<string, unknown>) {
+    const home = makeRoot();
+    const path = join(home, ".codex", "config.toml");
+    write(path, text);
+    const link = new ShellLink();
+    const merge = () =>
+      mergeBoxSettings({ remoteHome: home, harnesses: BUILTIN_HARNESSES, settings: codex(value), link });
+    return { path, link, merge };
+  }
+
+  test.each<[string, string, Record<string, unknown>]>([
+    ["a unicode escape in a key", '"\\u006dodel" = "old"\n', MODEL],
+    ["a long unicode escape in a key", 'other = "keep"\n"\\U0000006Dodel" = "old"\n', MODEL],
+    ["a quoted key", '"model" = "old"\n', MODEL],
+    ["a literal key", "'model' = 'old'\n", MODEL],
+    ["a table with a space in its quoted name", '["model "]\nkeep = "important"\n', MODEL],
+    ["an escape in a literal key, which TOML does not decode", "'\\u006dodel' = \"keep\"\n", MODEL],
+    ["an escaped quote and an escaped backslash in a key", '"mo\\"del" = "keep"\n"model\\\\" = "keep"\n', MODEL],
+    ["an escape outside ASCII in a key", '"mod\\u00e9l" = "keep"\n"model\\n" = "keep"\n', MODEL],
+    ["a dotted key after a quoted part", '"a.b".model = "keep"\na."model" = "keep"\n', MODEL],
+    [
+      "a dotted key under a quoted carried key",
+      '"model".name = "old"\n \'model\' . "size" = 1\nother = "keep"\n',
+      MODEL,
+    ],
+    ["a quoted key with a #", '"mo#del" = "keep" # "model" = 1\n\n["a#b"] # [model]\nmodel = "keep"\n', MODEL],
+    ["a quoted key with a =", '"model=" = "keep"\n"a = b".model = "keep"\n', MODEL],
+    [
+      "a key inside a multi-line basic string",
+      'notes = """\nmodel = "inside"\n["model"]\n\\""" still inside\n""""\nmodel = "old"\n',
+      MODEL,
+    ],
+    [
+      "a key inside a multi-line literal string",
+      "notes = '''\nmodel = 'inside'\n[model]\n''\\\n'''\nmodel = \"old\"\n",
+      MODEL,
+    ],
+    [
+      "an array of tables",
+      '[[model]]\nname = "old"\n\n[["model"]]\nname = "older"\n\n[[other]]\nmodel = "keep"\n',
+      MODEL,
+    ],
+    ["an inline table value", 'model = { name = "old", tags = ["[x]", "}"] }\nother = { model = "keep" }\n', MODEL],
+    ["a multi-line array value", 'model = [\n  "a", # "\n  "]",\n]\nother = [\n  "model = 1",\n]\n', MODEL],
+    ["CRLF line ends", 'model = "old"\r\nother = "keep"\r\n\r\n[table]\r\nmodel = "keep"\r\n', MODEL],
+    ["a byte order mark before a carried key", '﻿model = "old"\nother = "keep"\n', MODEL],
+    ["a byte order mark before another key", '﻿other = "keep"\n', MODEL],
+    ["no newline at the end", 'other = "keep"\nmodel = "old"', MODEL],
+    ["a key that differs only in case", 'Model = "keep"\nMODEL = "keep"\n\n[mODEL]\nmodel = "keep"\n', MODEL],
+    [
+      "a header with spaces around its parts",
+      '[ "model" . sub ]\nx = 1\n\n[ other . "model" ]\nx = "keep"\n',
+      MODEL,
+    ],
+    ["an empty quoted key", '"" = "keep"\n', MODEL],
+    [
+      "a quoted table name",
+      '["features"]\nold = true\n\n[ features . "sub" ]\nx = 1\n\n["features "]\nkeep = true\n\n["a.features"]\nkeep = true\n',
+      FEATURES,
+    ],
+    [
+      "an escaped table name",
+      'other = "keep"\n\n["f\\u0065atures".sub]\nx = 1\n\n[[\'features\'.list]]\nx = 1\n\n[Features]\nkeep = true\n',
+      FEATURES,
+    ],
+  ])("changes only the carried keys in a file with %s", async (_title, input, value) => {
+    const { path, merge } = box(input, value);
+    const expected = parseToml(input);
+    for (const key of CODEX_KEYS) delete expected[key];
+
+    expect((await merge()).written).toEqual([path]);
+
+    const merged = readFileSync(path, "utf8");
+    expect<Record<string, unknown>>(parseToml(merged)).toEqual({ ...expected, ...value });
+    // The second merge finds the carried values and writes nothing.
+    expect((await merge()).written).toEqual([]);
+    expect(readFileSync(path, "utf8")).toBe(merged);
+  });
+
+  test("keeps the CRLF line ends and the byte order mark", async () => {
+    const { path, merge } = box('﻿model = "old"\r\nother = "keep"\r\n', MODEL);
+
+    await merge();
+
+    expect(readFileSync(path, "utf8")).toBe('﻿model = "new"\r\nother = "keep"\r\n');
+  });
+
+  test("repairs a file that holds a carried key in two spellings", async () => {
+    const { path, merge } = box('"\\u006dodel" = "old"\nother = "keep"\nmodel = "stale"\n', MODEL);
+
+    await merge();
+
+    expect(readFileSync(path, "utf8")).toBe('model = "new"\nother = "keep"\n');
+  });
+
+  test.each<[string, string, number]>([
+    ["an escape that TOML does not have in a key", `a = 1\n"mod\\qel" = "${SECRET}"\n`, 2],
+    ["a short unicode escape in a key", `"\\u006" = "${SECRET}"\n`, 1],
+    ["a quoted key that does not end", `a = 1\n\n"model = ${SECRET}\n`, 3],
+    ["a key without a value", `a = 1\n${SECRET}\n`, 2],
+    ["a table header that does not end", `[model\nkey = "${SECRET}"\n`, 1],
+    ["text after a table header", `[model] key = "${SECRET}"\n`, 1],
+    ["a string that does not end", `a = 1\nb = "${SECRET}\n`, 2],
+    ["an array that does not end", `model = "o3"\nargs = [\n  "${SECRET}",\n`, 2],
+    ["a multi-line string that does not end", `a = """\n${SECRET}\n`, 1],
+    ["a bracket that closes nothing", `a = 1\nb = "${SECRET}" ]\n`, 2],
+  ])("refuses and keeps a file with %s, and names only the line", async (_title, input, line) => {
+    const { path, link, merge } = box(input, MODEL);
+
+    const error = await merge().then(
+      () => null,
+      (cause: unknown) => cause,
+    );
+
+    expect(error).toBeInstanceOf(BoxSettingsError);
+    expect((error as Error).message).toBe(
+      `${path}: Ferry cannot read line ${line} as TOML, so it left the file unchanged`,
+    );
+    expect(readFileSync(path, "utf8")).toBe(input);
+    expect(existsSync(`${path}.ferry-tmp`)).toBe(false);
+    expect(JSON.stringify({ calls: link.calls, outputs: link.outputs })).not.toContain(SECRET);
+  });
+});
+
 const HAS_JQ = Bun.which("jq") !== null;
 
 /** A test that runs box scripts with a real jq. It skips, and says why, when jq is not on the PATH. */
@@ -510,7 +642,9 @@ describe("box settings secrets", () => {
 });
 
 describe("installBoxPlugins", () => {
-  /** A fake claude CLI that logs its arguments and fails for one plugin. */
+  const TOKEN = `ghp_${"p".repeat(36)}`;
+
+  /** A fake claude CLI that logs its arguments. It fails for a broken name, and its last line holds a token. */
   function fakeClaude(root: string): { path: string; log: string } {
     const bin = join(root, "bin");
     const log = join(root, "claude.log");
@@ -519,7 +653,7 @@ describe("installBoxPlugins", () => {
       [
         "#!/bin/sh",
         `printf '%s\\n' "$*" >> '${log}'`,
-        'if [ "$3" = "broken@team" ]; then echo "Installing..."; echo "Plugin not found in marketplace team"; exit 1; fi',
+        `case "$*" in *broken*) echo "Installing..."; echo "fatal: no access to https://user:${TOKEN}@git.example.com/plugins.git" >&2; exit 1 ;; esac`,
         "exit 0",
       ].join("\n"),
     );
@@ -555,11 +689,30 @@ describe("installBoxPlugins", () => {
     ]);
     expect(warnings).toEqual([
       "marketplace local has a directory source; add it on the box by hand",
-      "could not install plugin broken@team: Plugin not found in marketplace team",
+      "could not install plugin broken@team: claude plugin install failed on the box. Run it on the box to see the error.",
     ]);
     expect(link.calls).toHaveLength(4);
     expect(link.calls.every((call) => call.options?.agentForwarding === "git")).toBe(true);
     expect(progress.events).toEqual(["count:1/4", "count:2/4", "count:3/4", "count:4/4"]);
+  });
+
+  test("reports a failed step with a fixed message, and the claude output stays on the box", async () => {
+    const root = makeRoot();
+    const link = new ShellLink(fakeClaude(root).path);
+
+    const warnings = await installBoxPlugins({
+      settings: carried({
+        enabledPlugins: { "broken@team": true },
+        extraKnownMarketplaces: { team: { source: { source: "github", repo: "example/broken-plugins" } } },
+      }),
+      link,
+    });
+
+    expect(warnings).toEqual([
+      "could not add marketplace team: claude plugin marketplace add failed on the box. Run it on the box to see the error.",
+      "could not install plugin broken@team: claude plugin install failed on the box. Run it on the box to see the error.",
+    ]);
+    expect(JSON.stringify({ outputs: link.outputs, warnings })).not.toContain(TOKEN);
   });
 
   test("reports a box without the claude CLI and changes nothing", async () => {
