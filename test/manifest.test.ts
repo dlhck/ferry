@@ -1785,6 +1785,22 @@ describe("carried project files", () => {
     expect(codes("draft.mdx", bytes("# Draft\n"))).toEqual([]);
   });
 
+  test("a secret-field reason names a key of only letters, digits, dot, underscore, and hyphen, up to 64 characters", () => {
+    const reasons = (keys: readonly string[]) =>
+      carriedContentHits("config.json", bytes(JSON.stringify(Object.fromEntries(keys.map((key) => [key, "hunter2"]))))).map((hit) => hit.reason);
+    const long = `secret_${"a".repeat(57)}`;
+
+    expect(reasons(["db.api-key_2", long])).toEqual([
+      "key db.api-key_2 holds a password or secret",
+      `key ${long} holds a password or secret`,
+    ]);
+    // A JSON key is free text, so it can hold a value. Such a key is not printed, and two of them give one hit.
+    expect(reasons(["secret of alice: swordfish", `${long}a`, "token\nline", "password"])).toEqual([
+      "a key holds a password or secret",
+      "key password holds a password or secret",
+    ]);
+  });
+
   test("an environment file gets the secret-field rule line by line", () => {
     expect(carriedContentHits(".env.local", bytes("PASSWORD=hunter2\n")).map((hit) => hit.code)).toEqual([
       "secret-field",

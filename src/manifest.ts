@@ -200,6 +200,8 @@ const PLACEHOLDER_BODY = /^(?:([xX0])\1*|[xX]+(?:[-_]+[xX]+)*)$/;
  */
 const SECRET_KEYS = new Set(["passwd"]);
 const SECRET_WORDS = ["secret", "privatekey", "apikey", "password", "token"];
+/** A key that a secret-field reason prints. */
+const PRINTED_KEY = /^[\w.-]{1,64}$/;
 const CONFIG_EXTS = { ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml" } as const;
 /**
  * A `key: value` or `key = value` line, for a config file that does not parse.
@@ -639,11 +641,13 @@ function secretLineKeys(text: string): string[] {
   });
 }
 
+/** A hit names its key only when the key matches `PRINTED_KEY`. A key of a JSON object is free text and can hold a value. */
 export function secretKeyHits(path: string, keys: readonly string[]): ForbiddenHit[] {
-  return [...new Set(keys)].map((key) => ({
+  const names = keys.map((key) => (PRINTED_KEY.test(key) ? `key ${key}` : "a key"));
+  return [...new Set(names)].map((name) => ({
     path,
     code: DENY_RULES["secret-field"].code,
-    reason: `key ${key} holds a password or secret`,
+    reason: `${name} holds a password or secret`,
   }));
 }
 
