@@ -917,6 +917,90 @@ describe("ferry move --from-box checks the files on the box", () => {
     expect(crossed(w, SESSION_TOKEN)).toBe(false);
   });
 
+  test("the hash of a refused file and of a file with secrets does not reach this machine before the confirmation", async () => {
+    const sha = (body: string) => new Bun.CryptoHasher("sha256").update(body).digest("hex");
+    const env = "PASSWORD=73" + "42\n";
+    const session = `${JSON.stringify({ password: "73" + "42" })}\n`;
+    const w = world();
+    const boxApp = project(w, w.box);
+    write(join(boxApp, ".env"), env);
+    write(join(w.box, ".claude/projects", projectDirectoryName(boxApp), "leaky.jsonl"), session);
+    const input = { path: "Developer/app", fromBox: "default", includeEnv: true };
+
+    const refused = await move(w, { ...input, dryRun: true });
+    const planned = await move(w, { ...input, allowSecrets: true, dryRun: true });
+    const cancelled = await move(w, { ...input, allowSecrets: true }, { interactive: true, confirm: async () => false });
+
+    expect(refused.lines).toContain("Refuse: .env (key PASSWORD holds a password or secret)");
+    expect(planned.lines).toContain("Carry with secrets: .env (key PASSWORD holds a password or secret)");
+    expect(planned.value?.carry).toEqual([{ path: ".env", sha256: null, secrets: ["key PASSWORD holds a password or secret"] }]);
+    expect(cancelled.value).toBeNull();
+    expect(cancelled.lines.at(-1)).toBe("Move cancelled.");
+    expect(crossed(w, sha(env))).toBe(false);
+    expect(crossed(w, sha(session))).toBe(false);
+
+    const moved = await move(w, { ...input, allowSecrets: true, yes: true });
+
+    expect(moved.error).toBeNull();
+    expect(moved.value?.carry).toEqual([{ path: ".env", sha256: sha(env), secrets: ["key PASSWORD holds a password or secret"] }]);
+    expect(readFileSync(join(w.operator, "Developer/app/.env"), "utf8")).toBe(env);
+    expect(existsSync(join(w.operator, ".claude/projects", projectDirectoryName(join(w.operator, "Developer/app")), "leaky.jsonl"))).toBe(true);
+  });
+
+  test("the id of a Codex session with secrets reaches this machine only after the confirmation", async () => {
+    const id = "55555555-eeee-4eee-8eee-eeeeeeeeeeee";
+    const w = world();
+    const boxApp = project(w, w.box);
+    const path = `.codex/sessions/2026/09/20/rollout-2026-09-20T10-00-00-${id}.jsonl`;
+    const meta = { type: "session_meta", payload: { id, cwd: boxApp } };
+    write(join(w.box, path), `${JSON.stringify(meta)}\n${JSON.stringify({ text: SESSION_TOKEN })}\n`);
+
+    const refused = await move(w, { path: "Developer/app", fromBox: "default", dryRun: true });
+    const planned = await move(w, { path: "Developer/app", fromBox: "default", allowSecrets: true, dryRun: true });
+
+    expect(refused.value?.sessions.refused.map((hit) => [hit.path, hit.code])).toEqual([[`~/${path}`, "github-token"]]);
+    expect(planned.value?.sessions.carry).toEqual([
+      { harness: "codex", id: null, files: [`~/${path}`], secrets: ["GitHub token in file content"] },
+    ]);
+    // The id is in the file name of this fixture, so look for it in the scan results only.
+    const scans = w.received.filter((output) => output.startsWith('{"schemaVersion"'));
+    expect(scans.length).toBeGreaterThan(0);
+    expect(scans.some((output) => output.includes(`"id":"${id}"`))).toBe(false);
+
+    const moved = await move(w, { path: "Developer/app", fromBox: "default", allowSecrets: true, yes: true });
+
+    expect(moved.error).toBeNull();
+    expect(moved.value?.sessions.carry.map((session) => session.id)).toEqual([id]);
+    expect(readFileSync(join(w.operator, path), "utf8")).toContain(SESSION_TOKEN);
+    expect(moved.lines.at(-1)).toBe("Carried 1 session. Resume them in ~/Developer/app on this machine.");
+  });
+
+  test("a file name, a session name, a branch name, and a commit subject with a token do not reach this machine", async () => {
+    const name = "gh" + "p_" + "1".repeat(36);
+    const w = world();
+    const boxApp = project(w, w.box);
+    git(boxApp, "switch", "-q", "-c", `topic-${name}`);
+    commit(boxApp, "work.ts", "x\n", `Add work for ${name}`);
+    write(join(boxApp, "AGENTS.md"), "# Agents\n");
+    write(join(boxApp, "notes", `${name}.md`), "notes\n");
+    const sessions = join(w.box, ".claude/projects", projectDirectoryName(boxApp));
+    write(join(sessions, "clean.jsonl"), `${JSON.stringify({ type: "user", message: "hello" })}\n`);
+    write(join(sessions, `${name}.jsonl`), `${JSON.stringify({ type: "user", message: "hello" })}\n`);
+    const warnings: string[] = [];
+
+    const result = await move(w, { path: "Developer/app", fromBox: "default", dryRun: true }, { warn: (line) => warnings.push(line) });
+
+    expect(crossed(w, name)).toBe(false);
+    expect(result.lines).toContain("Carry: AGENTS.md");
+    expect(result.lines).toContain("Refuse: notes (a file or directory in notes has a token in its name)");
+    expect(result.lines.find((line) => line.startsWith("Problem: Branch topic-"))).toContain('Branch topic-[token] has commit');
+    expect(result.lines.find((line) => line.startsWith("Problem: Branch topic-"))).toContain('"Add work for [token]"');
+    const parent = `~/${sessions.slice(w.box.length + 1)}`;
+    expect(warnings).toEqual([`WARNING: Ferry skips the session of ${parent} (a file or directory in ${parent.slice(2)} has a token in its name).`]);
+    expect(result.lines).toContain("Carry sessions: claude 1");
+    expect([...result.lines, JSON.stringify(result.value)].join("\n")).not.toContain(name);
+  });
+
   test("refuses when the box has no Ferry, and when its Ferry has no scan command, before it copies a file", async () => {
     const cases: [string | null, string, string][] = [
       [null, "Ferry is not installed on the box.", "Run ferry install."],
@@ -942,15 +1026,16 @@ describe("ferry move --from-box checks the files on the box", () => {
     }
   });
 
-  test("a box without Ferry still moves a project that has no file to check", async () => {
+  test("a box without Ferry refuses also for a project that has no file to check, before a command lists its files", async () => {
     const w = world();
     project(w, w.box);
     rmSync(join(w.box, ".local"), { recursive: true });
 
     const result = await move(w, { path: "Developer/app", fromBox: "default" });
 
-    expect(result.error).toBeNull();
-    expect(existsSync(join(w.operator, "Developer/app/README.md"))).toBe(true);
+    expect(result.error?.message).toStartWith("Ferry is not installed on the box.");
+    expect(w.commands).toHaveLength(1);
+    expect(listTree(w.operator)).toEqual([]);
   });
 
   test("refuses the move when a project file changes on the box after the check, before any change on this machine", async () => {
@@ -1527,8 +1612,8 @@ describe("ferry move sessions", () => {
     const source = claudeSession(w.operator, app, "11111111-aaaa");
     write(join(source, "memory/MEMORY.md"), "- note\n");
     claudeSession(w.operator, join(w.operator, "Developer/other"), "22222222-bbbb");
-    const codex = codexSession(w.operator, app, "33333333-cccc");
-    const otherCodex = codexSession(w.operator, join(w.operator, "Developer/other"), "44444444-dddd");
+    const codex = codexSession(w.operator, app, "33333333-cccc-4ccc-8ccc-cccccccccccc");
+    const otherCodex = codexSession(w.operator, join(w.operator, "Developer/other"), "44444444-dddd-4ddd-8ddd-dddddddddddd");
 
     const result = await move(w, { path: "Developer/app" });
 
@@ -1552,7 +1637,7 @@ describe("ferry move sessions", () => {
     expect(result.value?.sessions.carry.map((session) => [session.harness, session.id])).toEqual([
       ["claude", "11111111-aaaa"],
       ["claude", null],
-      ["codex", "33333333-cccc"],
+      ["codex", "33333333-cccc-4ccc-8ccc-cccccccccccc"],
     ]);
   });
 
@@ -1560,7 +1645,7 @@ describe("ferry move sessions", () => {
     const w = world();
     const app = project(w, w.operator);
     claudeSession(w.operator, app, "11111111-aaaa");
-    codexSession(w.operator, app, "33333333-cccc");
+    codexSession(w.operator, app, "33333333-cccc-4ccc-8ccc-cccccccccccc");
 
     const result = await move(w, { path: "Developer/app", sessions: false });
 
@@ -1575,10 +1660,10 @@ describe("ferry move sessions", () => {
     const boxApp = project(w, w.box);
     const app = join(w.operator, "Developer/app");
     claudeSession(w.box, boxApp, "both", "from the box");
-    const codex = codexSession(w.box, boxApp, "codex-both", "from the box");
+    const codex = codexSession(w.box, boxApp, "aaaaaaaa-0000-4000-8000-00000000b07b", "from the box");
     const local = claudeSession(w.operator, app, "both", "old on this machine");
     claudeSession(w.operator, app, "only-here", "only on this machine");
-    codexSession(w.operator, app, "codex-both", "old on this machine");
+    codexSession(w.operator, app, "aaaaaaaa-0000-4000-8000-00000000b07b", "old on this machine");
 
     const result = await move(w, { path: "Developer/app", fromBox: "default" });
 
@@ -1594,7 +1679,7 @@ describe("ferry move sessions", () => {
     const app = project(w, w.operator);
     const source = claudeSession(w.operator, app, "clean");
     claudeSession(w.operator, app, "leaky", `use ${GITHUB_TOKEN}`);
-    const codex = codexSession(w.operator, app, "codex-leaky", `token ${GITHUB_TOKEN}`);
+    const codex = codexSession(w.operator, app, "aaaaaaaa-0000-4000-8000-0000000001ea", `token ${GITHUB_TOKEN}`);
     const warnings: string[] = [];
 
     const result = await move(w, { path: "Developer/app" }, { warn: (line) => warnings.push(line) });
@@ -1666,7 +1751,7 @@ describe("ferry move sessions", () => {
       { type: "assistant", message: { content: [write_] } },
     ];
     write(join(source, "leaky.jsonl"), records.map((record) => `${JSON.stringify(record)}\n`).join(""));
-    const codex = codexSession(w.operator, app, "codex-leaky", "hello");
+    const codex = codexSession(w.operator, app, "aaaaaaaa-0000-4000-8000-0000000001ea", "hello");
     const call = { type: "response_item", payload: { type: "function_call", arguments: JSON.stringify({ cmd: `psql --password ${password}` }) } };
     writeFileSync(join(w.operator, codex), `${readFileSync(join(w.operator, codex), "utf8")}${JSON.stringify(call)}\n`);
     const warnings: string[] = [];
@@ -1704,6 +1789,27 @@ describe("ferry move sessions", () => {
     expect(allowed.lines.join("\n")).not.toContain(password);
   });
 
+  test("skips a session with a token that is written with a JSON escape", async () => {
+    const w = world();
+    const app = project(w, w.operator);
+    const source = claudeSession(w.operator, app, "clean");
+    const escaped = GITHUB_TOKEN.replace("_", "\\u005f");
+    write(join(source, "escaped.jsonl"), `{"type":"user","sessionId":"escaped","message":"use ${escaped}"}\n`);
+    const warnings: string[] = [];
+
+    const result = await move(w, { path: "Developer/app" }, { warn: (line) => warnings.push(line) });
+
+    expect(result.error).toBeNull();
+    const target = join(w.box, ".claude/projects", projectDirectoryName(join(w.box, "Developer/app")));
+    expect(existsSync(join(target, "clean.jsonl"))).toBe(true);
+    expect(existsSync(join(target, "escaped.jsonl"))).toBe(false);
+    const path = `~/${join(source, "escaped.jsonl").slice(w.operator.length + 1)}`;
+    expect(warnings).toEqual([`WARNING: Ferry skips the session of ${path} (GitHub token in file content). Add --allow-secrets to carry it.`]);
+    expect(result.value?.sessions.refused).toEqual([{ path, code: "github-token", reason: "GitHub token in file content" }]);
+    const sent = Buffer.concat(w.commands.map(({ options }) => Buffer.from(options.input ?? [])));
+    expect(sent.includes(escaped) || sent.includes(GITHUB_TOKEN)).toBe(false);
+  });
+
   test("passes the carried sessions to an enabled integration, and calls none without one", async () => {
     const calls: { path: string; sessions: readonly MovedSession[] }[] = [];
     const fake = {
@@ -1721,7 +1827,7 @@ describe("ferry move sessions", () => {
       const app = project(w, w.operator);
       const source = claudeSession(w.operator, app, "11111111-aaaa");
       write(join(source, "memory/MEMORY.md"), "- note\n");
-      codexSession(w.operator, app, "33333333-cccc");
+      codexSession(w.operator, app, "33333333-cccc-4ccc-8ccc-cccccccccccc");
 
       const result = await move(
         w,
@@ -1739,7 +1845,7 @@ describe("ferry move sessions", () => {
         path: "~/Developer/app",
         sessions: [
           { provider: "claude", id: "11111111-aaaa" },
-          { provider: "codex", id: "33333333-cccc" },
+          { provider: "codex", id: "33333333-cccc-4ccc-8ccc-cccccccccccc" },
         ],
       },
     ]);
@@ -1752,7 +1858,7 @@ describe("ferry move sessions", () => {
     const linkB = boxLink(boxB, w.bin, []);
     const appA = project(w, w.box);
     claudeSession(w.box, appA, "11111111-aaaa");
-    const codex = codexSession(w.box, appA, "33333333-cccc");
+    const codex = codexSession(w.box, appA, "33333333-cccc-4ccc-8ccc-cccccccccccc");
     const boxes = () => ({
       boxes: [
         { name: "a", host: { transport: "ssh" as const, destination: "user@a.example" } },

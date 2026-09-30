@@ -277,11 +277,38 @@ describe("sessionContentHits", () => {
     }
   });
 
-  test("a vendor token fires in any form, because the token patterns do not change", () => {
+  test("a vendor token with JSON escapes is a token in the decoded string, under any key and in nested JSON text", () => {
+    const token = "gh" + "p_" + "c".repeat(36);
+    const escaped = token.replace("_", "\\u005f");
+    const hit = [{ path: "session.jsonl", code: "github-token", reason: "GitHub token in file content" }];
+    const record = `{"type":"user","note":"use ${escaped}"}\n`;
+    const nested = jsonl(toolUse("Write", { file_path: "a.json", content: `{"note":"${escaped}"}` }));
+    const lines = jsonl(toolResult(`first\n{"note":"${escaped}"}\nlast\n`));
+    const key = `{"type":"user","${escaped}":1}\n`;
+
+    expect(record).not.toContain(token);
+    expect(carriedContentHits("session.jsonl", Buffer.from(record))).toEqual([]);
+    expect(sessionContentHits("session.jsonl", Buffer.from(record))).toEqual(hit);
+    expect(sessionContentHits("session.jsonl", nested)).toEqual(hit);
+    expect(sessionContentHits("session.jsonl", lines)).toEqual(hit);
+    expect(sessionContentHits("session.jsonl", Buffer.from(key))).toEqual(hit);
+    expect(sessionContentHits("session.jsonl", Buffer.from(`${record}${record}`))).toEqual(hit);
+    expect(JSON.stringify(sessionContentHits("session.jsonl", Buffer.from(record)))).not.toContain(token);
+  });
+
+  test("a vendor token after an underscore in a session is a content hit", () => {
+    const token = "gh" + "p_" + "c".repeat(36);
+    const bytes = jsonl(toolResult(`export MY_${token}=1`));
+
+    expect(carriedContentHits("session.jsonl", bytes).map((hit) => hit.code)).toEqual(["github-token"]);
+  });
+
+  test("a vendor token fires in any form: the token patterns have no literal condition", () => {
     const token = "gh" + "p_" + "c".repeat(36);
     const bytes = jsonl(toolResult(`token = get_token("${token}")`));
 
-    expect(sessionContentHits("session.jsonl", bytes)).toEqual([]);
+    // The secret-field rule has no hit for the call. The token rule has one, in the file bytes and in the decoded string.
+    expect(sessionContentHits("session.jsonl", bytes).map((hit) => hit.code)).toEqual(["github-token"]);
     expect(carriedContentHits("session.jsonl", bytes).map((hit) => hit.code)).toEqual(["github-token"]);
   });
 

@@ -1609,6 +1609,20 @@ describe("box mode", () => {
     }
   });
 
+  test("a box install runs the hidden ferry redact, which copies stdin with a mark in the place of each token", async () => {
+    const token = "gh" + "p_" + "a".repeat(36);
+    const output: string[] = [];
+
+    await runCli(["redact"], {
+      isBoxMode: () => true,
+      readStdin: async () => `notes/${token}.md\0AGENTS.md\0`,
+      writeText: (text) => output.push(text),
+    });
+
+    expect(output).toEqual(["notes/[token].md\0AGENTS.md\0"]);
+    expect(buildProgram().helpInformation()).not.toContain("redact");
+  });
+
   test("a box install still prints the version and the help", async () => {
     const out: string[] = [];
     const program = buildProgram({ isBoxMode: () => true }).exitOverride();

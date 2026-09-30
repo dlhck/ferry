@@ -7,7 +7,8 @@
  *
  * The scan reads each record and applies the rule to each key at any depth.
  * It also reads each string value. It parses JSON text in a string and reads
- * the result in the same way. It matches other text line by line as config
+ * the result in the same way. It applies the token patterns to each decoded
+ * string, because JSON can write a token with an escape. It matches other text line by line as config
  * text and as a command line. A hit names the key, never the value.
  *
  * A transcript holds much source code, where a secret key has a type or an
@@ -24,7 +25,7 @@
  * A change to this scan must raise `DENY_RULES_VERSION` in `manifest.ts`.
  */
 
-import { CONFIG_LINE, isSecretKey, isSecretValue, secretKeyHits, type ForbiddenHit } from "./manifest.ts";
+import { CONFIG_LINE, isSecretKey, isSecretValue, secretKeyHits, tokenHits, type ForbiddenHit } from "./manifest.ts";
 
 /** How deep the scan follows JSON text in the string values of JSON text. */
 const MAX_NESTING = 8;
@@ -51,11 +52,27 @@ const ONLY_REFERENCES = /^(?:\$\w+|\$\{[^{}]*\}|\$?\{\{[^{}]*\}\}|\{[^{}]*\}|\$\
 /** The start of a quoted string, also with a prefix letter such as `b"` or `f'`. Group 1 is the quote. */
 const QUOTE = /^[A-Za-z]{0,2}(["'])/;
 
-/** The secret-field hits of the session transcript `path`. A file that is not a `.jsonl` file has none. */
+/**
+ * The hits of the session transcript `path`: the token hits in its decoded
+ * strings, then the secret-field hits. A file that is not a `.jsonl` file has
+ * none.
+ */
 export function sessionContentHits(path: string, bytes: Uint8Array): ForbiddenHit[] {
   if (!path.toLowerCase().endsWith(".jsonl")) return [];
   const records = Buffer.from(bytes).toString("utf8").split("\n");
-  return secretKeyHits(path, records.flatMap((record) => textKeys(record, 0)));
+  // JSON can write a token with an escape, such as `ghp\u005f...`. The token rule on the file bytes does not see it.
+  const decoded = records.flatMap((record) => decodedText(parseJson(record, 0), 1));
+  return [...tokenHits(path, Buffer.from(decoded.join("\n"))), ...secretKeyHits(path, records.flatMap((record) => textKeys(record, 0)))];
+}
+
+/** Each key and each string under `value`, and the same for JSON text in a string or in a line of a string. */
+function decodedText(value: unknown, nesting: number): string[] {
+  if (typeof value === "string") {
+    const lines = value.includes("\n") ? value.split("\n").map((line) => line.replace(LINE_NUMBER, "")) : [];
+    return [value, ...[value, ...lines].flatMap((text) => decodedText(parseJson(text, nesting), nesting + 1))];
+  }
+  if (typeof value !== "object" || value === null) return [];
+  return Object.entries(value).flatMap(([key, child]) => [key, ...decodedText(child, nesting)]);
 }
 
 /** Each secret key under `value` whose value is a secret string, and the secret keys in each other string. */
