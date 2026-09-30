@@ -1691,6 +1691,38 @@ describe("--json", () => {
     });
   });
 
+  test("sync names a skipped box with the reason in result, and the box is not a failure", async () => {
+    const plan = { box: "dev@box-a.example" } as SyncResult["plan"];
+    const result = await run(["sync"], {
+      runSync: async (_input, dependencies) => {
+        dependencies?.warn?.("[b] Warning: box b left the config during the sync. Ferry did not connect to it.");
+        return {
+          dryRun: false,
+          published: true,
+          plan,
+          boxes: [
+            { name: "a", plan, applyPlan: { checkout: "/c", targetHome: "/h", actions: [], unmanaged: [] }, discarded: [] },
+            { name: "b", plan, skipped: "box b left the config during the sync" },
+          ],
+        };
+      },
+    });
+
+    expect(result.exitCodes).toEqual([]);
+    expect(result.json[0]).toMatchObject({
+      command: "sync",
+      ok: true,
+      result: {
+        boxes: [
+          { name: "a", ok: true, applyPlan: { actions: [] } },
+          { name: "b", ok: true, skipped: "box b left the config during the sync", applyPlan: null, discarded: [] },
+        ],
+      },
+      warnings: ["[b] Warning: box b left the config during the sync. Ferry did not connect to it."],
+    });
+    expect("skipped" in result.json[0].result.boxes[0]).toBe(false);
+  });
+
   test("a failed multi-box sync keeps the outcome of each box in result", async () => {
     const plan = { box: "dev@box-a.example" } as SyncResult["plan"];
     const offline = new SyncError("link-failure", "box", "failed to resolve home on box-b", {

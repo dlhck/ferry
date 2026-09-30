@@ -10,7 +10,7 @@ import {
   refreshUnitPath,
   unitFile,
 } from "../src/integrations/paseo.ts";
-import type { HostAdapter, LinkResult } from "../src/link.ts";
+import type { HostAdapter, LinkResult, RunOptions } from "../src/link.ts";
 import { noProgress } from "../src/progress.ts";
 import { BUILTIN_BOX_PATH_DIRS } from "../src/tools/path.ts";
 import { jqTest } from "./paseo-shell-box.ts";
@@ -26,8 +26,10 @@ type FakeBox = {
   readonly home: string;
   readonly state: string;
   readonly commands: string[];
+  /** The stdout and stderr of each command, as Ferry receives them. */
+  readonly outputs: string[];
   log(): string[];
-  run(command: string): Promise<LinkResult>;
+  run(command: string, options?: RunOptions): Promise<LinkResult>;
 };
 
 const roots: string[] = [];
@@ -69,11 +71,19 @@ exit 0`,
   --version) cat "$STATE/node" ;;
   -e) major=$(sed 's/^v\\([0-9]*\\).*/\\1/' "$STATE/node"); [ "$major" -ge 22 ] ;;
 esac`,
-  npm: 'echo "npm $*" >> "$LOG"',
-  paseo: `case "$1 $2" in
-  "daemon status") if [ -e "$STATE/status" ]; then cat "$STATE/status"; else echo '{"localDaemon":"running","daemonVersion":"0.9.2","listen":"127.0.0.1:6767"}'; fi ;;
-  "daemon reload") echo "paseo daemon reload" >> "$LOG" ;;
-  "project create") echo "paseo project create $3" >> "$LOG"; [ "$3" != "$(cat "$STATE/fail-project" 2>/dev/null)" ] ;;
+  npm: `echo "npm $*" >> "$LOG"
+if [ -e "$STATE/npm-fail" ]; then cat "$STATE/npm-fail"; cat "$STATE/npm-fail" >&2; exit 1; fi`,
+  // With a `noise` file, each command prints the file to stdout and to stderr. A failed command prints its `fail-` file.
+  paseo: `noise() { if [ -e "$STATE/noise" ]; then cat "$STATE/noise" >&2; [ "$1" = out ] && cat "$STATE/noise"; fi; }
+case "$1 $2" in
+  "daemon status") noise; if [ -e "$STATE/status" ]; then cat "$STATE/status"; else echo '{"localDaemon":"running","daemonVersion":"0.9.2","listen":"127.0.0.1:6767"}'; fi ;;
+  "daemon reload") echo "paseo daemon reload" >> "$LOG"; noise out ;;
+  "project create")
+    echo "paseo project create $3" >> "$LOG"; noise out
+    if [ "$3" = "$(cat "$STATE/fail-project" 2>/dev/null)" ]; then cat "$STATE/fail-output" >&2 2>/dev/null; exit 1; fi ;;
+  "import "*)
+    echo "paseo $*" >> "$LOG"; noise out
+    if [ -e "$STATE/fail-import-$2" ]; then cat "$STATE/fail-import-$2" >&2; exit 1; fi ;;
 esac`,
 };
 
@@ -92,16 +102,19 @@ function fakeBox(): FakeBox {
     chmodSync(join(bin, name), 0o755);
   }
   const commands: string[] = [];
+  const outputs: string[] = [];
   return {
     home,
     state,
     commands,
+    outputs,
     log: () => readFileSync(logPath, "utf8").split("\n").filter((line) => line !== ""),
-    async run(command) {
+    async run(command, options = {}) {
       commands.push(command);
       const process = Bun.spawn(["sh", "-c", `export PATH="${bin}:$PATH"; ${command}`], {
         cwd: home,
         env: { ...Bun.env, HOME: home, USER: "ploi", STATE: state, LOG: logPath },
+        stdin: options.input ?? "ignore",
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -110,9 +123,11 @@ function fakeBox(): FakeBox {
         new Response(process.stderr).text(),
         process.exited,
       ]);
+      outputs.push(stdout, stderr);
+      // The message is that of the Link: the stderr, else the stdout.
       return exitCode === 0
         ? { ok: true, address: "box", stdout, stderr }
-        : { ok: false, error: { code: "command-failed", origin: "box", message: stderr.trim() || `exit ${exitCode}` } };
+        : { ok: false, error: { code: "command-failed", origin: "box", message: stderr.trim() || stdout.trim() || `exit ${exitCode}` } };
     },
   };
 }
@@ -509,6 +524,174 @@ describe("Paseo unit PATH", () => {
   });
 });
 
+describe("Paseo box output", () => {
+  // Build the value at run time so this file holds no string a secret scanner flags.
+  const SECRET = "box-only-" + "password-" + "q7Zx9";
+  const dirs = [".local/bin", ".pi/agent/bin", ".bun/bin"];
+  /** A unit with an `Environment=` line that the operator added on the box by hand. */
+  const withSecret = (unit: string) =>
+    unit.replace("Restart=on-failure", `Environment=DATABASE_PASSWORD=${SECRET}\nRestart=on-failure`);
+  /** All that Ferry sends to the box and gets back. */
+  const crossed = (box: FakeBox) => JSON.stringify({ commands: box.commands, outputs: box.outputs });
+
+  test("the unit never reaches Ferry when the PATH is current", async () => {
+    const box = fakeBox();
+    touch(join(box.home, UNIT_PATH), withSecret(unitFile(dirs)));
+
+    expect(await refreshUnitPath(box, dirs)).toBe(false);
+
+    expect(box.outputs).toEqual(["unchanged\n", ""]);
+    expect(crossed(box)).not.toContain(SECRET);
+    expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(withSecret(unitFile(dirs)));
+    expect(box.log()).toEqual([]);
+  });
+
+  test("the unit never reaches Ferry when the PATH changed, and the box keeps each other line", async () => {
+    const box = fakeBox();
+    touch(join(box.home, UNIT_PATH), withSecret(unitFile(BUILTIN_BOX_PATH_DIRS, true)));
+
+    expect(await refreshUnitPath(box, dirs)).toBe(true);
+
+    expect(box.outputs).toEqual(["updated\n", ""]);
+    expect(crossed(box)).not.toContain(SECRET);
+    expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(withSecret(unitFile(dirs, true)));
+    expect(existsSync(join(box.home, `${UNIT_PATH}.ferry-tmp`))).toBe(false);
+    expect(box.log()).toEqual(["systemctl daemon-reload", "systemctl restart ferry-paseo.service"]);
+  });
+
+  test("the box adds the PATH line to a unit that has none", async () => {
+    const box = fakeBox();
+    const unit = withSecret(unitFile(dirs));
+    const path = unit.split("\n").find((line) => line.startsWith("Environment=PATH="));
+    touch(join(box.home, UNIT_PATH), unit.replace(`${path}\n`, ""));
+
+    expect(await refreshUnitPath(box, dirs)).toBe(true);
+
+    expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(unit.replace(`${path}\n`, "").replace("[Service]\n", `[Service]\n${path}\n`));
+    expect(crossed(box)).not.toContain(SECRET);
+  });
+
+  test("the box refuses a unit without a [Service] section, and does not restart the daemon", async () => {
+    const box = fakeBox();
+    const unit = `[Unit]\nEnvironment=DATABASE_PASSWORD=${SECRET}\n`;
+    touch(join(box.home, UNIT_PATH), unit);
+
+    await expect(refreshUnitPath(box, dirs)).rejects.toThrow("Ferry could not write the PATH line");
+
+    expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(unit);
+    expect(existsSync(join(box.home, `${UNIT_PATH}.ferry-tmp`))).toBe(false);
+    expect(crossed(box)).not.toContain(SECRET);
+    expect(box.log()).toEqual([]);
+  });
+
+  test("enable never reads an existing unit, replaces it, and restarts the daemon", async () => {
+    const box = fakeBox();
+    touch(join(box.home, UNIT_PATH), withSecret(unitFile(BUILTIN_BOX_PATH_DIRS)));
+
+    const lines = await paseoWith("0.9.2").box.enable(box, noProgress);
+
+    expect(crossed(box)).not.toContain(SECRET);
+    expect(lines.join("\n")).not.toContain(SECRET);
+    // Enable writes the whole unit again, so a line that the operator added by hand is gone.
+    expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(unitFile(BUILTIN_BOX_PATH_DIRS));
+    expect(box.log()).toContain("systemctl restart ferry-paseo.service");
+    expect(lines).toContain("The service config changed, so Ferry restarted the Paseo daemon. The restart stopped its agents.");
+  });
+
+  test("enable does not restart the daemon for a new unit or for the same unit", async () => {
+    const box = fakeBox();
+
+    await paseoWith("0.9.2").box.enable(box, noProgress);
+    await paseoWith("0.9.2").box.enable(box, noProgress);
+
+    expect(box.log()).not.toContain("systemctl restart ferry-paseo.service");
+    expect(box.outputs).toContain("created\n");
+    expect(box.outputs).toContain("unchanged\n");
+  });
+
+  test("the output of paseo daemon status and paseo daemon reload stays on the box", async () => {
+    const box = fakeBox();
+    touch(join(box.state, "active-ferry-paseo.service"));
+    writeFileSync(join(box.state, "status"), JSON.stringify({ localDaemon: "running", providers: [{ provider: "claude", available: true }] }));
+    writeFileSync(join(box.state, "noise"), `token=${SECRET}\n`);
+
+    if (Bun.which("jq") !== null) {
+      const carry = await carryAgentProfiles(box, [{ id: "p1", name: "Reviewer", provider: "claude" }]);
+      expect(carry.changed).toBe(true);
+      expect(box.log()).toEqual(["paseo daemon reload"]);
+    }
+    await paseoWith("0.9.2").box.update(box, noProgress);
+
+    expect(crossed(box)).not.toContain(SECRET);
+  });
+
+  test("a failed npm install shows only the npm error code", async () => {
+    const box = fakeBox();
+    writeFileSync(join(box.state, "npm-fail"), `npm error code E401\nnpm error 401 https://user:${SECRET}@registry.example/\n`);
+
+    const error = await paseoWith("0.9.2").box.enable(box, noProgress).catch(String);
+
+    expect(error).toBe(
+      'PaseoError: The Paseo install failed. Run npm install -g --prefix "$HOME/.local" @getpaseo/cli@0.9.2 on the box to see the npm output: npm error code E401',
+    );
+    expect(crossed(box)).not.toContain(SECRET);
+  });
+
+  test("a moved project and its sessions go to Paseo, and the box answers with a status word", async () => {
+    const box = fakeBox();
+    writeFileSync(join(box.state, "noise"), `token=${SECRET}\n`);
+    writeFileSync(join(box.state, "fail-import-known"), `Error: Failed to import agent: Provider session is already imported: known ${SECRET}\n`);
+
+    await createPaseo().box.onProjectMoved(box, "~/Developer/it's", [
+      { provider: "claude", id: "known" },
+      { provider: "codex", id: "it's" },
+    ]);
+
+    const app = join(box.home, "Developer/it's");
+    expect(box.log()).toEqual([
+      `paseo project create ${app}`,
+      `paseo import known --provider claude --cwd ${app}`,
+      `paseo import it's --provider codex --cwd ${app}`,
+    ]);
+    expect(box.outputs).toEqual(["ok\n", "", "duplicate\n", "", "ok\n", ""]);
+    expect(crossed(box)).not.toContain(SECRET);
+  });
+
+  test("a failed import gives a fixed message, and the paseo output stays on the box", async () => {
+    const box = fakeBox();
+    writeFileSync(join(box.state, "fail-import-broken"), `Error: no session in ${SECRET}\n`);
+
+    const error = await createPaseo().box.onProjectMoved(box, "~/app", [
+      { provider: "codex", id: "broken" },
+      { provider: "claude", id: "new" },
+    ]).catch(String);
+
+    expect(error).toBe(
+      `Error: paseo import failed for codex session broken (Paseo printed an error. Run paseo import 'broken' --provider 'codex' --cwd "$HOME"/'app' on the box to see it)`,
+    );
+    expect(box.log()).toHaveLength(3);
+    expect(crossed(box)).not.toContain(SECRET);
+  });
+
+  test("a failed project create names a directory that Paseo did not find, and else gives a fixed message", async () => {
+    const box = fakeBox();
+    writeFileSync(join(box.state, "fail-project"), join(box.home, "app"));
+    writeFileSync(join(box.state, "fail-output"), `Error: directory_not_found ${SECRET}\n`);
+
+    await expect(createPaseo().box.onProjectMoved(box, "~/app", [{ provider: "claude", id: "1a2b" }])).rejects.toThrow(
+      "paseo project create failed: Paseo did not find the directory on the box (directory_not_found)",
+    );
+    expect(box.log()).toHaveLength(1);
+
+    writeFileSync(join(box.state, "fail-output"), `Error: ${SECRET}\n`);
+    const error = await createPaseo().box.onProjectMoved(box, "~/app", []).catch(String);
+    expect(error).toBe(
+      `Error: paseo project create failed: Paseo printed an error. Run paseo project create "$HOME"/'app' on the box to see it`,
+    );
+    expect(crossed(box)).not.toContain(SECRET);
+  });
+});
+
 describe("Paseo plan", () => {
   test("lists the exact enable commands and connects to nothing", async () => {
     const lines = await paseoWith("0.9.2").box.plan("enable");
@@ -563,7 +746,7 @@ describe("Paseo plan", () => {
       "Box commands:",
       '  npm install -g --prefix "$HOME/.local" @getpaseo/cli@0.9.3',
       "  systemctl --user restart ferry-paseo.service",
-      "  systemctl --user is-active --quiet ferry-paseo.service && paseo daemon status --json",
+      "  systemctl --user is-active --quiet ferry-paseo.service && paseo daemon status --json 2>/dev/null",
       "The restart stops the agents that run on the box.",
     ]);
     expect(box.log()).toEqual([]);

@@ -5,7 +5,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { quoteShell } from "../box-settings.ts";
-import { carriedContentHits } from "../manifest.ts";
+import { carriedContentHits, SCRIPT_RUNNERS } from "../manifest.ts";
 import { CONFIG_FILE, editBoxConfig, jqObjects, noJqWarning, PaseoError, SYSTEM_PATH } from "./paseo.ts";
 import type { IntegrationLink } from "./types.ts";
 
@@ -27,12 +27,7 @@ export const PASEO_DEFAULT_TERMINAL_PROFILES: readonly TerminalProfile[] = [
 ];
 /** A command name that the daemon resolves through its PATH. It cannot start with `-` or `.`. */
 const BARE_EXECUTABLE = /^[A-Za-z0-9_][A-Za-z0-9._+-]*$/;
-/** Shells and interpreters. A profile may start one only with the flags in `INTERACTIVE_FLAGS`. */
-const SCRIPT_RUNNERS = new Set([
-  "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "env", "node", "deno", "bun",
-  "python", "python3", "perl", "ruby", "php", "lua", "pwsh", "powershell", "cmd", "osascript",
-]);
-/** Flags that start an interactive or login session and take no script. */
+/** Flags that start an interactive or login session and take no script. A profile may start a shell or interpreter of `SCRIPT_RUNNERS` only with these. */
 const INTERACTIVE_FLAGS = new Set(["-l", "-i", "-il", "-li", "--login", "--interactive", "--noprofile", "--norc"]);
 /** A file name with a config, key, script, or text extension. */
 const FILE_ARGUMENT = /\.(?:json5?|jsonc|ya?ml|toml|env|ini|conf|cfg|pem|key|sh|[cm]?js|ts|py|rb|txt)$/i;

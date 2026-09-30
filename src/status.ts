@@ -419,7 +419,10 @@ function mcpServerIssue(issue: BoxMcpIssue, flag: string): BriefIssue {
     case "not-portable":
       return {
         ...base,
-        message: `${name} refers to a path in your home, so Ferry does not carry it. Use a command on the PATH or a path outside the home.`,
+        message:
+          issue.reason === "inline-script"
+            ? `${name} runs an inline shell or interpreter script, which Ferry cannot check, so Ferry does not carry it. Put the script in a file that Ferry carries, or run the server through a tool on the PATH.`
+            : `${name} refers to a path in your home, so Ferry does not carry it. Use a command on the PATH or a path outside the home.`,
       };
   }
 }

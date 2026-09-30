@@ -16,7 +16,7 @@ import {
   type OperatorHostConfig,
   type PartialOperatorConfig,
 } from "./config.ts";
-import { resolveBoxes, snapshotGit, type ResolvedBox } from "./boxes.ts";
+import { hasNoBox, resolveBoxes, snapshotGit, type ResolvedBox } from "./boxes.ts";
 import { carriedContentHits, denyRules, readSeed as readManifest, type StoreUpdate } from "./manifest.ts";
 import { Link, type LinkOptions, type LinkResult, type RunOptions } from "./link.ts";
 import {
@@ -190,6 +190,8 @@ export type BoxSyncResult = {
   readonly discarded?: readonly string[];
   /** The step that failed on this box, and its error. */
   readonly failure?: { readonly step: string; readonly error: unknown };
+  /** The reason Ferry did not connect to this box. The box left the config, or its target changed, during the sync. It is not a failure. */
+  readonly skipped?: string;
 };
 
 export type SyncErrorCode =
@@ -311,7 +313,7 @@ export async function runSync(
       }, operatorSteps);
   if (planned !== (input.dryRun ? 1 : operatorSteps + BOX_STEPS)) progress.plan(planned);
   for (const leftover of seed.leftovers) {
-    const label = leftover.code === "hook-path" ? "hook" : leftover.code === "mcp-local" || leftover.code === "mcp-path" ? "MCP server" : null;
+    const label = leftover.code === "hook-path" ? "hook" : leftover.code === "mcp-local" || leftover.code === "mcp-path" || leftover.code === "mcp-script" ? "MCP server" : null;
     if (!label) continue;
     warn(`Skipped ${label}: ${leftover.reason}: ${leftover.path}`);
   }
@@ -414,6 +416,13 @@ export async function runSync(
       // Another sync for this box can take the box lock after refuseActiveSync. Then this box fails here, after the publish.
       const release = takeLock(dependencies, home, targetKey(box.host));
       try {
+        // `ferry box remove --uninstall` can remove the box while this sync waits in the publish. The config read is in the lock, so the box cannot leave after it.
+        const skipped = staleBox(home, dependencies, box);
+        if (skipped !== null) {
+          progress.skip(`Connecting to ${targetLabel(box.host)}`, skipped);
+          warn(`Warning: ${skipped}. Ferry did not connect to it.`);
+          return { name: box.name, plan, skipped };
+        }
         const link = dependencies.createLink?.(target) ?? new Link(target);
         const remoteHome = await boxStep(`Connecting to ${targetLabel(box.host)}`, () =>
           resolveRemoteHome(link, box.host),
@@ -1158,6 +1167,20 @@ async function takeStoreLock(dependencies: SyncDependencies, home: string): Prom
   } catch (cause) {
     throw new SyncError("lock-failure", "operator", "could not lock the local store", { cause });
   }
+}
+
+/**
+ * Read the config again, and compare the box with the box that the sync read at its start. Return
+ * the reason to skip the box, or null when the config has the box with the same target and git auth.
+ */
+function staleBox(home: string, dependencies: SyncDependencies, box: ResolvedBox): string | null {
+  const { source } = loadConfig(home, dependencies.readConfig ?? readOperatorConfig);
+  const current = hasNoBox(source) ? undefined : resolveBoxes(source).find((entry) => entry.name === box.name);
+  if (current === undefined) return `box ${box.name} left the config during the sync`;
+  if (targetKey(current.host) !== targetKey(box.host) || current.gitAuth !== box.gitAuth) {
+    return `box ${box.name} changed in the config during the sync`;
+  }
+  return null;
 }
 
 /** Fail before the publish when a live sync holds the box lock of this target. `label` names the box in the error. */

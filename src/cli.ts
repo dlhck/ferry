@@ -283,7 +283,7 @@ const JSON_RESULTS: Record<string, string> = {
   auth:
     '{ providers: [{ id, login }] } without a provider, where login is "startable", "manual", or "off", else the login result { kind, provider, ... }. ' +
     'A "login" event line with the URL comes before the envelope. A login that needs the code from the browser reads it as one line on stdin',
-  sync: "{ dryRun, published, boxes: [{ name, ok, step, error, plan, applyPlan, discarded }] }, also on failure of more than one box",
+  sync: "{ dryRun, published, boxes: [{ name, ok, step, error, skipped, plan, applyPlan, discarded }] }, also on failure of more than one box. skipped is the reason that Ferry did not connect to the box",
   history: "{ commits: [{ commit, date, subject, paths }] }, newest first",
   revert:
     "{ dryRun, commit, subject, tip, paths, settings: [{ file, keys }], sync }. sync is the sync result, or null with --dry-run or --no-sync",
@@ -1164,6 +1164,10 @@ For relay pairing, set paseo_relay = true in [integrations] of
 Run ferry integrations enable paseo --box <name> again to apply a change.
 A changed service config restarts the daemon and stops its agents.
 
+Enable writes the whole ferry-paseo.service again, so a line that you added
+to it by hand is gone. Put such a line in a drop-in file on the box, for
+example ~/.config/systemd/user/ferry-paseo.service.d/local.conf.
+
 To carry daemon.autoArchiveAfterMerge, set paseo_auto_archive = true in
 [integrations] of ~/.ferry/config.toml. A [box.<name>.integrations] table can
 override it. Sync applies it with paseo daemon reload, without a restart.
@@ -1831,6 +1835,7 @@ function syncResult(result: Pick<SyncResult, "dryRun" | "published" | "boxes">) 
       name: box.name,
       ok: box.failure === undefined,
       ...(box.failure ? { step: box.failure.step, error: errorInfo(box.failure.error) } : {}),
+      ...(box.skipped === undefined ? {} : { skipped: box.skipped }),
       plan: box.plan,
       applyPlan: box.applyPlan ?? null,
       discarded: box.discarded ?? [],

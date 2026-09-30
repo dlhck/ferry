@@ -13,6 +13,23 @@ The box `~/.paseo/config.json` can hold credentials, such as the `env` block of 
 - `ferry install` and `ferry update` install jq on each box. Without jq on the box, Ferry leaves the file as it is and warns: "Run ferry update to install jq". Agent profiles, provider definitions, preferences, terminal profiles, plugins, and the global plugin switch wait for jq. Without jq, Ferry does not install, update, enable, or disable a box plugin.
 - A value of `null` for `daemon`, `agents`, or a carried list counts as not set.
 
+## The service unit stays on the box
+
+You can add an `Environment=` line with a credential to `~/.config/systemd/user/ferry-paseo.service` on the box. Ferry never reads this file into the operator machine.
+
+- Each sync sends the `Environment=PATH=` line to the box. The box compares the line with its unit and sends back one word: `unchanged`, `updated`, `missing`, or `failed`.
+- When the PATH changed, the box replaces only that line and keeps each other line, also a line that you added. Then it runs `systemctl --user daemon-reload` and restarts the daemon. A unit without a PATH line gets the line after `[Service]`. A unit without a `[Service]` line stays as it is, and the sync warns.
+- `ferry integrations enable paseo` sends the complete unit to the box. The box compares it with its file and sends back `created`, `unchanged`, or `changed`. The new unit replaces the whole file, so a line that you added is gone after enable. Add it again, or put it in a drop-in file such as `~/.config/systemd/user/ferry-paseo.service.d/local.conf`, which Ferry does not change.
+
+## Paseo output stays on the box
+
+The output of a `paseo` or `npm` command on the box can hold box content, so Ferry does not read it when it needs only the result.
+
+- `paseo daemon reload` and the `paseo plugin` commands send their output to `/dev/null` on the box. A failure gives a fixed message.
+- `paseo project create` and `paseo import` after `ferry move` keep their output on the box. The box sends back one word: `ok`, `duplicate` for a session that an agent already has, `no-directory` for the Paseo error `directory_not_found`, or `failed`. For `failed`, the warning shows the command to run on the box to see the error.
+- A failed `npm install` or `npm uninstall` of the Paseo CLI shows only the npm error code, such as `E404`.
+- `paseo daemon status --json` sends its JSON to Ferry, and its error output stays on the box. Ferry keeps the daemon state, the version, the listen address, the relay switch, and the provider names, and shows nothing else.
+
 ## Git and npm plugins
 
 Ferry reads `~/.paseo/config.json` and `~/.paseo/plugins/sources.json`. For a Git plugin, it also reads the managed checkout's Git HEAD. It carries the plugin ID, repository URL, plugin subdirectory, installed commit, and enabled state. It uses `paseo plugin install --ref` for a missing plugin and `paseo plugin update --ref` for an existing plugin. An unchanged plugin needs no install or update.

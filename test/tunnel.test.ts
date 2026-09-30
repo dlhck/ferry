@@ -755,12 +755,12 @@ describe("FOLLOW_COMMAND", () => {
 });
 
 describe("ferry tunnel as a child process", () => {
-  /** A fake `ssh` that logs its arguments, fails `-W` for unreachable.example, and else waits for SIGTERM. */
+  /** A fake `ssh` that logs its arguments, answers the connect test of reach, with a failure for unreachable.example, and else waits for SIGTERM. */
   const FAKE_SSH = `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_SSH_LOG"
 case "$*" in
-  *"-W unreachable.example:"*) echo "channel 0: open failed: connect failed: Name or service not known" >&2; echo "stdio forwarding failed" >&2; exit 255 ;;
-  *"-W "*) exit 0 ;;
+  *"/dev/tcp/"*"'unreachable.example'"*) echo "bash: line 1: unreachable.example: Name or service not known"; echo "exit 1"; exit 0 ;;
+  *"/dev/tcp/"*) echo "exit 0"; exit 0 ;;
 esac
 [ -t 0 ] && echo "stdin is a terminal" >> "$FAKE_SSH_LOG"
 trap 'echo stopped >> "$FAKE_SSH_LOG"; exit 0' TERM
@@ -824,8 +824,8 @@ while :; do sleep 0.05; done
       expect(stdout).toContain(`http://localhost:${port} -> lab:db.example:5432`);
       expect(stdout.trim().split("\n").at(-1)).toBe("Tunnel closed.");
       const [check, tunnel, ...rest] = readFileSync(env.log, "utf8").trim().split("\n");
-      expect(check).toContain("-o BatchMode=yes");
-      expect(check).toContain("-W db.example:5432 user@box.example");
+      expect(check).toStartWith("-o BatchMode=yes -o ConnectTimeout=10 user@box.example ");
+      expect(check).toContain("bash 'db.example' 5432");
       expect(tunnel).toContain("-o BatchMode=yes");
       expect(tunnel).toContain(`-L 127.0.0.1:${port}:db.example:5432 user@box.example`);
       // OpenSSH got no terminal, and Ferry stopped it.
@@ -843,7 +843,7 @@ while :; do sleep 0.05; done
       const [exitCode, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
 
       expect(exitCode).toBe(1);
-      expect(stdout).toContain("lab cannot reach unreachable.example:5432: connect failed: Name or service not known");
+      expect(stdout).toContain("lab cannot reach unreachable.example:5432: Name or service not known");
       expect(existsSync(`${env.log}.ready`)).toBe(false);
     } finally {
       env.cleanup();
