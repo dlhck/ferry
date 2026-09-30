@@ -504,14 +504,14 @@ describe("runSync", () => {
         let stdout = "";
         if (command.startsWith("printf")) stdout = "/srv/ferry\n";
         else if (command.includes("claude plugin install")) events.push("install-plugins");
-        else if (command.includes("settings.json") && command.includes("mv ")) events.push("write-settings");
         else if (command.includes("settings.json")) {
-          events.push("read-settings");
-          stdout = "M";
+          events.push("merge-settings");
+          stdout = "J\n";
         }
         return { ok: true as const, address: "box", stdout, stderr: "" };
       },
     };
+    const warnings: string[] = [];
 
     await runSync(
       { home: "/operator" },
@@ -524,6 +524,7 @@ describe("runSync", () => {
         }),
         createLink: () => link,
         writePlan: () => {},
+        warn: (line) => warnings.push(line),
         acquireStoreLock: async () => () => {},
         acquireLock: () => () => events.push("unlock"),
         openStore: async () => ({
@@ -538,10 +539,13 @@ describe("runSync", () => {
       },
     );
 
-    expect(events).toEqual(["apply", "install-plugins", "read-settings", "write-settings", "unlock", "adopt"]);
-    const write = commands.find((call) => call.command.includes("mv "));
-    expect(write?.command).toContain("/srv/ferry/.claude/settings.json");
-    expect(write?.command).toContain('"review@team": true');
+    expect(events).toEqual(["apply", "install-plugins", "merge-settings", "unlock", "adopt"]);
+    const merge = commands.find((call) => call.command.includes("settings.json"));
+    expect(merge?.command).toContain("/srv/ferry/.claude/settings.json");
+    expect(merge?.command).toContain("review@team");
+    expect(warnings).toEqual([
+      "Box settings: jq is not on the box, so Ferry did not update .claude/settings.json. Run ferry update to install jq.",
+    ]);
   });
 
   test("declares the carried MCP servers on the box after the settings, and prints each warning", async () => {

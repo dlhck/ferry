@@ -8,6 +8,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -43,6 +44,8 @@ function write(path: string, body: string): void {
 /** Runs each command in a local shell, as the box would, with an optional PATH prefix. */
 class ShellLink {
   readonly calls: { command: string; options?: RunOptions }[] = [];
+  /** The stdout and stderr of each command, as Ferry receives them. */
+  readonly outputs: string[] = [];
 
   constructor(private readonly path?: string) {}
 
@@ -59,6 +62,7 @@ class ShellLink {
       new Response(process.stdout).text(),
       new Response(process.stderr).text(),
     ]);
+    this.outputs.push(stdout, stderr);
     if (exitCode !== 0) {
       return {
         ok: false,
@@ -67,6 +71,10 @@ class ShellLink {
     }
     return { ok: true, address: "test-box", stdout, stderr };
   }
+}
+
+function codex(value: Record<string, unknown>): SeedSettings[] {
+  return [{ harness: "codex", bytes: Buffer.from(JSON.stringify(value)) }];
 }
 
 function carried(value: Record<string, unknown>): SeedSettings[] {
@@ -161,7 +169,7 @@ describe("mergeBoxSettings", () => {
     );
     const hooks = { Stop: [{ hooks: [{ type: "command", command: "notify" }] }] };
 
-    const written = await mergeBoxSettings({
+    const { written } = await mergeBoxSettings({
       remoteHome: home,
       harnesses: BUILTIN_HARNESSES,
       settings: carried({
@@ -225,7 +233,7 @@ describe("mergeBoxSettings", () => {
     write(path, `${JSON.stringify({ enabledPlugins: { "review@team": true } }, null, 2)}\n`);
     const link = new ShellLink();
 
-    const written = await mergeBoxSettings({
+    const { written } = await mergeBoxSettings({
       remoteHome: home,
       harnesses: BUILTIN_HARNESSES,
       settings: carried({ enabledPlugins: { "review@team": true } }),
@@ -241,7 +249,7 @@ describe("mergeBoxSettings", () => {
     const path = join(home, ".codex", "config.toml");
     write(path, 'model = "o3"\n\n[mcp_servers.docs]\nurl = "https://docs.example/mcp"\n');
 
-    const written = await mergeBoxSettings({
+    const { written } = await mergeBoxSettings({
       remoteHome: home,
       harnesses: BUILTIN_HARNESSES,
       settings: [{ harness: "codex", bytes: Buffer.from(JSON.stringify({ model: "gpt-5" })) }],
@@ -255,6 +263,148 @@ describe("mergeBoxSettings", () => {
     });
   });
 
+  test("keeps config.toml and its comments when the carried Codex keys match", async () => {
+    const home = makeRoot();
+    const path = join(home, ".codex", "config.toml");
+    const text = '# box notes\nmodel = "gpt-5" # pinned\n\n[features] # flags\n# one flag\nnew_flag = true\n';
+    write(path, text);
+
+    const { written } = await mergeBoxSettings({
+      remoteHome: home,
+      harnesses: BUILTIN_HARNESSES,
+      settings: codex({ model: "gpt-5", features: { new_flag: true } }),
+      link: new ShellLink(),
+    });
+
+    expect(written).toEqual([]);
+    expect(readFileSync(path, "utf8")).toBe(text);
+  });
+
+  test("edits only the carried Codex keys and keeps every other line of config.toml", async () => {
+    const home = makeRoot();
+    const path = join(home, ".codex", "config.toml");
+    write(
+      path,
+      [
+        "# box notes",
+        'model = "o3" # old',
+        'model_verbosity = "high"',
+        "features = { old_flag = true }",
+        'approval_policy = "never"',
+        'notes = """',
+        'model = "inside a string"',
+        "[features]",
+        '"""',
+        "",
+        "# docs server",
+        "[mcp_servers.docs]",
+        'command = "docs-mcp"',
+        "args = [",
+        '  "--model",',
+        '  "[features]",',
+        "]",
+        "",
+      ].join("\n"),
+    );
+
+    const { written } = await mergeBoxSettings({
+      remoteHome: home,
+      harnesses: BUILTIN_HARNESSES,
+      settings: codex({ model: "gpt-5", features: { new_flag: true, sub: { deep: 1 } } }),
+      link: new ShellLink(),
+    });
+
+    expect(written).toEqual([path]);
+    const merged = readFileSync(path, "utf8");
+    expect(Bun.TOML.parse(merged)).toEqual({
+      model: "gpt-5",
+      approval_policy: "never",
+      notes: 'model = "inside a string"\n[features]\n',
+      features: { new_flag: true, sub: { deep: 1 } },
+      mcp_servers: { docs: { command: "docs-mcp", args: ["--model", "[features]"] } },
+    });
+    expect(merged).toStartWith('# box notes\nmodel = "gpt-5"\n');
+    expect(merged).toContain("# docs server\n[mcp_servers.docs]\n");
+  });
+
+  test("replaces a [features] table and its sub-tables in place", async () => {
+    const home = makeRoot();
+    const path = join(home, ".codex", "config.toml");
+    write(path, '[features]\nold = true\n\n[features.sub]\nx = 1\n\n[profiles.fast]\nmodel = "o3"\n');
+
+    await mergeBoxSettings({
+      remoteHome: home,
+      harnesses: BUILTIN_HARNESSES,
+      settings: codex({ features: { new_flag: false } }),
+      link: new ShellLink(),
+    });
+
+    expect(Bun.TOML.parse(readFileSync(path, "utf8"))).toEqual({
+      features: { new_flag: false },
+      profiles: { fast: { model: "o3" } },
+    });
+  });
+
+  test("creates a missing config.toml with the carried Codex keys", async () => {
+    const home = makeRoot();
+    const path = join(home, ".codex", "config.toml");
+
+    const { written } = await mergeBoxSettings({
+      remoteHome: home,
+      harnesses: BUILTIN_HARNESSES,
+      settings: codex({ model: "gpt-5", features: { new_flag: true } }),
+      link: new ShellLink(),
+    });
+
+    expect(written).toEqual([path]);
+    expect(Bun.TOML.parse(readFileSync(path, "utf8"))).toEqual({ model: "gpt-5", features: { new_flag: true } });
+    expect(statSync(path).mode & 0o077).toBe(0);
+  });
+
+  test("refuses and keeps a config.toml that awk cannot follow", async () => {
+    const home = makeRoot();
+    const path = join(home, ".codex", "config.toml");
+    write(path, 'model = "o3"\nargs = [\n');
+
+    await expect(
+      mergeBoxSettings({
+        remoteHome: home,
+        harnesses: BUILTIN_HARNESSES,
+        settings: codex({ model: "gpt-5" }),
+        link: new ShellLink(),
+      }),
+    ).rejects.toBeInstanceOf(BoxSettingsError);
+    expect(readFileSync(path, "utf8")).toBe('model = "o3"\nargs = [\n');
+  });
+
+  test("without jq, leaves a JSON settings file as it is and warns, and still merges config.toml", async () => {
+    const home = makeRoot();
+    const sys = join(home, "sys");
+    mkdirSync(sys);
+    for (const program of ["sh", "awk", "grep", "mkdir", "mv", "rm", "dirname", "printf"]) {
+      const found = Bun.which(program);
+      if (found) symlinkSync(found, join(sys, program));
+    }
+    const claude = join(home, ".claude", "settings.json");
+    const codexPath = join(home, ".codex", "config.toml");
+    write(claude, JSON.stringify({ enabledPlugins: {} }));
+    write(codexPath, 'model = "o3"\n');
+
+    const result = await mergeBoxSettings({
+      remoteHome: home,
+      harnesses: BUILTIN_HARNESSES,
+      settings: [...carried({ enabledPlugins: { "review@team": true } }), ...codex({ model: "gpt-5" })],
+      link: new ShellLink(sys),
+    });
+
+    expect(result).toEqual({
+      written: [codexPath],
+      warnings: ["jq is not on the box, so Ferry did not update .claude/settings.json. Run ferry update to install jq."],
+    });
+    expect(readFileSync(claude, "utf8")).toBe(JSON.stringify({ enabledPlugins: {} }));
+    expect(readFileSync(codexPath, "utf8")).toBe('model = "gpt-5"\n');
+  });
+
   test.each([
     ["pi", ".pi/agent/settings.json", { defaultModel: "claude-sonnet" }, { packages: ["npm:pi-tools"] }],
     ["cursor", ".cursor/cli-config.json", { maxMode: true }, { version: 1, authInfo: { userId: 1234 } }],
@@ -263,7 +413,7 @@ describe("mergeBoxSettings", () => {
     const path = join(home, file);
     write(path, JSON.stringify(boxOnly));
 
-    const written = await mergeBoxSettings({
+    const { written } = await mergeBoxSettings({
       remoteHome: home,
       harnesses: BUILTIN_HARNESSES,
       settings: [{ harness, bytes: Buffer.from(JSON.stringify(keys)) }],
@@ -288,6 +438,74 @@ describe("mergeBoxSettings", () => {
       }),
     ).rejects.toBeInstanceOf(BoxSettingsError);
     expect(readFileSync(path, "utf8")).toBe("{ not json");
+  });
+});
+
+const HAS_JQ = Bun.which("jq") !== null;
+
+/** A test that runs box scripts with a real jq. It skips, and says why, when jq is not on the PATH. */
+function jqTest(title: string, run: () => Promise<void>): void {
+  test.skipIf(!HAS_JQ)(HAS_JQ ? title : `${title} (skipped: jq is not on the PATH)`, run);
+}
+
+describe("box settings secrets", () => {
+  const SECRET = `sk-${"s".repeat(40)}`;
+
+  jqTest("never reach Ferry: the box merges each settings file and prints only a status", async () => {
+    const home = makeRoot();
+    const files = {
+      claude: join(home, ".claude", "settings.json"),
+      codex: join(home, ".codex", "config.toml"),
+      pi: join(home, ".pi", "agent", "settings.json"),
+      cursor: join(home, ".cursor", "cli-config.json"),
+    };
+    write(files.claude, JSON.stringify({ env: { ANTHROPIC_API_KEY: SECRET }, enabledPlugins: { "old@team": true } }));
+    write(
+      files.codex,
+      [
+        "# box notes",
+        'model = "o3"',
+        `experimental_bearer_token = "${SECRET}"`,
+        "",
+        "[mcp_servers.docs]",
+        'command = "docs-mcp"',
+        "",
+        "[mcp_servers.docs.env]",
+        `DOCS_KEY = "${SECRET}"`,
+        "",
+      ].join("\n"),
+    );
+    write(files.pi, JSON.stringify({ apiKey: SECRET, defaultModel: "old" }));
+    write(files.cursor, JSON.stringify({ authInfo: { token: SECRET }, maxMode: false }));
+    const link = new ShellLink();
+
+    const result = await mergeBoxSettings({
+      remoteHome: home,
+      harnesses: BUILTIN_HARNESSES,
+      settings: [
+        ...carried({ enabledPlugins: { "review@team": true } }),
+        { harness: "codex", bytes: Buffer.from(JSON.stringify({ model: "gpt-5", features: { web_search_request: true } })) },
+        { harness: "pi", bytes: Buffer.from(JSON.stringify({ defaultModel: "claude-sonnet" })) },
+        { harness: "cursor", bytes: Buffer.from(JSON.stringify({ maxMode: true })) },
+      ],
+      link,
+    });
+
+    expect(JSON.stringify({ calls: link.calls, outputs: link.outputs, result })).not.toContain(SECRET);
+    // The box merged the carried keys and kept each value.
+    expect(JSON.parse(readFileSync(files.claude, "utf8"))).toEqual({
+      env: { ANTHROPIC_API_KEY: SECRET },
+      enabledPlugins: { "review@team": true },
+    });
+    expect(Bun.TOML.parse(readFileSync(files.codex, "utf8"))).toEqual({
+      model: "gpt-5",
+      experimental_bearer_token: SECRET,
+      features: { web_search_request: true },
+      mcp_servers: { docs: { command: "docs-mcp", env: { DOCS_KEY: SECRET } } },
+    });
+    expect(readFileSync(files.codex, "utf8")).toStartWith("# box notes\n");
+    expect(JSON.parse(readFileSync(files.pi, "utf8"))).toEqual({ apiKey: SECRET, defaultModel: "claude-sonnet" });
+    expect(JSON.parse(readFileSync(files.cursor, "utf8"))).toEqual({ authInfo: { token: SECRET }, maxMode: true });
   });
 });
 
