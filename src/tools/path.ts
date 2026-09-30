@@ -46,8 +46,9 @@ export function pathExport(dirs: readonly string[]): string {
   return `export PATH="${dirs.map((dir) => `$HOME/${dir}`).join(":")}:$PATH"`;
 }
 
-const BLOCK_START = "# >>> ferry PATH >>>";
-const BLOCK_END = "# <<< ferry PATH <<<";
+/** The first and the last line of the ferry block of `~/.profile`. */
+export const PROFILE_BLOCK_START = "# >>> ferry PATH >>>";
+export const PROFILE_BLOCK_END = "# <<< ferry PATH <<<";
 
 /**
  * A box command that writes the ferry block of `~/.profile` with `dirs`. It
@@ -57,10 +58,10 @@ const BLOCK_END = "# <<< ferry PATH <<<";
  */
 export function profileBlockCommand(dirs: readonly string[]): string {
   const block = [
-    BLOCK_START,
+    PROFILE_BLOCK_START,
     "# Managed by ferry. ferry sync rewrites this block. Do not edit it.",
     pathExport(dirs),
-    BLOCK_END,
+    PROFILE_BLOCK_END,
   ].join("\n");
   return [
     "set -e",
@@ -71,8 +72,8 @@ export function profileBlockCommand(dirs: readonly string[]): string {
     'rm -f "$tmp"',
     'if [ -f "$profile" ]; then cp -p "$profile" "$tmp"; else : > "$tmp"; fi',
     "{ [ -f \"$profile\" ] && cat \"$profile\"; true; } | awk '",
-    `  $0 == "${BLOCK_START}" { if (!done) print ENVIRON["FERRY_BLOCK"]; done = 1; skip = 1; next }`,
-    `  skip && $0 == "${BLOCK_END}" { skip = 0; next }`,
+    `  $0 == "${PROFILE_BLOCK_START}" { if (!done) print ENVIRON["FERRY_BLOCK"]; done = 1; skip = 1; next }`,
+    `  skip && $0 == "${PROFILE_BLOCK_END}" { skip = 0; next }`,
     "  !skip { print }",
     '  END { if (!done) print ENVIRON["FERRY_BLOCK"] }',
     "' > \"$tmp\"",

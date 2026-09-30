@@ -15,15 +15,13 @@ import { FerryError, linkFailure } from "./errors.ts";
 import { EXPOSED_DIR } from "./expose.ts";
 import type { Link } from "./link.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
+import { PROFILE_BLOCK_END, PROFILE_BLOCK_START } from "./tools/path.ts";
 
 const STORE = ".ferry/store";
 const BACKUPS = ".ferry/backups";
 const OPERATOR_CONFIG = ".ferry/config.toml";
 const BINARY = ".local/bin/ferry";
 const UNIT_DIRECTORY = ".config/systemd/user";
-/** The markers of the ferry PATH block in `~/.profile`. `profileBlockCommand` writes them. */
-const PROFILE_BLOCK_START = "# >>> ferry PATH >>>";
-const PROFILE_BLOCK_END = "# <<< ferry PATH <<<";
 /** The Ferry files and directories of a box, in the order of removal. The marker goes last, so a failed run leaves a box install. */
 const FERRY_PATHS = [BOX_DIRECTORY, EXPOSED_DIR, STORE, BINARY, BOX_MARKER];
 
