@@ -14,7 +14,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { Link, LinkResult, RunOptions } from "../src/link.ts";
+import type { HostAdapter, Link, LinkResult, RunOptions } from "../src/link.ts";
+import { createPaseo } from "../src/integrations/paseo.ts";
 import type { Integration, MovedSession } from "../src/integrations/types.ts";
 import { runMove, type MoveDependencies, type MoveInput, type MoveResult } from "../src/move.ts";
 import { projectDirectoryName } from "../src/sessions.ts";
@@ -119,6 +120,8 @@ async function move(w: World, input: Partial<MoveInput> & { path: string }, over
         now: () => new Date("2026-09-27T10:11:12.345Z"),
         writeLine: (line) => lines.push(line),
         progress,
+        // No test runs the real `paseo` of this machine.
+        integrations: [createPaseo({ platform: "win32", which: () => null })],
         interactive: false,
         ...overrides,
       },
@@ -885,19 +888,179 @@ describe("ferry move with integrations", () => {
     );
   });
 
-  test("--from-box does not register the project on this machine, and --remove hints for the box", async () => {
+  /** A Paseo with a local `paseo` that records each argv. `answer` gives the stderr of a failed command, or null. */
+  function localPaseo(answer: (argv: readonly string[]) => string | null = () => null) {
+    const calls: string[][] = [];
+    const host: HostAdapter = {
+      async run(command) {
+        calls.push([...command.argv]);
+        const stderr = answer(command.argv);
+        return { exitCode: stderr === null ? 0 : 1, stdout: "", stderr: stderr ?? "", timedOut: false };
+      },
+    };
+    return { calls, integrations: [createPaseo({ platform: "win32", which: () => "paseo", host })] };
+  }
+
+  /** A Claude session of the box project, in the box home. */
+  function boxSession(w: World, id: string): void {
+    const directory = join(w.box, ".claude/projects", projectDirectoryName(join(w.box, "Developer/app")));
+    write(join(directory, `${id}.jsonl`), `${JSON.stringify({ type: "user", sessionId: id, message: "hello" })}\n`);
+  }
+
+  test("--from-box registers the project and imports the sessions in the local Paseo, and --remove hints for the box", async () => {
     const w = world();
     project(w, w.box);
+    boxSession(w, "11111111-aaaa");
     const log = boxPaseo(w);
+    const local = localPaseo();
 
-    const result = await move(w, { path: "Developer/app", fromBox: "default", remove: true }, { readConfig: PASEO_ON });
+    const result = await move(
+      w,
+      { path: "Developer/app", fromBox: "default", remove: true },
+      { readConfig: PASEO_ON, integrations: local.integrations },
+    );
 
     expect(result.error).toBeNull();
     expect(existsSync(log)).toBe(false);
-    expect(result.events.join("\n")).not.toContain("Registering");
+    const app = join(w.operator, "Developer/app");
+    expect(existsSync(join(w.operator, ".claude/projects", projectDirectoryName(app), "11111111-aaaa.jsonl"))).toBe(true);
+    expect(local.calls).toEqual([
+      ["paseo", "project", "create", app],
+      ["paseo", "import", "11111111-aaaa", "--provider", "claude", "--cwd", app],
+    ]);
+    expect(result.events.slice(-2)).toEqual(["start:Registering the project in Paseo", "done"]);
+    expect(result.lines.some((line) => line.startsWith("WARNING:"))).toBe(false);
     expect(result.lines).toContain(
       "Paseo still lists ~/Developer/app on the box. Ferry does not remove it. To remove it from Paseo, run paseo project ls to find its ID, then paseo project delete <id>. The files stay.",
     );
+  });
+});
+
+describe("ferry move --from-box with integrations on this machine", () => {
+  const PASEO_ON = () => ({
+    host: { transport: "ssh" as const, destination: "user@box.example" },
+    integrations: { paseo: true },
+  });
+
+  /** A Paseo whose local `paseo` fails each command with `stderr`. */
+  function failingPaseo(stderr: (argv: readonly string[]) => string | null): Integration[] {
+    const host: HostAdapter = {
+      async run(command) {
+        const message = stderr(command.argv);
+        return { exitCode: message === null ? 0 : 1, stdout: "", stderr: message ?? "", timedOut: false };
+      },
+    };
+    return [createPaseo({ platform: "win32", which: () => "paseo", host })];
+  }
+
+  test("a session that the local Paseo already has gives no warning", async () => {
+    const w = world();
+    const app = project(w, w.box);
+    const directory = join(w.box, ".claude/projects", projectDirectoryName(app));
+    write(join(directory, "11111111-aaaa.jsonl"), `${JSON.stringify({ type: "user", sessionId: "11111111-aaaa" })}\n`);
+    const integrations = failingPaseo((argv) =>
+      argv[1] === "import" ? "Error: Failed to import agent: Provider session is already imported: 11111111-aaaa" : null,
+    );
+
+    const result = await move(w, { path: "Developer/app", fromBox: "default" }, { readConfig: PASEO_ON, integrations });
+
+    expect(result.error).toBeNull();
+    expect(result.events.slice(-2)).toEqual(["start:Registering the project in Paseo", "done"]);
+    expect(result.lines.some((line) => line.startsWith("WARNING:"))).toBe(false);
+  });
+
+  test("a failed local import only warns, and the move completes", async () => {
+    const w = world();
+    const app = project(w, w.box);
+    const directory = join(w.box, ".claude/projects", projectDirectoryName(app));
+    write(join(directory, "11111111-aaaa.jsonl"), `${JSON.stringify({ type: "user", sessionId: "11111111-aaaa" })}\n`);
+    const integrations = failingPaseo((argv) => (argv[1] === "import" ? "Error: no session" : null));
+    const warnings: string[] = [];
+
+    const result = await move(
+      w,
+      { path: "Developer/app", fromBox: "default" },
+      { readConfig: PASEO_ON, integrations, warn: (line) => warnings.push(line) },
+    );
+
+    expect(result.error).toBeNull();
+    expect(existsSync(join(w.operator, "Developer/app/README.md"))).toBe(true);
+    expect(result.events.slice(-2)).toEqual(["start:Registering the project in Paseo", "fail"]);
+    expect(warnings).toEqual([
+      "WARNING: Ferry could not register ~/Developer/app in Paseo: paseo import failed for claude session 11111111-aaaa (Error: no session). The move is complete.",
+    ]);
+    expect(result.lines).toEqual(expect.arrayContaining(warnings));
+  });
+
+  test("a machine without a paseo command only warns, and the move completes", async () => {
+    const w = world();
+    project(w, w.box);
+
+    const result = await move(w, { path: "Developer/app", fromBox: "default" }, { readConfig: PASEO_ON });
+
+    expect(result.error).toBeNull();
+    expect(existsSync(join(w.operator, "Developer/app/README.md"))).toBe(true);
+    expect(result.lines).toContain(
+      "WARNING: Ferry could not register ~/Developer/app in Paseo: Ferry found no paseo command on this machine. The move is complete.",
+    );
+  });
+
+  test("calls an enabled and available operator part with the local path, and calls none without one", async () => {
+    const calls: { path: string; sessions: readonly MovedSession[] }[] = [];
+    const fake = (available: boolean) =>
+      ({
+        id: "paseo",
+        name: "Fake",
+        description: "records the moved project",
+        operator: {
+          available: () => available,
+          async onProjectMoved(path: string, sessions: readonly MovedSession[]) {
+            calls.push({ path, sessions });
+          },
+        },
+      }) as unknown as Integration;
+    const run = async (enabled: boolean, available: boolean) => {
+      const w = world();
+      project(w, w.box);
+      const result = await move(
+        w,
+        { path: "Developer/app", fromBox: "default" },
+        {
+          integrations: [fake(available)],
+          readConfig: () => ({ host: { transport: "ssh", destination: "user@box.example" }, integrations: { paseo: enabled } }),
+        },
+      );
+      expect(result.error).toBeNull();
+      return { w, result };
+    };
+
+    const on = await run(true, true);
+    expect(calls).toEqual([{ path: join(on.w.operator, "Developer/app"), sessions: [] }]);
+    expect(on.result.events.slice(-2)).toEqual(["start:Registering the project in Fake", "done"]);
+
+    for (const [enabled, available] of [[false, true], [true, false]] as const) {
+      const off = await run(enabled, available);
+      expect(off.result.events.join("\n")).not.toContain("Registering");
+      expect(off.result.lines.join("\n")).not.toMatch(/fake|paseo/i);
+    }
+    expect(calls).toHaveLength(1);
+  });
+
+  test("a move to a box does not call the operator part", async () => {
+    const w = world();
+    project(w, w.operator);
+    const calls: string[] = [];
+    const fake = {
+      id: "paseo",
+      name: "Fake",
+      description: "records the moved project",
+      operator: { available: () => true, onProjectMoved: async (path: string) => void calls.push(path) },
+    } as unknown as Integration;
+
+    const result = await move(w, { path: "Developer/app" }, { readConfig: PASEO_ON, integrations: [fake] });
+
+    expect(result.error).toBeNull();
+    expect(calls).toEqual([]);
   });
 });
 

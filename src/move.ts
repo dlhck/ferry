@@ -27,7 +27,7 @@ import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, posix, relative, resolve } from "node:path";
 import { BoxRequiredError, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import { ConfigMissingError, readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
-import { hasBoxPart, INTEGRATIONS, type Integration } from "./integrations/index.ts";
+import { hasBoxPart, INTEGRATIONS, operatorIntegrations, type Integration } from "./integrations/index.ts";
 import { paseoSourceHint } from "./integrations/paseo.ts";
 import type { IntegrationId, MovedSession } from "./integrations/types.ts";
 import { Link, type LinkOptions } from "./link.ts";
@@ -236,8 +236,17 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
   const source = sourceBox ? boxSide(dependencies.createLink(resolveLinkOptions(sourceBox.host)), label(sourceBox)) : local;
   const destinationLink = destinationBox && dependencies.createLink(resolveLinkOptions(destinationBox.host));
   const destination = destinationBox && destinationLink ? boxSide(destinationLink, label(destinationBox)) : local;
-  // An integration service runs on the box. A move to this machine registers nothing.
-  const registered = destinationLink ? enabled(destinationBox).map((integration) => ({ integration, link: destinationLink })) : [];
+  // The box part registers a project on a box. The operator part registers a project that comes back to this machine.
+  const registered = destinationLink
+    ? enabled(destinationBox).map((integration) => ({
+        name: integration.name,
+        onProjectMoved: (sessions: readonly MovedSession[]) => integration.box.onProjectMoved(destinationLink, `~/${rel}`, sessions),
+      }))
+    : operatorIntegrations(config, dependencies.integrations).flatMap(({ name, operator }) =>
+        operator.onProjectMoved && operator.available()
+          ? [{ name, onProjectMoved: (sessions: readonly MovedSession[]) => operator.onProjectMoved!(join(home, rel), sessions) }]
+          : [],
+      );
   const sourcePath = `${source.home}/${quoteShell(rel)}`;
   const destinationPath = `${destination.home}/${quoteShell(rel)}`;
   const writeLine = dependencies.writeLine;
@@ -421,10 +430,10 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       trash = `${source.trash.replace(source.home, "~")}/${name}`;
     }
 
-    for (const { integration, link } of registered) {
+    for (const integration of registered) {
       progress.start(`Registering the project in ${integration.name}`);
       try {
-        await integration.box.onProjectMoved(link, `~/${rel}`, moved);
+        await integration.onProjectMoved(moved);
         progress.done();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
