@@ -14,7 +14,7 @@ bun install
 
 ## Checks
 
-Run these before you open a pull request. CI runs the same checks on each push and pull request.
+Run these before you open a pull request. CI runs the same checks on each pull request and on each push to `main`.
 
 ```sh
 bun test
