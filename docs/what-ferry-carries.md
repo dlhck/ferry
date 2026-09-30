@@ -65,6 +65,8 @@ Ferry carries the name, the command, the arguments, and the names of the `env` k
 - Ferry does not carry a server that runs an inline script for a shell or an interpreter, such as `sh -c` or `node -e`, because Ferry cannot check the script. A script file passes, as in `node /srv/server.js`.
 - A command or an argument with a token, a secret flag with a value, or a URL with a credential stops the sync.
 
+The sync prints one line for each server that Ferry does not carry. After the sync, `ferry status` lists them in the [`Skipped MCP servers`](status.md#skipped-mcp-servers) block, each with the reason and what to change.
+
 The [Security model](security-model.md#stdio-mcp-servers) has the full rules.
 
 ## What stays on each machine

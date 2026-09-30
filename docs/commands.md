@@ -663,8 +663,11 @@ ferry update; missing, run ferry install; hidden, a login shell on the box
 does not find the tool, run ferry sync; skipped, the tool has no target;
 unknown, Ferry cannot read the box version. Box-only skills lists the skills
 on each box that the snapshot does not have. ferry adopt --from-box copies one
-to this machine. With --json, result is the
-status report, schema version 2. The ferry agent skill describes its fields.
+to this machine. Skipped MCP servers lists each stdio MCP server of this
+machine that Ferry does not carry, with its harness, its name, the reason, and
+what to change. It never prints a command or an argument of a server. With
+--json, result is the status report, schema version 2, and its skippedMcp has
+that list. The ferry agent skill describes its fields.
 Install the skill with ferry skills add dlhck/ferry --skill ferry.
 
 --brief checks only the link, the free disk, memory, and load, the logins, the

@@ -39,6 +39,7 @@ const EMPTY_REPORT: StatusReport = {
   store: { local: null, remote: null, localMatchesRemote: false, error: null },
   operator: { gitIdentity: null, error: null },
   denyList: [],
+  skippedMcp: [],
   boxes: [],
   errors: [],
 };

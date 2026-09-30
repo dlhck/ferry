@@ -71,7 +71,7 @@ A script file passes, as in `node /srv/server.js -c conf.json` or `python3 -m so
 
 Ferry knows only the shells and interpreters in its list. It carries a tool that is not in the list and that runs code from its arguments, such as `ssh host CODE`, `awk`, or `find -exec`. The credential rules still apply to the arguments of that tool.
 
-Ferry never installs a command. `ferry status --brief` names each missing env key, each command that is not on the box, and each server that Ferry did not carry.
+Ferry never installs a command. `ferry status --brief` names each missing env key, each command that is not on the box, and each server that Ferry did not carry. The full `ferry status` lists each skipped server, also a server from a macOS app bundle, with its harness, its name, and the reason, and never with a command or an argument.
 
 ## SSH
 

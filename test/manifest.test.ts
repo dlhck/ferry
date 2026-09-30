@@ -1879,8 +1879,8 @@ describe("carried MCP server declarations", () => {
       { name: "system", type: "stdio", command: "/usr/local/bin/system-mcp", args: ["/srv/data"], env: [] },
     ]);
     expect(seed.leftovers.filter((leftover) => leftover.code === "mcp-path").map((leftover) => leftover.reason)).toEqual([
-      "MCP server data refers to a path in the home, which the box does not have",
-      "MCP server local refers to a path in the home, which the box does not have",
+      "MCP server data refers to a path in your home. Use a command on the PATH or a path outside the home",
+      "MCP server local refers to a path in your home. Use a command on the PATH or a path outside the home",
     ]);
     expect(readMcpSources(home, BUILTIN_HARNESSES)).toEqual([
       { harness: "claude", servers: mcpOf(seed, "claude") as never, nonPortable: ["data", "local"].map((name) => ({ name, reason: "home-path" })) },
@@ -1912,7 +1912,7 @@ describe("carried MCP server declarations", () => {
     ]);
     const skipped = ["brace", "command", "inside", "shell", "tilde", "variable"];
     expect(seed.leftovers.filter((leftover) => leftover.code === "mcp-path").map((leftover) => leftover.reason)).toEqual(
-      skipped.map((name) => `MCP server ${name} refers to a path in the home, which the box does not have`),
+      skipped.map((name) => `MCP server ${name} refers to a path in your home. Use a command on the PATH or a path outside the home`),
     );
     expect(readMcpSources(home, BUILTIN_HARNESSES)).toEqual([
       { harness: "claude", servers: mcpOf(seed, "claude") as never, nonPortable: skipped.map((name) => ({ name, reason: "home-path" })) },

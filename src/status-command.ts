@@ -21,7 +21,7 @@ import {
   readOperatorGitIdentity,
   type GitIdentity,
 } from "./git-identity.ts";
-import { denyRules, readMcpSources, type DenyRuleDescription } from "./manifest.ts";
+import { denyRules, MCP_SKIPS, readMcpSources, type DenyRuleDescription } from "./manifest.ts";
 import { noProgress, type Progress } from "./progress.ts";
 import {
   loadRegistry,
@@ -79,7 +79,7 @@ export type StatusCommandDependencies = {
     tools: readonly ToolDescriptor[],
   ) => StatusAuth;
   readonly denyRules: () => readonly DenyRuleDescription[];
-  /** Reads the carried MCP servers of the operator home. */
+  /** Reads the carried and the skipped MCP servers of the operator home. */
   readonly readMcpSources: typeof readMcpSources;
   /** Runs the operator version commands of the tools. */
   readonly local: HostAdapter;
@@ -109,7 +109,14 @@ export async function runStatusCommand(
   const report = await composeStatus({
     operator: { gitIdentity: () => resolved.readOperatorGitIdentity(home) },
     store,
-    manifest: { denyRules: resolved.denyRules },
+    manifest: {
+      denyRules: resolved.denyRules,
+      // All harnesses: the list is of this machine, and a sync prints the same servers.
+      skippedMcp: () =>
+        resolved
+          .readMcpSources(home, registry.harnesses)
+          .flatMap((source) => source.nonPortable.map(({ name, reason }) => ({ harness: source.harness, name, reason }))),
+    },
     boxes: boxes.map((box) => boxDependencies(box, config, registry, local, resolved)),
     integrations: operatorIntegrations(config, resolved.integrations).flatMap(operatorCheck),
     progress: resolved.progress,
@@ -259,6 +266,7 @@ export function formatStatus(report: StatusReport): string {
     ...report.denyList.map(
       (rule) => `  ${rule.code}: ${rule.behavior} ${rule.description}`,
     ),
+    ...skippedMcpLines(report.skippedMcp),
     ...integrationLines("Integrations on this machine:", report.integrations),
     ...errorLines(report.errors),
     ...report.boxes.flatMap((box) => ["", ...boxLines(box, report.operator.gitIdentity)]),
@@ -323,6 +331,19 @@ function boxLines(box: BoxStatus, operator: GitIdentity | null): string[] {
     ...mcpLogins(box),
     ...integrationLines("Integrations:", box.integrations),
     ...errorLines(box.errors),
+  ];
+}
+
+/** One line for each stdio MCP server that Ferry does not carry: the name, the reason, and the fix. Never a command or an argument. */
+function skippedMcpLines(servers: StatusReport["skippedMcp"]): string[] {
+  if (servers.length === 0) return [];
+  return [
+    "",
+    "Skipped MCP servers:",
+    ...servers.map(({ harness, name, reason }) => {
+      const { cause, fix } = MCP_SKIPS[reason];
+      return `  ${harness}/${name} (${reason}): ${cause}. ${fix ?? "There is nothing to change"}.`;
+    }),
   ];
 }
 

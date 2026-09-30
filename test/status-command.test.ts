@@ -1410,3 +1410,174 @@ describe("ferry status --brief", () => {
     expect(envelope.result.boxes[0].issues[0].command).toBe("ferry auth codex --box default");
   });
 });
+
+describe("ferry status skipped MCP servers", () => {
+  const SERVERS = {
+    bundle: { command: "/Applications/Example.app/Contents/MacOS/example-mcp" },
+    homed: { command: "node", args: ["~/tools/server.js"] },
+    wrapped: { command: "sh", args: ["-c", "exec example-tool serve"] },
+    flagged: { command: "node", args: ["--some-new-option", "/srv/server.js", "-p", "3000"] },
+    carried: { command: "uvx", args: ["docs-mcp", "--root", "/srv/docs"] },
+  };
+  const toml = (servers: Record<string, { command: string; args?: string[] }>) =>
+    Object.entries(servers)
+      .map(([name, server]) => `[mcp_servers.${name}]\ncommand = ${JSON.stringify(server.command)}\nargs = ${JSON.stringify(server.args ?? [])}\n`)
+      .join("\n");
+
+  /** A home with one stdio server for each skip reason, and one carried server, in the MCP file of each harness. */
+  function homeWith(servers: Record<string, { command: string; args?: string[] }>): string {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "ferry-status-mcp-")));
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    mkdirSync(join(home, ".cursor"), { recursive: true });
+    writeFileSync(join(home, ".claude.json"), JSON.stringify({ mcpServers: servers }));
+    writeFileSync(join(home, ".codex", "config.toml"), toml(servers));
+    writeFileSync(join(home, ".cursor", "mcp.json"), JSON.stringify({ mcpServers: servers }));
+    return home;
+  }
+
+  function dependenciesFor(home: string, stack = fakeStack()): Partial<StatusCommandDependencies> {
+    return {
+      ...stack.dependencies,
+      home: () => home,
+      loadRegistry: () => ({ ok: true as const, harnesses: BUILTIN_HARNESSES, tools: registry.tools }),
+      inspectApply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }),
+      createAuthStart: () => ({ status: async () => ({ providers: [] }), mcpStatus: async () => [] }),
+    };
+  }
+
+  const REASONS = [
+    ["bundle", "app-bundle"],
+    ["flagged", "unknown-options"],
+    ["homed", "home-path"],
+    ["wrapped", "inline-script"],
+  ] as const;
+
+  test("the full status names each skipped server with its harness, its reason, and the fix", async () => {
+    const home = homeWith(SERVERS);
+    try {
+      const report = await runStatusCommand({}, dependenciesFor(home));
+      const lines = formatStatus(report).split("\n");
+
+      const start = lines.indexOf("Skipped MCP servers:");
+      expect(start).toBeGreaterThan(lines.indexOf("Deny list:"));
+      expect(start).toBeLessThan(lines.findIndex((line) => line.startsWith("Box ")));
+      expect(lines[start - 1]).toBe("");
+      expect(lines.slice(start, start + 14)).toEqual([
+        "Skipped MCP servers:",
+        ...["claude", "codex", "cursor"].flatMap((harness) => [
+          `  ${harness}/bundle (app-bundle): runs from a macOS app bundle, which the box does not have. There is nothing to change.`,
+          `  ${harness}/flagged (unknown-options): runs a shell or interpreter with options that Ferry cannot classify. Remove the options that come before the script file, or run the server through a tool on the PATH.`,
+          `  ${harness}/homed (home-path): refers to a path in your home. Use a command on the PATH or a path outside the home.`,
+          `  ${harness}/wrapped (inline-script): runs an inline shell or interpreter script, which Ferry cannot check. Put the script in a file that Ferry carries, or run the server through a tool on the PATH.`,
+        ]),
+        "",
+      ]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("the JSON report has the list at the report level, with the harness, the name, and the reason only", async () => {
+    const home = homeWith(SERVERS);
+    try {
+      const report = JSON.parse(JSON.stringify(await runStatusCommand({}, dependenciesFor(home))));
+
+      expect(report.schemaVersion).toBe(2);
+      expect(report.skippedMcp).toEqual(
+        ["claude", "codex", "cursor"].flatMap((harness) => REASONS.map(([name, reason]) => ({ harness, name, reason }))),
+      );
+      expect(report.boxes[0]).not.toHaveProperty("skippedMcp");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("prints no command and no argument of a server, and leaves a server with a credential to the deny list", async () => {
+    const home = homeWith({ ...SERVERS, secret: { command: "example-mcp", args: ["--password", "example-pass-1234"] } });
+    try {
+      const report = await runStatusCommand({}, dependenciesFor(home));
+      const text = `${formatStatus(report)}\n${JSON.stringify(report)}`;
+
+      expect(report.skippedMcp.map((server) => server.name)).not.toContain("secret");
+      expect(report.skippedMcp).toHaveLength(12);
+      for (const value of ["example-pass-1234", "--password", "example-tool", "server.js", "Example.app", "docs-mcp"]) {
+        expect(text).not.toContain(value);
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("prints no block when Ferry skips no server", async () => {
+    const home = homeWith({ carried: SERVERS.carried });
+    try {
+      const report = await runStatusCommand({}, dependenciesFor(home));
+
+      expect(report.skippedMcp).toEqual([]);
+      expect(formatStatus(report)).not.toContain("Skipped MCP");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("lists the servers of a harness that is off for the box, because the list is of this machine", async () => {
+    const home = homeWith(SERVERS);
+    try {
+      const report = await runStatusCommand({}, {
+        ...dependenciesFor(home),
+        readConfig: () => ({ version: 1, host: { tailscale: "box", sshUser: "ferry" }, tools: { codex: "off" } }),
+        loadRegistry: () => ({ ok: true as const, harnesses: BUILTIN_HARNESSES, tools: BUILTIN_TOOLS }),
+      });
+
+      expect(report.skippedMcp.filter((server) => server.harness === "codex")).toHaveLength(4);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("--brief does not change: a not-portable item for three reasons, none for an app bundle, and no list", async () => {
+    const home = homeWith(SERVERS);
+    try {
+      const report = await runBriefStatusCommand({}, {
+        ...dependenciesFor(home),
+        loadRegistry: () => ({ ok: true as const, harnesses: BUILTIN_HARNESSES, tools: BUILTIN_TOOLS }),
+        now: () => new Date("2026-09-29T10:00:00.000Z"),
+      });
+
+      expect(Object.keys(report)).toEqual(["schemaVersion", "checkedAt", "boxes"]);
+      expect(report.schemaVersion).toBe(1);
+      expect(report.boxes[0]!.issues.filter((issue) => issue.state === "not-portable")).toEqual(
+        ["claude", "codex", "cursor"].flatMap((harness) => [
+          {
+            kind: "mcp-server",
+            name: `${harness}/flagged`,
+            state: "not-portable",
+            summary: `${harness}/flagged: not carried`,
+            message: `${harness}/flagged runs a shell or interpreter with options that Ferry cannot classify, so Ferry does not carry it. Remove the options that come before the script file, or run the server through a tool on the PATH.`,
+            command: null,
+          },
+          {
+            kind: "mcp-server",
+            name: `${harness}/homed`,
+            state: "not-portable",
+            summary: `${harness}/homed: not carried`,
+            message: `${harness}/homed refers to a path in your home, so Ferry does not carry it. Use a command on the PATH or a path outside the home.`,
+            command: null,
+          },
+          {
+            kind: "mcp-server",
+            name: `${harness}/wrapped`,
+            state: "not-portable",
+            summary: `${harness}/wrapped: not carried`,
+            message: `${harness}/wrapped runs an inline shell or interpreter script, which Ferry cannot check, so Ferry does not carry it. Put the script in a file that Ferry carries, or run the server through a tool on the PATH.`,
+            command: null,
+          },
+        ]),
+      );
+      expect(formatBriefStatus(report)).not.toContain("Skipped MCP");
+      expect(formatBriefStatus(report)).not.toContain("bundle");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});

@@ -455,6 +455,31 @@ export type NonPortableMcp = { readonly name: string; readonly reason: "app-bund
 /** Why `scriptReason` skips a stdio server. */
 type ScriptReason = "inline-script" | "unknown-options";
 
+/**
+ * Why Ferry does not carry a stdio server, and what the operator can change to
+ * get it carried. `fix` is `null` when the operator can change nothing. The
+ * `Skipped MCP server` line of a sync, the `not-portable` item of the brief
+ * status, and the block of the full status all use these texts.
+ */
+export const MCP_SKIPS: Readonly<Record<NonPortableMcp["reason"], { readonly cause: string; readonly fix: string | null }>> = {
+  "app-bundle": { cause: "runs from a macOS app bundle, which the box does not have", fix: null },
+  "home-path": { cause: "refers to a path in your home", fix: "Use a command on the PATH or a path outside the home" },
+  "inline-script": {
+    cause: "runs an inline shell or interpreter script, which Ferry cannot check",
+    fix: "Put the script in a file that Ferry carries, or run the server through a tool on the PATH",
+  },
+  "unknown-options": {
+    cause: "runs a shell or interpreter with options that Ferry cannot classify",
+    fix: "Remove the options that come before the script file, or run the server through a tool on the PATH",
+  },
+};
+
+/** The reason of the `Skipped MCP server` line of a sync. */
+function skipReason(name: string, reason: NonPortableMcp["reason"]): string {
+  const { cause, fix } = MCP_SKIPS[reason];
+  return `MCP server ${name} ${cause}${fix === null ? "" : `. ${fix}`}`;
+}
+
 /** The carried MCP servers of one harness, and its stdio servers that Ferry does not carry. */
 export type McpSource = SeedMcp & { readonly nonPortable: readonly NonPortableMcp[] };
 
@@ -1127,7 +1152,7 @@ function readMcp(
         leftovers.push({
           path,
           code: DENY_RULES["mcp-app-bundle"].code,
-          reason: `MCP server ${name} runs from a macOS app bundle, which the box does not have`,
+          reason: skipReason(name, "app-bundle"),
         });
         continue;
       }
@@ -1136,7 +1161,7 @@ function readMcp(
         leftovers.push({
           path,
           code: DENY_RULES["mcp-path"].code,
-          reason: `MCP server ${name} refers to a path in the home, which the box does not have`,
+          reason: skipReason(name, "home-path"),
         });
         continue;
       }
@@ -1146,10 +1171,7 @@ function readMcp(
         leftovers.push({
           path,
           code: DENY_RULES["mcp-script"].code,
-          reason:
-            script === "inline-script"
-              ? `MCP server ${name} runs an inline shell or interpreter script, which Ferry cannot check. Put the script in a file that Ferry carries, or run the server through a tool on the PATH`
-              : `MCP server ${name} runs a shell or interpreter with options that Ferry cannot classify. Remove the options that come before the script file, or run the server through a tool on the PATH`,
+          reason: skipReason(name, script),
         });
         continue;
       }
