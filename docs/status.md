@@ -19,6 +19,25 @@ description: Read the state of each box with ferry status, the watch service, th
 
 `ferry status` does not fail for an offline box. The report shows the box as offline.
 
+### Skipped MCP servers
+
+The shared part of the report, before the boxes, has the block `Skipped MCP servers` when Ferry does not carry a stdio MCP server of this machine. Each line has the harness and the name of the server, the reason, and what to change:
+
+```
+Skipped MCP servers:
+  codex/node_repl (app-bundle): runs from a macOS app bundle, which the box does not have. There is nothing to change.
+  claude/local (home-path): refers to a path in your home. Use a command on the PATH or a path outside the home.
+```
+
+| Reason | Meaning | What to change |
+| --- | --- | --- |
+| `home-path` | The command or an argument refers to a path in your home. | Use a command on the `PATH` or a path outside the home. |
+| `inline-script` | A shell or an interpreter runs an inline script, which Ferry cannot check. | Put the script in a file that Ferry carries, or run the server through a tool on the `PATH`. |
+| `unknown-options` | A shell or an interpreter has options that Ferry cannot classify. | Remove the options that come before the script file, or run the server through a tool on the `PATH`. |
+| `app-bundle` | The server runs from a macOS app bundle, which the box does not have. | Nothing. A box cannot run a macOS app. |
+
+The block shows only the name and the reason, never a command or an argument of a server. The list is the same for each box. Ferry prints no block when it skips no server. A server with a credential in its arguments is not in the block: it stops the sync, and the deny list has its rule.
+
 ### Tool states
 
 | State | Meaning | Fix |
@@ -92,4 +111,4 @@ The menu bar app runs only on macOS. On Linux, a waybar custom module can show t
 
 ## Scripts and agents
 
-`ferry status --json` prints the status report with `schemaVersion: 2`. `ferry status --brief --json` prints `{ schemaVersion: 1, checkedAt, boxes }`. Each item has a `summary` of at most 60 characters and the full `message`. The [Ferry agent skill](https://github.com/dlhck/ferry/blob/main/skills/ferry/SKILL.md) describes each field.
+`ferry status --json` prints the status report with `schemaVersion: 2`. Its `skippedMcp` field has the skipped stdio MCP servers as `{ harness, name, reason }`. `ferry status --brief --json` prints `{ schemaVersion: 1, checkedAt, boxes }`. Each item has a `summary` of at most 60 characters and the full `message`. The [Ferry agent skill](https://github.com/dlhck/ferry/blob/main/skills/ferry/SKILL.md) describes each field.
