@@ -10,16 +10,29 @@
  * the result in the same way. It matches other text line by line as config
  * text and as a command line. A hit names the key, never the value.
  *
- * The scan has a limit. It finds a secret only next to a secret key or flag.
- * A secret in free prose, such as "the password is ...", passes.
+ * A transcript holds much source code, where a secret key has a type or an
+ * expression as its value. So a value in text counts only when it looks like
+ * a literal: see `isLiteral`. The token patterns of `carriedContentHits` do
+ * not have this condition.
+ *
+ * The scan has limits. It finds a secret only next to a secret key or flag.
+ * A secret in free prose, such as "the password is ...", passes. A bare value
+ * of only letters, such as `PASSWORD=swordfish`, also passes.
  */
 
-import { isSecretKey, isSecretValue, secretKeyHits, secretLineKeys, type ForbiddenHit } from "./manifest.ts";
+import { CONFIG_LINE, isSecretKey, isSecretValue, secretKeyHits, type ForbiddenHit } from "./manifest.ts";
 
 /** How deep the scan follows JSON text in the string values of JSON text. */
 const MAX_NESTING = 8;
 /** The line number that a harness puts before each line of a file that it read. */
 const LINE_NUMBER = /^\s*\d+(?:\t|→)/;
+/** A bare word that can be a secret: no quote, bracket, `$`, or space. */
+const BARE_WORD = /^[\w+/=.~@%:!#^*-]+$/;
+/** An identifier, a keyword, a type name, or a member access such as `config.password`. It has no digit. */
+const IDENTIFIER = /^[A-Za-z_]+(?:\.[A-Za-z_]+)*$/;
+const NUMBER = /^[\d._]+$/;
+/** A variable reference, as `$TOKEN`, or text with `${...}`, `$(...)`, or `{{...}}`. */
+const REFERENCE = /^\$\w+$|\$\{|\$\(|\{\{/;
 
 /** The secret-field hits of the session transcript `path`. A file that is not a `.jsonl` file has none. */
 export function sessionContentHits(path: string, bytes: Uint8Array): ForbiddenHit[] {
@@ -33,7 +46,7 @@ function valueKeys(value: unknown, nesting: number): string[] {
   if (typeof value === "string") return textKeys(value, nesting);
   if (typeof value !== "object" || value === null) return [];
   return Object.entries(value).flatMap(([key, child]) =>
-    !Array.isArray(value) && isSecretKey(key) && typeof child === "string" && isSecretValue(child)
+    !Array.isArray(value) && isSecretKey(key) && typeof child === "string" && isSecretValue(child) && !REFERENCE.test(child)
       ? [key]
       : valueKeys(child, nesting),
   );
@@ -48,7 +61,8 @@ function textKeys(text: string, nesting: number): string[] {
     const line = numbered.replace(LINE_NUMBER, "");
     const record = line === text ? undefined : parseJson(line, nesting);
     if (record !== undefined) return valueKeys(record, nesting + 1);
-    return [...secretLineKeys(line), ...commandKeys(line)];
+    const config = line.match(CONFIG_LINE);
+    return [...(config && isSecretKey(config[1]!) && isLiteral(config[2]!) ? [config[1]!] : []), ...commandKeys(line)];
   });
 }
 
@@ -63,19 +77,34 @@ function parseJson(text: string, nesting: number): object | undefined {
   }
 }
 
-/** The secret keys with a value in the words of a command line, as `--key=value`, `key=value`, or `--key value`. */
+/** The secret keys with a literal value in the words of a command line, as `--key=value`, `key=value`, or `--key value`. */
 function commandKeys(line: string): string[] {
   const words = line.split(/\s+/).filter((word) => word !== "");
   return words.flatMap((word, index) => {
     const pair = word.match(/^-{0,2}([\w-]+)=(.*)$/);
-    if (pair) return isSecretKey(pair[1]!) && isSecretValue(unquote(pair[2]!)) ? [pair[1]!] : [];
+    if (pair) return isSecretKey(pair[1]!) && isLiteral(pair[2]!) ? [pair[1]!] : [];
     const flag = word.match(/^--?([\w-]+)$/);
     const next = words[index + 1];
     if (!flag || !isSecretKey(flag[1]!) || next === undefined || next.startsWith("-")) return [];
-    return isSecretValue(unquote(next)) ? [flag[1]!] : [];
+    return isLiteral(next) ? [flag[1]!] : [];
   });
 }
 
-function unquote(word: string): string {
-  return word.replace(/^["']|["']$/g, "");
+/**
+ * True when the text after a secret key starts with a literal value: a quoted
+ * string, or a bare word that is not an identifier, a number, or a
+ * placeholder. A type, a function call, a member access, a keyword, and a
+ * variable reference are not literals. `hunter2` is a literal, and `string`
+ * is not, so a bare password of only letters passes.
+ */
+function isLiteral(text: string): boolean {
+  const value = text.trim();
+  const quote = value[0];
+  if (quote === '"' || quote === "'") {
+    const end = value.indexOf(quote, 1);
+    const body = value.slice(1, end === -1 ? undefined : end);
+    return isSecretValue(body) && !REFERENCE.test(body);
+  }
+  const word = value.split(/\s/, 1)[0]!.replace(/[,;]+$/, "");
+  return BARE_WORD.test(word) && !IDENTIFIER.test(word) && !NUMBER.test(word) && isSecretValue(word);
 }

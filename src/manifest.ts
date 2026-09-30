@@ -192,7 +192,7 @@ const CONFIG_EXTS = { ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml":
  * Group 1 is the key, group 2 the value. The match does not see a key in a
  * flow mapping such as `{ password: value }`, or a value on the next line.
  */
-const CONFIG_LINE = /^\s*(?:-\s+)?["']?([\w-]+)["']?\s*[:=]\s*(.*)$/;
+export const CONFIG_LINE = /^\s*(?:-\s+)?["']?([\w-]+)["']?\s*[:=]\s*(.*)$/;
 /** Mach-O magic numbers, thin and universal, as the first four bytes of the file. */
 const MACHO_MAGICS = new Set(["feedface", "feedfacf", "cefaedfe", "cffaedfe", "cafebabe", "cafebabf"]);
 /** A carried MCP server name reaches remote shell commands, so it may hold only these characters. */
@@ -583,7 +583,7 @@ function secretFieldHits(path: string, bytes: Uint8Array): ForbiddenHit[] {
 }
 
 /** The secret keys with a value in the `key: value` or `key = value` lines of `text`. */
-export function secretLineKeys(text: string): string[] {
+function secretLineKeys(text: string): string[] {
   return text.split("\n").flatMap((line) => {
     const match = line.match(CONFIG_LINE);
     if (!match || !isSecretKey(match[1]!)) return [];

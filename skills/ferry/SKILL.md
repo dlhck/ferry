@@ -191,7 +191,7 @@ Do not run these commands yourself. When `auth.loginRequired` or `mcpLogins.logi
    - A session file that is only on the destination stays. A session on both machines gets the source copy. The source keeps its sessions.
    - Ferry applies the deny rules to each session and memory file. A `WARNING: Ferry skips the session of <file> (<rule>)` line names a session that stays on the source. Ferry carries it with `--allow-secrets` only, with the same rules as step 5, and never with a private key.
    - For a session transcript, Ferry reads each record. It applies the token rules, and it looks for a password or secret key with a value in tool inputs and tool results: in JSON, in config text such as `KEY=value` lines, and in command flags such as `--password <value>`. The `<rule>` is then `key <name> holds a password or secret`.
-   - This scan has a limit. It finds a secret only by a token pattern or next to a secret key or flag. A secret in free prose, such as a password that the operator typed in a message, passes. Do not tell the operator that a carried session has no secret. If the operator says that a session can hold one, use `--no-sessions`.
+   - This scan has a limit. It finds a secret only by a token pattern or next to a secret key or flag. A secret in free prose, such as a password that the operator typed in a message, passes. In text, a value counts only when it looks like a literal, so a bare value of only letters, such as `PASSWORD=swordfish`, also passes. Do not tell the operator that a carried session has no secret. If the operator says that a session can hold one, use `--no-sessions`.
 
 ## Install skills
 

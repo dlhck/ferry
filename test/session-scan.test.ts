@@ -118,6 +118,75 @@ describe("sessionContentHits", () => {
     expect(sessionContentHits("session.jsonl", bytes)).toEqual([]);
   });
 
+  test("passes a value that is not a literal: a type, a call, a member access, an identifier, a number, or a variable reference", () => {
+    const code = [
+      "password: string;",
+      "  token: str",
+      "  token: Optional[str] = None",
+      "  apiKey?: string | undefined,",
+      "token = get_token()",
+      'password = os.environ["DB_PASSWORD"]',
+      "const x = 1;\n  apiKey: process.env.API_KEY,",
+      "  password: config.password,",
+      "  password=password,",
+      "secret: null",
+      "token = None",
+      "password: undefined,",
+      "use_token: true",
+      "max_tokens = 4096",
+      "PASSWORD=$DB_PASSWORD",
+      'PASSWORD="${DB_PASSWORD}"',
+      "token: {{token}}",
+      'token: "{{ secrets.token }}"',
+      "API_KEY=$(cat key.txt)",
+      "password: ''",
+      'token = ""',
+      "- token: The token of the request",
+    ];
+    const commands = [
+      "tool --token $TOKEN",
+      'tool --token "$TOKEN" --password=${PASSWORD}',
+      "tool --max-tokens 4096 --api-key-file key.txt",
+      "gh auth login --with-token < token.txt",
+      "call(a, password=password)",
+      "Use the --password flag for the password.",
+    ];
+
+    for (const text of [...code, ...commands]) {
+      expect([text, reasons(jsonl(toolResult(text)))]).toEqual([text, []]);
+      expect([text, reasons(jsonl(toolUse("Bash", { command: text })))]).toEqual([text, []]);
+    }
+    expect(reasons(jsonl(toolUse("Write", { content: JSON.stringify({ password: "${DB_PASSWORD}", token: "{{token}}", apiKey: "$API_KEY" }) })))).toEqual([]);
+  });
+
+  test("finds a literal value: a quoted string, or a bare word that is not only letters", () => {
+    const hunter = "hunt" + "er2";
+    const cases: [string, string][] = [
+      [`"password": "${hunter}"`, "password"],
+      [`{"password": "${hunter}"}`, "password"],
+      [`PASSWORD=${hunter}`, "PASSWORD"],
+      [`tool --password ${hunter}`, "password"],
+      [`Here is the config:\n\n\`\`\`python\npassword = "${hunter}"\n\`\`\`\n`, "password"],
+      [`  apiKey: '${hunter}',`, "apiKey"],
+      [`const config = {\n  token: "word",\n};`, "token"],
+      [`token: ${hunter}  # the token`, "token"],
+      [`tool --api-key="${hunter}"`, "api-key"],
+      [`TOKEN='two words' tool`, "TOKEN"],
+    ];
+
+    for (const [text, key] of cases) {
+      expect([text, reasons(jsonl(toolResult(text)))]).toEqual([text, [`key ${key} holds a password or secret`]]);
+    }
+  });
+
+  test("a vendor token fires in any form, because the token patterns do not change", () => {
+    const token = "gh" + "p_" + "c".repeat(36);
+    const bytes = jsonl(toolResult(`token = get_token("${token}")`));
+
+    expect(sessionContentHits("session.jsonl", bytes)).toEqual([]);
+    expect(carriedContentHits("session.jsonl", bytes).map((hit) => hit.code)).toEqual(["github-token"]);
+  });
+
   test("passes a secret in free prose: no rule sees it", () => {
     const bytes = jsonl({ type: "user", message: { role: "user", content: `the database password is ${PASSWORD}` } });
 
