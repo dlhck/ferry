@@ -48,6 +48,7 @@ import {
   readConfig,
   setIntegration,
   writeConfig,
+  type BoxesOperatorConfig,
   type GitAuth,
   type PartialOperatorConfig,
 } from "./config.ts";
@@ -61,6 +62,7 @@ import {
   runBoxDefault,
   runBoxList,
   runBoxRemove,
+  runBoxUninstall,
   type BoxCommandDependencies,
 } from "./box.ts";
 import type { IntegrationId } from "./integrations/types.ts";
@@ -176,6 +178,7 @@ type CliDependencies = {
   readonly installTunnelService?: (input: TunnelServiceInput) => Promise<WatchServiceResult>;
   readonly uninstallTunnelService?: (input: TunnelServiceInput) => Promise<TunnelServiceUninstallResult>;
   readonly runBoxAdd?: typeof runBoxAdd;
+  readonly runBoxUninstall?: typeof runBoxUninstall;
   readonly runExpose?: (input: ExposeInput, dependencies?: Partial<ExposeDependencies>) => Promise<number>;
   /** True when this is a box install. The default is `isBoxMode`. */
   readonly isBoxMode?: () => boolean;
@@ -220,6 +223,8 @@ type CliDependencies = {
   readonly confirmUninstall?: () => Promise<boolean>;
   /** The question of `ferry box add` before it changes a `[host]` config. */
   readonly confirm?: (message: string) => Promise<boolean | symbol | undefined>;
+  /** The question of `ferry box remove --uninstall`. It returns the text that the operator types. */
+  readonly confirmName?: (message: string) => Promise<string | symbol | undefined>;
   /** Writes a line to stdout: the text of a command, or with --json, the JSON. */
   readonly writeLine?: (line: string) => void;
   /** Writes a line to stderr. With --json, the text lines of a command go here. */
@@ -306,7 +311,8 @@ const JSON_RESULTS: Record<string, string> = {
     "{ current, latest, updated, services: [{ service, action, message }], skill }. skill is the message of the skill update, or null. The output of the installer goes to stderr",
   "box list": "{ boxes: [{ name, transport, destination, default }] }",
   "box add": "{ name, transport, destination, gitAuth, migrated, instructionFile }",
-  "box remove": "{ name, defaultBoxRemoved }",
+  "box remove":
+    "{ name, defaultBoxRemoved }. With --uninstall, also uninstall: { dryRun, plan: { home, services, links: [{ path, link, backup }], profileBlock, paths }, remaining }, or null when cancelled. The plan paths are relative to the box home. backup is the file that Ferry moves back to path, or null. remaining has the names that stay in ~/.ferry on the box. A dry run changes nothing",
   "box default": "{ defaultBox }",
   "skills add": "{ argv }. The output of npx goes to stderr",
 };
@@ -1517,9 +1523,62 @@ git_auth = "box" in its [box.<name>] table and run ferry init --box <name>.`)
     });
   box
     .command("remove")
-    .description("Remove a box from the config. Ferry does not connect to the box")
+    .summary("Remove a box from the config. With --uninstall, remove Ferry from the box first")
+    .description(`Remove a box from the config. With --uninstall, remove Ferry from the box first.
+
+Without --uninstall, Ferry does not connect to the box and does not change it.
+
+With --uninstall, Ferry reads the box, prints the plan, and asks you to type
+the box name. Then it does these steps on the box, in this order:
+
+  1. It stops and removes each ferry-*.service user service, such as
+     ferry-paseo.service. A stopped service stops its agents.
+  2. It removes each skill link, instruction file link, and root link that
+     points into ~/.ferry/store or to ~/.ferry/box/AGENTS.md. When ferry sync
+     --force moved a file of yours to ~/.ferry/backups, Ferry moves the
+     newest backup of that path back. Else the path stays absent.
+  3. It removes the ferry PATH block of ~/.profile.
+  4. It removes ~/.ferry/box, ~/.ferry/exposed, ~/.ferry/store, the Ferry
+     binary ~/.local/bin/ferry, and the marker ~/.ferry/box.json.
+
+Then Ferry removes the box from the config. Ferry keeps these on the box:
+the logins and credentials, the SSH keys, the project directories,
+~/.paseo, and the tools that Ferry installed: gh, jq, the agent CLIs, the
+Paseo CLI, and the tools of the config. It also keeps the settings keys, MCP
+servers, and plugins that ferry sync merged into the config files of the
+box, ~/.ferry/trash, and each backup that it did not move back.
+
+When Ferry cannot reach the box, or a box step fails, the box stays in the
+config. Run the command without --uninstall to remove the box from the
+config only. Ferry refuses the last box of the config.`)
     .argument("<name>", "box name")
-    .action((name: string) => report(runBoxRemove({ name }, { readConfig: config, writeConfig: (value) => writeConfig(value), writeLine, warn })));
+    .option("--uninstall", "remove Ferry from the box, then remove the box from the config")
+    .option("--yes", "with --uninstall, do not ask for the box name")
+    .option("--dry-run", "with --uninstall, print the plan and change nothing")
+    .action(async (name: string, options: { uninstall?: boolean; yes?: boolean; dryRun?: boolean }) => {
+      const configDependencies = { readConfig: config, writeConfig: (value: BoxesOperatorConfig) => writeConfig(value), warn };
+      if (options.uninstall !== true) {
+        if (options.dryRun === true) throw new FerryError("usage", "--dry-run needs --uninstall.");
+        report(runBoxRemove({ name }, { ...configDependencies, writeLine }));
+        return;
+      }
+      const result = await withProgress((reporter, writeLine) =>
+        (dependencies.runBoxUninstall ?? runBoxUninstall)(
+          { name, yes: options.yes === true, dryRun: options.dryRun === true },
+          {
+            ...configDependencies,
+            createLink,
+            harnesses: registry().harnesses,
+            confirmName: json()
+              ? (message) => refuse(message)()
+              : (dependencies.confirmName ?? ((message) => prompts.text({ message }))),
+            writeLine,
+            progress: reporter,
+          },
+        ),
+      );
+      report(result);
+    });
   box
     .command("default")
     .description("Set default_box, the box of install, auth, move, tunnel, and integrations enable|disable without --box")
