@@ -1258,6 +1258,8 @@ describe("ferry status --brief", () => {
         ...stack.dependencies,
         home: () => home,
         loadRegistry: () => ({ ok: true as const, harnesses: BUILTIN_HARNESSES, tools: BUILTIN_TOOLS }),
+        // A machine without the tools: no test runs a real version command.
+        local: { run: async () => ({ exitCode: 127, stdout: "", stderr: "", timedOut: false }) },
         createAuthStart: () => ({ status: async () => ({ providers: [] }), mcpStatus: async () => [] }),
         // A box that has neither the command nor the env value of the server.
         createLink: () => ({
