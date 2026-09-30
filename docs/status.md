@@ -78,6 +78,7 @@ At the start, every 5 minutes, and after each sync, the watch writes the report 
 
 `ferry menubar install` installs a menu bar app that shows the report of `ferry status --brief` for each box. The app reads `~/.ferry/status.json`, so `ferry watch` must run.
 
+- Each item has a short title, such as `codex/node_repl: command not on the box`. Its submenu has the full message, the Ferry command that fixes it, and Copy. Copy puts the command on the clipboard, or the message when the item has no command.
 - Click an item with a Ferry command to run it in Terminal.
 - The app shows the ports of each running `ferry tunnel --follow`. Click a port to open it in the browser.
 - The app sends a macOS notification when a box goes offline, a login or MCP login needs a login, or a tool has drift. Turn off Notifications in the menu to stop them.
@@ -91,4 +92,4 @@ The menu bar app runs only on macOS. On Linux, a waybar custom module can show t
 
 ## Scripts and agents
 
-`ferry status --json` prints the status report with `schemaVersion: 2`. `ferry status --brief --json` prints `{ schemaVersion: 1, checkedAt, boxes }`. The [Ferry agent skill](https://github.com/dlhck/ferry/blob/main/skills/ferry/SKILL.md) describes each field.
+`ferry status --json` prints the status report with `schemaVersion: 2`. `ferry status --brief --json` prints `{ schemaVersion: 1, checkedAt, boxes }`. Each item has a `summary` of at most 60 characters and the full `message`. The [Ferry agent skill](https://github.com/dlhck/ferry/blob/main/skills/ferry/SKILL.md) describes each field.

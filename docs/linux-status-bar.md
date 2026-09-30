@@ -2,7 +2,7 @@
 
 The menu bar app runs only on macOS. On Linux, a [waybar](https://github.com/Alexays/Waybar) custom module can show the same state. It reads `~/.ferry/status.json`, which `ferry watch` writes. Run `ferry watch install` first.
 
-The module shows the number of items that need action. Its tooltip lists the items of each box. A click opens a terminal and runs the fix command of the first item that has one.
+The module shows the number of items that need action. Its tooltip lists the items of each box, one short line for each item. A click opens a terminal and runs the fix command of the first item that has one.
 
 ## The status file
 
@@ -18,11 +18,13 @@ The module shows the number of items that need action. Its tooltip lists the ite
       "host": "user@box.example",
       "online": true,
       "error": null,
+      "summary": null,
       "issues": [
         {
           "kind": "mcp-login",
           "name": "claude/linear",
           "state": "login-required",
+          "summary": "claude/linear: login needed",
           "message": "claude/linear needs a login.",
           "command": "ferry auth claude --mcp linear --box box-a"
         }
@@ -37,7 +39,7 @@ The module shows the number of items that need action. Its tooltip lists the ite
 }
 ```
 
-`command` is `null` when a person must act on the box. An offline box has `online: false`, the reason in `error`, no issues, and `resources: null`. Low disk or memory is an issue of the kind `resource`, so the script counts it.
+`summary` is a short title of at most 60 characters, such as `codex/node_repl: 5 env keys missing`. A long name loses its middle, which becomes `…`. `message` is the full text. A status file of Ferry 0.10.0 or earlier has no `summary`. `command` is `null` when a person must act on the box. An offline box has `online: false`, the reason in `error`, the reason in at most 60 characters in `summary`, no issues, and `resources: null`. Low disk or memory is an issue of the kind `resource`, so the script counts it.
 
 ## States
 
@@ -83,7 +85,7 @@ jq -c '
   ([.boxes[] | if .online then (.issues | length) else 1 end] | add // 0) as $count |
   ([.boxes[] |
     "\(.name | esc)  \(if .online then "ONLINE" else "OFFLINE" end)",
-    (if .online then (.issues[] | "  \(.message | esc)") else "  \(.error // "" | esc)" end)
+    (if .online then (.issues[] | "  \(.summary // .message | esc)") else "  \(.summary // .error // "" | esc)" end)
   ] | join("\n")) as $items |
   if $age > 900 then
     {text: "?", class: "stale", tooltip: "ferry watch is not running. Last check \(ago($age)).\n\n\($items)"}
