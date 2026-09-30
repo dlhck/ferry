@@ -230,7 +230,7 @@ test("sync carries plugins before the unit check and reports failures without bl
         return { ok: true, address: "box", stdout: command.startsWith("printf") ? "/home/user\n"
           : command.includes("paseo plugin ls --json") ? "review\tabsent\toff\tstale\n" : "", stderr: "" };
       } }),
-      apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
+      apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }),
       acquireLock: () => () => {}, adopt: () => {}, writePlan: () => {}, writeLine: () => {},
       warn: (line) => warnings.push(line),
     });

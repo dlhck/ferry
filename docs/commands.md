@@ -155,6 +155,18 @@ Commands:
                                  the operator machine, not
                                  on the box. This command runs on the operator
                                  machine and on a box install.
+
+                                 The managed paths of a box are the paths that
+                                 the last ferry sync linked
+                                 there: the instruction files, the skill roots,
+                                 and the other roots of the
+                                 harnesses that are on for the box, with the
+                                 custom harnesses of the config.
+                                 A box that an earlier Ferry synced has no such
+                                 record until the next sync.
+                                 Until then, Ferry lists the paths of the
+                                 built-in harnesses that are links
+                                 of Ferry on the box.
   box                            List, add, and remove the boxes of the config
   skills                         Install skills into the global harness roots
                                  that Ferry manages
@@ -1059,10 +1071,17 @@ them, and the shared ~/AGENTS.md. The operator machine is the source of
 truth. On a box, change a Ferry-managed file on the operator machine, not
 on the box. This command runs on the operator machine and on a box install.
 
+The managed paths of a box are the paths that the last ferry sync linked
+there: the instruction files, the skill roots, and the other roots of the
+harnesses that are on for the box, with the custom harnesses of the config.
+A box that an earlier Ferry synced has no such record until the next sync.
+Until then, Ferry lists the paths of the built-in harnesses that are links
+of Ferry on the box.
+
 Options:
   -h, --help  display help for command
 
-With --json: { role: "operator" or "box", box, instructions: { file, sources: [{ part: "header", "box", or "shared", path }] }, managedPaths: { instructionFiles, skillRoots, roots } }. box is null on the operator machine and before the first sync of a box. instructions is null on the operator machine and on a box without the generated file. sources has the merged parts in order, and path is the file on the operator machine.
+With --json: { role: "operator" or "box", box, instructions: { file, sources: [{ part: "header", "box", or "shared", path }] }, managedPaths: { instructionFiles, skillRoots, roots } }. box is null on the operator machine and before the first sync of a box. instructions is null on the operator machine and on a box without the generated file. sources has the merged parts in order, and path is the file on the operator machine. On a box, managedPaths has the paths that the last sync linked there.
 ```
 
 ## ferry box

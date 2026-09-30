@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -437,5 +438,58 @@ describe("remote apply of an off harness", () => {
     const again = await apply({ checkout, targetHome: home, harnesses: withoutHarness("claude"), offHarnesses: harness("claude"), link });
     expect(again.actions).toEqual([]);
     expect(readFileSync(join(home, ".claude", "CLAUDE.md"), "utf8")).toBe("own instructions");
+  });
+});
+
+describe("the managed paths of a remote apply", () => {
+  const custom = {
+    id: "opencode",
+    name: "OpenCode",
+    skillRoot: ".config/opencode/skills",
+    instructionFile: ".config/opencode/AGENTS.md",
+    extraRoots: [".config/opencode/commands"],
+  };
+
+  test("are the paths that Apply links for the harnesses that are on, with a custom harness and without an off harness", async () => {
+    const root = makeRoot("remote-managed");
+    const checkout = makeCheckout(root, ["unslop"]);
+    // The checkout holds two of the four extra roots.
+    write(join(checkout, "roots", ".claude", "agents", "reviewer.md"), "review agent");
+    write(join(checkout, "roots", ".config", "opencode", "commands", "ship.md"), "ship");
+    const home = join(root, "home");
+    mkdirSync(home);
+
+    const plan = await apply({
+      checkout,
+      targetHome: home,
+      harnesses: [...BUILTIN_HARNESSES.filter((harness) => harness.id !== "pi"), custom],
+      offHarnesses: BUILTIN_HARNESSES.filter((harness) => harness.id === "pi"),
+      link: new ShellLink(root),
+    });
+
+    expect(plan.managed).toEqual({
+      instructionFiles: ["AGENTS.md", ".claude/CLAUDE.md", ".codex/AGENTS.md", ".config/opencode/AGENTS.md"],
+      skillRoots: [".agents/skills", ".claude/skills", ".config/opencode/skills"],
+      roots: [".claude/agents", ".config/opencode/commands"],
+    });
+    // Each path of the list is a link on the box.
+    for (const path of [...plan.managed.instructionFiles, ...plan.managed.roots]) {
+      expect(lstatSync(join(home, path)).isSymbolicLink()).toBe(true);
+    }
+    for (const path of plan.managed.skillRoots) {
+      expect(lstatSync(join(home, path, "unslop")).isSymbolicLink()).toBe(true);
+    }
+  });
+
+  test("have no instruction file when the checkout has no instructions", async () => {
+    const root = makeRoot("remote-managed-no-instructions");
+    const checkout = makeCheckout(root, ["unslop"]);
+    rmSync(join(checkout, "AGENTS.md"));
+    const home = join(root, "home");
+    mkdirSync(home);
+
+    const plan = await apply({ checkout, targetHome: home, harnesses: BUILTIN_HARNESSES, link: new ShellLink(root) });
+
+    expect(plan.managed).toEqual({ instructionFiles: [], skillRoots: [".agents/skills", ".claude/skills"], roots: [] });
   });
 });

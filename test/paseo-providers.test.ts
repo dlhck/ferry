@@ -434,7 +434,7 @@ test("sync applies provider definitions before it checks provider availability f
         : command.includes("paseo daemon status --json") ? status
         : merge ? "W\n" : command.includes("$w | to_entries") ? "zai\tabsent\n" : "", stderr: "" };
     } }),
-    apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
+    apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }),
     acquireLock: () => () => {}, adopt: () => {}, writePlan: () => {}, writeLine: () => {},
     warn: (line) => warnings.push(line),
   });

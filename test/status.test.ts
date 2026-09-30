@@ -23,7 +23,7 @@ function plan(actions: ApplyPlan["actions"] = []): ApplyPlan {
     checkout: "/box/home/.ferry/store",
     targetHome: "/box/home",
     actions,
-    unmanaged: [],
+    unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] },
   };
 }
 

@@ -645,7 +645,7 @@ describe("multi-box watch", () => {
               }),
               apply: async (applyInput) => {
                 events.push(`${applyInput.targetHome}:apply`);
-                return { checkout: applyInput.checkout, targetHome: applyInput.targetHome, actions: [], unmanaged: [] };
+                return { checkout: applyInput.checkout, targetHome: applyInput.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } };
               },
               adopt: () => {},
               writePlan: () => {},

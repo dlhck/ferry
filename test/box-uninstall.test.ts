@@ -442,7 +442,7 @@ describe("ferry box remove --uninstall", () => {
               return { published: true, tip: "abc123" };
             },
           }),
-          apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
+          apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }),
           adopt: () => {},
           writePlan: () => {},
           writeLine: () => {},
@@ -527,7 +527,7 @@ describe("ferry box remove --uninstall", () => {
               return { published: true, tip: "abc123" };
             },
           }),
-          apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
+          apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }),
           adopt: () => {},
           writePlan: () => {},
           writeLine: (line) => lines.push(line),

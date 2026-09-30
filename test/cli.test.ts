@@ -1830,7 +1830,7 @@ describe("--json", () => {
           published: true,
           plan,
           boxes: [
-            { name: "a", plan, applyPlan: { checkout: "/c", targetHome: "/h", actions: [], unmanaged: [] }, discarded: [] },
+            { name: "a", plan, applyPlan: { checkout: "/c", targetHome: "/h", actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }, discarded: [] },
             { name: "b", plan, skipped: "box b left the config during the sync" },
           ],
         };
@@ -1861,7 +1861,7 @@ describe("--json", () => {
       runSync: async () => {
         throw new BoxesSyncError(
           [
-            { name: "a", plan, applyPlan: { checkout: "/c", targetHome: "/h", actions: [], unmanaged: [] }, discarded: [] },
+            { name: "a", plan, applyPlan: { checkout: "/c", targetHome: "/h", actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }, discarded: [] },
             { name: "b", plan, failure: { step: "Connecting to dev@box-b", error: offline } },
           ],
           true,
