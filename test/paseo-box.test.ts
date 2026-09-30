@@ -13,6 +13,7 @@ import {
 import type { HostAdapter, LinkResult } from "../src/link.ts";
 import { noProgress } from "../src/progress.ts";
 import { BUILTIN_BOX_PATH_DIRS } from "../src/tools/path.ts";
+import { jqTest } from "./paseo-shell-box.ts";
 
 /**
  * A fake box. Each Link command runs in `sh` with a temporary HOME and fake
@@ -648,7 +649,7 @@ describe("Paseo agent profiles", () => {
     expect(() => readAgentProfiles(home)).toThrow("Reviewer");
   });
 
-  test("merges the profiles into the box config, keeps other keys, skips a missing provider, and reloads", async () => {
+  jqTest("merges the profiles into the box config, keeps other keys, skips a missing provider, and reloads", async () => {
     const box = runningBox([
       { provider: "claude", available: true },
       { provider: "codex", available: true },
@@ -671,7 +672,7 @@ describe("Paseo agent profiles", () => {
     expect(box.log()).toEqual(["paseo daemon reload"]);
   });
 
-  test("skips a profile whose provider the box does not list", async () => {
+  jqTest("skips a profile whose provider the box does not list", async () => {
     const box = runningBox([{ provider: "claude", available: true }]);
 
     const result = await carryAgentProfiles(box, [claude, { ...codex, provider: "custom" }]);
@@ -684,15 +685,16 @@ describe("Paseo agent profiles", () => {
     });
   });
 
-  test("writes nothing and does not reload when the box already has the profiles", async () => {
+  jqTest("writes nothing and does not reload when the box already has the profiles", async () => {
     const box = runningBox([{ provider: "claude", available: true }]);
-    touch(join(box.home, ".paseo/config.json"), `${JSON.stringify({ daemon: { agentProfiles: [claude] } }, null, 2)}\n`);
+    const text = JSON.stringify({ daemon: { agentProfiles: [claude] } });
+    touch(join(box.home, ".paseo/config.json"), text);
 
     const result = await carryAgentProfiles(box, [claude]);
 
     expect(result.changed).toBe(false);
     expect(box.log()).toEqual([]);
-    expect(box.commands.some((command) => command.includes(" mv "))).toBe(false);
+    expect(readFileSync(join(box.home, ".paseo/config.json"), "utf8")).toBe(text);
   });
 
   test("with no profiles, it does nothing on the box", async () => {
@@ -722,7 +724,7 @@ describe("Paseo preferences", () => {
     return box;
   }
 
-  test("sets only the two fields, keeps other box keys, skips a missing provider, and reloads", async () => {
+  jqTest("sets only the two fields, keeps other box keys, skips a missing provider, and reloads", async () => {
     const box = runningBox([
       { provider: "claude", available: true },
       { provider: "codex", available: false },
@@ -759,7 +761,7 @@ describe("Paseo preferences", () => {
     expect(box.log()).toEqual([]);
   });
 
-  test("explicit empty values clear the box values without a provider check", async () => {
+  jqTest("explicit empty values clear the box values without a provider check", async () => {
     const box = fakeBox();
     touch(join(box.home, ".paseo/config.json"), JSON.stringify({
       daemon: { appendSystemPrompt: "Old." },
@@ -778,7 +780,7 @@ describe("Paseo preferences", () => {
     expect(box.commands).toEqual([]);
   });
 
-  test("writes nothing and does not reload when the box already has the values", async () => {
+  jqTest("writes nothing and does not reload when the box already has the values", async () => {
     const box = fakeBox();
     touch(join(box.home, ".paseo/config.json"), `${JSON.stringify({ daemon: { appendSystemPrompt: "Be brief." } }, null, 2)}\n`);
 
@@ -786,7 +788,7 @@ describe("Paseo preferences", () => {
     expect(box.log()).toEqual([]);
   });
 
-  test("fails without the instruction text when the box config is not an object", async () => {
+  jqTest("fails without the instruction text when the box config is not an object", async () => {
     const box = fakeBox();
     touch(join(box.home, ".paseo/config.json"), JSON.stringify({ agents: [] }));
 

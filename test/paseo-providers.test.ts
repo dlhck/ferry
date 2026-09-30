@@ -10,6 +10,7 @@ import {
 import type { IntegrationLink } from "../src/integrations/types.ts";
 import { runSync, type SyncDependencies } from "../src/sync.ts";
 import { runWatch } from "../src/watch.ts";
+import { jqTest, shellBox } from "./paseo-shell-box.ts";
 
 const homes: string[] = [];
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
@@ -173,33 +174,30 @@ describe("Paseo provider discovery", () => {
   });
 });
 
-const readConfig = "if [ -e '.paseo/config.json' ]; then printf 'F' && cat '.paseo/config.json'; else printf 'M'; fi";
+/**
+ * A box that merges its config in a real shell with jq. `onPath` names the
+ * commands that `command -v` finds. `written` gives the box config when the box
+ * wrote the file, else undefined.
+ */
 function box(config: unknown = {}, onPath: readonly string[] = []) {
-  const commands: string[] = [];
-  const link: IntegrationLink = { run: async (command) => {
-    commands.push(command);
-    if (command === readConfig) {
-      return { ok: true, address: "box", stdout: config === null ? "M" : `F${typeof config === "string" ? config : JSON.stringify(config)}`, stderr: "" };
-    }
-    if (command.includes("command -v")) {
-      const names = [...command.matchAll(/command -v -- '([^']+)'/g)].map((match) => match[1]!);
-      return { ok: true, address: "box", stdout: names.map((name) => `${onPath.includes(name) ? "ok" : "missing"} ${name}\n`).join(""), stderr: "" };
-    }
-    return { ok: true, address: "box", stdout: "", stderr: "" };
-  } };
-  return { commands, link };
-}
-function written(commands: readonly string[]): any {
-  const write = commands.find((command) => command.includes("config.json.ferry-tmp"));
-  const text = write?.match(/^umask 077 && mkdir -p '\.paseo' && printf '%s' '(.*)' > /s)?.[1];
-  return text === undefined ? undefined : JSON.parse(text.replaceAll("'\"'\"'", "'"));
+  const b = shellBox({ config, answer: (command) => {
+    if (!command.includes("command -v -- ")) return undefined;
+    const names = [...command.matchAll(/command -v -- '([^']+)'/g)].map((match) => match[1]!);
+    return names.map((name) => `${onPath.includes(name) ? "ok" : "missing"} ${name}\n`).join("");
+  } });
+  boxes.push(b.remove);
+  const before = config === null ? null : b.text();
+  return { ...b, written: (): any => (before !== null && b.text() === before ? undefined : b.config()) };
 }
 function source(providers: unknown): PaseoProviders {
   return readPaseoProviders(home(providers));
 }
 
+const boxes: (() => void)[] = [];
+afterEach(() => { for (const remove of boxes.splice(0)) remove(); });
+
 describe("Paseo provider carry", () => {
-  test("merges matching providers field by field and keeps box-only fields and providers", async () => {
+  jqTest("merges matching providers field by field and keeps box-only fields and providers", async () => {
     const boxConfig = {
       version: 1,
       daemon: { listen: "127.0.0.1:6767" },
@@ -219,7 +217,7 @@ describe("Paseo provider carry", () => {
       zai: { extends: "claude", label: "Z.AI", env: { ANTHROPIC_AUTH_TOKEN: "local" }, models, paseoTools: { disabledTools: ["y"] } },
     }));
     expect(result).toEqual({ carried: ["zai"], warnings: [], changed: true });
-    expect(written(b.commands)).toEqual({
+    expect(b.written()).toEqual({
       ...boxConfig,
       agents: {
         ...boxConfig.agents,
@@ -236,24 +234,24 @@ describe("Paseo provider carry", () => {
     expect(b.commands.at(-1)).toBe("paseo daemon reload");
   });
 
-  test("creates a portable provider that the box lacks, and a built-in override", async () => {
+  jqTest("creates a portable provider that the box lacks, and a built-in override", async () => {
     const b = box(null);
     const result = await carryPaseoProviders(b.link, source({
       claude: { models, disallowedTools: ["WebFetch"] },
       qwen: { extends: "claude", label: "Qwen", additionalModels: models },
     }));
     expect(result.carried).toEqual(["claude", "qwen"]);
-    expect(written(b.commands)).toEqual({ agents: { providers: {
+    expect(b.written()).toEqual({ agents: { providers: {
       claude: { models, disallowedTools: ["WebFetch"] },
       qwen: { extends: "claude", label: "Qwen", additionalModels: models },
     } } });
   });
 
-  test("creates a provider with a bare command only when the box resolves the executable", async () => {
+  jqTest("creates a provider with a bare command only when the box resolves the executable", async () => {
     const providers = { gemini: { extends: "acp", label: "Gemini", command: ["gemini", "--experimental-acp"] } };
     const found = box({}, ["gemini"]);
     expect((await carryPaseoProviders(found.link, source(providers))).carried).toEqual(["gemini"]);
-    expect(written(found.commands).agents.providers.gemini).toEqual({ extends: "acp", label: "Gemini", command: ["gemini", "--experimental-acp"] });
+    expect(found.written().agents.providers.gemini).toEqual({ extends: "acp", label: "Gemini", command: ["gemini", "--experimental-acp"] });
     expect(found.commands.findIndex((command) => command.includes("command -v")))
       .toBeLessThan(found.commands.findIndex((command) => command.includes("ferry-tmp")));
 
@@ -265,25 +263,25 @@ describe("Paseo provider carry", () => {
       changed: false,
     });
     expect(result.warnings[0]).not.toContain("--experimental-acp");
-    expect(written(missing.commands)).toBeUndefined();
+    expect(missing.written()).toBeUndefined();
     expect(missing.commands).not.toContain("paseo daemon reload");
   });
 
-  test("skips a new provider that needs local runtime fields, and updates it once the box defines it", async () => {
+  jqTest("skips a new provider that needs local runtime fields, and updates it once the box defines it", async () => {
     const local = source({ zai: { extends: "claude", label: "Z.AI", env: { KEY: "local-only" }, models } });
     const missing = box({ agents: { providers: {} } });
     const result = await carryPaseoProviders(missing.link, local);
     expect(result.warnings).toEqual([
       "Paseo provider zai was not created on the box: it has an env block. Define it on the box first, then Ferry syncs its portable fields.",
     ]);
-    expect(written(missing.commands)).toBeUndefined();
+    expect(missing.written()).toBeUndefined();
 
     const defined = box({ agents: { providers: { zai: { extends: "claude", label: "Z.AI", env: { KEY: "box" } } } } });
     expect((await carryPaseoProviders(defined.link, local)).carried).toEqual(["zai"]);
-    expect(written(defined.commands).agents.providers.zai).toEqual({ extends: "claude", label: "Z.AI", env: { KEY: "box" }, models });
+    expect(defined.written().agents.providers.zai).toEqual({ extends: "claude", label: "Z.AI", env: { KEY: "box" }, models });
   });
 
-  test("does not send a skipped command to a box that lacks the provider", async () => {
+  jqTest("does not send a skipped command to a box that lacks the provider", async () => {
     const b = box({}, ["sh"]);
     const result = await carryPaseoProviders(b.link, source({
       wrapper: { extends: "acp", label: "Wrapper", command: ["sh", "-c", "exec /Users/example/private-wrapper"] },
@@ -294,32 +292,33 @@ describe("Paseo provider carry", () => {
       changed: false,
     });
     expect(b.commands.join("\n")).not.toContain("private-wrapper");
-    expect(b.commands).toEqual([readConfig]);
+    expect(b.commands).toHaveLength(1);
+    expect(b.written()).toBeUndefined();
   });
 
-  test("merges allowlisted fields into a box provider whose local command is not portable", async () => {
+  jqTest("merges allowlisted fields into a box provider whose local command is not portable", async () => {
     const b = box({ agents: { providers: { wrapper: { extends: "acp", label: "Old", command: ["box-agent"] } } } });
     const result = await carryPaseoProviders(b.link, source({
       wrapper: { extends: "acp", label: "Wrapper", models, command: ["sh", "-c", "exec /Users/example/private-wrapper"] },
     }));
     expect(result).toEqual({ carried: ["wrapper"], warnings: [], changed: true });
-    expect(written(b.commands).agents.providers.wrapper).toEqual({ extends: "acp", label: "Wrapper", command: ["box-agent"], models });
+    expect(b.written().agents.providers.wrapper).toEqual({ extends: "acp", label: "Wrapper", command: ["box-agent"], models });
     expect(b.commands.join("\n")).not.toContain("private-wrapper");
   });
 
-  test("treats a provider named constructor as new, not as an inherited box entry", async () => {
+  jqTest("treats a provider named constructor as new, not as an inherited box entry", async () => {
     const b = box({ agents: { providers: {} } });
     const result = await carryPaseoProviders(b.link, source({ constructor: { extends: "claude", label: "Constructor", models } }));
     expect(result).toEqual({ carried: ["constructor"], warnings: [], changed: true });
-    expect(written(b.commands).agents.providers).toEqual({ constructor: { extends: "claude", label: "Constructor", models } });
+    expect(b.written().agents.providers).toEqual({ constructor: { extends: "claude", label: "Constructor", models } });
 
     const existing = box({ agents: { providers: { constructor: { extends: "claude", label: "Old" } } } });
     expect((await carryPaseoProviders(existing.link, source({ constructor: { extends: "claude", label: "New" } }))).carried)
       .toEqual(["constructor"]);
-    expect(written(existing.commands).agents.providers.constructor).toEqual({ extends: "claude", label: "New" });
+    expect(existing.written().agents.providers.constructor).toEqual({ extends: "claude", label: "New" });
   });
 
-  test("skips a provider that the box defines with a different extends value", async () => {
+  jqTest("skips a provider that the box defines with a different extends value", async () => {
     const b = box({ agents: { providers: { zai: { extends: "codex", label: "Z.AI" } } } });
     const result = await carryPaseoProviders(b.link, source({ zai: { extends: "claude", label: "Z.AI", models } }));
     expect(result).toEqual({
@@ -327,23 +326,24 @@ describe("Paseo provider carry", () => {
       warnings: ["Paseo provider zai was skipped: the box defines it with a different extends value."],
       changed: false,
     });
-    expect(written(b.commands)).toBeUndefined();
+    expect(b.written()).toBeUndefined();
   });
 
-  test("skips a box entry in the legacy provider format", async () => {
+  jqTest("skips a box entry in the legacy provider format", async () => {
     const b = box({ agents: { providers: { claude: { command: { mode: "replace", argv: ["/opt/claude"] } } } } });
     const result = await carryPaseoProviders(b.link, source({ claude: { models } }));
     expect(result.warnings).toEqual(["Paseo provider claude was skipped: the box entry uses the legacy provider format. Open and save it in Paseo on the box to migrate it."]);
-    expect(written(b.commands)).toBeUndefined();
+    expect(b.written()).toBeUndefined();
   });
 
-  test("is idempotent: an unchanged box gets no write and no reload", async () => {
+  jqTest("is idempotent: an unchanged box gets no write and no reload", async () => {
     const local = source({ zai: { extends: "claude", label: "Z.AI", models } });
     const first = box({ agents: { providers: { zai: { extends: "claude", label: "Old" } } } });
     await carryPaseoProviders(first.link, local);
-    const second = box(written(first.commands));
+    const second = box(first.written());
     expect(await carryPaseoProviders(second.link, local)).toEqual({ carried: ["zai"], warnings: [], changed: false });
-    expect(second.commands).toEqual([readConfig]);
+    expect(second.written()).toBeUndefined();
+    expect(second.log()).toEqual([]);
   });
 
   test("runs no box command without local providers", async () => {
@@ -352,7 +352,7 @@ describe("Paseo provider carry", () => {
     expect(b.commands).toEqual([]);
   });
 
-  test("fails without box values or command output when the box config or a command is bad", async () => {
+  jqTest("fails without box values or command output when the box config or a command is bad", async () => {
     const local = source({ zai: { extends: "claude", label: "Z.AI" } });
     for (const config of ["box-secret", { agents: [] }, { agents: { providers: [] } }]) {
       const error = String(await carryPaseoProviders(box(config).link, local).catch((caught: unknown) => caught));
@@ -427,11 +427,12 @@ test("sync applies provider definitions before it checks provider availability f
       host: { tailscale: "box", sshUser: "user" }, integrations: { paseo: true } }),
     createLink: () => ({ run: async (command) => {
       commands.push(command);
-      if (command.includes("config.json.ferry-tmp")) boxConfig = "written";
+      const merge = command.includes(".paseo/config.json") && command.includes("ferry-tmp");
+      if (merge) boxConfig = "written";
       const status = JSON.stringify({ localDaemon: "running", providers: [{ provider: "zai", available: boxConfig === "written" }] });
       return { ok: true, address: "box", stdout: command.startsWith("printf") ? "/home/user\n"
         : command.includes("paseo daemon status --json") ? status
-        : command === readConfig ? "M" : "", stderr: "" };
+        : merge ? "W\n" : command.includes("$w | to_entries") ? "zai\tabsent\n" : "", stderr: "" };
     } }),
     apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
     acquireLock: () => () => {}, adopt: () => {}, writePlan: () => {}, writeLine: () => {},

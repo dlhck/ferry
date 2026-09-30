@@ -1385,7 +1385,7 @@ describe("sync with the Paseo integration", () => {
             else if (command.startsWith("if [ -e '.config/systemd/user/ferry-paseo.service' ]")) {
               stdout = options.unit === null ? "M" : `F${options.unit ?? unitFile(BUILTIN_BOX_PATH_DIRS)}`;
             }
-            else if (command.includes(".paseo/config.json") && !command.includes(" mv ")) stdout = "M";
+            else if (command.includes(".paseo/config.json")) stdout = "W\n";
             return { ok: true as const, address: "box", stdout, stderr: "" };
           },
         };
@@ -1429,7 +1429,7 @@ describe("sync with the Paseo integration", () => {
       "Warning: Paseo agent profile Pilot was not carried: provider copilot is not available on the box.",
     );
     const write = sync.commands.find((command) => command.includes(".paseo/config.json") && command.includes(" mv "));
-    expect(write).toContain('"name": "Reviewer"');
+    expect(write).toContain('"name":"Reviewer"');
     expect(write).not.toContain("Pilot");
     expect(write).not.toContain("providers");
     expect(sync.commands.at(-2)).toBe("paseo daemon reload");

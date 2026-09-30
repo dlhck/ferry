@@ -4,9 +4,9 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { quoteShell, readCommand, writeCommand } from "../box-settings.ts";
+import { jqReadScript, quoteShell } from "../box-settings.ts";
 import { carriedContentHits } from "../manifest.ts";
-import { CONFIG_FILE, PaseoError } from "./paseo.ts";
+import { CONFIG_FILE, editBoxConfig, jqObjects, noJqWarning, PaseoError } from "./paseo.ts";
 import type { IntegrationLink } from "./types.ts";
 
 /** The fields that Ferry carries. Paseo 0.10.1 reloads them without a restart. */
@@ -223,12 +223,32 @@ export type ProviderCarry = {
   readonly changed: boolean;
 };
 
-/** Put the local portable fields over the box entry. `paseoTools` merges by key. */
-function merge(box: Record<string, unknown>, fields: Readonly<Record<string, unknown>>): Record<string, unknown> {
-  const merged = { ...box, ...fields };
-  if (object(fields.paseoTools) && object(box.paseoTools)) merged.paseoTools = { ...box.paseoTools, ...fields.paseoTools };
-  return merged;
-}
+/** A jq test: the box config has `agents` and `agents.providers` objects, or does not set them. */
+const VALID = jqObjects(".agents", ".agents.providers");
+/**
+ * A jq filter: print `<id>\t<state>` for each provider ID of `$w`, which maps
+ * the ID to the local `extends` value. The state is `absent`, `legacy` for an
+ * entry in the legacy provider format, `differs` for an entry with another
+ * `extends` value, or `same`. It prints `E` for a config that fails `VALID`.
+ * Only the IDs that Ferry sent and these fixed words leave the box.
+ */
+const STATES = [
+  `if ${VALID} then (.agents.providers // {}) as $b | $w | to_entries[] | .key as $id | .value as $x | $b[$id] as $e |`,
+  '"\\($id)\\t" + (if $b | has($id) | not then "absent" elif ($e | type) != "object" then "differs"',
+  'elif ($e.command | type) == "object" then "legacy" elif $e.extends != $x then "differs" else "same" end)',
+  'else "E" end',
+].join(" ");
+/**
+ * A jq filter: put the portable fields of `$u` over each box entry, where
+ * `paseoTools` merges by key, and add each entry of `$n` that the box lacks.
+ * Each box entry keeps its other fields, such as `env`.
+ */
+const MERGE = [
+  "(.agents.providers // {}) as $b | .agents.providers = $b",
+  "+ ($u | with_entries(select(.key as $k | $b | has($k)) | .key as $k | .value as $f | .value = $b[$k] + $f",
+  '+ (if ($f.paseoTools | type) == "object" and ($b[$k].paseoTools | type) == "object" then {paseoTools: ($b[$k].paseoTools + $f.paseoTools)} else {} end)))',
+  "+ ($n | with_entries(select(.key as $k | $b | has($k) | not)))",
+].join(" ");
 
 /**
  * Merge the local providers into `agents.providers` of the box Paseo config.
@@ -237,6 +257,8 @@ function merge(box: Record<string, unknown>, fields: Readonly<Record<string, unk
  * when it needs no local runtime field, and its command executable is on the
  * box PATH. Ferry never removes a box provider. `paseo daemon reload` applies
  * the change without a restart. With no local providers, it runs no box command.
+ * The box compares and merges its entries with jq, and prints back only a
+ * state word for each provider ID. Without jq, the file stays as it is.
  */
 export async function carryPaseoProviders(link: IntegrationLink, source: PaseoProviders): Promise<ProviderCarry> {
   const warnings = [...source.warnings];
@@ -248,34 +270,29 @@ export async function carryPaseoProviders(link: IntegrationLink, source: PaseoPr
     if (!result.ok) throw new PaseoError(what);
     return result.stdout;
   };
-  const current = await run(readCommand(CONFIG_FILE), `Ferry could not read ~/${CONFIG_FILE} on the box`);
-  let config: unknown = {};
-  if (current.startsWith("F") && current.slice(1).trim() !== "") {
-    try { config = JSON.parse(current.slice(1)); } catch { config = null; }
-  }
-  const agents = object(config) ? config.agents : undefined;
-  const boxProviders = object(agents) ? agents.providers : undefined;
-  if (!object(config) || (agents !== undefined && !object(agents)) || (boxProviders !== undefined && !object(boxProviders))) {
-    throw new PaseoError(`~/${CONFIG_FILE} on the box is not a JSON object with agents and agents.providers objects`);
-  }
-  const before = (boxProviders ?? {}) as Record<string, unknown>;
-  const next: Record<string, unknown> = { ...before };
+  const invalid = new PaseoError(`~/${CONFIG_FILE} on the box is not a JSON object with agents and agents.providers objects`);
+  const want = Object.fromEntries(source.providers.map((provider) => [provider.id, provider.fields.extends ?? null]));
+  const lines = (await run(
+    `sh -c ${quoteShell(jqReadScript(CONFIG_FILE, `--argjson w ${quoteShell(JSON.stringify(want))}`, STATES))}`,
+    `Ferry could not read the Paseo provider IDs in ~/${CONFIG_FILE} on the box`,
+  )).split("\n");
+  if (lines.includes("J")) return { carried: [], warnings: [...warnings, noJqWarning("the Paseo providers")], changed: false };
+  if (lines.includes("E")) throw invalid;
+  const states = new Map(lines.map((line) => line.split("\t") as [string, string]));
+
+  const updates: Record<string, unknown> = {};
+  const creates: Record<string, unknown> = {};
   const verify: PaseoProvider[] = [];
-  const kept = new Set<string>();
   for (const provider of source.providers) {
-    // An own-key read, so a provider named `constructor` does not find Object.prototype.constructor.
-    const existing = Object.hasOwn(before, provider.id) ? before[provider.id] : undefined;
-    if (existing !== undefined) {
-      if (object(existing) && object(existing.command)) {
-        warnings.push(`Paseo provider ${provider.id} was skipped: the box entry uses the legacy provider format. Open and save it in Paseo on the box to migrate it.`);
-        continue;
-      }
-      if (!object(existing) || existing.extends !== provider.fields.extends) {
-        warnings.push(`Paseo provider ${provider.id} was skipped: the box defines it with a different extends value.`);
-        continue;
-      }
-      next[provider.id] = merge(existing, provider.fields);
-      kept.add(provider.id);
+    const state = states.get(provider.id);
+    if (state === "legacy") {
+      warnings.push(`Paseo provider ${provider.id} was skipped: the box entry uses the legacy provider format. Open and save it in Paseo on the box to migrate it.`);
+    } else if (state === "differs") {
+      warnings.push(`Paseo provider ${provider.id} was skipped: the box defines it with a different extends value.`);
+    } else if (state === "same") {
+      updates[provider.id] = provider.fields;
+    } else if (state !== "absent") {
+      throw invalid;
     } else if (provider.createBlocker !== null) {
       warnings.push(
         `Paseo provider ${provider.id} was not created on the box: ${provider.createBlocker}. Define it on the box first, then Ferry syncs its portable fields.`,
@@ -283,8 +300,7 @@ export async function carryPaseoProviders(link: IntegrationLink, source: PaseoPr
     } else if (provider.command !== null) {
       verify.push(provider);
     } else {
-      next[provider.id] = { ...provider.fields };
-      kept.add(provider.id);
+      creates[provider.id] = provider.fields;
     }
   }
   if (verify.length > 0) {
@@ -296,8 +312,7 @@ export async function carryPaseoProviders(link: IntegrationLink, source: PaseoPr
     const onPath = new Set(found.split("\n").filter((line) => line.startsWith("ok ")).map((line) => line.slice(3)));
     for (const provider of verify) {
       if (onPath.has(provider.command![0]!)) {
-        next[provider.id] = { ...provider.fields, command: provider.command };
-        kept.add(provider.id);
+        creates[provider.id] = { ...provider.fields, command: provider.command };
       } else {
         warnings.push(
           `Paseo provider ${provider.id} was not created on the box: its command executable is not on the box PATH. Install it on the box, or define the provider on the box first.`,
@@ -305,10 +320,15 @@ export async function carryPaseoProviders(link: IntegrationLink, source: PaseoPr
       }
     }
   }
-  const carried = source.providers.map((provider) => provider.id).filter((id) => kept.has(id));
-  if (JSON.stringify(next) === JSON.stringify(before)) return { carried, warnings, changed: false };
-  const merged = { ...config, agents: { ...(agents as Record<string, unknown> | undefined), providers: next } };
-  await run(writeCommand(CONFIG_FILE, `${JSON.stringify(merged, null, 2)}\n`), `Ferry could not write the Paseo providers to ~/${CONFIG_FILE} on the box`);
-  await run("paseo daemon reload", "paseo daemon reload failed on the box after Ferry wrote the Paseo providers");
-  return { carried, warnings, changed: true };
+  const carried = source.providers.map((provider) => provider.id).filter((id) => Object.hasOwn(updates, id) || Object.hasOwn(creates, id));
+  if (carried.length === 0) return { carried, warnings, changed: false };
+  const edit = await editBoxConfig(run, {
+    args: `--argjson u ${quoteShell(JSON.stringify(updates))} --argjson n ${quoteShell(JSON.stringify(creates))}`,
+    valid: VALID,
+    filter: MERGE,
+    what: "the Paseo providers",
+  });
+  if (edit === "invalid") throw invalid;
+  if (edit === "no-jq") return { carried: [], warnings: [...warnings, noJqWarning("the Paseo providers")], changed: false };
+  return { carried, warnings, changed: edit === "written" };
 }

@@ -2,9 +2,9 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
-import { quoteShell, readCommand, writeCommand } from "../box-settings.ts";
+import { quoteShell } from "../box-settings.ts";
 import { carriedContentHits } from "../manifest.ts";
-import { CONFIG_FILE, PaseoError } from "./paseo.ts";
+import { CONFIG_FILE, editBoxConfig, noJqWarning, PaseoError } from "./paseo.ts";
 import type { IntegrationLink } from "./types.ts";
 
 export type PaseoPlugin = {
@@ -188,23 +188,22 @@ export function readPaseoPlugins(home: string): PaseoPlugins {
 /**
  * Set the global `pluginsEnabled` switch in the box config and keep all other keys.
  * Paseo has no CLI command for the switch. `paseo daemon reload` applies it without a restart.
+ * The box edits the file with jq. Without jq, the file stays as it is, and the result is a warning.
  */
-async function enableGlobalSwitch(link: IntegrationLink): Promise<void> {
+async function enableGlobalSwitch(link: IntegrationLink): Promise<readonly string[]> {
   const run = async (command: string, what: string): Promise<string> => {
     const result = await link.run(command, { timeoutMs: 30_000 });
-    if (!result.ok) throw new PaseoError(`${what} on the box`);
+    if (!result.ok) throw new PaseoError(what);
     return result.stdout;
   };
-  const current = await run(readCommand(CONFIG_FILE), `Ferry could not read ~/${CONFIG_FILE}`);
-  let config: unknown = {};
-  if (current.startsWith("F") && current.slice(1).trim() !== "") {
-    try { config = JSON.parse(current.slice(1)); } catch { config = null; }
-  }
-  if (!object(config)) throw new PaseoError(`~/${CONFIG_FILE} on the box is not a JSON object`);
-  if (config.pluginsEnabled === true) return;
-  const text = `${JSON.stringify({ ...config, pluginsEnabled: true }, null, 2)}\n`;
-  await run(writeCommand(CONFIG_FILE, text), `Ferry could not write ~/${CONFIG_FILE}`);
-  await run("paseo daemon reload", "paseo daemon reload failed");
+  const edit = await editBoxConfig(run, {
+    args: "",
+    valid: 'type == "object"',
+    filter: ".pluginsEnabled = true",
+    what: "the Paseo plugin switch",
+  });
+  if (edit === "invalid") throw new PaseoError(`~/${CONFIG_FILE} on the box is not a JSON object`);
+  return edit === "no-jq" ? [noJqWarning("the Paseo plugin switch")] : [];
 }
 
 /**
@@ -259,6 +258,6 @@ export async function carryPaseoPlugins(link: IntegrationLink, source: PaseoPlug
     }
     if (plugin.enabled) reconciled = true;
   }
-  if (reconciled) await enableGlobalSwitch(link);
+  if (reconciled) warnings.push(...await enableGlobalSwitch(link));
   return warnings;
 }
