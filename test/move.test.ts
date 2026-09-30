@@ -1789,6 +1789,27 @@ describe("ferry move sessions", () => {
     expect(allowed.lines.join("\n")).not.toContain(password);
   });
 
+  test("skips a session with a token that is written with a JSON escape", async () => {
+    const w = world();
+    const app = project(w, w.operator);
+    const source = claudeSession(w.operator, app, "clean");
+    const escaped = GITHUB_TOKEN.replace("_", "\\u005f");
+    write(join(source, "escaped.jsonl"), `{"type":"user","sessionId":"escaped","message":"use ${escaped}"}\n`);
+    const warnings: string[] = [];
+
+    const result = await move(w, { path: "Developer/app" }, { warn: (line) => warnings.push(line) });
+
+    expect(result.error).toBeNull();
+    const target = join(w.box, ".claude/projects", projectDirectoryName(join(w.box, "Developer/app")));
+    expect(existsSync(join(target, "clean.jsonl"))).toBe(true);
+    expect(existsSync(join(target, "escaped.jsonl"))).toBe(false);
+    const path = `~/${join(source, "escaped.jsonl").slice(w.operator.length + 1)}`;
+    expect(warnings).toEqual([`WARNING: Ferry skips the session of ${path} (GitHub token in file content). Add --allow-secrets to carry it.`]);
+    expect(result.value?.sessions.refused).toEqual([{ path, code: "github-token", reason: "GitHub token in file content" }]);
+    const sent = Buffer.concat(w.commands.map(({ options }) => Buffer.from(options.input ?? [])));
+    expect(sent.includes(escaped) || sent.includes(GITHUB_TOKEN)).toBe(false);
+  });
+
   test("passes the carried sessions to an enabled integration, and calls none without one", async () => {
     const calls: { path: string; sessions: readonly MovedSession[] }[] = [];
     const fake = {
