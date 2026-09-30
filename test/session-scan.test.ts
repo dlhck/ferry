@@ -179,6 +179,40 @@ describe("sessionContentHits", () => {
     }
   });
 
+  test("in the env form, KEY=value with an upper-case key and no space, a bare value of only letters is a literal", () => {
+    const word = "sword" + "fish";
+    const hits: [string, string][] = [
+      [`PASSWORD=${word}`, "PASSWORD"],
+      [`export DB_PASSWORD=${word}`, "DB_PASSWORD"],
+      [`PORT=3000\nAPI_KEY=${word}\n`, "API_KEY"],
+      [`cd app && PGPASSWORD=${word} psql`, "PGPASSWORD"],
+    ];
+    const passes = [
+      "password=password",
+      `password=${word}`,
+      "connect(password=password)",
+      `password = ${word}`,
+      `PASSWORD = ${word}`,
+      `PASSWORD: ${word}`,
+      "PASSWORD=$OTHER",
+      "PASSWORD=${OTHER}",
+      "PASSWORD=",
+      "PASSWORD= ",
+      "API_KEY=xxxx",
+      "USE_TOKEN=true",
+      "USE_TOKEN=False",
+      "DB_PASSWORD=null",
+      "DB_PASSWORD=None",
+      "DB_PASSWORD=undefined",
+      "MAX_TOKENS=4096",
+    ];
+
+    for (const [text, key] of hits) {
+      expect([text, reasons(jsonl(toolResult(text)))]).toEqual([text, [`key ${key} holds a password or secret`]]);
+    }
+    for (const text of passes) expect([text, reasons(jsonl(toolResult(text)))]).toEqual([text, []]);
+  });
+
   test("a vendor token fires in any form, because the token patterns do not change", () => {
     const token = "gh" + "p_" + "c".repeat(36);
     const bytes = jsonl(toolResult(`token = get_token("${token}")`));

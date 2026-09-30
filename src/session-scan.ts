@@ -17,7 +17,8 @@
  *
  * The scan has limits. It finds a secret only next to a secret key or flag.
  * A secret in free prose, such as "the password is ...", passes. A bare value
- * of only letters, such as `PASSWORD=swordfish`, also passes.
+ * of only letters, such as `password: swordfish`, also passes, unless the key
+ * is in the env form, such as `PASSWORD=swordfish`.
  */
 
 import { CONFIG_LINE, isSecretKey, isSecretValue, secretKeyHits, type ForbiddenHit } from "./manifest.ts";
@@ -31,6 +32,10 @@ const BARE_WORD = /^[\w+/=.~@%:!#^*-]+$/;
 /** An identifier, a keyword, a type name, or a member access such as `config.password`. It has no digit. */
 const IDENTIFIER = /^[A-Za-z_]+(?:\.[A-Za-z_]+)*$/;
 const NUMBER = /^[\d._]+$/;
+/** The key of a `.env` line or of an `export` line: upper case, with `=` and no space after it. */
+const ENV_KEY = /^[A-Z][A-Z0-9_]*$/;
+/** Words that are not a secret as the value of an env key. */
+const ENV_KEYWORDS = new Set(["true", "false", "null", "none", "undefined"]);
 /** A variable reference, as `$TOKEN`, or text with `${...}`, `$(...)`, or `{{...}}`. */
 const REFERENCE = /^\$\w+$|\$\{|\$\(|\{\{/;
 
@@ -82,7 +87,7 @@ function commandKeys(line: string): string[] {
   const words = line.split(/\s+/).filter((word) => word !== "");
   return words.flatMap((word, index) => {
     const pair = word.match(/^-{0,2}([\w-]+)=(.*)$/);
-    if (pair) return isSecretKey(pair[1]!) && isLiteral(pair[2]!) ? [pair[1]!] : [];
+    if (pair) return isSecretKey(pair[1]!) && isLiteral(pair[2]!, ENV_KEY.test(pair[1]!)) ? [pair[1]!] : [];
     const flag = word.match(/^--?([\w-]+)$/);
     const next = words[index + 1];
     if (!flag || !isSecretKey(flag[1]!) || next === undefined || next.startsWith("-")) return [];
@@ -96,8 +101,11 @@ function commandKeys(line: string): string[] {
  * placeholder. A type, a function call, a member access, a keyword, and a
  * variable reference are not literals. `hunter2` is a literal, and `string`
  * is not, so a bare password of only letters passes.
+ *
+ * With `env`, the key is in the env form, where a value is not code. A bare
+ * word of only letters is then a literal too, but not a word of `ENV_KEYWORDS`.
  */
-function isLiteral(text: string): boolean {
+function isLiteral(text: string, env = false): boolean {
   const value = text.trim();
   const quote = value[0];
   if (quote === '"' || quote === "'") {
@@ -106,5 +114,6 @@ function isLiteral(text: string): boolean {
     return isSecretValue(body) && !REFERENCE.test(body);
   }
   const word = value.split(/\s/, 1)[0]!.replace(/[,;]+$/, "");
-  return BARE_WORD.test(word) && !IDENTIFIER.test(word) && !NUMBER.test(word) && isSecretValue(word);
+  const identifier = env ? ENV_KEYWORDS.has(word.toLowerCase()) : IDENTIFIER.test(word);
+  return BARE_WORD.test(word) && !identifier && !NUMBER.test(word) && isSecretValue(word);
 }
