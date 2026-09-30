@@ -1,0 +1,23 @@
+# The pages of the docs sidebar, in order. `url` is the page URL without the base path.
+- title: Getting started
+  url: /getting-started.html
+- title: Commands
+  url: /commands.html
+- title: What Ferry carries
+  url: /what-ferry-carries.html
+- title: Security model
+  url: /security-model.html
+- title: Moving a project
+  url: /moving-a-project.html
+- title: Boxes
+  url: /boxes.html
+- title: Integrations
+  url: /integrations.html
+- title: Paseo sync
+  url: /paseo-sync.html
+- title: Status and the menu bar
+  url: /status.html
+- title: Linux status bar
+  url: /linux-status-bar.html
+- title: Troubleshooting
+  url: /troubleshooting.html

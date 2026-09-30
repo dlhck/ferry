@@ -76,7 +76,7 @@ Use `--host <tailscale host> --ssh-user <user>` instead of `--ssh-destination` f
 | `ferry integrations` | List, enable, or disable the Paseo and Sherlock integrations. The list shows the part of each integration: `box` for a box service, `operator` for commands and status checks on this machine. |
 | `ferry uninstall` | Remove Ferry from this machine and restore the paths that `init` changed. |
 
-`ferry <command> --help` has the options, the config formats, and the details of each command.
+`ferry <command> --help` has the options, the config formats, and the details of each command. The [documentation](https://dlhck.github.io/ferry/getting-started.html) has a page for each topic.
 
 Add `--json` to any command for scripts and agents: stdout then has only JSON, and Ferry asks nothing. `ferry --help` describes the output.
 
