@@ -23,7 +23,7 @@ Ferry copies the agent setup of the operator machine to a remote Linux box. The 
 ## Find out where you are
 
 - The operator machine has `~/.ferry/config.toml` and the `ferry` command.
-- The box has `~/.ferry/store` and `~/.ferry/box.json`, but no `~/.ferry/config.toml`. On the box, `ferry` is a box install: only `ferry expose`, `ferry whoami`, `ferry --version`, and the help run. The operator machine also runs the hidden `ferry scan` there. Do not run it yourself. A development build of Ferry ignores `~/.ferry/box.json`.
+- The box has `~/.ferry/store` and `~/.ferry/box.json`, but no `~/.ferry/config.toml`. On the box, `ferry` is a box install: only `ferry expose`, `ferry whoami`, `ferry --version`, and the help run. The operator machine also runs the hidden `ferry scan` and `ferry redact` there. Do not run them yourself. A development build of Ferry ignores `~/.ferry/box.json`.
 - On the box, the instruction files start with a header that names the box. On the operator machine, they have no header.
 - When you are not sure, run `ferry whoami --json`. It prints `role` (`operator` or `box`), `box`, the box name, `instructions`, and `managedPaths`. On a box, `instructions.sources` lists the merged parts of the instruction file in order.
 
@@ -181,6 +181,7 @@ Do not run these commands yourself. When `auth.loginRequired` or `mcpLogins.logi
 2. Fix each `Problem:` line before the real move. Ferry refuses a move with unpushed commits, uncommitted changes to tracked files, or an existing destination path. Push or commit only if the operator agrees.
 3. A `Refuse:` file stays on the source machine. Do not copy it yourself. The operator decides what to do with it.
    - The deny rules run on the source machine. With `--from-box`, the Ferry on the box runs them, and Ferry copies only the files that pass. `--dry-run` copies no file.
+   - A `Refuse: <directory> (a file or directory in <directory> has a token in its name)` line means that a name there has the form of a token. Ferry does not print the name. In the output of a move from a box, `[token]` stands for such a text in a file name, a branch name, or a commit subject. Do not try to find the name.
    - `Ferry is not installed on <box>` or `The Ferry on <box> is too old to check the files there` means that the box has no release of Ferry with `ferry scan`. Tell the operator to run `ferry install` or `ferry update`. A development build of Ferry puts no Ferry on a box. Do not copy the files in another way.
    - `The Ferry on <box> has older deny rules than this machine` means that the check of the box can pass a file that the operator machine refuses. Ferry copied no file. Tell the operator to run `ferry update`. The same errors apply to `ferry adopt --from-box`.
    - `<file> changed on <box> after the check` means that a file changed between the check and the copy. Run the move again. A `WARNING: Ferry skips the session of <file> (a file changed after the check)` line names a session that stays on the source for the same reason, for example a session that is still in use.
@@ -360,7 +361,7 @@ With `--json`, Ferry never asks:
 | `tools` | `{ tools: [{ id, name, kind, install, policy: { policy, default }, boxes: [{ name, policy, default }], operatorVersion }] }` |
 | `skills add` | `{ argv }`, the `npx skills add` command that ran. |
 | `adopt` | `{ box, name, source, destination, replaces, files: [{ path, executable }], skipped: [{ path, code, reason }], diff, adopted, boxBackup }`, or `null` when the operator says no. `diff` is `null` for a new skill. `adopted` is `false` when the copy on the operator machine is already the same. `boxBackup` is `null` when Ferry could not move the box copy, and `warnings` then says so. |
-| `move` | `{ path, source, destination, dryRun, git: { url, branch } or null, carry: [{ path, sha256, secrets }], refused: [{ path, code, reason }], skipped, notes, trash, sessions: { carry: [{ harness, id, files, secrets }], refused: [{ path, code, reason }] } }`. A memory file is a session with `id` null. |
+| `move` | `{ path, source, destination, dryRun, git: { url, branch } or null, carry: [{ path, sha256, secrets }] (in a dry run from a box, `sha256` is null for a file with secrets, and `id` is null for a Codex session with secrets), refused: [{ path, code, reason }], skipped, notes, trash, sessions: { carry: [{ harness, id, files, secrets }], refused: [{ path, code, reason }] } }`. A memory file is a session with `id` null. |
 | `tunnel --list` | `{ box, listeners: [{ port, address, process }] }` |
 | `integrations` | `{ boxes: [{ name, destination, integrations: [{ id, description, enabled, localVersion, localSource, connectSteps }] }] }`. `name` is `null` for a `[host]` config. |
 | `integrations enable`, `integrations disable` | `{ integration, action, dryRun, plan, output, enabled, connectSteps }`. `enabled` is the new config value, or `null` for a dry run. |

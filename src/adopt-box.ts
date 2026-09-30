@@ -36,7 +36,7 @@ import { resolveTargetBox } from "./boxes.ts";
 import { ConfigMissingError, readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
 import { FerryError } from "./errors.ts";
 import { Link, type LinkOptions } from "./link.ts";
-import { CODEX_SYSTEM_SKILLS, readSeed } from "./manifest.ts";
+import { CODEX_SYSTEM_SKILLS, readSeed, TOKEN_ERE } from "./manifest.ts";
 import { noProgress, step, type Progress } from "./progress.ts";
 import { BUILTIN_HARNESSES } from "./registry/builtin.ts";
 import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
@@ -54,8 +54,12 @@ type BoxLink = Pick<Link, "run">;
 const LIST_WORKER = String.raw`
 hex() { LC_ALL=C od -An -tx1 | tr -d ' \n'; }
 index=$1
-shift
+tokens=$2
+shift 2
 for entry; do
+  # A name or a link target with the form of a token does not leave the box.
+  if printf '%s
+' "$(basename -- "$entry")" "$(readlink "$entry" 2>/dev/null)" | grep -Eq -- "$tokens"; then continue; fi
   if [ -L "$entry" ]; then kind=L; target=$(printf '%s' "$(readlink "$entry")" | hex); else kind=O; target=; fi
   if [ -d "$entry" ]; then directory=1; else directory=0; fi
   printf 'E\t%s\t%s\t%s\t%s\t%s\n' "$index" "$(printf '%s' "$(basename -- "$entry")" | hex)" "$directory" "$kind" "$target"
@@ -65,14 +69,15 @@ done
 const LIST_SCRIPT = String.raw`
 set -f
 worker=$1
-shift
+tokens=$2
+shift 2
 hex() { LC_ALL=C od -An -tx1 | tr -d ' \n'; }
 printf 'H\t%s\n' "$(printf '%s' "$HOME" | hex)"
 printf 'T\t%s\n' "$(git -C "$HOME/.ferry/store" ls-tree -z -d --name-only HEAD skills/ 2>/dev/null | hex)"
 index=0
 for root in "$@"; do
   if [ -d "$HOME/$root" ]; then
-    find "$HOME/$root"/. ! -name . -prune -exec sh -c "$worker" sh "$index" {} + || exit 1
+    find "$HOME/$root"/. ! -name . -prune -exec sh -c "$worker" sh "$index" "$tokens" {} + || exit 1
   fi
   index=$((index + 1))
 done
@@ -81,11 +86,12 @@ done
 /**
  * List the skills on the box that its snapshot checkout does not track. It
  * reads each skill root of `harnesses` and the skills of the box checkout.
- * It changes nothing.
+ * It changes nothing. It leaves out a directory whose name, or whose link
+ * target, has the form of a token, so that the name stays on the box.
  */
 export async function listBoxSkills(link: BoxLink, harnesses: readonly HarnessDescriptor[]): Promise<BoxSkill[]> {
   const roots = [...new Set(harnesses.flatMap((harness) => (harness.skillRoot ? [harness.skillRoot] : []))), STORE_SKILLS];
-  const result = await link.run(shellCommand(LIST_SCRIPT, [LIST_WORKER, ...roots]));
+  const result = await link.run(shellCommand(LIST_SCRIPT, [LIST_WORKER, TOKEN_ERE, ...roots]));
   if (!result.ok) throw new Error(`${result.error.origin}/${result.error.code}: ${result.error.message}`);
 
   let home: string | null = null;

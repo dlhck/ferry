@@ -9,6 +9,12 @@
  * operator machine compares the hash of each file that arrives with the hash
  * of the scan, so the check applies to the bytes that it gets.
  *
+ * A hash of a small file is a test for its content, so the result has a hash
+ * only for a file that leaves the machine: a file that passes, and with
+ * `confirmed` a file with secrets that the operator agreed to carry. The same
+ * applies to the session id from the first line of a session. A name, a key,
+ * or an id with the form of a token is not in the result: see `holdsToken`.
+ *
  * Each result has `rules`, the `DENY_RULES_VERSION` of the machine that ran
  * the scan. The operator machine refuses a result with a lower number than its
  * own, because older rules can pass a file that it refuses.
@@ -20,16 +26,27 @@ import { isAbsolute, join, relative } from "node:path";
 import { BOX_MARKER } from "./box-ferry.ts";
 import { FerryError } from "./errors.ts";
 import type { Link } from "./link.ts";
-import { carriedContentHits, carriedNameHit, DENY_RULES_VERSION, scanSkill } from "./manifest.ts";
+import { carriedContentHits, carriedNameHit, DENY_RULES_VERSION, holdsToken, scanSkill, TOKEN_MARK } from "./manifest.ts";
 import { sessionContentHits } from "./session-scan.ts";
 
 export type ScanHit = { readonly path: string; readonly code: string; readonly reason: string };
 
-/** Each `root` and each path of `sessions` is relative to the home. The paths of `files` are relative to `root`. */
+/**
+ * Each `root` and each path of `sessions` is relative to the home. The paths
+ * of `files` are relative to `root`. `confirmed` is true after the operator
+ * agreed to carry the files with secrets. Only then the result has their
+ * hashes and session ids.
+ */
 export type ScanRequest =
   | { readonly kind: "skill"; readonly root: string }
-  | { readonly kind: "files"; readonly root: string; readonly paths: readonly string[]; readonly allowSecrets: boolean }
-  | { readonly kind: "sessions"; readonly paths: readonly string[]; readonly project: string };
+  | {
+      readonly kind: "files";
+      readonly root: string;
+      readonly paths: readonly string[];
+      readonly allowSecrets: boolean;
+      readonly confirmed: boolean;
+    }
+  | { readonly kind: "sessions"; readonly paths: readonly string[]; readonly project: string; readonly confirmed: boolean };
 
 /** The files of a skill directory that pass the rules of a publish. The paths are relative to the directory. */
 export type SkillScan = {
@@ -38,17 +55,23 @@ export type SkillScan = {
   readonly skipped: readonly ScanHit[];
 };
 
-/** `secrets` holds the kinds of secret in a carried environment file, never the values. */
+/**
+ * `secrets` holds the kinds of secret in a carried environment file, never the
+ * values. `sha256` of a file with secrets is null in a scan that is not confirmed.
+ */
 export type FilesScan = {
-  readonly carry: readonly { readonly path: string; readonly sha256: string; readonly secrets: readonly string[] }[];
+  readonly carry: readonly { readonly path: string; readonly sha256: string | null; readonly secrets: readonly string[] }[];
   readonly refused: readonly ScanHit[];
 };
 
 export type SessionsScan = {
   readonly files: readonly {
     readonly path: string;
-    readonly sha256: string;
-    /** The session id in the first line, when that line records the project of the request. */
+    /** True when the first line records the project of the request and a session id. */
+    readonly session: boolean;
+    /** Null for a file with a hit, unless the scan is confirmed and the file is not blocked. */
+    readonly sha256: string | null;
+    /** The session id in the first line of a session. Null when `sha256` is null. */
     readonly id: string | null;
     readonly hits: readonly ScanHit[];
     /** True when a hit refuses the file also with `--allow-secrets`. */
@@ -62,8 +85,8 @@ export type ScanOf<Request extends ScanRequest> = Scans[Request["kind"]] & { rea
 
 /** Content rules that refuse a file also with `allowSecrets`. */
 const ALWAYS_REFUSED = new Set(["private-key", "executable"]);
-/** A session id that the scan returns. Other text in its place is not an id. */
-const SESSION_ID = /^[\w.-]{1,128}$/;
+/** A session id that the scan returns: a UUID, as Codex writes it. Other text in its place is not an id. */
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SCAN_TIMEOUT_MS = 15 * 60_000;
 /** Prints `MISSING` when the box has no box install of Ferry. The exit code of Ferry does not fail the command. */
 const BOX_SCAN_COMMAND = `if [ -f "$HOME/${BOX_MARKER}" ] && [ -x "$HOME/.local/bin/ferry" ]; then "$HOME/.local/bin/ferry" --json scan; else echo MISSING; fi; true`;
@@ -73,8 +96,8 @@ export function runScan<Request extends ScanRequest>(request: Request, home: str
 export function runScan(request: ScanRequest, home: string): ScanOf<ScanRequest> {
   const rules = DENY_RULES_VERSION;
   if (request.kind === "skill") return { rules, ...scanSkillFiles(join(home, request.root)) };
-  if (request.kind === "files") return { rules, ...scanFiles(join(home, request.root), request.paths, request.allowSecrets) };
-  return { rules, ...scanSessionFiles(home, request.paths, request.project) };
+  if (request.kind === "files") return { rules, ...scanFiles(join(home, request.root), request) };
+  return { rules, ...scanSessionFiles(home, request) };
 }
 
 /** The request in the JSON text `text`. */
@@ -88,10 +111,11 @@ export function parseScanRequest(text: string): ScanRequest {
   }
   if (typeof value !== "object" || value === null) throw invalid;
   const { kind, root, paths, allowSecrets, project } = value as Record<string, unknown>;
+  const confirmed = (value as Record<string, unknown>).confirmed === true;
   const list = Array.isArray(paths) && paths.every((path): path is string => typeof path === "string") ? paths : null;
   if (kind === "skill" && typeof root === "string") return { kind, root };
-  if (kind === "files" && typeof root === "string" && list) return { kind, root, paths: list, allowSecrets: allowSecrets === true };
-  if (kind === "sessions" && list && typeof project === "string") return { kind, paths: list, project };
+  if (kind === "files" && typeof root === "string" && list) return { kind, root, paths: list, allowSecrets: allowSecrets === true, confirmed };
+  if (kind === "sessions" && list && typeof project === "string") return { kind, paths: list, project, confirmed };
   throw invalid;
 }
 
@@ -133,7 +157,10 @@ export async function scanOnBox<Request extends ScanRequest>(
     );
   }
   if (envelope.ok === false && envelope.error && envelope.error.code !== "usage") {
-    throw new FerryError("box-command-failed", `Ferry could not check the files on ${label}: ${String(envelope.error.message)}`);
+    // The text is from the box and can name a file there.
+    const text = String(envelope.error.message);
+    const shown = holdsToken(text) ? ". Ferry does not show the error text of the box, because it has the form of a token." : `: ${text}`;
+    throw new FerryError("box-command-failed", `Ferry could not check the files on ${label}${shown}`);
   }
   throw new FerryError("refused", `The Ferry on ${label} is too old to check the files there. ${why}`, {
     hint: `Run ferry update. ${build}`,
@@ -154,14 +181,39 @@ export function changedFiles(stage: string, files: readonly { readonly path: str
     .map((file) => file.path);
 }
 
+/**
+ * The hit for a path with a token in a name, or with `TOKEN_MARK` from the
+ * listing of a box in the place of one. It names the directories before that
+ * name, never the name. Null for a path that Ferry prints.
+ */
+export function tokenNameHit(path: string): ScanHit | null {
+  const marked = (name: string) => holdsToken(name) || name.includes(TOKEN_MARK);
+  if (!marked(path)) return null;
+  const names = path.split("/");
+  const parent = names.slice(0, Math.max(0, names.findIndex(marked))).join("/") || ".";
+  return { path: parent, code: "token-name", reason: `a file or directory in ${parent} has a token in its name` };
+}
+
 function scanSkillFiles(directory: string): SkillScan {
   const scan = scanSkill(directory);
-  const hit = (found: ScanHit): ScanHit => ({ path: relative(directory, found.path), code: found.code, reason: found.reason });
-  return {
-    files: scan.files.map((file) => ({ path: file.path, sha256: sha256(file.bytes), executable: file.executable })),
-    forbidden: scan.forbidden.map(hit),
-    skipped: scan.leftovers.map(hit),
+  const named = new Map<string, ScanHit>();
+  /** The path relative to the skill, or null after a hit for a name with a token. */
+  const shown = (path: string): string | null => {
+    const hit = tokenNameHit(path);
+    if (hit) named.set(hit.path, hit);
+    return hit ? null : path;
   };
+  const hits = (found: readonly ScanHit[]) =>
+    found.flatMap((hit) => {
+      const path = shown(relative(directory, hit.path));
+      return path === null ? [] : [{ path, code: hit.code, reason: hit.reason }];
+    });
+  const files = scan.files.flatMap((file) =>
+    shown(file.path) === null ? [] : [{ path: file.path, sha256: sha256(file.bytes), executable: file.executable }],
+  );
+  const forbidden = hits(scan.forbidden);
+  const skipped = hits(scan.leftovers);
+  return { files, forbidden: [...forbidden, ...named.values()], skipped };
 }
 
 /**
@@ -169,10 +221,15 @@ function scanSkillFiles(directory: string): SkillScan {
  * With `allowSecrets`, an environment file that fails only the token or
  * secret-field rules is carried, and `secrets` names the kinds of secret.
  */
-function scanFiles(root: string, paths: readonly string[], allowSecrets: boolean): FilesScan {
+function scanFiles(root: string, request: Extract<ScanRequest, { kind: "files" }>): FilesScan {
   const carry: FilesScan["carry"][number][] = [];
   const refused: ScanHit[] = [];
-  for (const path of paths) {
+  for (const path of request.paths) {
+    const named = tokenNameHit(path);
+    if (named) {
+      refused.push(named);
+      continue;
+    }
     const full = join(root, path);
     let stat;
     try {
@@ -192,12 +249,12 @@ function scanFiles(root: string, paths: readonly string[], allowSecrets: boolean
     const bytes = readFileSync(full);
     const hits = carriedContentHits(path, bytes);
     if (hits.length === 0) carry.push({ path, sha256: sha256(bytes), secrets: [] });
-    else if (!allowSecrets || carriedNameHit(path)?.code !== "dotenv") refused.push(...hits);
+    else if (!request.allowSecrets || carriedNameHit(path)?.code !== "dotenv") refused.push(...hits);
     else {
       const all = [...hits, ...envLineHits(path, bytes)];
       const kept = all.find((hit) => ALWAYS_REFUSED.has(hit.code));
       if (kept) refused.push(kept);
-      else carry.push({ path, sha256: sha256(bytes), secrets: [...new Set(all.map((hit) => hit.reason))] });
+      else carry.push({ path, sha256: request.confirmed ? sha256(bytes) : null, secrets: [...new Set(all.map((hit) => hit.reason))] });
     }
   }
   return { carry, refused };
@@ -215,21 +272,27 @@ function envLineHits(path: string, bytes: Uint8Array): ScanHit[] {
     .flatMap((line) => carriedContentHits(path, Buffer.from(line)));
 }
 
-/** The hits of the name rules, the content rules, and the session scan for each session or memory file of `paths`. */
-function scanSessionFiles(home: string, paths: readonly string[], project: string): SessionsScan {
-  const files = paths.map((path) => {
+/** The hits of the name rules, the content rules, and the session scan for each session or memory file of the request. */
+function scanSessionFiles(home: string, request: Extract<ScanRequest, { kind: "sessions" }>): SessionsScan {
+  const files = request.paths.map((path) => {
+    const denied = (hit: ScanHit, session: boolean) => ({ path, session, sha256: null, id: null, hits: [hit], blocked: true });
+    // The list of the session store names the file, so it counts as a session of the project.
+    const named = tokenNameHit(path);
+    if (named) return denied(named, true);
     let bytes: Buffer;
     try {
       bytes = readFileSync(join(home, path));
     } catch {
-      const hits = [{ path, code: "missing", reason: "file changed during the preflight" }];
-      return { path, sha256: "", id: null, hits, blocked: true };
+      return denied({ path, code: "missing", reason: "file changed during the preflight" }, false);
     }
     const nameHit = carriedNameHit(path);
     const hits = nameHit ? [nameHit] : [...carriedContentHits(path, bytes), ...sessionContentHits(path, bytes)];
+    const id = sessionId(bytes, request.project);
     // A name rule, a private key, or an executable refuses the file also with allowSecrets.
     const blocked = nameHit !== null || hits.some((hit) => ALWAYS_REFUSED.has(hit.code));
-    return { path, sha256: sha256(bytes), id: sessionId(bytes, project), hits, blocked };
+    // Only a file that leaves the machine gives its hash and its id.
+    const leaves = hits.length === 0 || (request.confirmed && !blocked);
+    return { path, session: id !== null, sha256: leaves ? sha256(bytes) : null, id: leaves ? id : null, hits, blocked };
   });
   return { files };
 }
