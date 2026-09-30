@@ -76,7 +76,7 @@ A skipped entry is expected. The sync continues.
 | Line | Meaning | What to do |
 | --- | --- | --- |
 | `Skipped hook: <reason>: <location>` | The hook command refers to a home path that the box will not have. | Move the script into `~/.claude/hooks` or onto the `PATH` of both machines. |
-| `Skipped MCP server: <reason>: <path>` | The server has a plain `http://` URL, refers to a home path, runs from a macOS app bundle, or runs an inline script. | Put the script in a file that Ferry carries, or run the server through a tool on the `PATH`. For a macOS app bundle, do nothing: the box cannot run the app. |
+| `Skipped MCP server: <reason>: <path>` | The server has a plain `http://` URL, refers to a home path, runs from a macOS app bundle, or runs an inline script. | Put the script in a file that Ferry carries, or run the server through a tool on the `PATH`. For a macOS app bundle, do nothing: the box cannot run the app. `ferry status` lists each skipped stdio server again, with its reason. See [Skipped MCP servers](status.md#skipped-mcp-servers). |
 | `Discarded box change: <path>` | Sync threw away an edit on the box. | Change the file on the operator machine. |
 | `Box plugins: ...`, `Box MCP: ...` | A warning about a plugin or an MCP server on the box. | Read the warning. For a missing jq, run `ferry update`. |
 
