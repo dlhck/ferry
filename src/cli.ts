@@ -280,7 +280,7 @@ const JSON_RESULTS: Record<string, string> = {
   auth:
     '{ providers: [{ id, login }] } without a provider, where login is "startable", "manual", or "off", else the login result { kind, provider, ... }. ' +
     'A "login" event line with the URL comes before the envelope. A login that needs the code from the browser reads it as one line on stdin',
-  sync: "{ dryRun, published, boxes: [{ name, ok, step, error, plan, applyPlan, discarded }] }, also on failure of more than one box",
+  sync: "{ dryRun, published, boxes: [{ name, ok, step, error, skipped, plan, applyPlan, discarded }] }, also on failure of more than one box. skipped is the reason that Ferry did not connect to the box",
   history: "{ commits: [{ commit, date, subject, paths }] }, newest first",
   revert:
     "{ dryRun, commit, subject, tip, paths, settings: [{ file, keys }], sync }. sync is the sync result, or null with --dry-run or --no-sync",
@@ -1813,6 +1813,7 @@ function syncResult(result: Pick<SyncResult, "dryRun" | "published" | "boxes">) 
       name: box.name,
       ok: box.failure === undefined,
       ...(box.failure ? { step: box.failure.step, error: errorInfo(box.failure.error) } : {}),
+      ...(box.skipped === undefined ? {} : { skipped: box.skipped }),
       plan: box.plan,
       applyPlan: box.applyPlan ?? null,
       discarded: box.discarded ?? [],
