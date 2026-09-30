@@ -26,3 +26,7 @@ defaults:
       path: ""
     values:
       layout: default
+
+# The site has each Markdown page only as HTML.
+optional_front_matter:
+  remove_originals: true
