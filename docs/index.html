@@ -4,20 +4,20 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ferry: keep your agent setup in sync with your Linux boxes</title>
-<meta name="description" content="Run agents on your laptop or a remote Linux box with the setup you already use. Ferry keeps your skills, instructions, remote MCP servers and supported settings in sync. Logins stay on the machine that has them.">
+<meta name="description" content="Run agents on your laptop or a remote Linux box with the setup you already use. Ferry keeps your skills, instructions, MCP servers and supported settings in sync. Logins stay on the machine that has them.">
 <link rel="canonical" href="https://dlhck.github.io/ferry/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Ferry">
 <meta property="og:url" content="https://dlhck.github.io/ferry/">
 <meta property="og:title" content="Ferry: keep your agent setup in sync with your Linux boxes">
-<meta property="og:description" content="Run agents on your laptop or a remote Linux box with the setup you already use. Ferry keeps your skills, instructions, remote MCP servers and supported settings in sync. Logins stay on the machine that has them.">
+<meta property="og:description" content="Run agents on your laptop or a remote Linux box with the setup you already use. Ferry keeps your skills, instructions, MCP servers and supported settings in sync. Logins stay on the machine that has them.">
 <meta property="og:image" content="https://dlhck.github.io/ferry/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="Ferry. Your agent setup. Wherever you run. An illustration of a ferry that carries labelled cargo from a harbor to three island boxes, while a key stays on the quay.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Ferry: keep your agent setup in sync with your Linux boxes">
-<meta name="twitter:description" content="Run agents on your laptop or a remote Linux box with the setup you already use. Ferry keeps your skills, instructions, remote MCP servers and supported settings in sync. Logins stay on the machine that has them.">
+<meta name="twitter:description" content="Run agents on your laptop or a remote Linux box with the setup you already use. Ferry keeps your skills, instructions, MCP servers and supported settings in sync. Logins stay on the machine that has them.">
 <meta name="twitter:image" content="https://dlhck.github.io/ferry/og.png">
 <meta name="twitter:image:alt" content="Ferry. Your agent setup. Wherever you run. An illustration of a ferry that carries labelled cargo from a harbor to three island boxes, while a key stays on the quay.">
 <meta name="theme-color" content="#F1EADB">
@@ -264,17 +264,20 @@ section.benefits{padding-top:clamp(2.5rem,6vw,4.5rem)}
 .berth{border-style:dashed;border-color:rgba(19,35,58,.35);background:repeating-linear-gradient(135deg,transparent 0 10px,rgba(19,35,58,.035) 10px 20px);display:flex;align-items:center;justify-content:center;min-height:7rem}
 .berth span{font:500 .75rem/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:rgba(19,35,58,.5)}
 .sub-h{margin:clamp(2.5rem,5vw,3.5rem) 0 1rem;font-size:1.6rem}
-.harbor{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr) minmax(0,1fr);gap:1rem}
-.entry.paseo{background:var(--night);color:var(--paper);border-color:var(--night)}
-.entry.paseo .entry-head{border-bottom-color:rgba(241,234,219,.25)}
-.entry.paseo .entry-head code{background:rgba(241,234,219,.1);color:#E0B25A}
-.entry.paseo p{color:#C9D3DE;margin:.8rem 0 0;font-size:.97rem}
-.entry.paseo p code{background:rgba(241,234,219,.1);color:var(--paper)}
+.harbor{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) minmax(0,.45fr);gap:1rem}
+.entry.integ{background:var(--night);color:var(--paper);border-color:var(--night)}
+.entry.integ .entry-head{border-bottom-color:rgba(241,234,219,.25)}
+.entry.integ .entry-head code{background:rgba(241,234,219,.1);color:#E0B25A}
+.entry.integ p{color:#C9D3DE;margin:.8rem 0 0;font-size:.97rem}
+.entry.integ p code{background:rgba(241,234,219,.1);color:var(--paper);white-space:normal;overflow-wrap:anywhere}
+.entry.integ a{color:#E0B25A}
+.entry.integ a:hover{color:var(--paper)}
 .planned{margin:1rem 0 0;color:var(--ink-2)}
 .works{list-style:none;margin:.85rem 0 0;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(13rem,1fr));gap:1.25rem 1.5rem}
 .works b{display:block;font-weight:600}
 .works span{color:var(--ink-2);font-size:.95rem}
-@media (max-width:900px){.harbor{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.harbor .paseo{grid-column:1 / -1}}
+@media (max-width:900px){.harbor{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.harbor .berth{grid-column:1 / -1;min-height:4.5rem}}
+@media (max-width:640px){.harbor{grid-template-columns:minmax(0,1fr)}}
 @media (max-width:760px){.register{grid-template-columns:minmax(0,1fr)}.register .berth + .berth{display:none}}
 @media (max-width:480px){.entry-head{grid-template-columns:minmax(0,1fr)}.entry-head code{justify-self:start;margin-top:.4rem}.entry dl{grid-template-columns:minmax(0,1fr)}.entry dt{padding-bottom:0}.entry dd{border-top:0;padding-top:.2rem}.entry dt:first-of-type{padding-top:.7rem}.harbor .berth{min-height:5rem}}
 
@@ -284,7 +287,7 @@ section.benefits{padding-top:clamp(2.5rem,6vw,4.5rem)}
 .menubar-card{position:sticky;top:1.5rem;background:var(--night);color:var(--paper);border-radius:18px;padding:1.2rem 1.2rem 1.4rem;margin:0}
 .menubar-card figcaption{margin-top:1rem}
 /* macOS menu bar mockup */
-.mac{position:relative;border-radius:12px;overflow:hidden;min-height:23.5rem;isolation:isolate;
+.mac{position:relative;border-radius:12px;overflow:hidden;min-height:28.5rem;isolation:isolate;
   background:radial-gradient(120% 80% at 85% 110%,#D98B5F 0%,rgba(217,139,95,0) 60%),radial-gradient(90% 70% at 10% 0%,#6C8AA6 0%,rgba(108,138,166,0) 65%),linear-gradient(165deg,#2E4560 0%,#4B5F78 45%,#9C6A58 100%);
   font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,"Helvetica Neue",sans-serif;-webkit-font-smoothing:antialiased}
 .mbar{display:flex;align-items:center;gap:.9rem;height:26px;padding:0 10px 0 12px;color:#fff;font-size:13px;font-weight:500;
@@ -314,6 +317,10 @@ button.mi.blink{background:transparent;color:inherit}
 button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
 .mi.off{color:rgba(0,0,0,.6)}
 .mi.mi-pre{white-space:pre}
+.mi.mi-long{white-space:normal;max-width:21rem}
+.mi.mi-check{justify-content:flex-start;gap:.3rem}
+.mi-check .ck{display:inline-block;width:.9em;margin-left:-.15rem}
+.mi-check[aria-pressed="false"] .ck{visibility:hidden}
 .mi kbd{font:inherit;color:rgba(0,0,0,.5)}
 .mi-wrap{display:grid;grid-template-rows:1fr;transition:grid-template-rows .35s ease,opacity .3s ease}
 .mi-wrap > .mi{overflow:hidden;min-height:0}
@@ -326,7 +333,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
   .mbar{gap:.7rem}
   .mb-status{gap:.6rem}
   .mi{white-space:normal;gap:1rem}
-  .mac{min-height:25.5rem}
+  .mac{min-height:33rem}
 }
 @media (prefers-reduced-motion: reduce){.mb-menu,.mi-wrap{transition:none}.mb-count.tick{animation:none}}
 .menubar-card figcaption p{margin:.45rem 0 0;color:#C9D3DE;font-size:.97rem}
@@ -340,6 +347,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
 .log .cmd{font:600 .92rem/1.5 var(--mono);color:var(--ink);overflow-wrap:anywhere}
 .log .cmd .arg{color:var(--brass)}
 .log p{margin:.3rem 0 0;color:var(--ink-2)}
+.log p code{white-space:normal;overflow-wrap:anywhere}
 
 /* customs */
 .customs{display:grid;grid-template-columns:1fr 1fr;border:1.5px solid var(--ink);border-radius:18px;overflow:hidden}
@@ -355,7 +363,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
 .customs li::before{content:"";flex:none;width:10px;height:10px;border-radius:2px;border:1.2px solid var(--ink);background:var(--c,var(--brass-bright));transform:translateY(1px)}
 .ashore-note{margin:1rem 0 0;color:var(--ink-2)}
 .customs .ashore li::before{border-radius:50%;background:none;border:2px solid var(--red)}
-.rules{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.5rem;margin-top:2rem}
+.rules{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1.5rem 2.5rem;margin-top:2rem}
 @media (max-width:860px){.rules{grid-template-columns:minmax(0,1fr)}}
 .rules h3{font-size:1.15rem}
 .rules p{margin:.45rem 0 0;color:var(--ink-2);font-size:.98rem}
@@ -418,7 +426,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
     <h1 id="hero-title">Your agent setup.<br> <em>Wherever you run.</em></h1>
   </div>
   <div>
-    <p class="lede">Run agents on your laptop or a remote Linux box with the skills, instructions, remote MCP servers and supported settings you already use. Ferry keeps them in sync as you work, so every box gets your setup without you rebuilding it by hand.</p>
+    <p class="lede">Run agents on your laptop or a remote Linux box with the skills, instructions, MCP servers and supported settings you already use. Ferry keeps them in sync as you work, so every box gets your setup without you rebuilding it by hand.</p>
     <p class="lede lede-em"><strong>Change a skill locally. Your remote agents get it too.</strong></p>
     <div class="install">
       <div class="tabs" role="tablist" aria-label="Install with">
@@ -642,7 +650,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
     <li>
       <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 11h20M18 5l6 6-6 6M28 21H8M14 15l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
       <h3>Continue your project on another machine.</h3>
-      <p>Move a Git project to a box and bring it back, including untracked files.</p>
+      <p>Move a Git project to a box and back, with its untracked files and its Claude and Codex sessions, so you can resume the conversation there.</p>
       <a class="gain-cmd" href="#cmd-move"><code>ferry move</code></a>
     </li>
     <li>
@@ -666,7 +674,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
   <ol class="route">
     <li class="stop home">
       <h3>Your machine</h3>
-      <p>Your skills, <code>~/AGENTS.md</code>, Claude subagents and commands, some Claude and Codex settings, and remote MCP servers.</p>
+      <p>Your skills, <code>~/AGENTS.md</code>, Claude subagents, commands and hook scripts, some Claude, Codex, Pi and Cursor Agent settings, and remote and stdio MCP servers.</p>
     </li>
     <li class="leg" aria-hidden="true">
       <svg viewBox="0 0 100 14" preserveAspectRatio="none"><path d="M0 7H92" stroke="#13233A" stroke-width="2" stroke-dasharray="5 5" vector-effect="non-scaling-stroke"/><path d="M90 2l8 5-8 5" fill="none" stroke="#13233A" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>
@@ -689,7 +697,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
   <div class="also">
     <div>
       <h3>It also sets up the box</h3>
-      <p>Ferry installs and updates the agent CLIs on each box (<code>claude</code>, <code>codex</code>, <code>pi</code>, <code>cursor-agent</code>, <code>gh</code>) and the tools you list. It starts logins there. It never copies one.</p>
+      <p>Ferry installs and updates the agent CLIs on each box (<code>claude</code>, <code>codex</code>, <code>pi</code>, <code>cursor-agent</code>), plus <code>gh</code>, <code>jq</code> and the tools you list. It starts logins there. It never copies one.</p>
     </div>
     <div>
       <h3>See the plan first</h3>
@@ -711,7 +719,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
       <div class="entry-head"><h3>Claude Code</h3><code>claude</code></div>
       <dl>
         <dt>Carries</dt>
-        <dd>Skills in <code>~/.claude/skills</code>, <code>~/.claude/CLAUDE.md</code>, subagents, custom commands, and the remote MCP servers in <code>~/.claude.json</code>.</dd>
+        <dd>Skills in <code>~/.claude/skills</code>, <code>~/.claude/CLAUDE.md</code>, subagents, custom commands, hook scripts in <code>~/.claude/hooks</code>, and the remote and stdio MCP servers in <code>~/.claude.json</code>.</dd>
         <dt>Settings</dt>
         <dd><code>enabledPlugins</code>, <code>extraKnownMarketplaces</code>, <code>permissions</code>, <code>hooks</code>, <code>attribution</code>, <code>model</code>, <code>alwaysThinkingEnabled</code>. The box installs the plugins. <code>env</code> and <code>apiKeyHelper</code> stay on your machine.</dd>
         <dt>Login</dt>
@@ -722,7 +730,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
       <div class="entry-head"><h3>Codex</h3><code>codex</code></div>
       <dl>
         <dt>Carries</dt>
-        <dd><code>~/.codex/AGENTS.md</code> and the MCP servers in <code>mcp_servers</code>. Skills come from <code>~/.agents/skills</code>.</dd>
+        <dd><code>~/.codex/AGENTS.md</code> and the remote and stdio MCP servers in <code>mcp_servers</code>. Skills come from <code>~/.agents/skills</code>.</dd>
         <dt>Settings</dt>
         <dd><code>model</code>, <code>model_reasoning_effort</code>, <code>model_reasoning_summary</code>, <code>model_verbosity</code>, <code>features</code>, <code>web_search</code>. Providers, profiles, <code>notify</code> and project trust stay on your machine.</dd>
         <dt>Login</dt>
@@ -734,6 +742,8 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
       <dl>
         <dt>Carries</dt>
         <dd><code>~/.pi/agent/AGENTS.md</code>. Skills come from <code>~/.agents/skills</code>.</dd>
+        <dt>Settings</dt>
+        <dd><code>defaultProvider</code>, <code>defaultModel</code>, <code>defaultThinkingLevel</code>, <code>enabledModels</code>, <code>thinkingBudgets</code>, <code>enableSkillCommands</code> in <code>~/.pi/agent/settings.json</code>. Packages, resource paths, the shell path, and the npm and shell commands stay on your machine.</dd>
         <dt>Install</dt>
         <dd>Ferry installs and updates Pi. It installs Node first if the box has none.</dd>
         <dt>Login</dt>
@@ -744,7 +754,9 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
       <div class="entry-head"><h3>Cursor Agent</h3><code>cursor-agent</code></div>
       <dl>
         <dt>Carries</dt>
-        <dd>MCP servers, merged into <code>~/.cursor/mcp.json</code>. Skills come from <code>~/.agents/skills</code>.</dd>
+        <dd>Remote and stdio MCP servers, merged into <code>~/.cursor/mcp.json</code>. Skills come from <code>~/.agents/skills</code>.</dd>
+        <dt>Settings</dt>
+        <dd><code>model</code>, <code>maxMode</code>, <code>hasChangedDefaultModel</code>, <code>attribution</code> in <code>~/.cursor/cli-config.json</code>. Permissions, the status line and the login state stay on your machine.</dd>
         <dt>Login</dt>
         <dd><code>ferry auth cursor</code>.</dd>
       </dl>
@@ -755,8 +767,8 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
 
   <div class="also">
     <div>
-      <h3>GitHub CLI</h3>
-      <p>Ferry installs <code>gh</code> on every box. <code>ferry auth gh</code> logs it in on the box and sets up the box SSH key for GitHub.</p>
+      <h3>GitHub CLI and jq</h3>
+      <p>Ferry installs <code>gh</code> and <code>jq</code> on every box. <code>ferry auth gh</code> logs <code>gh</code> in on the box and sets up the box SSH key for GitHub. The box uses <code>jq</code> to merge its MCP entries.</p>
     </div>
     <div>
       <h3>Your own tools</h3>
@@ -766,23 +778,28 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
 
   <h3 class="sub-h">Integrations</h3>
   <div class="harbor">
-    <div class="entry paseo">
+    <div class="entry integ">
       <div class="entry-head"><h3>Paseo</h3><code>ferry integrations enable paseo</code></div>
       <p>Runs the Paseo daemon on a box. Ferry carries your agent profiles, managed Git plugins at their installed commit, npm plugins at their installed version, the portable fields of provider definitions, metadata model preferences, shared system instructions, and portable terminal profiles. These go to the box directly, not through the snapshot.</p>
+      <p>With <code>paseo_auto_archive = true</code>, Ferry also carries the auto-archive-after-merge switch. When <code>ferry move</code> puts a project on a box with Paseo, Ferry registers the project and imports each carried session as a Paseo agent.</p>
       <p>Plugin settings, provider env blocks and commands, terminal env blocks and paths, and credentials stay on each host. Set <code>paseo_relay = true</code> for relay pairing.</p>
     </div>
-    <div class="entry berth" aria-hidden="true"><span>Berth open</span></div>
+    <div class="entry integ">
+      <div class="entry-head"><h3>Sherlock</h3><code>ferry integrations enable sherlock</code></div>
+      <p>With <a href="https://github.com/michaelbromley/sherlock">Sherlock</a> on your machine, Ferry adds <code>ferry sherlock add &lt;name&gt; --box &lt;box&gt; --target &lt;host:port&gt; --type &lt;type&gt;</code>. It registers a Sherlock connection that tunnels through the box on the first query, so Sherlock can query a database on the box, or one that only the box can reach.</p>
+      <p>Sherlock keeps the password in the keychain of your machine. Ferry never stores it and never edits the Sherlock config. <code>ferry status</code> checks that each box can reach its target.</p>
+    </div>
     <div class="entry berth" aria-hidden="true"><span>Berth open</span></div>
   </div>
-  <p class="planned">More agents and integrations are planned. <a href="https://github.com/dlhck/ferry/issues">Request one on GitHub</a>.</p>
+  <p class="planned"><code>ferry integrations</code> lists the part of each integration: <code>box</code> for a service on the box, <code>operator</code> for commands and checks on your machine. More agents and integrations are planned. <a href="https://github.com/dlhck/ferry/issues">Request one on GitHub</a>.</p>
 
   <h3 class="sub-h">Works with</h3>
   <ul class="works">
     <li><b>Tailscale or plain OpenSSH</b><span>The link to each box.</span></li>
     <li><b>Any private git host</b><span>Holds the snapshot. An SSH URL needs an SSH agent with a key that can push.</span></li>
-    <li><b><code>npx skills add</code></b><span>Through <code>ferry skills add</code>.</span></li>
+    <li><b><code>npx skills add</code></b><span>Through <code>ferry skills add</code>, as a global copy that Ferry carries.</span></li>
     <li><b>launchd and systemd</b><span>User services for watch and tunnel, on macOS and Linux.</span></li>
-    <li><b>The macOS menu bar</b><span>Through the Ferry menu bar app.</span></li>
+    <li><b>The macOS menu bar and waybar</b><span>The Ferry menu bar app on macOS, and a <a href="https://github.com/dlhck/ferry/blob/main/docs/linux-status-bar.md">waybar module</a> on Linux.</span></li>
   </ul>
 </section>
 
@@ -801,9 +818,9 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
           <svg class="mb-apple" viewBox="0 0 14 17" aria-hidden="true"><path d="M11.6 9c0-2 1.7-3 1.8-3-1-1.4-2.5-1.6-3-1.6-1.3-.1-2.5.8-3.1.8-.7 0-1.7-.8-2.7-.7C3.2 4.5 2 5.3 1.3 6.5c-1.5 2.5-.4 6.3 1 8.4.7 1 1.5 2.1 2.6 2 1-.04 1.4-.7 2.7-.7s1.6.7 2.7.7c1.1 0 1.8-1 2.5-2 .8-1.2 1.1-2.3 1.1-2.4 0 0-2.3-.9-2.3-3.5zM9.5 2.9c.6-.7 1-1.6.9-2.6-.8 0-1.8.6-2.4 1.3-.5.6-1 1.6-.9 2.5.9.1 1.8-.5 2.4-1.2z" fill="currentColor"/></svg>
           <span class="mb-app" aria-hidden="true">Terminal</span>
           <div class="mb-status">
-            <button type="button" class="mb-ferry is-open" id="mb-ferry" aria-expanded="true" aria-controls="mb-menu" aria-label="Ferry: 3 items need action">
+            <button type="button" class="mb-ferry is-open" id="mb-ferry" aria-expanded="true" aria-controls="mb-menu" aria-label="Ferry: 4 items need action">
               <svg viewBox="0 0 22 14" aria-hidden="true"><path d="M1 8.2h20l-2.6 4.6H3.4z" fill="currentColor"/><rect x="5" y="3.4" width="9" height="4" rx=".8" fill="currentColor"/><rect x="6.4" y="0.6" width="2.4" height="2.4" fill="currentColor"/><path d="M1.5 13.4q2.4-1 4.8 0t4.8 0 4.8 0 4.6 0" fill="none" stroke="currentColor" stroke-width="1" opacity=".7"/></svg>
-              <span class="mb-count" id="mb-count" aria-hidden="true">3</span>
+              <span class="mb-count" id="mb-count" aria-hidden="true">4</span>
             </button>
             <svg class="mb-glyph" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="3" width="13" height="4.4" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="4" cy="5.2" r="1.3" fill="currentColor"/><rect x="1.5" y="8.8" width="13" height="4.4" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="12" cy="11" r="1.3" fill="currentColor"/></svg>
             <svg class="mb-glyph mb-opt" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.3 6.2a9.6 9.6 0 0 1 13.4 0M3.5 8.5a6.4 6.4 0 0 1 9 0M5.7 10.8a3.2 3.2 0 0 1 4.6 0" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="13" r="1.2" fill="currentColor"/></svg>
@@ -813,10 +830,11 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
           </div>
         </div>
         <div class="mb-menu" id="mb-menu">
-          <p class="mi off" id="mb-summary">3 items need action. Checked 12 seconds ago.</p>
+          <p class="mi off" id="mb-summary">4 items need action. Checked 12 seconds ago.</p>
           <hr>
           <p class="mi off mi-pre">box-a  ONLINE</p>
           <div class="mi-wrap" id="mb-login"><button type="button" class="mi">claude/linear needs a login.</button></div>
+          <p class="mi off mi-long">claude/postgres needs DATABASE_URL on the box. Set it in the env of postgres in ~/.claude.json on the box.</p>
           <button type="button" class="mi">gh is 2.80.0 on the box, and the target is 2.83.1.</button>
           <p class="mi off">Ports</p>
           <button type="button" class="mi">web &middot; shop &rarr; localhost:3000</button>
@@ -825,27 +843,34 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
           <p class="mi off mi-pre">box-b  OFFLINE</p>
           <p class="mi off">Tailscale host box-b is offline</p>
           <hr>
+          <button type="button" class="mi">Sync now</button>
           <button type="button" class="mi" id="mb-refresh">Refresh now</button>
+          <button type="button" class="mi mi-check" id="mb-notify" aria-pressed="true"><span class="ck" aria-hidden="true">&#10003;</span>Notifications</button>
           <button type="button" class="mi">Quit<kbd>&#8984;Q</kbd></button>
         </div>
         <span class="mb-tag" aria-hidden="true">Illustration</span>
       </div>
       <figcaption id="mb-cap">
         <span class="cmd">ferry menubar install</span>
-        <p>A macOS menu bar app that shows what needs action on each box: offline boxes, logins, MCP logins and tool drift. It also lists the ports of running tunnels. It reads the status that <code>ferry watch</code> writes.</p>
+        <p>A macOS menu bar app that shows the report of <code>ferry status --brief</code> for each box, and the ports of running tunnels. It sends a notification when a box goes offline, a login or MCP login is needed, or a tool drifts. Sync now runs <code>ferry sync</code>. It reads the status that <code>ferry watch</code> writes. On Linux, a waybar module shows the same report.</p>
         <p class="mb-note" id="mb-desc">Sample data. The count shows items that need action. An offline box counts as one, ports do not count. Click the ferry icon to open or close the menu.</p>
       </figcaption>
     </figure>
 
     <ol class="log">
       <li id="cmd-watch"><span class="cmd">ferry watch install</span><p>Syncs each change after one second. It runs as a launchd or systemd user service.</p></li>
-      <li><span class="cmd">ferry status --brief</span><p>Shows only what needs action. Plain <code>ferry status</code> checks the link, the snapshot, the logins and the tools.</p></li>
+      <li><span class="cmd">ferry status --brief</span><p>Shows only what needs action: offline boxes, low disk or memory on a box, logins, MCP logins, stdio MCP servers that lack something on the box, tool drift, and hooks that run a home file Ferry does not carry. Plain <code>ferry status</code> checks the link, the snapshot, the logins and the tools.</p></li>
+      <li><span class="cmd">ferry doctor</span><p>Checks the SSH agent, push access to the snapshot, SSH and Tailscale to each box, the box deploy key, linger and the installed services. It changes nothing and prints a fix for each failed check.</p></li>
+      <li><span class="cmd">ferry history</span><p>Lists the last 20 snapshot commits and the paths each one changed.</p></li>
+      <li><span class="cmd">ferry revert <span class="arg">&lt;commit&gt;</span></span><p>Undoes one snapshot commit on your machine, including the carried settings keys, then syncs all boxes. <code>--no-sync</code> skips the sync. <code>--dry-run</code> shows the plan.</p></li>
       <li><span class="cmd">ferry box add <span class="arg">&lt;name&gt;</span></span><p>Adds another box. <code>sync</code>, <code>status</code> and <code>update</code> act on all boxes, or on one with <code>--box</code>.</p></li>
-      <li id="cmd-tunnel"><span class="cmd">ferry tunnel <span class="arg">3000</span></span><p>Opens a box port on 127.0.0.1 on your machine. Run <code>ferry expose</code> on the box and <code>ferry tunnel --follow</code> here, and each dev server port opens on its own.</p></li>
-      <li id="cmd-move"><span class="cmd">ferry move <span class="arg">&lt;path&gt;</span> --to-box <span class="arg">&lt;name&gt;</span></span><p>Carries a git project to a box, untracked files included. <code>--from-box</code> brings it back.</p></li>
+      <li id="cmd-tunnel"><span class="cmd">ferry tunnel <span class="arg">3000</span></span><p>Opens a box port on 127.0.0.1 on your machine. <code>ferry tunnel db.example:5432:15432</code> opens port 5432 of a host that the box can reach on local port 15432. Run <code>ferry expose</code> on the box and <code>ferry tunnel --follow</code> here, and each dev server port opens on its own.</p></li>
+      <li id="cmd-move"><span class="cmd">ferry move <span class="arg">&lt;path&gt;</span> --to-box <span class="arg">&lt;name&gt;</span></span><p>Carries a git project to a box, untracked files included. It also carries the Claude and Codex sessions of the project and the Claude project memory, so <code>claude --resume</code> and <code>codex resume</code> find them there. <code>--from-box</code> brings the project back, and <code>--no-sessions</code> leaves the sessions out. A session that fails the deny rules stays on the source.</p></li>
+      <li><span class="cmd">ferry skills add</span><p>Installs skills with <code>npx skills add</code> as a global copy, so Ferry carries them.</p></li>
+      <li><span class="cmd">~/.agents/skills/ferry</span><p>The Ferry skill. It tells your agents how to work with Ferry on both machines, for example not to edit a Ferry-managed file on the box. <code>ferry init</code> writes it here and the snapshot carries it to the boxes. <code>ferry self-update</code> refreshes it. <code>ferry init --no-skill</code> leaves it out.</p></li>
       <li><span class="cmd">ferry integrations enable paseo</span><p>Runs the Paseo daemon on a box and carries your Paseo agent profiles, plugins, provider definitions, metadata model preferences, shared system instructions and terminal profiles.</p></li>
+      <li><span class="cmd">ferry sherlock add <span class="arg">&lt;name&gt;</span></span><p>With the Sherlock integration on, registers a Sherlock connection to a database through a box.</p></li>
       <li><span class="cmd">[tools.<span class="arg">&lt;id&gt;</span>]</span><p>Each tool in the config has a version policy: <code>"operator"</code>, <code>"latest"</code> or an exact version. The menu bar and <code>ferry status</code> report drift.</p></li>
-      <li><span class="cmd">ferry skills add dlhck/ferry --skill ferry</span><p>Adds the Ferry skill. It tells your agents how to work with Ferry on both machines. For example, an agent on the box does not edit a file that Ferry manages, because the next sync resets it.</p></li>
     </ol>
   </div>
 </section>
@@ -866,8 +891,9 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
         <li style="--c:#E4D5B0"><span>Agent instructions in <code>~/AGENTS.md</code></span></li>
         <li style="--c:#8AA573"><span>Subagents</span></li>
         <li style="--c:#C9775A"><span>Custom commands</span></li>
+        <li style="--c:#B89A6A"><span>Hook scripts</span></li>
         <li style="--c:#9AAEC2"><span>Agent CLI settings, without the keys that can hold secrets</span></li>
-        <li style="--c:#A889B4"><span>Remote MCP servers</span></li>
+        <li style="--c:#A889B4"><span>Remote and stdio MCP servers, without env values</span></li>
         <li style="--c:#5AA7A0"><span>ADE setup, such as agent profiles, plugins and providers, through an integration</span></li>
       </ul>
     </div>
@@ -878,6 +904,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
         <li><span>Credential files</span></li>
         <li><span>Tokens and API keys</span></li>
         <li><span><code>.env</code> files</span></li>
+        <li><span>Env values of MCP servers</span></li>
         <li><span>Whole settings files</span></li>
       </ul>
       <p class="ashore-note">These never leave the machine that has them.</p>
@@ -887,7 +914,11 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
   <div class="rules">
     <div>
       <h3>Checked before each publish</h3>
-      <p>Deny rules catch secret files, private keys, tokens, secret config keys and executables. A match stops the sync. The error names the file, never the value.</p>
+      <p>Deny rules catch secret files, private keys, tokens, secret config keys and executable binaries. Scripts, such as hook scripts, pass and keep their executable bit. A match stops the sync. The error names the file, never the value.</p>
+    </div>
+    <div>
+      <h3>Stdio MCP servers carry no values</h3>
+      <p>Ferry carries the command, the arguments and the names of the env keys. You set the values on the box, and Ferry keeps them. An argument that looks like a token or secret stops the sync. Ferry skips a server whose command or arguments refer to a path in your home, and it never installs a command.</p>
     </div>
     <div>
       <h3>Boxes do not trust each other</h3>
@@ -927,7 +958,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
         <div class="code-bar"><span>Terminal, on your machine</span><button class="copy" type="button" data-copy="qs-code" aria-label="Copy the quick start commands"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="9" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3 11V3.5A1.5 1.5 0 0 1 4.5 2H11" fill="none" stroke="currentColor" stroke-width="1.5"/></svg><span class="label">Copy</span></button></div>
 <pre id="qs-code"><span class="f">ferry init</span> --ssh-destination user@box.example \
   --snapshot-url git@github.com:you/ferry-snapshot.git
-<span class="f">ferry install</span>        <span class="c"># gh, the agent CLIs, your tools, and Ferry on the box</span>
+<span class="f">ferry install</span>        <span class="c"># gh, jq, the agent CLIs, your tools, and Ferry on the box</span>
 <span class="f">ferry sync</span>           <span class="c"># publish the snapshot and apply it on the box</span>
 <span class="f">ferry auth claude</span>    <span class="c"># start a login on the box, finish it in a browser here</span>
 <span class="f">ferry watch install</span>  <span class="c"># sync each change automatically, as a user service</span>
@@ -1287,9 +1318,9 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
     skills: '<strong>Skills.</strong> Each box clones the snapshot and links its harness directories to it, so the box sees the same skills.',
     agents: '<strong>~/AGENTS.md.</strong> The instructions file in your home directory goes to every box.',
     subagents: '<strong>Claude subagents.</strong> Carried with the snapshot and linked on each box.',
-    commands: '<strong>Claude commands.</strong> Carried with the snapshot and linked on each box.',
-    settings: '<strong>Some Claude and Codex settings.</strong> Ferry carries selected settings. Whole settings files stay on your machine.',
-    mcp: '<strong>Remote MCP servers.</strong> The server definitions sync. MCP logins happen on each box, and the menu bar shows which ones need action.',
+    commands: '<strong>Claude commands and hook scripts.</strong> Carried with the snapshot and linked on each box. Hook scripts keep their executable bit.',
+    settings: '<strong>Some Claude, Codex, Pi and Cursor Agent settings.</strong> Ferry carries selected keys. Keys that can hold secrets, and whole settings files, stay on your machine.',
+    mcp: '<strong>Remote and stdio MCP servers.</strong> For a stdio server, Ferry carries the command, the arguments and the names of the env keys, never the values. You set the values on the box. MCP logins happen on each box.',
     paseo: '<strong>Paseo.</strong> With <code>ferry integrations enable paseo</code>, Ferry runs the Paseo daemon on a box and carries agent profiles, plugins, provider definitions, metadata model preferences, shared system instructions and terminal profiles. They go to the box directly, not through the snapshot.',
     keys: '<strong>Logins and keys never sync.</strong> Logins, credential files, tokens, API keys and .env files never leave the machine that has them. Deny rules stop a sync that would carry one.'
   };
@@ -1330,8 +1361,9 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
   const summary = document.getElementById('mb-summary');
   const login = document.getElementById('mb-login');
   const refresh = document.getElementById('mb-refresh');
+  const notify = document.getElementById('mb-notify');
   const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  let issues = 3, age = 12, visible = false, seen = 0, resolved = false, refreshing = false;
+  let issues = 4, age = 12, visible = false, seen = 0, resolved = false, refreshing = false;
 
   // Same wording as RelativeDateTimeFormatter with the full style.
   const ago = (s) => s < 60 ? `${s} second${s === 1 ? '' : 's'} ago` : `${Math.floor(s / 60)} minute${Math.floor(s / 60) === 1 ? '' : 's'} ago`;
@@ -1366,6 +1398,8 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
   item.addEventListener('click', () => toggle(menu.hidden));
   menu.querySelectorAll('button.mi').forEach((b) => {
     if (b === refresh) return;
+    // The Notifications toggle keeps its state. Like any menu item, it closes the menu.
+    if (b === notify) b.addEventListener('click', () => b.setAttribute('aria-pressed', String(b.getAttribute('aria-pressed') !== 'true')));
     // A menu item flashes once and the menu closes, as on macOS.
     b.addEventListener('click', () => {
       b.classList.add('blink');
