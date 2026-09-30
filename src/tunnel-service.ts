@@ -2,6 +2,8 @@
 
 import {
   installUserService,
+  launchdPath,
+  systemdPath,
   uninstallUserService,
   type UserService,
   type WatchServiceDependencies,
@@ -28,6 +30,11 @@ export function tunnelService(box: string): UserService {
     // The follow connects again after a drop. The service starts it again after each exit.
     restart: "always",
   };
+}
+
+/** The service file of the box on this machine: the launchd plist on macOS, else the systemd unit. */
+export function tunnelServicePath(box: string, home: string): string {
+  return process.platform === "darwin" ? launchdPath(tunnelService(box), home) : systemdPath(tunnelService(box), home);
 }
 
 export function installTunnelService(

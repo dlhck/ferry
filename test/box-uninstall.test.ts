@@ -17,10 +17,13 @@ import { dirname, join } from "node:path";
 import { runBoxUninstall, type BoxUninstallDependencies } from "../src/box.ts";
 import { boxUninstallLines, commitBoxUninstall, planBoxUninstall } from "../src/box-uninstall.ts";
 import { readConfig, writeConfig, type BoxesOperatorConfig } from "../src/config.ts";
+import type { Seed } from "../src/manifest.ts";
 import { errorInfo } from "../src/output.ts";
 import { noProgress } from "../src/progress.ts";
 import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
+import { acquireBoxLock, runSync } from "../src/sync.ts";
 import { profileBlockCommand } from "../src/tools/path.ts";
+import { tunnelServicePath } from "../src/tunnel-service.ts";
 import { recordProgress } from "./fake-progress.ts";
 
 const roots: string[] = [];
@@ -320,8 +323,10 @@ describe("ferry box remove --uninstall", () => {
     const links: unknown[] = [];
     const questions: string[] = [];
     const deps: BoxUninstallDependencies = {
+      home,
       readConfig: () => readConfig(home),
       writeConfig: (config: BoxesOperatorConfig) => writeConfig(config, home),
+      uninstallTunnelService: async ({ box }) => rmSync(tunnelServicePath(box, home)),
       createLink: (options) => {
         links.push(options);
         return box.link;
@@ -336,7 +341,7 @@ describe("ferry box remove --uninstall", () => {
       progress: noProgress,
       ...overrides,
     };
-    return { deps, lines, warnings, links, questions, boxes: () => readConfig(home)?.boxes?.map((entry) => entry.name), text: () => readFileSync(join(home, ".ferry/config.toml"), "utf8") };
+    return { home, deps, lines, warnings, links, questions, boxes: () => readConfig(home)?.boxes?.map((entry) => entry.name), text: () => readFileSync(join(home, ".ferry/config.toml"), "utf8") };
   }
 
   const offline = {
@@ -370,6 +375,150 @@ describe("ferry box remove --uninstall", () => {
       "Warning: box b was the default_box. Ferry removed default_box. Set a new one with ferry box default <name>.",
     ]);
     expect(warnings).toEqual(lines.slice(-1));
+  });
+
+  test("removes the tunnel service from the operator machine after the box, and keeps the instruction file", async () => {
+    const box = await ferryBox();
+    const { home, deps, lines } = operator(box);
+    const service = tunnelServicePath("b", home);
+    const instructionFile = join(home, ".ferry/boxes/b/AGENTS.md");
+    for (const path of [service, instructionFile]) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, "text\n");
+    }
+
+    const dryRun = await runBoxUninstall({ name: "b", yes: true, dryRun: true }, deps);
+
+    expect(dryRun).toMatchObject({ tunnelService: null, instructionFile });
+    expect(lines.slice(-2)).toEqual([`On this machine: stop and remove the tunnel service ${service}`, "Dry run: Ferry made no changes."]);
+    expect(existsSync(service)).toBe(true);
+
+    const result = await runBoxUninstall({ name: "b", yes: true, dryRun: false }, deps);
+
+    expect(result).toMatchObject({ name: "b", tunnelService: service, instructionFile });
+    expect(existsSync(service)).toBe(false);
+    expect(readFileSync(instructionFile, "utf8")).toBe("text\n");
+    expect(lines.slice(-5)).toEqual([
+      "Removed Ferry from box b. ~/.ferry stays on the box with: backups, trash.",
+      `Removed the tunnel service ${service} from this machine.`,
+      "Removed box b from the config.",
+      "Warning: box b was the default_box. Ferry removed default_box. Set a new one with ferry box default <name>.",
+      `The instruction file ${instructionFile} stays on this machine, because it is your text. A later box with the name b gets it. Delete the file when you do not need it.`,
+    ]);
+  });
+
+  describe("the box lock", () => {
+    const seed: Seed = {
+      ok: true,
+      skills: [],
+      instructions: null,
+      roots: [],
+      settings: [],
+      mcp: [],
+      identity: "seed-identity",
+      leftovers: [],
+      storeUpdates: [],
+    };
+
+    /** A sync of box b, as the watch runs it. `events` gets each publish and each box command. */
+    function syncBoxB(home: string, events: string[]) {
+      return runSync(
+        { home, boxes: ["b"] },
+        {
+          readConfig: () => readConfig(home) as never,
+          publisher: () => "operator",
+          readSeed: () => seed,
+          createLink: () => ({
+            run: async (command) => {
+              events.push(`box: ${command}`);
+              return { ok: true, address: "box", stdout: "/home/user\n", stderr: "" };
+            },
+          }),
+          openStore: async () => ({
+            path: join(home, ".ferry/store"),
+            publish: async () => {
+              events.push("publish");
+              return { published: true, tip: "abc123" };
+            },
+          }),
+          apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
+          adopt: () => {},
+          writePlan: () => {},
+          writeLine: () => {},
+        },
+      ).then(
+        () => "synced",
+        (error) => errorInfo(error).code,
+      );
+    }
+
+    test("refuses a sync for the box from before the connection until the box is out of the config", async () => {
+      const box = await ferryBox();
+      const events: string[] = [];
+      const during: string[] = [];
+      const { home, boxes, deps } = operator(box);
+      const observed: BoxUninstallDependencies = {
+        ...deps,
+        createLink: () => ({
+          run: async (command) => {
+            during.push(`box command: ${await syncBoxB(home, events)}`);
+            return box.link.run(command);
+          },
+        }),
+        confirmName: async () => {
+          during.push(`question: ${await syncBoxB(home, events)}`);
+          return "b";
+        },
+        writeConfig: (config) => {
+          deps.writeConfig(config);
+          during.push(`config written: boxes ${boxes()?.join(", ")}`);
+        },
+      };
+
+      await runBoxUninstall({ name: "b", yes: false, dryRun: false }, observed);
+
+      // The plan command, the question, and the removal command: each sync stops before its publish and its box steps.
+      expect(during).toEqual([
+        "box command: sync-busy",
+        "question: sync-busy",
+        "box command: sync-busy",
+        "config written: boxes a",
+      ]);
+      expect(events).toEqual([]);
+      expect(box.isLink("AGENTS.md")).toBe(false);
+      // After the removal, the lock is free, and the config has no box b for a sync.
+      expect(readdirSync(join(home, ".ferry"))).toEqual(["config.toml"]);
+      expect(await syncBoxB(home, events)).toBe("unknown-box");
+      expect(events).toEqual([]);
+    });
+
+    test("fails and changes nothing while a sync holds the lock, and a dry run takes no lock", async () => {
+      const box = await ferryBox();
+      const { home, deps, links, text } = operator(box);
+      const release = acquireBoxLock(home, { name: "b", host: { transport: "ssh", destination: "user@box.example" } });
+
+      const error = await runBoxUninstall({ name: "b", yes: true, dryRun: false }, deps).catch((error) => error);
+
+      expect(error.message).toBe("operator: a sync is active for box b");
+      expect(errorInfo(error)).toMatchObject({ code: "sync-busy", hint: "Wait for the other sync to end, then run the command again." });
+      expect(links).toEqual([]);
+      expect(text()).toBe(CONFIG);
+      expect(await runBoxUninstall({ name: "b", yes: true, dryRun: true }, deps)).toMatchObject({ uninstall: { dryRun: true } });
+
+      release();
+      await runBoxUninstall({ name: "b", yes: true, dryRun: false }, deps);
+      expect(box.exists(".ferry/store")).toBe(false);
+    });
+
+    test("frees the lock when the removal fails or the operator cancels", async () => {
+      const failing = operator(await ferryBox({ systemctl: "fails" }));
+      await expect(runBoxUninstall({ name: "b", yes: true, dryRun: false }, failing.deps)).rejects.toThrow("The box stays in the config");
+      expect(readdirSync(join(failing.home, ".ferry"))).toEqual(["config.toml"]);
+
+      const cancelled = operator(await ferryBox(), { confirmName: async () => "" });
+      expect(await runBoxUninstall({ name: "b", yes: false, dryRun: false }, cancelled.deps)).toBeNull();
+      expect(readdirSync(join(cancelled.home, ".ferry"))).toEqual(["config.toml"]);
+    });
   });
 
   test("--yes asks nothing", async () => {

@@ -1180,6 +1180,17 @@ function acquireSyncLock(home: string, host: string): () => void {
   return release;
 }
 
+/**
+ * Take the box lock for a command that is not a sync, such as `ferry box
+ * remove --uninstall`. While the command holds the lock, a sync for the box
+ * fails with `concurrent-sync`. Throws that error when a sync holds the lock.
+ */
+export function acquireBoxLock(home: string, box: Pick<ResolvedBox, "name" | "host">): () => void {
+  const release = tryLock(boxLockPath(home, targetKey(box.host)));
+  if (!release) throw new SyncError("concurrent-sync", "operator", `a sync is active for box ${box.name}`);
+  return release;
+}
+
 /** Wait while another sync publishes. Only the publish holds this lock, so the wait is short. */
 export async function acquireStoreLock(home: string): Promise<() => void> {
   const path = join(home, ".ferry", "store.lock");

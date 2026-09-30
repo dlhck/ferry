@@ -312,7 +312,7 @@ const JSON_RESULTS: Record<string, string> = {
   "box list": "{ boxes: [{ name, transport, destination, default }] }",
   "box add": "{ name, transport, destination, gitAuth, migrated, instructionFile }",
   "box remove":
-    "{ name, defaultBoxRemoved }. With --uninstall, also uninstall: { dryRun, plan: { home, services, links: [{ path, link, backup }], profileBlock, paths }, remaining }, or null when cancelled. The plan paths are relative to the box home. backup is the file that Ferry moves back to path, or null. remaining has the names that stay in ~/.ferry on the box. A dry run changes nothing",
+    "{ name, defaultBoxRemoved, tunnelService, instructionFile }. tunnelService is the file of the tunnel user service that Ferry removed from this machine, or null. instructionFile is the per-box instruction file that stays on this machine, or null. With --uninstall, also uninstall: { dryRun, plan: { home, services, links: [{ path, link, backup }], profileBlock, paths }, remaining }, or null when cancelled. The plan paths are relative to the box home. backup is the file that Ferry moves back to path, or null. remaining has the names that stay in ~/.ferry on the box. A dry run changes nothing",
   "box default": "{ defaultBox }",
   "skills add": "{ argv }. The output of npx goes to stderr",
 };
@@ -1528,6 +1528,12 @@ git_auth = "box" in its [box.<name>] table and run ferry init --box <name>.`)
 
 Without --uninstall, Ferry does not connect to the box and does not change it.
 
+With and without --uninstall, Ferry stops and removes the tunnel user service
+of the box on this machine, which ferry tunnel install wrote. Your per-box
+instruction file ~/.ferry/boxes/<name>/AGENTS.md stays. Ferry prints its path.
+A later box with the same name gets its text. Delete the file when you do not
+need it.
+
 With --uninstall, Ferry reads the box, prints the plan, and asks you to type
 the box name. Then it does these steps on the box, in this order:
 
@@ -1548,6 +1554,13 @@ Paseo CLI, and the tools of the config. It also keeps the settings keys, MCP
 servers, and plugins that ferry sync merged into the config files of the
 box, ~/.ferry/trash, and each backup that it did not move back.
 
+With --uninstall, Ferry holds the sync lock of the box from before it
+connects until the box is out of the config. During that time, a sync that
+includes the box fails with the code sync-busy, also a sync of ferry watch.
+The watch syncs again later. When a sync for the box runs, the command fails
+with that code and changes nothing. Run it again when the sync ends.
+--dry-run takes no lock.
+
 When Ferry cannot reach the box, or a box step fails, the box stays in the
 config. Run the command without --uninstall to remove the box from the
 config only. Ferry refuses the last box of the config.`)
@@ -1556,10 +1569,16 @@ config only. Ferry refuses the last box of the config.`)
     .option("--yes", "with --uninstall, do not ask for the box name")
     .option("--dry-run", "with --uninstall, print the plan and change nothing")
     .action(async (name: string, options: { uninstall?: boolean; yes?: boolean; dryRun?: boolean }) => {
-      const configDependencies = { readConfig: config, writeConfig: (value: BoxesOperatorConfig) => writeConfig(value), warn };
+      const configDependencies = {
+        home: (dependencies.home ?? homedir)(),
+        readConfig: config,
+        writeConfig: (value: BoxesOperatorConfig) => writeConfig(value),
+        uninstallTunnelService: dependencies.uninstallTunnelService ?? uninstallTunnelService,
+        warn,
+      };
       if (options.uninstall !== true) {
         if (options.dryRun === true) throw new FerryError("usage", "--dry-run needs --uninstall.");
-        report(runBoxRemove({ name }, { ...configDependencies, writeLine }));
+        report(await runBoxRemove({ name }, { ...configDependencies, writeLine }));
         return;
       }
       const result = await withProgress((reporter, writeLine) =>
