@@ -39,7 +39,7 @@ export type DenyRuleDescription = {
  * a box whose number is lower than this one, because older rules can pass a
  * file that this machine refuses.
  */
-export const DENY_RULES_VERSION = 1;
+export const DENY_RULES_VERSION = 2;
 
 const DENY_RULES = {
   dotenv: { code: "dotenv", reason: "environment file", verdict: "refuse" },
@@ -641,9 +641,12 @@ function secretLineKeys(text: string): string[] {
   });
 }
 
-/** A hit names its key only when the key matches `PRINTED_KEY`. A key of a JSON object is free text and can hold a value. */
+/**
+ * A hit names its key only when the key matches `PRINTED_KEY` and has no
+ * token in it. A key of a JSON object is free text and can hold a value.
+ */
 export function secretKeyHits(path: string, keys: readonly string[]): ForbiddenHit[] {
-  const names = keys.map((key) => (PRINTED_KEY.test(key) ? `key ${key}` : "a key"));
+  const names = keys.map((key) => (PRINTED_KEY.test(key) && !holdsToken(key) ? `key ${key}` : "a key"));
   return [...new Set(names)].map((name) => ({
     path,
     code: DENY_RULES["secret-field"].code,
@@ -670,6 +673,32 @@ export function isSecretKey(key: string): boolean {
 export function isSecretValue(value: string): boolean {
   return value !== "" && !PLACEHOLDER_BODY.test(value);
 }
+
+/**
+ * The token patterns without a word boundary, for a name, a key, or a line
+ * that Ferry prints or that leaves a box. `password_ghp_...` has no word
+ * boundary before the token, and it must not be printed.
+ */
+const PRINTED_TOKEN_PATTERNS = TOKEN_PATTERNS.map(([pattern]) => new RegExp(pattern.source.replaceAll("\\b", ""), "g"));
+
+/** True when a token pattern matches in `text`. Ferry does not print such a name, key, or id. */
+export function holdsToken(text: string): boolean {
+  return redactTokens(text) !== text;
+}
+
+/** The text that `redactTokens` puts in the place of a token. */
+export const TOKEN_MARK = "[token]";
+
+/** `text` with `TOKEN_MARK` in the place of each match of a token pattern. A placeholder stays. */
+export function redactTokens(text: string): string {
+  return PRINTED_TOKEN_PATTERNS.reduce(
+    (redacted, pattern) => redacted.replace(pattern, (match, body: string) => (PLACEHOLDER_BODY.test(body) ? match : TOKEN_MARK)),
+    text,
+  );
+}
+
+/** The token patterns as one POSIX extended regular expression, for `grep -E` on a box. It has no word boundary. */
+export const TOKEN_ERE = TOKEN_PATTERNS.map(([pattern]) => pattern.source.replaceAll("\\b", "")).join("|");
 
 /** Name each token kind found in `bytes`. The hit never holds the token itself. */
 function tokenHits(path: string, bytes: Uint8Array): ForbiddenHit[] {

@@ -2,7 +2,16 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { carriedContentHits, carriedNameHit, denyRules, readMcpSources, readSeed } from "../src/manifest.ts";
+import {
+  carriedContentHits,
+  carriedNameHit,
+  denyRules,
+  holdsToken,
+  readMcpSources,
+  readSeed,
+  redactTokens,
+  TOKEN_ERE,
+} from "../src/manifest.ts";
 import type { Refusal, Seed } from "../src/manifest.ts";
 import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 
@@ -1799,6 +1808,17 @@ describe("carried project files", () => {
       "a key holds a password or secret",
       "key password holds a password or secret",
     ]);
+  });
+
+  test("the printed form of a text has a mark in the place of each token, also without a word boundary before it", () => {
+    const token = "gh" + "p_" + "a".repeat(36);
+    const aws = "AK" + "IA" + "Q2W3E4R5T6Y7U8I9";
+
+    expect(redactTokens(`notes/${token}.md\0password_${token}\0x${aws}y`)).toBe("notes/[token].md\0password_[token]\0x[token]y");
+    expect(redactTokens("ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx and README.md")).toBe("ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx and README.md");
+    expect([token, `password_${token}`, "README.md", "ghp_short"].map(holdsToken)).toEqual([true, true, false, false]);
+    const grep = (text: string) => Bun.spawnSync(["grep", "-Eq", "--", TOKEN_ERE], { stdin: Buffer.from(`${text}\n`) }).exitCode === 0;
+    expect([token, `password_${token}`, aws, "README.md"].map(grep)).toEqual([true, true, true, false]);
   });
 
   test("an environment file gets the secret-field rule line by line", () => {

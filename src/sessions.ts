@@ -31,6 +31,9 @@ export type Session = {
 /** The staged sessions, the sessions whose files changed after the scan, and the local directory with the staged files at the target paths. */
 export type StagedSessions = { readonly sessions: readonly Session[]; readonly changed: readonly Session[]; readonly stage: string };
 
+/** The id of a session whose id the scan holds back: a session with a hit, before the operator agrees to carry it. */
+export const UNKNOWN_ID = "";
+
 /** Claude shortens a longer directory name and adds a hash of the path. */
 const MAX_NAME_LENGTH = 200;
 
@@ -67,12 +70,14 @@ export async function listSessionFiles(options: {
 }
 
 /**
- * The sessions in the candidate files. `ids` has the session id of each file
- * whose first line records the source project, from the scan on the source.
+ * The sessions in the candidate files. `scanned` has the result of the scan on
+ * the source for each file: `session` is true when its first line records the
+ * source project, and `id` is its session id, or null when the scan holds it
+ * back. Such a session gets the id `UNKNOWN_ID`.
  */
 export function groupSessions(
   listed: readonly SessionCandidates[],
-  ids: ReadonlyMap<string, string | null>,
+  scanned: ReadonlyMap<string, { readonly session: boolean; readonly id: string | null }>,
   sourceProject: string,
   targetProject: string,
 ): Session[] {
@@ -80,8 +85,8 @@ export function groupSessions(
     store.layout === "project-directory"
       ? projectSessions(harness, store, paths, sourceProject, targetProject)
       : paths.flatMap((path) => {
-          const id = ids.get(path);
-          return id ? [{ harness, id, layout: store.layout, files: [{ source: path, target: path }] }] : [];
+          const file = scanned.get(path);
+          return file?.session ? [{ harness, id: file.id ?? UNKNOWN_ID, layout: store.layout, files: [{ source: path, target: path }] }] : [];
         }),
   );
 }
