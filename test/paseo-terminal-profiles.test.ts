@@ -328,7 +328,7 @@ test("sync carries terminal profiles after the preferences and before the unit P
         : command.includes("command -v -- 'lazygit'") ? "ok lazygit\n"
         : "", stderr: "" };
     } }),
-    apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
+    apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }),
     acquireLock: () => () => {}, adopt: () => {}, writePlan: () => {}, writeLine: () => {}, warn: () => {},
   });
   expect(result.boxes[0]?.failure).toBeUndefined();

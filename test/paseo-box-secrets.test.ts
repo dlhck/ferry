@@ -154,7 +154,7 @@ describe("box Paseo config secrets", () => {
       readConfig: () => ({ version: 1, publisher: "operator", snapshotUrl: "snapshot.git",
         host: { tailscale: "box", sshUser: "user" }, integrations: { paseo: true } }),
       createLink: () => b.link,
-      apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
+      apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }),
       acquireLock: () => () => {}, adopt: () => {}, writePlan: (plan) => plans.push(plan),
       writeLine: (line) => lines.push(line), warn: (line) => warnings.push(line),
     });

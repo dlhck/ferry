@@ -134,7 +134,7 @@ test("sync carries the preferences and reports a failure without blocking the co
         if (fail && command === "paseo daemon reload >/dev/null 2>&1") return { ok: false, error: { origin: "box", code: "command-failed", message: "down" } };
         return { ok: true, address: "box", stdout: command.startsWith("printf") ? "/home/user\n" : command.includes(".paseo/config.json") ? "W\n" : "", stderr: "" };
       } }),
-      apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
+      apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }),
       acquireLock: () => () => {}, adopt: () => {}, writePlan: () => {}, writeLine: () => {},
       warn: (line) => warnings.push(line),
     });
@@ -166,7 +166,7 @@ test("a failed box command never puts its message, the instruction text, or anot
         if (fails(command)) return { ok: false, error: { origin: "box", code: "command-failed", message: `${command} ${session}` } };
         return { ok: true, address: "box", stdout: command.startsWith("printf") ? "/home/user\n" : command.includes(".paseo/config.json") ? "W\n" : "", stderr: "" };
       } }),
-      apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
+      apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }),
       acquireLock: () => () => {}, adopt: () => {}, writePlan: () => {}, writeLine: (line) => lines.push(line),
       warn: (line) => warnings.push(line),
     });
@@ -207,7 +207,7 @@ function autoArchiveSync(path: string, autoArchive: boolean | undefined) {
       host: { tailscale: "box", sshUser: "user" },
       integrations: autoArchive === undefined ? { paseo: true } : { paseo: true, paseo_auto_archive: autoArchive } }),
     createLink: () => box.link,
-    apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
+    apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }),
     acquireLock: () => () => {}, adopt: () => {}, writePlan: () => {}, writeLine: () => {}, warn: () => {},
   });
   return run.then(() => box);

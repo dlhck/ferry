@@ -313,7 +313,7 @@ const JSON_RESULTS: Record<string, string> = {
   "menubar install": "{ app, path, version, ferryPath }. version is null with --app",
   "menubar uninstall": "{ app, path, removed }",
   whoami:
-    '{ role: "operator" or "box", box, instructions: { file, sources: [{ part: "header", "box", or "shared", path }] }, managedPaths: { instructionFiles, skillRoots, roots } }. box is null on the operator machine and before the first sync of a box. instructions is null on the operator machine and on a box without the generated file. sources has the merged parts in order, and path is the file on the operator machine',
+    '{ role: "operator" or "box", box, instructions: { file, sources: [{ part: "header", "box", or "shared", path }] }, managedPaths: { instructionFiles, skillRoots, roots } }. box is null on the operator machine and before the first sync of a box. instructions is null on the operator machine and on a box without the generated file. sources has the merged parts in order, and path is the file on the operator machine. On a box, managedPaths has the paths that the last sync linked there',
   "self-update":
     "{ current, latest, updated, services: [{ service, action, message }], skill }. skill is the message of the skill update, or null. The output of the installer goes to stderr",
   "box list": "{ boxes: [{ name, transport, destination, default }] }",
@@ -1476,7 +1476,14 @@ order: the Ferry header, the per-box instructions from
 ~/.ferry/boxes/<name>/AGENTS.md on the operator machine when the box has
 them, and the shared ~/AGENTS.md. The operator machine is the source of
 truth. On a box, change a Ferry-managed file on the operator machine, not
-on the box. This command runs on the operator machine and on a box install.`)
+on the box. This command runs on the operator machine and on a box install.
+
+The managed paths of a box are the paths that the last ferry sync linked
+there: the instruction files, the skill roots, and the other roots of the
+harnesses that are on for the box, with the custom harnesses of the config.
+A box that an earlier Ferry synced has no such record until the next sync.
+Until then, Ferry lists the paths of the built-in harnesses that are links
+of Ferry on the box.`)
     .action(() => {
       const result = whoami({
         home: (dependencies.home ?? homedir)(),
