@@ -1669,14 +1669,12 @@ describe("carried MCP server declarations", () => {
     ["an inline node script joined to --print", "node", ["--print=serve()"]],
     ["an inline node script with -pe", "node", ["-pe", "serve()"]],
     ["an inline node script after an option with a value", "node", ["--input-type", "module", "--eval", "serve()"]],
-    ["an inline node script after an unknown option with a value", "node", ["--experimental-default-type", "module", "--eval", "serve()"]],
     ["an inline node script after a value that has a space", "node", ["-r", "my module", "-e", "serve()"]],
     ["an inline node script in a data URL", "node", ["--import", "data:text/javascript,serve()", "/srv/server.js"]],
     ["an inline script for nodejs", "nodejs", ["-e", "serve()"]],
     ["an inline tsx script", "npx", ["-y", "tsx", "-e", "serve()"]],
     ["an inline python script joined to its option", "python3", ["-cimport tool"]],
     ["an inline python script in an option group", "python3", ["-uc", "import tool"]],
-    ["an inline python script after an unknown option", "python3", ["-Z", "value", "-c", "import tool"]],
     ["an inline bash script with c first in the option group", "bash", ["-cl", "exec tool serve"]],
     ["an inline bash script with c in the middle of the option group", "bash", ["-lce", "exec tool serve"]],
     ["an inline bash script after a + option", "bash", ["+x", "-c", "exec tool serve"]],
@@ -1719,10 +1717,39 @@ describe("carried MCP server declarations", () => {
     ["an inline script behind sudo", "sudo", ["-u", "tool", "bash", "-c", "exec tool serve"]],
     ["an inline script behind uv", "uv", ["run", "python", "-c", "import tool"]],
     ["an inline script in a container after options", "docker", ["run", "--rm", "-i", "example/tool", "sh", "-c", "exec tool serve"]],
-    ["an inline script for a container entry point", "docker", ["run", "-i", "--entrypoint", "sh", "example/tool", "-c", "exec tool serve"]],
-    ["an inline script for a joined container entry point", "docker", ["run", "-i", "--entrypoint=python3", "example/tool", "-c", "import tool"]],
-    ["an inline script for an interpreter image", "docker", ["run", "-i", "--rm", "node:22", "-e", "serve()"]],
   ];
+  const unknownOptions: readonly (readonly [string, string, readonly string[]])[] = [
+    ["a node script option after an unknown option with a value", "node", ["--experimental-default-type", "module", "--eval", "serve()"]],
+    ["a python script option after an unknown option", "python3", ["-Z", "value", "-c", "import tool"]],
+    ["a python script option in a group with an unknown option", "python3", ["-Zc", "import tool"]],
+    ["a script option after a script file and an unknown option", "node", ["--some-new-option", "/srv/server.js", "-p", "3000"]],
+    ["a script option for a container entry point", "docker", ["run", "-i", "--entrypoint", "sh", "example/tool", "-c", "exec tool serve"]],
+    ["a script option for a joined container entry point", "docker", ["run", "-i", "--entrypoint=python3", "example/tool", "-c", "import tool"]],
+    ["a script option for an interpreter image after a long option", "docker", ["run", "-i", "--rm", "node:22", "-e", "serve()"]],
+    ["a pwsh option that Ferry does not know", "pwsh", ["-NoExit", "/srv/server.ps1"]],
+  ];
+  for (const [what, command, args] of unknownOptions) {
+    test(`skips a stdio server with ${what}, and says that Ferry cannot classify the options`, () => {
+      const home = makeHome();
+      write(home, ".cursor/mcp.json", JSON.stringify({ mcpServers: { tool: { command, args }, other: { command: "other-mcp" } } }));
+
+      const seed = seedOf(home);
+
+      expect(mcpOf(seed, "cursor")).toEqual([{ name: "other", type: "stdio", command: "other-mcp", args: [], env: [] }]);
+      expect(seed.leftovers.filter((leftover) => leftover.code === "mcp-script")).toEqual([
+        {
+          path: join(home, ".cursor", "mcp.json"),
+          code: "mcp-script",
+          reason:
+            "MCP server tool runs a shell or interpreter with options that Ferry cannot classify. Remove the options that come before the script file, or run the server through a tool on the PATH",
+        },
+      ]);
+      expect(readMcpSources(home, BUILTIN_HARNESSES)).toEqual([
+        { harness: "cursor", servers: mcpOf(seed, "cursor") as never, nonPortable: [{ name: "tool", reason: "unknown-options" }] },
+      ]);
+    });
+  }
+
   for (const [what, command, args] of inlineScripts) {
     test(`skips a stdio server with ${what}, and says what to do`, () => {
       const home = makeHome();

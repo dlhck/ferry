@@ -373,6 +373,8 @@ const CMD_SCRIPT_OPTION = /^\/[ckr][^/]*$/i;
 const POWERSHELL_FILE_OPTION = /^f(?:i(?:le?)?)?$/;
 /** PowerShell options that take the next word as a value. */
 const POWERSHELL_VALUE_OPTION = /^(?:ex(?:ecutionpolicy)?|ep|w(?:indowstyle)?|wd|workingdirectory)$/;
+/** PowerShell options that take a command as text. PowerShell also accepts their first letters, such as `-c` and `-enc`. */
+const POWERSHELL_COMMAND_OPTIONS = ["command", "commandwithargs", "encodedcommand", "ec", "cwa"];
 /** PowerShell options that take no value and run nothing. */
 const POWERSHELL_FLAG_OPTION = /^(?:nop(?:rofile)?|nol(?:ogo)?|noni(?:nteractive)?|l(?:ogin)?|mta|sta)$/;
 
@@ -415,9 +417,14 @@ export type SeedMcp = { readonly harness: string; readonly servers: readonly Mcp
 /**
  * A stdio server that Ferry does not carry. `home-path`: it refers to a path
  * in the operator home. `inline-script`: it runs an inline shell or
- * interpreter script, which Ferry cannot check.
+ * interpreter script, which Ferry cannot check. `unknown-options`: it runs a
+ * shell or an interpreter with options that Ferry cannot classify, so Ferry
+ * cannot tell if it runs an inline script.
  */
-export type NonPortableMcp = { readonly name: string; readonly reason: "home-path" | "inline-script" };
+export type NonPortableMcp = { readonly name: string; readonly reason: "home-path" | ScriptReason };
+
+/** Why `scriptReason` skips a stdio server. */
+type ScriptReason = "inline-script" | "unknown-options";
 
 /** The carried MCP servers of one harness, and its stdio servers that Ferry does not carry. */
 export type McpSource = SeedMcp & { readonly nonPortable: readonly NonPortableMcp[] };
@@ -1038,12 +1045,16 @@ function readMcp(
         });
         continue;
       }
-      if (runsInlineScript(words) || runsInlineScript(parts)) {
-        nonPortable.push({ name, reason: "inline-script" });
+      const script = scriptReason(words, parts);
+      if (script) {
+        nonPortable.push({ name, reason: script });
         leftovers.push({
           path,
           code: DENY_RULES["mcp-script"].code,
-          reason: `MCP server ${name} runs an inline shell or interpreter script, which Ferry cannot check. Put the script in a file that Ferry carries, or run the server through a tool on the PATH`,
+          reason:
+            script === "inline-script"
+              ? `MCP server ${name} runs an inline shell or interpreter script, which Ferry cannot check. Put the script in a file that Ferry carries, or run the server through a tool on the PATH`
+              : `MCP server ${name} runs a shell or interpreter with options that Ferry cannot classify. Remove the options that come before the script file, or run the server through a tool on the PATH`,
         });
         continue;
       }
@@ -1176,39 +1187,49 @@ function refersToHome(words: readonly string[], home: string): boolean {
 }
 
 /**
- * True when a word of `words` names a shell or an interpreter, and the words
- * after it give it a script as text, such as `sh -c`, `node --eval=...`,
- * `python -c...`, `deno eval`, `npx -c`, `pwsh -Command`, or `cmd /c`. The
- * name can be the command or a later word, as in `env bash -c`, `busybox sh
- * -c`, or `docker run image sh -c`. `python3.12`, `node.exe`, and the image
- * `node:22` name `python` and `node`.
+ * Why Ferry skips a stdio command, else `null`. Each list has the words of the
+ * command: the arguments as they are, and the words inside them.
+ *
+ * `inline-script`: a word names a shell or an interpreter, and the words after
+ * it give it a script as text, such as `sh -c`, `node --eval=...`, `python
+ * -c...`, `deno eval`, `npx -c`, `pwsh -Command`, or `cmd /c`. The name can be
+ * the command or a later word, as in `env bash -c`, `busybox sh -c`, or
+ * `docker run image sh -c`. `python3.12`, `node.exe`, and the image `node:22`
+ * name `python` and `node`.
+ *
+ * `unknown-options`: Ferry found a script option, but only after an option
+ * that it cannot classify. `inline-script` comes first when both apply.
  */
-function runsInlineScript(words: readonly string[]): boolean {
-  return words.some((word, index) => {
-    const name = word.split(/[\\/=]/).at(-1)!.split(":")[0]!.toLowerCase().replace(/\.exe$/, "").replace(/[\d.]+$/, "");
-    const rest = words.slice(index + 1);
-    if (name === "cmd") return rest.some((next) => CMD_SCRIPT_OPTION.test(next));
-    if (name === "pwsh" || name === "powershell") return startsPowerShellCommand(name, rest);
-    const options = RUNNER_OPTIONS.get(name);
-    // The value of an option, as in `--entrypoint sh`, does not have its own arguments next to it.
-    const direct = !word.includes("=") && !words[index - 1]?.startsWith("--");
-    return options !== undefined && startsInlineScript(options, rest, direct);
-  });
+function scriptReason(...lists: readonly (readonly string[])[]): ScriptReason | null {
+  const reasons = lists.flatMap((words) =>
+    words.map((word, index) => {
+      const name = word.split(/[\\/=]/).at(-1)!.split(":")[0]!.toLowerCase().replace(/\.exe$/, "").replace(/[\d.]+$/, "");
+      const rest = words.slice(index + 1);
+      if (name === "cmd") return rest.some((next) => CMD_SCRIPT_OPTION.test(next)) ? "inline-script" : null;
+      if (name === "pwsh" || name === "powershell") return startsPowerShellCommand(name, rest);
+      const options = RUNNER_OPTIONS.get(name);
+      // The value of an option, as in `--entrypoint sh`, does not have its own arguments next to it.
+      const direct = !word.includes("=") && !words[index - 1]?.startsWith("--");
+      return options === undefined ? null : startsInlineScript(options, rest, direct);
+    }),
+  );
+  return reasons.includes("inline-script") ? "inline-script" : reasons.includes("unknown-options") ? "unknown-options" : null;
 }
 
 /**
- * True when `rest`, the words after a shell or an interpreter, give it a
- * script as text. The check reads the options before the script file. The
- * first word that is not an option is the script file, and the words after it
- * pass, as in `node /srv/server.js -c conf.json`.
+ * `inline-script` when `rest`, the words after a shell or an interpreter, give
+ * it a script as text. The check reads the options before the script file.
+ * The first word that is not an option is the script file, and the words
+ * after it pass, as in `node /srv/server.js -c conf.json`.
  *
  * An option that is not in `options` can take the next word as its value.
  * Then the script file has no sure position, and a script option at any later
- * place counts, as in `node --new-option value --eval ...`. With `direct`
- * false, the position is not sure from the start.
+ * place gives `unknown-options`, as in `node --new-option value --eval ...`.
+ * With `direct` false, the position is not sure from the start.
  */
-function startsInlineScript(options: RunnerOptions, rest: readonly string[], direct: boolean): boolean {
+function startsInlineScript(options: RunnerOptions, rest: readonly string[], direct: boolean): ScriptReason | null {
   let sure = direct;
+  const found = (): ScriptReason => (sure ? "inline-script" : "unknown-options");
   let passed = false;
   /** The index of a word that is the value of the option before it. */
   let value = -1;
@@ -1216,13 +1237,13 @@ function startsInlineScript(options: RunnerOptions, rest: readonly string[], dir
   const takesNext = (at: number): boolean => rest[at + 1] !== undefined && !/^[-+]/.test(rest[at + 1]!);
   for (let at = 0; at < rest.length; at++) {
     const word = rest[at]!;
-    if (DATA_URL.test(word)) return true;
+    if (DATA_URL.test(word)) return found();
     if (at === value) continue;
     const long = word.match(/^--([^=]+)(=)?/);
     if (long) {
       const [, name = "", joined] = long;
       // A program can accept the first letters of a long option.
-      if (options.script.long.some((script) => script.startsWith(name))) return true;
+      if (options.script.long.some((script) => script.startsWith(name))) return found();
       if (options.value.long.includes(name)) {
         if (!joined && takesNext(at)) value = at + 1;
       } else if (!joined && !options.flag.long.includes(name)) sure = false;
@@ -1232,10 +1253,10 @@ function startsInlineScript(options: RunnerOptions, rest: readonly string[], dir
       const letters = word.slice(1);
       for (let i = 0; i < letters.length; i++) {
         const letter = letters[i]!;
-        if (options.script.short.includes(letter)) return true;
-        if (options.end?.includes(letter)) return false;
+        if (options.script.short.includes(letter)) return found();
+        if (options.end?.includes(letter)) return null;
         if (options.module?.includes(letter)) {
-          if (!PERL_MODULE.test(letters.slice(i + 1))) return true;
+          if (!PERL_MODULE.test(letters.slice(i + 1))) return found();
           break;
         }
         if (options.value.short.includes(letter)) {
@@ -1246,35 +1267,37 @@ function startsInlineScript(options: RunnerOptions, rest: readonly string[], dir
       }
       continue;
     }
-    if (options.inline?.includes(word)) return true;
+    if (options.inline?.includes(word)) return found();
     if (!sure) continue;
     if (!passed && options.pass?.includes(word)) {
       passed = true;
       continue;
     }
-    return false;
+    return null;
   }
-  return false;
+  return null;
 }
 
 /**
- * True when `rest`, the words after `pwsh` or `powershell`, give it a command
- * as text. Only the options that Ferry knows before `-File` pass. Each other
- * option counts as a command, such as `-Command`, `-c`, and `-EncodedCommand`.
- * A word without an option is a script file for `pwsh` and a command for
- * `powershell`.
+ * `inline-script` when `rest`, the words after `pwsh` or `powershell`, give it
+ * a command as text, with `-Command`, `-c`, `-EncodedCommand`, or their short
+ * forms. A word without an option is a script file for `pwsh` and a command
+ * for `powershell`. Only the options that Ferry knows before `-File` pass.
+ * Each other option gives `unknown-options`.
  */
-function startsPowerShellCommand(name: string, rest: readonly string[]): boolean {
+function startsPowerShellCommand(name: string, rest: readonly string[]): ScriptReason | null {
   for (let at = 0; at < rest.length; at++) {
     const word = rest[at]!;
-    if (!word.startsWith("-")) return name === "powershell";
+    if (!word.startsWith("-")) return name === "powershell" ? "inline-script" : null;
     const option = word.replace(/^-+/, "").toLowerCase();
-    if (POWERSHELL_FILE_OPTION.test(option)) return false;
+    if (POWERSHELL_FILE_OPTION.test(option)) return null;
     if (POWERSHELL_VALUE_OPTION.test(option)) {
       if (!rest[at + 1]?.startsWith("-")) at++;
-    } else if (!POWERSHELL_FLAG_OPTION.test(option)) return true;
+    } else if (!POWERSHELL_FLAG_OPTION.test(option)) {
+      return POWERSHELL_COMMAND_OPTIONS.some((known) => known.startsWith(option)) ? "inline-script" : "unknown-options";
+    }
   }
-  return false;
+  return null;
 }
 
 /** The type and URL of a declaration with an HTTPS URL and an HTTP or SSE transport, else `null`. */
