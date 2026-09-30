@@ -286,7 +286,10 @@ function scanSessionFiles(home: string, request: Extract<ScanRequest, { kind: "s
       return denied({ path, code: "missing", reason: "file changed during the preflight" }, false);
     }
     const nameHit = carriedNameHit(path);
-    const hits = nameHit ? [nameHit] : [...carriedContentHits(path, bytes), ...sessionContentHits(path, bytes)];
+    const content = nameHit ? [] : carriedContentHits(path, bytes);
+    // The session scan finds a token in the file bytes again. One hit for each rule is enough.
+    const session = nameHit ? [] : sessionContentHits(path, bytes).filter((hit) => !content.some((found) => found.code === hit.code && found.reason === hit.reason));
+    const hits = nameHit ? [nameHit] : [...content, ...session];
     const id = sessionId(bytes, request.project);
     // A name rule, a private key, or an executable refuses the file also with allowSecrets.
     const blocked = nameHit !== null || hits.some((hit) => ALWAYS_REFUSED.has(hit.code));

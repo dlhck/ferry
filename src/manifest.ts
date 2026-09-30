@@ -39,7 +39,7 @@ export type DenyRuleDescription = {
  * a box whose number is lower than this one, because older rules can pass a
  * file that this machine refuses.
  */
-export const DENY_RULES_VERSION = 4;
+export const DENY_RULES_VERSION = 5;
 
 const DENY_RULES = {
   dotenv: { code: "dotenv", reason: "environment file", verdict: "refuse" },
@@ -817,7 +817,7 @@ export function redactTokens(text: string): string {
 export const TOKEN_ERE = TOKEN_SOURCES.join("|");
 
 /** Name each token kind found in `bytes`. The hit never holds the token itself. */
-function tokenHits(path: string, bytes: Uint8Array): ForbiddenHit[] {
+export function tokenHits(path: string, bytes: Uint8Array): ForbiddenHit[] {
   const text = Buffer.from(bytes).toString("latin1");
   const hits = new Map<string, ForbiddenHit>();
   for (const [pattern, rule] of TOKEN_PATTERNS) {
