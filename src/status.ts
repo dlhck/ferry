@@ -193,12 +193,14 @@ export type StatusReport = {
  * Ferry does not carry, with the name of that path. `resource`: the free disk
  * of the home file system (`disk`) or the available memory (`memory`) of the
  * box is below its limit, in the state `low`. `check-failed`: Ferry cannot
- * read a part of the box.
+ * read a part of the box. `summary` is a short title for a menu, `<name>: <state
+ * in words>`, of at most 60 characters. `message` is the full text.
  */
 export type BriefIssue = {
   readonly kind: "login" | "mcp-login" | "mcp-server" | "tool" | "hook" | "resource" | "check-failed";
   readonly name: string;
   readonly state: string;
+  readonly summary: string;
   readonly message: string;
   /** The Ferry command that fixes the issue, or null when a person must act on the box. */
   readonly command: string | null;
@@ -210,6 +212,8 @@ export type BriefBoxStatus = {
   readonly online: boolean;
   /** Why the box is offline. */
   readonly error: string | null;
+  /** `error` in at most 60 characters. A longer error loses its middle. */
+  readonly summary: string | null;
   /** Empty when the box is offline. */
   readonly issues: readonly BriefIssue[];
   /** The disk, memory, and load of the box. Null when the box is offline or the check has no resource read. */
@@ -261,13 +265,20 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
     progress.skip("Checking MCP logins on the box", OFFLINE);
     if (box.mcpServers) progress.skip("Checking MCP servers on the box", OFFLINE);
     if (box.tools) progress.skip("Checking tools on the box", OFFLINE);
-    return { ...base, online: false, error, issues: [], resources: null };
+    return { ...base, online: false, error, summary: cutMiddle(error, SUMMARY_LIMIT), issues: [], resources: null };
   }
 
   const resources = box.resources?.read() ?? null;
   const issues: BriefIssue[] = resources && box.resources ? resourceIssues(resources, box.resources.limits) : [];
   const failed = (name: string, cause: unknown) =>
-    issues.push({ kind: "check-failed", name, state: "failed", message: dependencyError("box", cause).message, command: null });
+    issues.push({
+      kind: "check-failed",
+      name,
+      state: "failed",
+      summary: summarize(name, "check failed"),
+      message: dependencyError("box", cause).message,
+      command: null,
+    });
   const flag = `--box ${box.name}`;
 
   try {
@@ -278,13 +289,34 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
         case "authenticated":
           break;
         case "login-required":
-          issues.push({ kind: "login", name, state: provider.status, message: `${name} needs a login.`, command: `ferry auth ${shellArg(name)} ${flag}` });
+          issues.push({
+            kind: "login",
+            name,
+            state: provider.status,
+            summary: summarize(name, "login needed"),
+            message: `${name} needs a login.`,
+            command: `ferry auth ${shellArg(name)} ${flag}`,
+          });
           break;
         case "manual":
-          issues.push({ kind: "login", name, state: provider.status, message: provider.instruction, command: null });
+          issues.push({
+            kind: "login",
+            name,
+            state: provider.status,
+            summary: summarize(name, "manual login needed"),
+            message: provider.instruction,
+            command: null,
+          });
           break;
         case "unavailable":
-          issues.push({ kind: "login", name, state: provider.status, message: `Ferry cannot check the ${name} login: ${provider.error.message}`, command: null });
+          issues.push({
+            kind: "login",
+            name,
+            state: provider.status,
+            summary: summarize(name, "login check failed"),
+            message: `Ferry cannot check the ${name} login: ${provider.error.message}`,
+            command: null,
+          });
           break;
       }
     }
@@ -303,6 +335,7 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
           kind: "mcp-login",
           name: `${status.tool}/${server}`,
           state: "login-required",
+          summary: summarize(`${status.tool}/${server}`, "login needed"),
           message: `${status.tool}/${server} needs a login.`,
           command: `ferry auth ${shellArg(status.tool)} --mcp ${shellArg(server)} ${flag}`,
         });
@@ -337,7 +370,7 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
 
   if (box.hookPaths) issues.push(...box.hookPaths().map(hookIssue));
 
-  return { ...base, online: true, error: null, issues, resources };
+  return { ...base, online: true, error: null, summary: null, issues, resources };
 }
 
 /**
@@ -359,6 +392,7 @@ function resourceIssues(resources: BoxResources, limits: ResourceLimits): BriefI
       issues.push({
         ...base,
         name: "disk",
+        summary: summarize("disk", `${formatGiB(gib)} free`),
         message: `The home file system has ${formatGiB(gib)} free (${formatPercent(percent)}). The limit is ${crossed.map((limit) => limit.text).join(" and ")}. Free disk space on the box.`,
       });
     }
@@ -369,6 +403,7 @@ function resourceIssues(resources: BoxResources, limits: ResourceLimits): BriefI
       issues.push({
         ...base,
         name: "memory",
+        summary: summarize("memory", `${formatGiB(memory.availableKiB / KIB_PER_GIB)} available`),
         message: `The box has ${formatGiB(memory.availableKiB / KIB_PER_GIB)} memory available (${formatPercent(percent)}). The limit is ${formatPercent(limits.memoryAvailablePercent)}. Stop processes on the box.`,
       });
     }
@@ -391,6 +426,7 @@ function hookIssue(hook: UncarriedHookPath): BriefIssue {
     kind: "hook",
     name: hook.path,
     state: "uncarried",
+    summary: summarize(hook.path, "hook file not carried"),
     message: `Hook ${hook.at} in ${hook.file} runs ${hook.path}, and Ferry does not carry that file. Move it into ~/.claude/hooks.`,
     command: null,
   };
@@ -403,22 +439,26 @@ function mcpServerIssue(issue: BoxMcpIssue, flag: string): BriefIssue {
     case "env-missing":
       return {
         ...base,
+        summary: summarize(name, `${plural(issue.keys.length, "env key")} missing`),
         message: `${name} needs ${issue.keys.join(", ")} on the box. Set ${issue.keys.length === 1 ? "it" : "them"} in the env of ${issue.server} in ~/${issue.file} on the box.`,
       };
     case "env-unchecked":
       return {
         ...base,
+        summary: summarize(name, "env keys not checked"),
         message: `Ferry cannot check ${issue.keys.join(", ")} of ${name}, because jq is not on the box.`,
         command: `ferry update ${flag}`,
       };
     case "command-missing":
       return {
         ...base,
+        summary: summarize(name, "command not on the box"),
         message: `${name} runs ${issue.command}, which is not on the box. Install ${issue.command} on the box, or add a tool for it to the registry.`,
       };
     case "not-portable":
       return {
         ...base,
+        summary: summarize(name, "not carried"),
         message: {
           "home-path": `${name} refers to a path in your home, so Ferry does not carry it. Use a command on the PATH or a path outside the home.`,
           "inline-script": `${name} runs an inline shell or interpreter script, which Ferry cannot check, so Ferry does not carry it. Put the script in a file that Ferry carries, or run the server through a tool on the PATH.`,
@@ -432,14 +472,36 @@ function toolIssue(tool: ToolStatus, flag: string): BriefIssue | null {
   const base = { kind: "tool", name: tool.id, state: tool.state } as const;
   switch (tool.state) {
     case "drift":
-      return { ...base, message: `${tool.id} is ${tool.box} on the box, and the target is ${tool.target}.`, command: `ferry update ${flag}` };
+      return {
+        ...base,
+        summary: summarize(tool.id, `${tool.box} on the box, target ${tool.target}`),
+        message: `${tool.id} is ${tool.box} on the box, and the target is ${tool.target}.`,
+        command: `ferry update ${flag}`,
+      };
     case "missing":
-      return { ...base, message: `${tool.id} is not on the box.`, command: `ferry install ${flag}` };
+      return { ...base, summary: summarize(tool.id, "not on the box"), message: `${tool.id} is not on the box.`, command: `ferry install ${flag}` };
     case "hidden":
-      return { ...base, message: `${tool.id}: ${tool.reason}.`, command: `ferry sync ${flag}` };
+      return { ...base, summary: summarize(tool.id, "hidden from the login shell"), message: `${tool.id}: ${tool.reason}.`, command: `ferry sync ${flag}` };
     default:
       return null;
   }
+}
+
+/** The most characters of a `summary`. */
+const SUMMARY_LIMIT = 60;
+
+/** `<name>: <state>` in at most SUMMARY_LIMIT characters. A long name loses its middle. */
+function summarize(name: string, state: string): string {
+  const room = Math.max(SUMMARY_LIMIT - state.length - 2, 8);
+  return cutMiddle(`${cutMiddle(name, room)}: ${state}`, SUMMARY_LIMIT);
+}
+
+/** Put `…` in place of the middle of a text that has more than `limit` characters. */
+function cutMiddle(text: string, limit: number): string {
+  const chars = [...text];
+  if (chars.length <= limit) return text;
+  const keep = limit - 1;
+  return `${chars.slice(0, Math.ceil(keep / 2)).join("")}…${chars.slice(chars.length - Math.floor(keep / 2)).join("")}`;
 }
 
 /** A name in a fix command. The operator runs the command in a shell, so a name with other characters gets quotes. */

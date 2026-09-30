@@ -1295,6 +1295,7 @@ describe("ferry status --brief", () => {
         kind: "mcp-server",
         name: "codex/github",
         state: "env-missing",
+        summary: "codex/github: 1 env key missing",
         message: "codex/github needs GITHUB_TOKEN on the box. Set it in the env of github in ~/.codex/config.toml on the box.",
         command: null,
       },

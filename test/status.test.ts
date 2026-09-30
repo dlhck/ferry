@@ -712,13 +712,15 @@ describe("brief status", () => {
           host: "ferry@build-box",
           online: true,
           error: null,
+          summary: null,
           resources: null,
           issues: [
-            { kind: "login", name: "codex", state: "login-required", message: "codex needs a login.", command: "ferry auth codex --box a" },
+            { kind: "login", name: "codex", state: "login-required", summary: "codex: login needed", message: "codex needs a login.", command: "ferry auth codex --box a" },
             {
               kind: "login",
               name: "pi",
               state: "manual",
+              summary: "pi: manual login needed",
               message: "SSH to the box, run pi, then use /login in its interactive session.",
               command: null,
             },
@@ -726,6 +728,7 @@ describe("brief status", () => {
               kind: "mcp-login",
               name: "claude/linear",
               state: "login-required",
+              summary: "claude/linear: login needed",
               message: "claude/linear needs a login.",
               command: "ferry auth claude --mcp linear --box a",
             },
@@ -733,14 +736,16 @@ describe("brief status", () => {
               kind: "tool",
               name: "node",
               state: "drift",
+              summary: "node: 1.0.0 on the box, target 2.0.0",
               message: "node is 1.0.0 on the box, and the target is 2.0.0.",
               command: "ferry update --box a",
             },
-            { kind: "tool", name: "bun", state: "missing", message: "bun is not on the box.", command: "ferry install --box a" },
+            { kind: "tool", name: "bun", state: "missing", summary: "bun: not on the box", message: "bun is not on the box.", command: "ferry install --box a" },
             {
               kind: "tool",
               name: "my tool",
               state: "hidden",
+              summary: "my tool: hidden from the login shell",
               message: "my tool: the login shell PATH does not find it.",
               command: "ferry sync --box a",
             },
@@ -777,6 +782,7 @@ describe("brief status", () => {
         kind: "mcp-server",
         name: "claude/local",
         state: "not-portable",
+        summary: "claude/local: not carried",
         message: "claude/local refers to a path in your home, so Ferry does not carry it. Use a command on the PATH or a path outside the home.",
         command: null,
       },
@@ -784,6 +790,7 @@ describe("brief status", () => {
         kind: "mcp-server",
         name: "cursor/wrapped",
         state: "not-portable",
+        summary: "cursor/wrapped: not carried",
         message:
           "cursor/wrapped runs an inline shell or interpreter script, which Ferry cannot check, so Ferry does not carry it. Put the script in a file that Ferry carries, or run the server through a tool on the PATH.",
         command: null,
@@ -792,6 +799,7 @@ describe("brief status", () => {
         kind: "mcp-server",
         name: "cursor/flagged",
         state: "not-portable",
+        summary: "cursor/flagged: not carried",
         message:
           "cursor/flagged runs a shell or interpreter with options that Ferry cannot classify, so Ferry does not carry it. Remove the options that come before the script file, or run the server through a tool on the PATH.",
         command: null,
@@ -800,6 +808,7 @@ describe("brief status", () => {
         kind: "mcp-server",
         name: "cursor/docs",
         state: "command-missing",
+        summary: "cursor/docs: command not on the box",
         message: "cursor/docs runs uvx, which is not on the box. Install uvx on the box, or add a tool for it to the registry.",
         command: null,
       },
@@ -807,6 +816,7 @@ describe("brief status", () => {
         kind: "mcp-server",
         name: "codex/github",
         state: "env-missing",
+        summary: "codex/github: 1 env key missing",
         message: "codex/github needs GITHUB_TOKEN on the box. Set it in the env of github in ~/.codex/config.toml on the box.",
         command: null,
       },
@@ -814,6 +824,7 @@ describe("brief status", () => {
         kind: "mcp-server",
         name: "cursor/db",
         state: "env-missing",
+        summary: "cursor/db: 2 env keys missing",
         message: "cursor/db needs DB_URL, DB_PASSWORD on the box. Set them in the env of db in ~/.cursor/mcp.json on the box.",
         command: null,
       },
@@ -821,6 +832,7 @@ describe("brief status", () => {
         kind: "mcp-server",
         name: "claude/github",
         state: "env-unchecked",
+        summary: "claude/github: env keys not checked",
         message: "Ferry cannot check GITHUB_TOKEN of claude/github, because jq is not on the box.",
         command: "ferry update --box default",
       },
@@ -844,7 +856,7 @@ describe("brief status", () => {
     );
 
     expect(report.boxes[0]!.issues).toEqual([
-      { kind: "check-failed", name: "MCP servers", state: "failed", message: "box: the box MCP file is not a JSON object", command: null },
+      { kind: "check-failed", name: "MCP servers", state: "failed", summary: "MCP servers: check failed", message: "box: the box MCP file is not a JSON object", command: null },
     ]);
   });
 
@@ -884,6 +896,7 @@ describe("brief status", () => {
         kind: "hook",
         name: "~/bin/notify.sh",
         state: "uncarried",
+        summary: "~/bin/notify.sh: hook file not carried",
         message:
           "Hook hooks.Stop[0].hooks[0].command in /home/user/.claude/settings.json runs ~/bin/notify.sh, and Ferry does not carry that file. Move it into ~/.claude/hooks.",
         command: null,
@@ -915,6 +928,7 @@ describe("brief status", () => {
         kind: "resource",
         name: "disk",
         state: "low",
+        summary: "disk: 4 GiB free",
         message: "The home file system has 4 GiB free (4%). The limit is 5 GiB and 10%. Free disk space on the box.",
         command: null,
       },
@@ -922,6 +936,7 @@ describe("brief status", () => {
         kind: "resource",
         name: "memory",
         state: "low",
+        summary: "memory: 0.8 GiB available",
         message: "The box has 0.8 GiB memory available (5%). The limit is 10%. Stop processes on the box.",
         command: null,
       },
@@ -964,6 +979,83 @@ describe("brief status", () => {
     expect(await disk(100, 1, { diskFreePercent: 0, diskFreeGiB: 0, memoryAvailablePercent: 0 })).toEqual([]);
   });
 
+  test("a login that Ferry cannot check has a summary", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const report = await composeBriefStatus(
+      [
+        box(calls, {
+          auth: {
+            status: async () => ({
+              providers: [
+                { provider: "claude", status: "login-required" },
+                { provider: "codex", status: "unavailable", error: { code: "command-timeout", origin: "box", message: "no answer" } },
+              ],
+            }),
+            mcpStatus: async () => [],
+          },
+        }),
+      ],
+      checkedAt,
+    );
+
+    expect(report.boxes[0]!.issues.map((issue) => issue.summary)).toEqual(["claude: login needed", "codex: login check failed"]);
+  });
+
+  test("a summary has at most 60 characters, and a long name loses its middle", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const keys = ["BROWSER_USE_AVAILABLE_BACKENDS", "BROWSER_USE_CODEX_APP_BUILD_FLAVOR", "NODE_REPL_NODE_PATH", "SKY_CUA_NODE_PATH", "SKY_CUA_SERVICE_PATH"];
+    const command = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl";
+    const server = "a-server-with-a-very-long-name-that-does-not-fit-in-the-title-of-a-menu-item";
+    const report = await composeBriefStatus(
+      [
+        box(calls, {
+          auth: { status: async () => ({ providers: [] }), mcpStatus: async () => [] },
+          mcpServers: {
+            check: async () => [
+              { kind: "command-missing", harness: "codex", server: "node_repl", command },
+              { kind: "env-missing", harness: "codex", server: "node_repl", keys, file: ".codex/config.toml" },
+              { kind: "command-missing", harness: "codex", server, command },
+            ],
+          },
+          tools: { check: async () => [tool("node", "drift", { box: "1".repeat(40), target: "2".repeat(40) })] },
+          hookPaths: () => [{ file: "/home/user/.claude/settings.json", at: "hooks.Stop[0].hooks[0].command", path: `~/${"dir/".repeat(20)}notify.sh` }],
+        }),
+      ],
+      checkedAt,
+    );
+
+    const issues = report.boxes[0]!.issues;
+    expect(issues.map((issue) => issue.summary)).toEqual([
+      "codex/node_repl: command not on the box",
+      "codex/node_repl: 5 env keys missing",
+      "codex/a-server-wit…le-of-a-menu-item: command not on the box",
+      "node: 111111111111111111111111…22222222222222222222222222222",
+      "~/dir/dir/dir/dir/…/dir/dir/notify.sh: hook file not carried",
+    ]);
+    for (const issue of issues) expect([...issue.summary].length).toBeLessThanOrEqual(60);
+    // The message keeps the full text.
+    expect(issues[0]!.message).toContain(command);
+    expect(issues[1]!.message).toContain(keys.join(", "));
+    expect(issues[2]!.message).toContain(server);
+  });
+
+  test("the summary of an offline box is its error, without the middle when the error is long", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const message = "ssh: connect to host box.example port 22: Connection timed out after 10 seconds";
+    const report = await composeBriefStatus(
+      [
+        box(calls, {
+          link: { ...box(calls).link, probe: async () => ({ ok: false, error: { code: "ssh-failed", origin: "network", message } }) },
+        }),
+      ],
+      checkedAt,
+    );
+
+    expect(report.boxes[0]!.error).toBe(message);
+    expect(report.boxes[0]!.summary).toBe("ssh: connect to host box.examp…on timed out after 10 seconds");
+    expect(report.boxes[0]!.summary).toHaveLength(60);
+  });
+
   test("reads only the link, the logins, the MCP logins, and the tools", async () => {
     const calls: Calls = { reads: [], mutations: [] };
     await composeBriefStatus([box(calls)], checkedAt);
@@ -1000,7 +1092,7 @@ describe("brief status", () => {
     );
 
     expect(report.boxes).toEqual([
-      { name: "default", host: "ferry@build-box", online: false, error: "Tailscale host box is offline", issues: [], resources: null },
+      { name: "default", host: "ferry@build-box", online: false, error: "Tailscale host box is offline", summary: "Tailscale host box is offline", issues: [], resources: null },
     ]);
     expect(calls.reads).toEqual(["link.probe"]);
   });
@@ -1029,9 +1121,9 @@ describe("brief status", () => {
     );
 
     expect(report.boxes[0]!.issues).toEqual([
-      { kind: "check-failed", name: "logins", state: "failed", message: "box: login probe timed out", command: null },
-      { kind: "check-failed", name: "codex MCP", state: "failed", message: "box: mcp list failed", command: null },
-      { kind: "check-failed", name: "tools", state: "failed", message: "box: tool command failed", command: null },
+      { kind: "check-failed", name: "logins", state: "failed", summary: "logins: check failed", message: "box: login probe timed out", command: null },
+      { kind: "check-failed", name: "codex MCP", state: "failed", summary: "codex MCP: check failed", message: "box: mcp list failed", command: null },
+      { kind: "check-failed", name: "tools", state: "failed", summary: "tools: check failed", message: "box: tool command failed", command: null },
     ]);
   });
 });
