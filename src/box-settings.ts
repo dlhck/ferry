@@ -248,6 +248,49 @@ function jsonScript(path: string, keys: readonly string[], values: Record<string
 }
 
 /**
+ * The box script that edits a JSON file with the jq `filter`. jq gets `{}` for
+ * a missing or empty file. The script prints `W` when it wrote the file, `J`
+ * without jq, `E` for a file that fails the jq test `valid`, and `S` when the
+ * write failed. It prints nothing when the filter changes nothing. `args` are
+ * jq options, such as `--argjson`. jq stderr goes to /dev/null, because a jq
+ * error can quote a value.
+ */
+export function jqEditScript(path: string, args: string, valid: string, filter: string): string {
+  return [
+    `f=${quoteShell(path)}`,
+    "umask 077",
+    `${HAS_JQ} || { printf 'J\\n'; exit 0; }`,
+    JQ_SOURCE,
+    `src | jq -e ${args} ${quoteShell(valid)} >/dev/null 2>&1 || { printf 'E\\n'; exit 0; }`,
+    `src | jq -e ${args} ${quoteShell(`(${filter}) == .`)} >/dev/null 2>&1 && exit 0`,
+    `if mkdir -p "$(dirname "$f")" && src | jq ${args} ${quoteShell(filter)} > "$f.ferry-tmp" 2>/dev/null; then`,
+    `  mv "$f.ferry-tmp" "$f" && printf 'W\\n' || printf 'S\\n'`,
+    "else",
+    `  rm -f "$f.ferry-tmp"; printf 'S\\n'`,
+    "fi",
+  ].join("\n");
+}
+
+/**
+ * The box script that prints the output of the jq `filter` for a JSON file.
+ * jq gets `{}` for a missing or empty file. The script prints `J` without jq
+ * and `E` when jq fails. Ferry reads all that the filter prints, so the filter
+ * must print only the fields that Ferry compares, and never a value that can
+ * hold a secret.
+ */
+export function jqReadScript(path: string, args: string, filter: string): string {
+  return [
+    `f=${quoteShell(path)}`,
+    `${HAS_JQ} || { printf 'J\\n'; exit 0; }`,
+    JQ_SOURCE,
+    `src | jq -r ${args} ${quoteShell(filter)} 2>/dev/null || printf 'E\\n'`,
+  ].join("\n");
+}
+
+/** A shell function that prints the file `$f`, or `{}` for a missing or empty file. */
+const JQ_SOURCE = `src() { if grep -q '[^[:space:]]' "$f" 2>/dev/null; then cat "$f"; else printf '{}'; fi; }`;
+
+/**
  * The box script for a TOML settings file. awk merges the carried keys into a
  * temporary file, and the script moves it into place only when a carried key
  * changed. awk is on every POSIX box. The status letters are those of

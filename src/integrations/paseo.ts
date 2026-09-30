@@ -3,7 +3,7 @@
 import type { IntegrationsConfig } from "../config.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { quoteShell, readCommand, writeCommand } from "../box-settings.ts";
+import { jqEditScript, quoteShell, readCommand, writeCommand } from "../box-settings.ts";
 import { BunHostAdapter, type HostAdapter, type Link } from "../link.ts";
 import { carriedContentHits } from "../manifest.ts";
 import { step, type Progress } from "../progress.ts";
@@ -486,6 +486,38 @@ export async function refreshUnitPath(link: IntegrationLink, pathDirs: readonly 
   return true;
 }
 
+/** A jq test: the input is an object, and the value at each path is an object or is not set. */
+export function jqObjects(...paths: readonly string[]): string {
+  return ['type == "object"', ...paths.map((path) => `(${path} | type | . == "null" or . == "object")`)].join(" and ");
+}
+
+/** The warning for a box without jq. Ferry never reads the box config to merge it on the operator machine. */
+export function noJqWarning(what: string): string {
+  return `jq is not on the box, so Ferry did not update ${what}. Run ferry update to install jq.`;
+}
+
+/**
+ * Edit the box Paseo config on the box with a jq filter, and reload the daemon
+ * when the box wrote the file. The box config can hold env blocks with
+ * credentials, so the box merges the file itself and prints only a status
+ * letter. `what` names the carried values in an error. `run` runs one box
+ * command and throws its second argument, never the box output.
+ */
+export async function editBoxConfig(
+  run: (command: string, what: string) => Promise<string>,
+  edit: { readonly args: string; readonly valid: string; readonly filter: string; readonly what: string },
+): Promise<"written" | "unchanged" | "no-jq" | "invalid"> {
+  const failed = `Ferry could not write ${edit.what} to ~/${CONFIG_FILE} on the box`;
+  const script = jqEditScript(CONFIG_FILE, edit.args, edit.valid, edit.filter);
+  const status = await run(`sh -c ${quoteShell(script)}`, failed);
+  if (status.startsWith("J")) return "no-jq";
+  if (status.startsWith("E")) return "invalid";
+  if (status.startsWith("S")) throw new PaseoError(failed);
+  if (!status.startsWith("W")) return "unchanged";
+  await run(RELOAD_COMMAND, `paseo daemon reload failed on the box after Ferry wrote ${edit.what}`);
+  return "written";
+}
+
 /**
  * A Paseo agent profile. Ferry carries `daemon.agentProfiles` from the Paseo
  * config and nothing else from that file.
@@ -547,7 +579,8 @@ export type ProfileCarry = {
  * Put `profiles` into `daemon.agentProfiles` of the box Paseo config, and keep
  * all other box keys. Skip each profile whose provider is not available on the
  * box (issue #99, decision 3). Profiles need no restart, so `paseo daemon
- * reload` applies them. With no profiles, it runs no box command.
+ * reload` applies them. With no profiles, it runs no box command. The box
+ * merges the file with jq. Without jq, the file stays as it is.
  */
 export async function carryAgentProfiles(
   link: IntegrationLink,
@@ -578,30 +611,15 @@ export async function carryAgentProfiles(
     }
   }
 
-  const current = await boxRun(link, readCommand(CONFIG_FILE), `Ferry could not read ~/${CONFIG_FILE} on the box`);
-  const text = current.startsWith("F") ? current.slice(1) : null;
-  const merged = mergeAgentProfiles(text, kept);
-  if (merged === text) return { carried, warnings, changed: false };
-  await boxRun(link, writeCommand(CONFIG_FILE, merged), `Ferry could not write ~/${CONFIG_FILE} on the box`);
-  await boxRun(link, RELOAD_COMMAND, "paseo daemon reload failed on the box");
-  return { carried, warnings, changed: true };
-}
-
-/** Set `daemon.agentProfiles` in the box config text. Keep all other keys. */
-function mergeAgentProfiles(box: string | null, profiles: readonly AgentProfile[]): string {
-  let config: unknown = {};
-  if (box !== null && box.trim() !== "") {
-    try {
-      config = JSON.parse(box);
-    } catch {
-      config = null;
-    }
-  }
-  if (!isObject(config) || (config.daemon !== undefined && !isObject(config.daemon))) {
-    throw new PaseoError(`~/${CONFIG_FILE} on the box is not a JSON object with a daemon object`);
-  }
-  const merged = { ...config, daemon: { ...(config.daemon as object | undefined), agentProfiles: profiles } };
-  return `${JSON.stringify(merged, null, 2)}\n`;
+  const edit = await editBoxConfig((command, what) => boxRun(link, command, what), {
+    args: `--argjson p ${quoteShell(JSON.stringify(kept))}`,
+    valid: jqObjects(".daemon"),
+    filter: ".daemon.agentProfiles = $p",
+    what: "the Paseo agent profiles",
+  });
+  if (edit === "invalid") throw new PaseoError(`~/${CONFIG_FILE} on the box is not a JSON object with a daemon object`);
+  if (edit === "no-jq") return { carried: [], warnings: [...warnings, noJqWarning("the Paseo agent profiles")], changed: false };
+  return { carried, warnings, changed: edit === "written" };
 }
 
 /** One entry of `agents.metadataGeneration.providers`, in the strict Paseo schema. */
@@ -711,7 +729,8 @@ export type PreferenceCarry = {
  * Put the set preferences into the box Paseo config, and keep all other box
  * keys. Skip each metadata provider that is not available on the box. When no
  * local provider is available, keep the box list. Paseo reloads all three fields
- * without a restart. With no set field, it runs no box command.
+ * without a restart. With no set field, it runs no box command. The box merges
+ * the file with jq. Without jq, the file stays as it is.
  */
 export async function carryPaseoPreferences(link: IntegrationLink, preferences: PaseoPreferences): Promise<PreferenceCarry> {
   const { metadataProviders, appendSystemPrompt, autoArchiveAfterMerge } = preferences;
@@ -751,50 +770,22 @@ export async function carryPaseoPreferences(link: IntegrationLink, preferences: 
     if (!result.ok) throw new PaseoError(what);
     return result.stdout;
   };
-  const current = await run(readCommand(CONFIG_FILE), `Ferry could not read ~/${CONFIG_FILE} on the box`);
-  const text = current.startsWith("F") ? current.slice(1) : null;
-  const merged = mergePreferences(text, providers, appendSystemPrompt, autoArchiveAfterMerge);
-  if (merged === text) return { warnings, changed: false };
-  await run(writeCommand(CONFIG_FILE, merged), `Ferry could not write the Paseo preferences to ~/${CONFIG_FILE} on the box`);
-  await run(RELOAD_COMMAND, "paseo daemon reload failed on the box after Ferry wrote the Paseo preferences");
-  return { warnings, changed: true };
-}
-
-/** Set the given preferences in the box config text. Keep all other keys. */
-function mergePreferences(
-  box: string | null,
-  providers: readonly MetadataProvider[] | undefined,
-  prompt: string | undefined,
-  autoArchive: boolean | undefined,
-): string {
-  let config: unknown = {};
-  if (box !== null && box.trim() !== "") {
-    try {
-      config = JSON.parse(box);
-    } catch {
-      config = null;
-    }
-  }
-  const agents = isObject(config) ? config.agents : undefined;
-  if (!isObject(config) || (config.daemon !== undefined && !isObject(config.daemon)) ||
-      (agents !== undefined && (!isObject(agents) || (agents.metadataGeneration !== undefined && !isObject(agents.metadataGeneration))))) {
+  const sets: { readonly filter: string; readonly arg: string }[] = [
+    ...(providers === undefined ? [] : [{ filter: `.${METADATA_PROVIDERS} = $m`, arg: `--argjson m ${quoteShell(JSON.stringify(providers))}` }]),
+    ...(appendSystemPrompt === undefined ? [] : [{ filter: `.${APPEND_SYSTEM_PROMPT} = $s`, arg: `--arg s ${quoteShell(appendSystemPrompt)}` }]),
+    ...(autoArchiveAfterMerge === undefined ? [] : [{ filter: `.${AUTO_ARCHIVE} = $a`, arg: `--argjson a ${autoArchiveAfterMerge}` }]),
+  ];
+  const edit = await editBoxConfig(run, {
+    args: sets.map((set) => set.arg).join(" "),
+    valid: jqObjects(".daemon", ".agents", ".agents.metadataGeneration"),
+    filter: sets.map((set) => set.filter).join(" | "),
+    what: "the Paseo preferences",
+  });
+  if (edit === "invalid") {
     throw new PaseoError(`~/${CONFIG_FILE} on the box is not a JSON object with daemon, agents, and agents.metadataGeneration objects`);
   }
-  const daemon = {
-    ...(prompt === undefined ? {} : { appendSystemPrompt: prompt }),
-    ...(autoArchive === undefined ? {} : { autoArchiveAfterMerge: autoArchive }),
-  };
-  const merged = {
-    ...config,
-    ...(Object.keys(daemon).length === 0 ? {} : { daemon: { ...(config.daemon as object | undefined), ...daemon } }),
-    ...(providers === undefined ? {} : {
-      agents: {
-        ...(agents as Record<string, unknown> | undefined),
-        metadataGeneration: { ...((agents as Record<string, unknown> | undefined)?.metadataGeneration as object | undefined), providers },
-      },
-    }),
-  };
-  return `${JSON.stringify(merged, null, 2)}\n`;
+  if (edit === "no-jq") warnings.push(noJqWarning("the Paseo preferences"));
+  return { warnings, changed: edit === "written" };
 }
 
 /** The profile name for people: its `name`, else its `id`, else its position. */

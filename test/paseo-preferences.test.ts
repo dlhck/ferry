@@ -5,9 +5,14 @@ import { join } from "node:path";
 import { boxPaseoPreferences, readPaseoPreferences } from "../src/integrations/paseo.ts";
 import { runSync, type SyncDependencies } from "../src/sync.ts";
 import { runWatch } from "../src/watch.ts";
+import { jqTest, shellBox } from "./paseo-shell-box.ts";
 
 const homes: string[] = [];
-afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
+const boxes: (() => void)[] = [];
+afterEach(() => {
+  for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+  for (const remove of boxes.splice(0)) remove();
+});
 // Build the values at run time so this file holds no string a secret scanner flags.
 const token = "gh" + "p_" + "A".repeat(36);
 const prompt = "Answer in short sentences.";
@@ -127,7 +132,7 @@ test("sync carries the preferences and reports a failure without blocking the co
       createLink: () => ({ run: async (command) => {
         commands.push(command);
         if (fail && command === "paseo daemon reload") return { ok: false, error: { origin: "box", code: "command-failed", message: "down" } };
-        return { ok: true, address: "box", stdout: command.startsWith("printf") ? "/home/user\n" : command.includes("cat '.paseo/config.json'") ? "M" : "", stderr: "" };
+        return { ok: true, address: "box", stdout: command.startsWith("printf") ? "/home/user\n" : command.includes(".paseo/config.json") ? "W\n" : "", stderr: "" };
       } }),
       apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
       acquireLock: () => () => {}, adopt: () => {}, writePlan: () => {}, writeLine: () => {},
@@ -146,7 +151,6 @@ test("a failed box command never puts its message, the instruction text, or anot
   const path = home({ daemon: { appendSystemPrompt: prompt } });
   const session = "session-" + "q7Z-hunter-2x";
   const failing: readonly ((command: string) => boolean)[] = [
-    (command) => command.includes("cat '.paseo/config.json'"),
     (command) => command.includes("appendSystemPrompt"),
     (command) => command === "paseo daemon reload",
   ];
@@ -160,7 +164,7 @@ test("a failed box command never puts its message, the instruction text, or anot
       createLink: () => ({ run: async (command) => {
         // A remote shell can echo the failed command, which holds the instruction text.
         if (fails(command)) return { ok: false, error: { origin: "box", code: "command-failed", message: `${command} ${session}` } };
-        return { ok: true, address: "box", stdout: command.startsWith("printf") ? "/home/user\n" : command.includes("cat '.paseo/config.json'") ? "M" : "", stderr: "" };
+        return { ok: true, address: "box", stdout: command.startsWith("printf") ? "/home/user\n" : command.includes(".paseo/config.json") ? "W\n" : "", stderr: "" };
       } }),
       apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
       acquireLock: () => () => {}, adopt: () => {}, writePlan: () => {}, writeLine: (line) => lines.push(line),
@@ -189,40 +193,40 @@ test("watch detects preference-only changes with its real observer", async () =>
   expect(syncs).toBe(1);
 });
 
+/** Run a sync against a box whose config has the switch off. Only the Paseo config commands run in the shell. */
 function autoArchiveSync(path: string, autoArchive: boolean | undefined) {
-  const commands: string[] = [];
+  const box = shellBox({
+    config: { daemon: { listen: "127.0.0.1:6767", autoArchiveAfterMerge: false } },
+    answer: (command) => (command.includes(".paseo/config.json") || command === "paseo daemon reload"
+      ? undefined : command.startsWith("printf") ? "/home/user\n" : ""),
+  });
+  boxes.push(box.remove);
   const run = runSync({ home: path, publish: false }, {
     publisher: () => "operator",
     readConfig: () => ({ version: 1, publisher: "operator", snapshotUrl: "snapshot.git",
       host: { tailscale: "box", sshUser: "user" },
       integrations: autoArchive === undefined ? { paseo: true } : { paseo: true, paseo_auto_archive: autoArchive } }),
-    createLink: () => ({ run: async (command) => {
-      commands.push(command);
-      const box = JSON.stringify({ daemon: { listen: "127.0.0.1:6767", autoArchiveAfterMerge: false } });
-      return { ok: true, address: "box", stdout: command.startsWith("printf") ? "/home/user\n" : command.includes("cat '.paseo/config.json'") ? `F${box}` : "", stderr: "" };
-    } }),
+    createLink: () => box.link,
     apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
     acquireLock: () => () => {}, adopt: () => {}, writePlan: () => {}, writeLine: () => {}, warn: () => {},
   });
-  return run.then(() => commands);
+  return run.then(() => box);
 }
 
 test("sync does not change the box auto-archive switch without paseo_auto_archive", async () => {
   const path = home({ daemon: { autoArchiveAfterMerge: true } });
   for (const setting of [undefined, false]) {
-    const commands = await autoArchiveSync(path, setting);
-    expect(commands.some((command) => command.includes("autoArchiveAfterMerge"))).toBe(false);
-    expect(commands).not.toContain("paseo daemon reload");
+    const box = await autoArchiveSync(path, setting);
+    expect(box.commands.some((command) => command.includes("autoArchiveAfterMerge"))).toBe(false);
+    expect(box.commands).not.toContain("paseo daemon reload");
   }
 });
 
-test("sync writes the local auto-archive switch with paseo_auto_archive and reloads the daemon", async () => {
-  const commands = await autoArchiveSync(home({ daemon: { autoArchiveAfterMerge: true } }), true);
-  const write = commands.find((command) => command.includes("autoArchiveAfterMerge"));
-  expect(write).toContain('"autoArchiveAfterMerge": true');
-  expect(write).toContain('"listen": "127.0.0.1:6767"');
-  expect(commands).toContain("paseo daemon reload");
-  expect(commands.some((command) => command.includes("restart"))).toBe(false);
+jqTest("sync writes the local auto-archive switch with paseo_auto_archive and reloads the daemon", async () => {
+  const box = await autoArchiveSync(home({ daemon: { autoArchiveAfterMerge: true } }), true);
+  expect(box.config()).toEqual({ daemon: { listen: "127.0.0.1:6767", autoArchiveAfterMerge: true } });
+  expect(box.commands).toContain("paseo daemon reload");
+  expect(box.commands.some((command) => command.includes("restart"))).toBe(false);
 });
 
 test("a box override turns the auto-archive carry on for one box in the dry run", async () => {

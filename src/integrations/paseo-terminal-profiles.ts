@@ -4,9 +4,9 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { quoteShell, readCommand, writeCommand } from "../box-settings.ts";
+import { quoteShell } from "../box-settings.ts";
 import { carriedContentHits } from "../manifest.ts";
-import { CONFIG_FILE, PaseoError, SYSTEM_PATH } from "./paseo.ts";
+import { CONFIG_FILE, editBoxConfig, jqObjects, noJqWarning, PaseoError, SYSTEM_PATH } from "./paseo.ts";
 import type { IntegrationLink } from "./types.ts";
 
 /** The fields that Ferry carries. Paseo 0.10.1 reloads `daemon.terminalProfiles` without a restart. */
@@ -42,6 +42,26 @@ const SCOPED_PACKAGE = /^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*(?:@[A-Za-z0
 const LOOPBACK_HOST = /^(?:localhost|[^:/]*\.localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[?::1?\]?)(?::\d+)?$/i;
 const CREDENTIAL_ARGUMENT = /api[-_]?key|token|secret|passw|credential|auth/i;
 const BOX_TIMEOUT_MS = 30_000;
+/** A jq test: the box config has a `daemon.terminalProfiles` list of profiles with unique IDs, or does not set the list. */
+const VALID = [
+  jqObjects(".daemon"),
+  '(.daemon.terminalProfiles | type | . == "null" or . == "array")',
+  '((.daemon.terminalProfiles // []) | all(.[]; type == "object" and (.id | type) == "string" and .id != "") and (map(.id) | length == (unique | length)))',
+].join(" and ");
+/**
+ * A jq filter: merge the profiles `$p` by `id` into the box list, or into the
+ * defaults `$d` when the box does not set the list. A matching box profile
+ * gets the local fields, loses each field of `$a` that the local profile does
+ * not set, and keeps its other fields, such as `env`. New profiles go at the
+ * end. An equal list stays as it is, so the box does not write the defaults.
+ */
+const MERGE = [
+  "(.daemon.terminalProfiles // $d) as $b",
+  "| ([$b[] | . as $e | ([$p[] | select(.id == $e.id)][0]) as $l | if $l == null then $e",
+  "else ($e | with_entries(select(.key as $k | all($a[]; . != $k) or ($l | has($k))))) + $l end]",
+  "+ [$p[] | select(.id as $i | all($b[]; .id != $i))]) as $n",
+  "| if $n == $b then . else .daemon.terminalProfiles = $n end",
+].join(" ");
 
 export type TerminalProfile = {
   readonly id: string;
@@ -197,7 +217,8 @@ export type TerminalProfileCarry = {
  * their positions, and new profiles go at the end. When the box does not set
  * the list, the merge starts from the Paseo 0.10.1 defaults, so the box keeps
  * them. Ferry never removes a box profile. With nothing to carry, or no change,
- * it writes nothing. The errors never hold box output.
+ * it writes nothing. The box merges the list with jq and prints only a status
+ * letter. Without jq, the file stays as it is. The errors never hold box output.
  */
 export async function carryPaseoTerminalProfiles(
   link: IntegrationLink,
@@ -239,40 +260,19 @@ export async function carryPaseoTerminalProfiles(
   }
   if (kept.length === 0) return { carried: [], warnings, changed: false };
 
-  const current = await run(readCommand(CONFIG_FILE), `Ferry could not read ~/${CONFIG_FILE} on the box`);
-  let config: unknown = {};
-  if (current.startsWith("F") && current.slice(1).trim() !== "") {
-    try { config = JSON.parse(current.slice(1)); } catch { config = null; }
+  const edit = await editBoxConfig(run, {
+    args: [
+      `--argjson p ${quoteShell(JSON.stringify(kept.map(portable)))}`,
+      `--argjson d ${quoteShell(JSON.stringify(PASEO_DEFAULT_TERMINAL_PROFILES))}`,
+      `--argjson a ${quoteShell(JSON.stringify(PORTABLE_FIELDS))}`,
+    ].join(" "),
+    valid: VALID,
+    filter: MERGE,
+    what: "the Paseo terminal profiles",
+  });
+  if (edit === "invalid") {
+    throw new PaseoError(`~/${CONFIG_FILE} on the box is not a JSON object with a ${FIELD} list of profiles with unique IDs`);
   }
-  const daemon = object(config) ? config.daemon : undefined;
-  const boxList = object(daemon) ? daemon.terminalProfiles : undefined;
-  if (!object(config) || (daemon !== undefined && !object(daemon)) ||
-      (boxList !== undefined && (!Array.isArray(boxList) || !boxList.every((entry) => object(entry) && filled(entry.id))))) {
-    throw new PaseoError(`~/${CONFIG_FILE} on the box is not a JSON object with a ${FIELD} list of profiles with IDs`);
-  }
-  const before = (boxList ?? PASEO_DEFAULT_TERMINAL_PROFILES) as readonly Record<string, unknown>[];
-  if (new Set(before.map((entry) => entry.id)).size !== before.length) {
-    throw new PaseoError(`${FIELD} in ~/${CONFIG_FILE} on the box repeats a profile ID`);
-  }
-  const next = before.map((entry) => ({ ...entry }));
-  for (const profile of kept) {
-    const index = next.findIndex((entry) => entry.id === profile.id);
-    if (index === -1) {
-      next.push({ ...profile });
-      continue;
-    }
-    // Keep the box key order and the other box fields. An allowlisted field that is absent locally goes away.
-    const local: Record<string, unknown> = { ...portable(profile) };
-    const entry = Object.fromEntries(Object.entries(next[index]!)
-      .filter(([key]) => !(PORTABLE_FIELDS as readonly string[]).includes(key) || Object.hasOwn(local, key))
-      // An own-key check, so a box field named `constructor` does not find Object.prototype.constructor.
-      .map(([key, value]) => [key, Object.hasOwn(local, key) ? local[key] : value]));
-    next[index] = { ...entry, ...local };
-  }
-  const carried = kept.map((profile) => profile.name);
-  if (JSON.stringify(next) === JSON.stringify(before)) return { carried, warnings, changed: false };
-  const merged = { ...config, daemon: { ...(daemon as Record<string, unknown> | undefined), terminalProfiles: next } };
-  await run(writeCommand(CONFIG_FILE, `${JSON.stringify(merged, null, 2)}\n`), `Ferry could not write the Paseo terminal profiles to ~/${CONFIG_FILE} on the box`);
-  await run("paseo daemon reload", "paseo daemon reload failed on the box after Ferry wrote the Paseo terminal profiles");
-  return { carried, warnings, changed: true };
+  if (edit === "no-jq") return { carried: [], warnings: [...warnings, noJqWarning("the Paseo terminal profiles")], changed: false };
+  return { carried: kept.map((profile) => profile.name), warnings, changed: edit === "written" };
 }

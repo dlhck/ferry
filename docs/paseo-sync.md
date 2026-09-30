@@ -2,6 +2,16 @@
 
 With the Paseo integration enabled for a box, `ferry sync` carries agent profiles, managed Git and npm plugins, provider definitions, metadata model preferences, shared system instructions, portable terminal profiles, and, with an explicit setting, the auto-archive switch from the operator machine. These go directly to the box. They are not stored in the snapshot repository. `ferry watch` detects changes to plugin commits, npm versions, enabled states, provider definitions, the preferences, and terminal profiles.
 
+## The box config stays on the box
+
+The box `~/.paseo/config.json` can hold credentials, such as the `env` block of a provider or of a terminal profile. Ferry never reads this file into the operator machine.
+
+- The box merges each carried value into the file itself, with jq. It sends back only a status letter: written, no jq, not valid, or failed.
+- For provider definitions, the box also compares its entries with the local entries. It sends back one fixed word for each provider ID that Ferry sent: `absent`, `same`, `differs`, or `legacy`. It never sends a field value.
+- The box writes the file only when a carried value changes. Then Ferry runs `paseo daemon reload`.
+- `ferry install` and `ferry update` install jq on each box. Without jq on the box, Ferry leaves the file as it is and warns: "Run ferry update to install jq". Agent profiles, provider definitions, preferences, terminal profiles, and the global plugin switch wait for jq. Plugin installs and updates use the Paseo CLI and do not need jq.
+- A value of `null` for `daemon`, `agents`, or a carried list counts as not set.
+
 ## Git and npm plugins
 
 Ferry reads `~/.paseo/config.json` and `~/.paseo/plugins/sources.json`. For a Git plugin, it also reads the managed checkout's Git HEAD. It carries the plugin ID, repository URL, plugin subdirectory, installed commit, and enabled state. It uses `paseo plugin install --ref` for a missing plugin and `paseo plugin update --ref` for an existing plugin. An unchanged plugin needs no install or update.
@@ -11,7 +21,7 @@ For an npm plugin, Ferry reads the installed version from the plugin's `package-
 - The box daemon must have access to the Git repository. SSH agent forwarding to the Ferry command does not give the running Paseo daemon access to that agent.
 - For npm plugins, the box daemon needs `npm` on its PATH and access to the registry. Ferry uses the box's own npm configuration and authentication. It does not carry `.npmrc`, registry tokens, or the lockfile's resolved URL.
 - An installed version that is not an exact semver version, and a package name or version that looks like a credential, stops the sync with an error. The error does not show the value. A missing lockfile, or a lockfile version that does not match the installed `package.json`, also stops the sync.
-- After at least one enabled plugin is installed or current on the box, Ferry sets the box's global `pluginsEnabled` switch to `true` in `~/.paseo/config.json` and runs `paseo daemon reload`. Paseo 0.10.1 applies the switch on reload without a restart. Paseo has no CLI command for the switch. Ferry keeps all other config keys and does not write the file when the switch is already on.
+- After at least one enabled plugin is installed or current on the box, Ferry sets the box's global `pluginsEnabled` switch to `true` in `~/.paseo/config.json` and runs `paseo daemon reload`. Paseo 0.10.1 applies the switch on reload without a restart. Paseo has no CLI command for the switch. The box sets the switch with jq, keeps all other config keys, and does not write the file when the switch is already on.
 - Turning on the switch starts every plugin that is enabled on the box, including box-only plugins. Ferry disables locally disabled plugins before it turns on the switch.
 - Ferry never turns off the switch. With no enabled plugin to carry, or when all plugins are skipped, disabled, or in conflict, the switch stays as it is.
 - Ferry preserves box-only plugins. Removing a local plugin does not uninstall its box copy.
@@ -42,7 +52,7 @@ Ferry reads `agents.providers` from `~/.paseo/config.json` and merges an allowli
 - Ferry creates a provider that the box does not define only when the result works without local runtime fields. It skips the provider with a warning when the local entry has `env` or `params`, or is disabled. Define the provider on the box first. Then Ferry syncs its portable fields.
 - A new provider with a `command` is created only when all of these are true: the executable is a bare name and is not a shell or interpreter, such as `sh` or `node`; no argument or flag value is a path, a file name, or text with spaces; no URL argument has a user, password, query, or fragment; every URL argument is a remote `http:` or `https:` URL, so `file:` URLs and `localhost`, `127.0.0.1`, and `[::1]` endpoints are skipped; no argument looks like a credential; and `command -v` finds the executable on the box PATH before Ferry writes the config. Scoped npm packages, such as `@scope/name`, are the one accepted slash. A box provider that already exists keeps its own command and gets the allowlisted fields.
 - Ferry refuses the sync before it publishes or connects to a box when an entry does not match the Paseo schema, or when a carried field holds a token or a secret. The error names the provider and the rule, never the value.
-- Warnings and errors never show env values, command arguments, or box config contents. `ferry sync --dry-run` and its `--json` plan show provider IDs, carried field names, model IDs, and skip reasons.
+- The box compares and merges its provider entries with jq. Ferry gets back only a state word for each provider ID. Warnings and errors never show env values, command arguments, or box config contents. `ferry sync --dry-run` and its `--json` plan show provider IDs, carried field names, model IDs, and skip reasons.
 - An entry in Paseo's legacy runtime format, on either host, produces a warning and is skipped.
 - Provider definitions are carried after plugins and before agent profiles and preferences, so a profile or a metadata provider can use a provider that the same sync creates. A provider failure produces a warning and does not block the core sync.
 
@@ -94,7 +104,7 @@ Ferry reads `daemon.terminalProfiles` from `~/.paseo/config.json` and merges the
 - A shell or interpreter, such as `bash`, `zsh`, `node`, or `python3`, is carried only alone or with `-l`, `-i`, `--login`, `--interactive`, `--noprofile`, or `--norc`. Ferry skips `sh -c`, `node -e`, `python -c`, a script file, and all other arguments to these commands.
 - Ferry skips a profile when an argument or a flag value is a path, a file name, a `file:` URL, text with spaces, a URL with a user, password, query, or fragment, a loopback or non-HTTP URL, or looks like a credential. It does not parse shell syntax.
 - Before it writes, Ferry checks each command with `command -v` on the box, with the PATH that `ferry-paseo.service` gets from this sync. It skips a profile whose command is not an executable file on that PATH. Ferry runs no profile command.
-- A box profile with the same ID gets the local `id`, `name`, `command`, `args`, and `icon`, and keeps its other box fields, such as `env`. A carried field that the local profile does not set is removed from the box profile.
+- A box profile with the same ID gets the local `id`, `name`, `command`, `args`, and `icon`, and keeps its other box fields, such as `env`. The box does this merge with jq, so an `env` value never leaves the box. A carried field that the local profile does not set is removed from the box profile.
 - Box-only profiles keep their position. New profiles go at the end. Removing a local profile does not remove its box copy. An empty local list adds nothing and removes nothing.
 - When the box does not set `daemon.terminalProfiles`, Paseo shows its four default profiles. Paseo has no command that returns this resolved list, so Ferry starts the merge from a copy of the Paseo 0.10.1 defaults: `claude`, `codex`, `opencode`, and `pi`. The box keeps them. A later Paseo version with other defaults gets the 0.10.1 defaults when Ferry writes the list for the first time.
 - With no local list, no portable profile, or no command on the box, Ferry writes nothing. It also writes nothing when the merged list equals the box list.

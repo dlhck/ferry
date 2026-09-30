@@ -12,6 +12,7 @@ import {
 import type { IntegrationLink } from "../src/integrations/types.ts";
 import { runSync, type SyncDependencies } from "../src/sync.ts";
 import { runWatch } from "../src/watch.ts";
+import { jqTest, shellBox } from "./paseo-shell-box.ts";
 
 const homes: string[] = [];
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
@@ -40,26 +41,22 @@ function source(profiles: unknown) {
   return read;
 }
 
-const readConfig = "if [ -e '.paseo/config.json' ]; then printf 'F' && cat '.paseo/config.json'; else printf 'M'; fi";
+const boxes: (() => void)[] = [];
+afterEach(() => { for (const remove of boxes.splice(0)) remove(); });
+/**
+ * A box that merges its config in a real shell with jq. `onPath` names the
+ * commands that `command -v` finds. `written` gives the box config when the box
+ * wrote the file, else undefined.
+ */
 function box(config: unknown = {}, onPath: readonly string[] = ["claude", "lazygit", "bash", "codex"]) {
-  const commands: string[] = [];
-  const link: IntegrationLink = { run: async (command) => {
-    commands.push(command);
-    if (command === readConfig) {
-      return { ok: true, address: "box", stdout: config === null ? "M" : `F${typeof config === "string" ? config : JSON.stringify(config)}`, stderr: "" };
-    }
-    if (command.includes("command -v")) {
-      const names = [...command.matchAll(/command -v -- '([^']+)'/g)].map((match) => match[1]!);
-      return { ok: true, address: "box", stdout: names.filter((name) => onPath.includes(name)).map((name) => `ok ${name}\n`).join(""), stderr: "" };
-    }
-    return { ok: true, address: "box", stdout: "", stderr: "" };
-  } };
-  return { commands, link };
-}
-function written(commands: readonly string[]): any {
-  const write = commands.find((command) => command.includes("config.json.ferry-tmp"));
-  const text = write?.match(/^umask 077 && mkdir -p '\.paseo' && printf '%s' '(.*)' > /s)?.[1];
-  return text === undefined ? undefined : JSON.parse(text.replaceAll("'\"'\"'", "'"));
+  const b = shellBox({ config, answer: (command) => {
+    if (!command.includes("command -v -- ")) return undefined;
+    const names = [...command.matchAll(/command -v -- '([^']+)'/g)].map((match) => match[1]!);
+    return names.filter((name) => onPath.includes(name)).map((name) => `ok ${name}\n`).join("");
+  } });
+  boxes.push(b.remove);
+  const before = config === null ? null : b.text();
+  return { ...b, written: (): any => (before !== null && b.text() === before ? undefined : b.config()) };
 }
 
 describe("Paseo terminal profile discovery", () => {
@@ -164,7 +161,7 @@ describe("Paseo terminal profile discovery", () => {
 });
 
 describe("Paseo terminal profile carry", () => {
-  test("merges by ID, keeps target-only fields and profiles in place, and appends new IDs", async () => {
+  jqTest("merges by ID, keeps target-only fields and profiles in place, and appends new IDs", async () => {
     const boxList = [
       { id: "shell", name: "Box shell", command: "fish" },
       { id: "claude", env: { BOX: "keep" }, name: "Old", command: "claude", args: ["--old"], icon: "x", extra: 1 },
@@ -172,7 +169,7 @@ describe("Paseo terminal profile carry", () => {
     const b = box({ version: 1, daemon: { listen: "127.0.0.1:6767", terminalProfiles: boxList }, agents: { providers: {} } });
     const carry = await carryPaseoTerminalProfiles(b.link, source([lazygit, { ...claude, icon: undefined }]), [".local/bin"]);
     expect(carry).toEqual({ carried: ["Lazygit", "Claude Code"], warnings: [], changed: true });
-    const config = written(b.commands);
+    const config = b.written();
     expect(config.daemon.listen).toBe("127.0.0.1:6767");
     expect(config.agents).toEqual({ providers: {} });
     expect(config.daemon.terminalProfiles).toEqual([
@@ -184,39 +181,40 @@ describe("Paseo terminal profile carry", () => {
     expect(b.commands.at(-1)).toBe("paseo daemon reload");
   });
 
-  test("keeps box fields named like Object.prototype keys on a same-ID profile, and stays idempotent", async () => {
+  jqTest("keeps box fields named like Object.prototype keys on a same-ID profile, and stays idempotent", async () => {
     const boxProfile = { id: "lazygit", constructor: "box-value", toString: "box-text", env: { BOX: "keep" }, name: "Old", command: "lazygit" };
     const first = box(`{"daemon":{"terminalProfiles":[${JSON.stringify(boxProfile)}]}}`);
     expect((await carryPaseoTerminalProfiles(first.link, source([lazygit]), [])).changed).toBe(true);
-    const profile = written(first.commands).daemon.terminalProfiles[0];
+    const profile = first.written().daemon.terminalProfiles[0];
     expect(profile).toEqual({ ...boxProfile, name: "Lazygit", icon: "git" });
     expect(Object.keys(profile)).toEqual(["id", "constructor", "toString", "env", "name", "command", "icon"]);
-    const again = box(written(first.commands));
+    const again = box(first.written());
     expect((await carryPaseoTerminalProfiles(again.link, source([lazygit]), [])).changed).toBe(false);
-    expect(again.commands.some((command) => command.includes("ferry-tmp"))).toBe(false);
+    expect(again.written()).toBeUndefined();
   });
 
-  test("keeps the Paseo defaults when the box has no list", async () => {
+  jqTest("keeps the Paseo defaults when the box has no list", async () => {
     for (const config of [null, {}, { daemon: {} }]) {
       const b = box(config);
       await carryPaseoTerminalProfiles(b.link, source([lazygit]), []);
-      expect(written(b.commands).daemon.terminalProfiles).toEqual([...PASEO_DEFAULT_TERMINAL_PROFILES, lazygit]);
+      expect(b.written().daemon.terminalProfiles).toEqual([...PASEO_DEFAULT_TERMINAL_PROFILES, lazygit]);
     }
   });
 
-  test("writes nothing when the carried profiles match the box defaults, or the list is unchanged", async () => {
+  jqTest("writes nothing when the carried profiles match the box defaults, or the list is unchanged", async () => {
     const defaults = box({});
     const carry = await carryPaseoTerminalProfiles(defaults.link, source([PASEO_DEFAULT_TERMINAL_PROFILES[1]]), []);
     expect(carry).toEqual({ carried: ["Codex"], warnings: [], changed: false });
-    expect(defaults.commands.some((command) => command.includes("ferry-tmp"))).toBe(false);
+    expect(defaults.written()).toBeUndefined();
 
     const first = box({ daemon: { terminalProfiles: [{ id: "shell", name: "Shell", command: "fish" }] } });
     await carryPaseoTerminalProfiles(first.link, source([lazygit, claude]), []);
-    const again = box(written(first.commands));
+    const again = box(first.written());
     expect(await carryPaseoTerminalProfiles(again.link, source([lazygit, claude]), [])).toEqual({
       carried: ["Lazygit", "Claude Code"], warnings: [], changed: false,
     });
-    expect(again.commands).toEqual([expect.stringContaining("command -v"), readConfig]);
+    expect(again.written()).toBeUndefined();
+    expect(again.log()).toEqual([]);
   });
 
   test("runs no box command for an empty list or all-skipped profiles, and never removes box profiles", async () => {
@@ -253,13 +251,13 @@ describe("Paseo terminal profile carry", () => {
     expect(output).toBe("ok fake-tool\n");
   });
 
-  test("fails with a fixed message when the box config or a command is bad, without box output", async () => {
+  jqTest("fails with a fixed message when the box config or a command is bad, without box output", async () => {
     for (const config of ["not json", [], { daemon: [] }, { daemon: { terminalProfiles: {} } },
       { daemon: { terminalProfiles: [{ name: "no id" }] } }, { daemon: { terminalProfiles: [lazygit, lazygit] } }]) {
       const b = box(config);
       const error = await carryPaseoTerminalProfiles(b.link, source([lazygit]), []).catch((caught: unknown) => caught);
       expect(String(error)).toContain("~/.paseo/config.json on the box");
-      expect(b.commands.some((command) => command.includes("ferry-tmp"))).toBe(false);
+      expect(b.written()).toBeUndefined();
     }
     const secret = `hidden ${token}`;
     const failing: IntegrationLink = { run: async () => ({
@@ -328,7 +326,7 @@ test("sync carries terminal profiles after the preferences and before the unit P
       return { ok: true, address: "box", stdout: command.startsWith("printf") ? "/home/user\n"
         : command.includes("paseo daemon status --json") ? status
         : command.includes("command -v -- 'lazygit'") ? "ok lazygit\n"
-        : command === readConfig ? "M" : "", stderr: "" };
+        : "", stderr: "" };
     } }),
     apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
     acquireLock: () => () => {}, adopt: () => {}, writePlan: () => {}, writeLine: () => {}, warn: () => {},
