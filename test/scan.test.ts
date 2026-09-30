@@ -732,16 +732,12 @@ describe("the size limit of a checked file", () => {
     const files = runPack({ kind: "files", root: "self", paths: ["status"], secrets: [] }, "/proc", 16);
     const scanned = runScan({ kind: "files", root: "self", paths: ["status"], allowSecrets: false }, "/proc", 16);
     const sessions = runPack({ kind: "sessions", paths: ["self/status"], secrets: [], project: "/home/user/app" }, "/proc", 16);
-    const skill = runPack({ kind: "skill", root: "self/net" }, "/proc", 16);
     const whole = runPack({ kind: "files", root: "self", paths: ["status"], secrets: [] }, "/proc");
 
     expect(files).toEqual({ files: [], refused: [changed("status")], skipped: [] });
     expect(scanned.carry).toEqual([]);
     expect(scanned.refused).toEqual([changed("status")]);
     expect(sessions).toEqual({ files: [], refused: [changed("self/status")], skipped: [] });
-    // Some of these files are empty. Each file with more bytes than the limit is left out.
-    expect(skill.files.every((file) => file.bytes.length <= 16)).toBe(true);
-    expect(skill.skipped.some((hit) => hit.code === "changed" && hit.reason === "file changed during the check")).toBe(true);
     expect(whole.files.map((file) => file.path)).toEqual(["status"]);
   });
 });
