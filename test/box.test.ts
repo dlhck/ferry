@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { boxListLines, runBoxAdd, runBoxDefault, runBoxList, runBoxRemove, type BoxCommandDependencies } from "../src/box.ts";
@@ -61,6 +61,7 @@ function dependencies(home: string, overrides: Partial<BoxCommandDependencies> =
   const commands: string[] = [];
   const confirms: string[] = [];
   const deps: BoxCommandDependencies = {
+    home,
     readConfig: () => readConfig(home),
     writeConfig: (config: BoxesOperatorConfig) => writeConfig(config, home),
     createLink: (options) => {
@@ -143,14 +144,31 @@ describe("ferry box add", () => {
 
     const result = await runBoxAdd({ name: "c", sshDestination: "dev@box-c.example", yes: false }, deps);
 
-    expect(result).toEqual({ name: "c", transport: "ssh", destination: "dev@box-c.example", gitAuth: "agent", migrated: false });
+    const instructionFile = join(home, ".ferry/boxes/c/AGENTS.md");
+    expect(result).toEqual({ name: "c", transport: "ssh", destination: "dev@box-c.example", gitAuth: "agent", migrated: false, instructionFile });
     expect(links).toEqual([{ destination: "dev@box-c.example" }]);
     expect(commands).toEqual(["true"]);
     expect(confirms).toEqual([]);
     expect(readConfig(home)?.boxes?.map((box) => box.name)).toEqual(["a", "b", "c"]);
     expect(readConfig(home)?.boxes?.[2]).toEqual({ name: "c", host: { transport: "ssh", destination: "dev@box-c.example" } });
     expect(readConfig(home)?.defaultBox).toBe("a");
-    expect(lines).toEqual(["Add box c: ssh dev@box-c.example", "Added box c."]);
+    expect(lines).toEqual([
+      "Add box c: ssh dev@box-c.example",
+      "Added box c.",
+      `Instructions for this box only: ${instructionFile}. Ferry puts its text into the instruction file of the box, after the Ferry header and before your ~/AGENTS.md.`,
+    ]);
+    expect(readFileSync(instructionFile, "utf8")).toBe("");
+  });
+
+  test("keeps a per-box instruction file that is there already", async () => {
+    const home = makeHome(BOXES_CONFIG);
+    const instructionFile = join(home, ".ferry/boxes/c/AGENTS.md");
+    mkdirSync(dirname(instructionFile), { recursive: true });
+    writeFileSync(instructionFile, "Use the GPU here.\n");
+
+    await runBoxAdd({ name: "c", sshDestination: "dev@box-c.example", yes: false }, dependencies(home).deps);
+
+    expect(readFileSync(instructionFile, "utf8")).toBe("Use the GPU here.\n");
   });
 
   test("adds a Tailscale box", async () => {
@@ -192,6 +210,7 @@ describe("ferry box add", () => {
       "box-c is offline",
     );
     expect(configText(home)).toBe(before);
+    expect(existsSync(join(home, ".ferry/boxes"))).toBe(false);
   });
 
   test("refuses an invalid name, a known name, and bad transport flags before it connects", async () => {
@@ -240,6 +259,7 @@ describe("ferry box add", () => {
         "The config has a [host] table. Ferry moves it to [box.default], adds [box.b], and sets default_box = \"default\".",
         "install, auth, move, tunnel, and integrations enable|disable still use the old host when you give no --box.",
         "Added box b.",
+        `Instructions for this box only: ${join(home, ".ferry/boxes/b/AGENTS.md")}. Ferry puts its text into the instruction file of the box, after the Ferry header and before your ~/AGENTS.md.`,
       ]);
       expect(confirms).toEqual(["Change the config and add box b?"]);
       expect(progress.events.indexOf("pause")).toBeLessThan(progress.events.indexOf("start:Connecting to the box"));

@@ -13,11 +13,16 @@ import {
   type OperatorHostConfig,
   type PartialOperatorConfig,
 } from "./config.ts";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { boxInstructionsSource } from "./box-identity.ts";
 import { boxCheckSteps, checkBoxAccess, type InitDependencies, type InitLink } from "./init.ts";
 import type { LinkOptions } from "./link.ts";
 import type { Progress } from "./progress.ts";
 
 export type BoxCommandDependencies = {
+  /** The operator home, for the per-box instruction file of `ferry box add`. */
+  readonly home: string;
   readonly readConfig: () => PartialOperatorConfig | null;
   readonly writeConfig: (config: BoxesOperatorConfig) => void;
   readonly createLink: (options: LinkOptions) => InitLink;
@@ -40,13 +45,18 @@ export type BoxListEntry = {
 
 export type BoxListResult = { readonly boxes: readonly BoxListEntry[] };
 
-/** The box that `ferry box add` added. `migrated` is true when the `[host]` table moved to `[box.default]`. */
+/**
+ * The box that `ferry box add` added. `migrated` is true when the `[host]` table
+ * moved to `[box.default]`. `instructionFile` is the per-box instruction file on
+ * the operator machine.
+ */
 export type BoxAddResult = {
   readonly name: string;
   readonly transport: "tailscale" | "ssh";
   readonly destination: string;
   readonly gitAuth: GitAuth;
   readonly migrated: boolean;
+  readonly instructionFile: string;
 };
 
 export type BoxAddInput = {
@@ -132,12 +142,20 @@ export async function runBoxAdd(input: BoxAddInput, dependencies: BoxCommandDepe
   ];
   dependencies.writeConfig(withBoxes(config, boxes, migrate ? MIGRATED_BOX : config.defaultBox));
   dependencies.writeLine(`Added box ${input.name}.`);
+  const instructionFile = join(dependencies.home, boxInstructionsSource(input.name));
+  mkdirSync(dirname(instructionFile), { recursive: true });
+  // A file from before, for example of a removed box with this name, keeps its text.
+  writeFileSync(instructionFile, "", { flag: "a" });
+  dependencies.writeLine(
+    `Instructions for this box only: ${instructionFile}. Ferry puts its text into the instruction file of the box, after the Ferry header and before your ~/AGENTS.md.`,
+  );
   return {
     name: input.name,
     transport: transport(host),
     destination: destination(host),
     gitAuth: input.gitAuth ?? "agent",
     migrated: migrate,
+    instructionFile,
   };
 }
 

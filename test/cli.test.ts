@@ -1963,7 +1963,7 @@ describe("--json", () => {
         args: ["box", "add", "c", "--ssh-destination", "dev@box-c.example"],
         runBoxAdd: async (_input: unknown, dependencies: { approveHostKeys?: (request: SnapshotHostKeyApproval) => Promise<boolean> }) => {
           if ((await dependencies.approveHostKeys?.(key)) !== true) throw new Error("not trusted");
-          return { name: "c", transport: "ssh" as const, destination: "dev@box-c.example", gitAuth: "agent" as const, migrated: false };
+          return { name: "c", transport: "ssh" as const, destination: "dev@box-c.example", gitAuth: "agent" as const, migrated: false, instructionFile: "/home/user/.ferry/boxes/c/AGENTS.md" };
         },
       },
     };

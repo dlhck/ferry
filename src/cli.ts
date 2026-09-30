@@ -179,7 +179,7 @@ type CliDependencies = {
   readonly runExpose?: (input: ExposeInput, dependencies?: Partial<ExposeDependencies>) => Promise<number>;
   /** True when this is a box install. The default is `isBoxMode`. */
   readonly isBoxMode?: () => boolean;
-  /** The home that `ferry whoami` reads. The default is the user home. */
+  /** The home that `ferry whoami` and `ferry box add` use. The default is the user home. */
   readonly home?: () => string;
   /** True when stdin and stdout are a terminal, so Ferry can ask to update itself. */
   readonly isInteractive?: () => boolean;
@@ -300,11 +300,12 @@ const JSON_RESULTS: Record<string, string> = {
   "watch install": "{ manager, path }",
   "menubar install": "{ app, path, version, ferryPath }. version is null with --app",
   "menubar uninstall": "{ app, path, removed }",
-  whoami: '{ role: "operator" or "box", box, managedPaths: { instructionFiles, skillRoots, roots } }. box is null on the operator machine and before the first sync of a box',
+  whoami:
+    '{ role: "operator" or "box", box, instructions: { file, sources: [{ part: "header", "box", or "shared", path }] }, managedPaths: { instructionFiles, skillRoots, roots } }. box is null on the operator machine and before the first sync of a box. instructions is null on the operator machine and on a box without the generated file. sources has the merged parts in order, and path is the file on the operator machine',
   "self-update":
     "{ current, latest, updated, services: [{ service, action, message }], skill }. skill is the message of the skill update, or null. The output of the installer goes to stderr",
   "box list": "{ boxes: [{ name, transport, destination, default }] }",
-  "box add": "{ name, transport, destination, gitAuth, migrated }",
+  "box add": "{ name, transport, destination, gitAuth, migrated, instructionFile }",
   "box remove": "{ name, defaultBoxRemoved }",
   "box default": "{ defaultBox }",
   "skills add": "{ argv }. The output of npx goes to stderr",
@@ -718,6 +719,11 @@ MCP server carries its command, its arguments, and the names of its env keys,
 never their values.
 Ferry syncs up to 4 boxes at the same time. A failed box does not stop the
 other boxes. Sync also writes the ferry PATH block in ~/.profile on the box.
+
+Sync writes ~/.ferry/box/AGENTS.md on each box from three parts: the Ferry
+header, then ~/.ferry/boxes/<name>/AGENTS.md of this machine for that box
+only, then your ~/AGENTS.md. One blank line separates the parts. A per-box
+file that looks like a secret stops the sync of that box only.
 
 If a plugin in enabledPlugins comes from a marketplace that
 extraKnownMarketplaces does not list, run claude plugin marketplace add for it
@@ -1410,10 +1416,13 @@ with --json, with CI set, or with FERRY_NO_UPDATE_CHECK=1.`)
     .command("whoami")
     .description(`Print the role of this machine: the operator machine or a Ferry box.
 
-On a box, Ferry also prints the box name from the last ferry sync. The
-operator machine is the source of truth. On a box, change a Ferry-managed
-file on the operator machine, not on the box. This command runs on the
-operator machine and on a box install.`)
+On a box, Ferry also prints the box name from the last ferry sync, and the
+parts of the generated instruction file ~/.ferry/box/AGENTS.md in their
+order: the Ferry header, the per-box instructions from
+~/.ferry/boxes/<name>/AGENTS.md on the operator machine when the box has
+them, and the shared ~/AGENTS.md. The operator machine is the source of
+truth. On a box, change a Ferry-managed file on the operator machine, not
+on the box. This command runs on the operator machine and on a box install.`)
     .action(() => {
       const result = whoami({
         home: (dependencies.home ?? homedir)(),
@@ -1438,6 +1447,7 @@ operator machine and on a box install.`)
     writeLine: (line: string) => void,
     acceptHostKeys: boolean,
   ): BoxCommandDependencies => ({
+    home: (dependencies.home ?? homedir)(),
     readConfig: config,
     writeConfig: (value) => writeConfig(value),
     createLink,
@@ -1462,6 +1472,11 @@ operator machine and on a box install.`)
 
 The first box add on a [host] config moves [host] to [box.default] and sets
 default_box = "default". Ferry asks before it writes.
+
+Ferry also creates the empty file ~/.ferry/boxes/<name>/AGENTS.md on this
+machine and prints its path. Write instructions for this box only there.
+ferry sync puts them into the instruction file of the box, after the Ferry
+header and before your ~/AGENTS.md. The file never goes into the snapshot.
 
 With --git-auth box, Ferry never forwards your SSH agent to the box. Ferry
 creates ~/.ssh/ferry_snapshot on the box and tests read access to the

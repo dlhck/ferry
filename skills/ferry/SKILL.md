@@ -25,7 +25,7 @@ Ferry copies the agent setup of the operator machine to a remote Linux box. The 
 - The operator machine has `~/.ferry/config.toml` and the `ferry` command.
 - The box has `~/.ferry/store` and `~/.ferry/box.json`, but no `~/.ferry/config.toml`. On the box, `ferry` is a box install: only `ferry expose`, `ferry whoami`, `ferry --version`, and the help run. A development build of Ferry ignores `~/.ferry/box.json`.
 - On the box, the instruction files start with a header that names the box. On the operator machine, they have no header.
-- When you are not sure, run `ferry whoami --json`. It prints `role` (`operator` or `box`), `box`, the box name, and `managedPaths`.
+- When you are not sure, run `ferry whoami --json`. It prints `role` (`operator` or `box`), `box`, the box name, `instructions`, and `managedPaths`. On a box, `instructions.sources` lists the merged parts of the instruction file in order.
 
 ## What Ferry manages
 
@@ -34,10 +34,25 @@ These paths are managed on both machines. Each one is a symlink into `~/.ferry/s
 | Item | Paths | Store target |
 | --- | --- | --- |
 | Skills | each entry in `~/.agents/skills`, `~/.claude/skills`, `~/.codex/skills`, `~/.pi/agent/skills`, `~/.cursor/skills`, and in custom `skill_root` entries of `~/.ferry/config.toml` | `~/.ferry/store/skills/<name>` |
-| Instruction file | `~/AGENTS.md`, `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.pi/agent/AGENTS.md`, and custom `instruction_file` entries | `~/.ferry/store/AGENTS.md`. On the box: `~/.ferry/box/AGENTS.md`, which sync writes from it with the box header |
+| Instruction file | `~/AGENTS.md`, `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.pi/agent/AGENTS.md`, and custom `instruction_file` entries | `~/.ferry/store/AGENTS.md`. On the box: `~/.ferry/box/AGENTS.md`, which sync merges from three parts (see [Instruction files on a box](#instruction-files-on-a-box)) |
 | Claude subagents and commands | `~/.claude/agents`, `~/.claude/commands` (the whole directory) | `~/.ferry/store/roots/.claude/...` |
 
 Ferry does not manage the `.system` directory in a skill root. Codex owns it on each machine.
+
+### Instruction files on a box
+
+On a box, each instruction file is a link to the generated file `~/.ferry/box/AGENTS.md`. Each sync merges it from three parts, in this order, with one blank line between them:
+
+1. The Ferry header. It names the box.
+2. The per-box instructions, from `~/.ferry/boxes/<name>/AGENTS.md` on the operator machine. Only the box `<name>` gets them. A `[host]` config has one box with the name `default`. A missing or empty file adds nothing.
+3. The shared instructions, `~/AGENTS.md` of the operator machine, byte for byte.
+
+- To change the instructions of all machines, edit `~/AGENTS.md` on the operator machine. To change the instructions of one box, edit `~/.ferry/boxes/<name>/AGENTS.md` on the operator machine. Then run `ferry sync`.
+- Never edit `~/.ferry/box/AGENTS.md` on the box. Each sync writes it again, and the edit is lost.
+- `ferry box add` creates the per-box file empty and prints its path, and its JSON result has the path in `instructionFile`. `ferry init` does not create the file.
+- The per-box file is not in the snapshot and not in `~/.ferry/store`. It is a plain file, not a symlink.
+- A box gets the generated file only when the operator machine has `~/AGENTS.md`. Without it, sync prints a warning and does not apply the per-box file.
+- `ferry watch` syncs only the box of a changed per-box file, without a publish.
 
 These items are not symlinks. Sync writes them into box files:
 
@@ -137,6 +152,7 @@ Each section also has an `error` field. A `null` value with an error means Ferry
 Read these output lines:
 
 - `operator: Manifest refused publisher <host>: <reason>: <path>` means a deny rule refused a file. The sync stopped and nothing was published. The message names the file, never the value. Tell the operator the path and the reason. The operator removes the secret from the file or removes the file from the managed set.
+- `operator: Manifest refused the instructions of box <name>: <reason>: <path>` means a deny rule refused the per-box instruction file `~/.ferry/boxes/<name>/AGENTS.md`. Ferry did not connect to that box. The other boxes sync. The message names the file, never the value.
 - A refusal that contains `clash <name>: <path>, <path>` means two harness roots hold different copies of a skill with the same name. The operator must keep one copy.
 - `Skipped hook: <reason>: <location>` means Ferry left out one hook, because its command refers to a home path that the box will not have. The sync continues without that hook. To carry it, the operator moves the script into a carried directory or onto `PATH` on both machines.
 - `Skipped MCP server: <reason>: <path>` means Ferry left out a server with a plain `http://` URL, a server with neither a URL nor a `command`, or a stdio server whose command or arguments refer to a path in the operator home. The sync continues.
@@ -325,7 +341,7 @@ With `--json`, Ferry never asks:
 | --- | --- |
 | `init` | `{ dryRun: false, leftovers, published, skill: { action, path, message } }`. `skill.action` is `installed`, `updated`, `unchanged`, `kept`, or `off`. With `--dry-run`: `{ dryRun: true, leftovers, plan: { operator, box, gitRemote, localCheckout, configPath, skills, instructions, links } }`. |
 | `box list` | `{ boxes: [{ name, transport, destination, default }] }` |
-| `box add` | `{ name, transport, destination, gitAuth, migrated }` |
+| `box add` | `{ name, transport, destination, gitAuth, migrated, instructionFile }`. `instructionFile` is the per-box instruction file on the operator machine. |
 | `box remove` | `{ name, defaultBoxRemoved }` |
 | `box default` | `{ defaultBox }` |
 | `install` | `{ plan: [{ tool, policy, version, action, command, dependsOn }], gitIdentity: { name, email } or null }` |
@@ -347,7 +363,7 @@ With `--json`, Ferry never asks:
 | `menubar install` | `{ app, path, version, ferryPath }`. `path` is the launchd agent. `version` is the release of the app, or `null` with `--app`. |
 | `menubar uninstall` | `{ app, path, removed }`. `removed` is `false` when neither the app nor the agent was there. |
 | `uninstall` | `{ removed, restored }` |
-| `whoami` | `{ role: "operator" or "box", box, managedPaths: { instructionFiles, skillRoots, roots } }`. `box` is `null` on the operator machine and before the first sync of a box. |
+| `whoami` | `{ role: "operator" or "box", box, instructions, managedPaths: { instructionFiles, skillRoots, roots } }`. `box` is `null` on the operator machine and before the first sync of a box. `instructions` is `{ file, sources: [{ part, path }] }` on a box with the generated instruction file, else `null`. `sources` has the merged parts in order. `part` is `header`, `box`, or `shared`. `path` is the file on the operator machine, or `null` for the header. The `box` part is there only when the last sync applied a per-box file. |
 | `self-update` | `{ current, latest, updated, services: [{ service, action, message }], skill }`. `skill` is the message of the skill update, or `null` when Ferry did not update. An action is `restarted`, `updated`, `skipped`, or `failed`. A failed service action is also in `warnings` and does not fail the binary update. `updated` is `false` when `current` is the latest release. The output of the installer goes to stderr. |
 
 ## Other commands

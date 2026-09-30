@@ -6,7 +6,7 @@ import { hostname, homedir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { apply as applyStore, type ApplyPlan, type RemoteApplyInput } from "./apply.ts";
-import { BOX_INSTRUCTIONS, writeBoxFilesCommand } from "./box-identity.ts";
+import { BOX_INSTRUCTIONS, boxInstructionsInput, readBoxInstructions, writeBoxFilesCommand } from "./box-identity.ts";
 import {
   completeHostConfig,
   ConfigMissingError,
@@ -18,7 +18,7 @@ import {
   type PartialOperatorConfig,
 } from "./config.ts";
 import { resolveBoxes, snapshotGit, type ResolvedBox } from "./boxes.ts";
-import { denyRules, readSeed as readManifest, type StoreUpdate } from "./manifest.ts";
+import { carriedContentHits, denyRules, readSeed as readManifest, type StoreUpdate } from "./manifest.ts";
 import { Link, type LinkOptions, type LinkResult, type RunOptions } from "./link.ts";
 import {
   loadRegistry as loadEffectiveRegistry,
@@ -117,6 +117,8 @@ export type SyncPlan = {
   readonly remoteCheckout: string | null;
   readonly message: string | null;
   readonly force: boolean;
+  /** The per-box instruction file of this box on the operator machine. Not set when the file is missing or blank. */
+  readonly boxInstructions?: string;
   /** Carried settings keys whose local value differs from the local store checkout. */
   readonly settingsChanges: readonly SettingsChange[];
   /** The carried MCP servers, as `harness/server`. */
@@ -198,6 +200,7 @@ export type SyncErrorCode =
   | "registry-refusal"
   | "manifest-failure"
   | "manifest-refusal"
+  | "box-instructions-refusal"
   | "invalid-box-home"
   | "link-failure"
   | "concurrent-sync"
@@ -242,8 +245,8 @@ export class BoxesSyncError extends SyncError {
 /** The number of boxes that sync at the same time. */
 const BOX_LIMIT = 4;
 
-/** Box steps without the Paseo steps: connect, update, Apply, plugins, settings, MCP, PATH. */
-const BOX_STEPS = 7;
+/** Box steps without the Paseo steps: connect, update, box instructions, Apply, plugins, settings, MCP, PATH. */
+const BOX_STEPS = 8;
 
 export async function runSync(
   input: SyncInput,
@@ -329,7 +332,7 @@ export async function runSync(
 
   if (input.dryRun) {
     const results = boxes.map((box) => {
-      const plan = makePlan(input, config, box, home, null, registry, seed);
+      const plan = makePlan(input, config, box, home, null, registry, seed, boxInstructions(home, box.name));
       output(box).writePlan(plan);
       return { name: box.name, plan };
     });
@@ -406,6 +409,9 @@ export async function runSync(
     const target = { ...resolveLinkOptions(box.host), pathDirs: box.pathDirs };
     let plan = makePlan(input, config, box, home, null, registry, seed);
     try {
+      current = "Reading the box instructions";
+      const instructions = boxInstructions(home, box.name);
+      current = "Locking the box";
       // Another sync for this box can take the box lock after refuseActiveSync. Then this box fails here, after the publish.
       const release = takeLock(dependencies, home, targetKey(box.host));
       try {
@@ -413,11 +419,12 @@ export async function runSync(
         const remoteHome = await boxStep(`Connecting to ${targetLabel(box.host)}`, () =>
           resolveRemoteHome(link, box.host),
         );
-        plan = makePlan(input, config, box, home, remoteHome, registry, seed);
+        plan = makePlan(input, config, box, home, remoteHome, registry, seed, instructions);
         writePlan(plan);
         const { applyPlan, discarded } = await applyOnBox({
           plan,
           box,
+          instructions,
           link,
           publication,
           config,
@@ -495,6 +502,7 @@ function hasPreferences(preferences: PaseoPreferences | null): preferences is Pa
 async function applyOnBox(context: {
   readonly plan: SyncPlan;
   readonly box: SyncBox;
+  readonly instructions: BoxInstructions | null;
   readonly link: SyncLink;
   readonly publication: PublishResult;
   readonly config: SyncOperatorConfig;
@@ -507,7 +515,7 @@ async function applyOnBox(context: {
   readonly writeLine: (line: string) => void;
   readonly warn: (line: string) => void;
 }): Promise<{ applyPlan: ApplyPlan; discarded: string[] }> {
-  const { plan, box, link, publication, config, registry, seed, boxStep, progress, writeLine, warn } = context;
+  const { plan, box, instructions, link, publication, config, registry, seed, boxStep, progress, writeLine, warn } = context;
   const { profiles, pathDirs } = box;
   // An off agent gets no links, plugins, settings, or MCP servers. Apply removes Ferry's earlier links in its harness.
   const off = offHarnesses(registry, box.tools);
@@ -543,8 +551,10 @@ async function applyOnBox(context: {
 
   // The instruction links of the box point at the generated file, so it must be there before Apply.
   await boxStep("Writing the box instructions", async () => {
+    // The per-box text goes on the standard input, so it is not in the command line on the box.
     const result = await link.run(
-      writeBoxFilesCommand(required(plan.remoteHome), required(plan.remoteCheckout), box.name),
+      writeBoxFilesCommand(required(plan.remoteHome), required(plan.remoteCheckout), box.name, instructions !== null),
+      instructions ? { input: boxInstructionsInput(instructions.bytes) } : undefined,
     );
     if (!result.ok) {
       throw new SyncError(
@@ -555,6 +565,9 @@ async function applyOnBox(context: {
       );
     }
   });
+  if (instructions && seed.instructions === null) {
+    warn(`Warning: Ferry did not apply ${instructions.path}, because this machine has no ~/AGENTS.md. The box gets no instruction file.`);
+  }
 
   let applyPlan: ApplyPlan;
   try {
@@ -848,6 +861,26 @@ async function refuseChangedStoreCopies(home: string, config: SyncOperatorConfig
   }
 }
 
+type BoxInstructions = NonNullable<ReturnType<typeof readBoxInstructions>>;
+
+/**
+ * Read the per-box instructions of one box. They get the deny rules of the
+ * shared instructions and the private key rule. A hit refuses this box only,
+ * with the file name and never the value.
+ */
+function boxInstructions(home: string, box: string): BoxInstructions | null {
+  const instructions = readBoxInstructions(home, box);
+  if (instructions === null) return null;
+  const forbidden = carriedContentHits(instructions.path, instructions.bytes);
+  if (forbidden.length === 0) return instructions;
+  throw new SyncError(
+    "box-instructions-refusal",
+    "operator",
+    `Manifest refused the instructions of box ${box}: ${forbidden.map((hit) => `${hit.reason}: ${hit.path}`).join("; ")}`,
+    denyRuleCause(forbidden),
+  );
+}
+
 /** Read the local Paseo agent profiles. A refused profile refuses the sync before it publishes. */
 function paseoProfiles(home: string): readonly AgentProfile[] {
   try {
@@ -865,6 +898,7 @@ function makePlan(
   remoteHome: string | null,
   registry: Registry,
   seed: Seed,
+  instructions: BoxInstructions | null = null,
 ): SyncPlan {
   const localCheckout = join(home, ".ferry", "store");
   const off = offHarnesses(registry, box.tools);
@@ -879,6 +913,7 @@ function makePlan(
     remoteCheckout: remoteHome ? posix.join(remoteHome, ".ferry", "store") : null,
     message: input.message ?? null,
     force: input.force === true,
+    ...(instructions ? { boxInstructions: instructions.path } : {}),
     settingsChanges: settingsChanges(localCheckout, harnesses, seed),
     mcpServers: seed.mcp.filter(on).flatMap((entry) => entry.servers.map((server) => `${entry.harness}/${server.name}`)),
     storeUpdates: seed.storeUpdates,
@@ -954,6 +989,9 @@ function printPlan(plan: SyncPlan, gitAuth: GitAuth, writeLine: (line: string) =
         ? "SSH agent forwarding: only for the box snapshot update and the Claude plugin installs"
         : "SSH agent forwarding: none (git_auth = box)",
       `Apply: ${remoteCheckout} -> ${remoteHome} (force: ${plan.force ? "yes" : "no"})`,
+      ...(plan.boxInstructions === undefined
+        ? []
+        : [`Box instructions: ${plan.boxInstructions} -> ${remoteHome}/${BOX_INSTRUCTIONS}, between the Ferry header and the shared AGENTS.md`]),
       `Off harnesses: ${
         plan.offHarnesses.length === 0
           ? "none"
