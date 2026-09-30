@@ -243,6 +243,10 @@ const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh
 const SHELL_SCRIPT_OPTION = /^(?:-[A-Za-z]*c|--command)$/;
 /** An interpreter option that takes the script as an argument, such as `-e`, `-c`, `-pe`, or `--eval`. */
 const INTERPRETER_SCRIPT_OPTION = /^(?:-[A-Za-z]*[ce]|-p|--eval|--print|-[Cc]ommand|-[Ee]ncoded[Cc]ommand)$/;
+/** A script option of one interpreter only. Python has `-E` and Node.js has `-r` for other uses. */
+const RUNNER_SCRIPT_OPTION: Readonly<Record<string, RegExp>> = { perl: /^-[A-Za-z]*E$/, php: /^-r$/ };
+/** An interpreter option that takes the next word as its value, so that word is not the script file. */
+const INTERPRETER_VALUE_OPTION = /^(?:-r|--require|--import|--loader|-C|--conditions|-W|-X|-I)$/;
 
 /**
  * A file whose path relative to its skill directory is `path`. `executable` is
@@ -994,8 +998,9 @@ function refersToHome(words: readonly string[], home: string): boolean {
  * True when the words start a shell or an interpreter with an inline script,
  * such as `sh -c`, `node -e`, `python -c`, or `deno eval`. The runner can be
  * the command or a later word, as in `env bash -c`. A shell takes its script
- * option at any place. An interpreter takes it before its first other
- * argument, so the options of a script file pass.
+ * option at any place. An interpreter takes it before its script file, also
+ * after other options, as in `node --require x -e`. The options after a script
+ * file pass.
  */
 function runsInlineScript(parts: readonly string[]): boolean {
   return parts.some((part, index) => {
@@ -1004,9 +1009,13 @@ function runsInlineScript(parts: readonly string[]): boolean {
     if (!SCRIPT_RUNNERS.has(runner)) return false;
     const rest = parts.slice(index + 1);
     if (SHELLS.has(runner)) return rest.some((word) => SHELL_SCRIPT_OPTION.test(word));
-    const first = rest.findIndex((word) => !word.startsWith("-"));
-    const options = first < 0 ? rest : rest.slice(0, first);
-    return rest[first] === "eval" || options.some((word) => INTERPRETER_SCRIPT_OPTION.test(word));
+    for (let at = 0; at < rest.length; at++) {
+      const word = rest[at]!;
+      if (!word.startsWith("-")) return word === "eval";
+      if (INTERPRETER_SCRIPT_OPTION.test(word) || RUNNER_SCRIPT_OPTION[runner]?.test(word)) return true;
+      if (INTERPRETER_VALUE_OPTION.test(word)) at++;
+    }
+    return false;
   });
 }
 

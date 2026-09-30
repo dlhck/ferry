@@ -1614,6 +1614,15 @@ describe("carried MCP server declarations", () => {
     ["an inline python script", "python3", ["-c", "import tool; tool.serve()"]],
     ["an inline script for a python version", "python3.12", ["-c", "import tool; tool.serve()"]],
     ["an inline deno script", "deno", ["eval", "serve()"]],
+    ["an inline node script after a preload option", "node", ["--require", "dotenv/config", "-e", "serve()"]],
+    ["an inline node script after a short preload option", "node", ["-r", "dotenv/config", "--import", "tsx", "-e", "serve()"]],
+    ["an inline python script after a warning option", "python3", ["-W", "ignore", "-X", "utf8", "-c", "import tool"]],
+    ["an inline perl script", "perl", ["-e", "serve()"]],
+    ["an inline perl script with -E", "perl", ["-Mstrict", "-E", "serve()"]],
+    ["an inline perl script after an include option", "perl", ["-I", "/srv/lib", "-E", "serve()"]],
+    ["an inline php script", "php", ["-r", "serve();"]],
+    ["an inline ruby script", "ruby", ["-e", "serve"]],
+    ["an inline ruby script after a require option", "ruby", ["-r", "json", "-e", "serve"]],
     ["an inline script behind env", "env", ["bash", "-c", "exec tool serve"]],
     ["an inline script in a container", "docker", ["run", "-i", "example/tool", "sh", "-c", "exec tool serve"]],
   ];
@@ -1654,6 +1663,9 @@ describe("carried MCP server declarations", () => {
     ["a python module", "python3", ["-E", "-m", "some_server"]],
     ["a command with a working directory", "env", ["-C", "/srv/tool", "tool-mcp"]],
     ["a shell script file", "bash", ["/srv/run.sh"]],
+    ["a script file after a preload option", "node", ["-r", "dotenv/config", "/srv/server.js", "-e", "prod"]],
+    ["a ruby script file after a require option", "ruby", ["-r", "json", "/srv/server.rb", "-e", "prod"]],
+    ["a php script file", "php", ["/srv/server.php", "-r", "prod"]],
   ];
   for (const [what, command, args] of portableCommands) {
     test(`carries a stdio server with ${what}`, () => {
