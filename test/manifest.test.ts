@@ -6,6 +6,7 @@ import {
   carriedContentHits,
   carriedNameHit,
   denyRules,
+  hasUrlCredential,
   holdsToken,
   readMcpSources,
   readSeed,
@@ -1622,6 +1623,15 @@ describe("carried MCP server declarations", () => {
     ["a URL with a scheme in mixed case and a secret query key", "tool-mcp", ["hTTps://db.example/app?PASSWORD=example-pass"], "url-credential"],
     ["a git+https URL in mixed case with only a user", "uvx", ["--from", "Git+HTTPS://example-pass@git.example/team/server", "server"], "url-credential"],
     ["an encoded secret query key in a shell script", "bash", ["-cl", 'exec tool "https://db.example/app?pa%73sword=example-pass"'], "url-credential"],
+    ["a URL with a password in a query value of another URL", "tool-mcp", ["https://proxy.example/path?next=https://alice:example-pass@backend.example/path"], "url-credential"],
+    ["an encoded URL with a password in a query value of another URL", "tool-mcp", ["https://proxy.example/path?next=https%3A%2F%2Falice%3Aexample-pass%40backend.example%2Fpath"], "url-credential"],
+    ["a URL with a password after a comma and another URL", "tool-mcp", ["https://db.example/a,https://alice:example-pass@db.example/b"], "url-credential"],
+    ["a URL with only a user in a query value of another URL", "tool-mcp", ["https://proxy.example/?next=https://example-pass@backend.example/"], "url-credential"],
+    ["a URL with a password in the fragment of another URL", "tool-mcp", ["https://proxy.example/page#https://alice:example-pass@backend.example/"], "url-credential"],
+    ["a URL with a password in the path of another URL", "tool-mcp", ["https://archive.example/web/2026/https://alice:example-pass@backend.example/path"], "url-credential"],
+    ["a URL with a password that is encoded two times in a URL in a URL", "tool-mcp", ["https://a.example/?u=https%3A%2F%2Fb.example%2F%3Fv%3Dhttps%253A%252F%252Falice%253Aexample-pass%2540c.example"], "url-credential"],
+    ["an encoded URL with a password in a flag value", "tool-mcp", ["--next=https%3A%2F%2Falice%3Aexample-pass%40backend.example"], "url-credential"],
+    ["a URL with a shell operator in its password", "tool-mcp", ["postgresql://alice:example-pass;more@db.example/app"], "url-credential"],
     ["a secret flag in a shell script with an option group", "bash", ["-cl", "exec tool --password example-pass"], "secret-field"],
     ["a secret flag in a script that is joined to its option", "python3", ["-crun('tool --password example-pass')"], "secret-field"],
     ["a secret flag in a string that env splits", "env", ["-S", "tool --password example-pass"], "secret-field"],
@@ -1799,6 +1809,10 @@ describe("carried MCP server declarations", () => {
     ["a URL with a malformed escape in a query key", "tool-mcp", ["https://db.example/app?na%zzme=value&rate=50%"]],
     ["a URL with a percent-encoded secret query key and a placeholder", "tool-mcp", ["https://db.example/app?pa%73sword=xxxx"]],
     ["a URL with a percent-encoded login name", "tool-mcp", ["postgresql://al%69ce@db.example/app"]],
+    ["an SSH URL with a login name in a query value of another URL", "tool-mcp", ["https://proxy.example/?next=ssh://git@git.example/team/server"]],
+    ["an encoded SSH URL with a login name in a query value of another URL", "tool-mcp", ["https://proxy.example/?next=ssh%3A%2F%2Fgit%40git.example%2Fteam%2Fserver"]],
+    ["a login name and a host in a query value of a URL", "tool-mcp", ["https://proxy.example/?next=git@git.example:team/server.git"]],
+    ["a URL with a mail address in a query value of another URL", "tool-mcp", ["https://proxy.example/?next=https://backend.example/?to=alice@mail.example"]],
     ["a node script file with an option for the script", "node", ["/srv/server.js", "-c", "conf.json"]],
     ["a node script file after a known option", "node", ["--enable-source-maps", "/srv/dist/index.js", "-p", "3000"]],
     ["a node script file after an unknown option", "node", ["--some-new-option", "/srv/server.js", "--port", "3000"]],
@@ -1971,6 +1985,119 @@ describe("carried project files", () => {
     for (const [text, printed] of cases) expect([text.replaceAll(secret, "<secret>"), redactUrlCredentials(text)]).toEqual([text.replaceAll(secret, "<secret>"), printed]);
     expect(cases.map(([text]) => redactUrlCredentials(text)).join("\n")).not.toContain(secret);
   });
+
+  test("the MCP argument rule and the printed form agree on each URL, also for a URL inside a URL", () => {
+    const secret = "box-only" + "-password";
+    // The text, and its printed form. A text that stays has no credential.
+    const cases: [string, string][] = [
+      // The inputs of the review.
+      [`https://proxy/path?next=https://alice:${secret}@backend/path`, "https://proxy/path?next=https://[credential]@backend/path"],
+      [`https://proxy/path?next=https%3A%2F%2Falice%3A${secret}%40backend%2Fpath`, "https://proxy/path?next=https%3A%2F%2F[credential]%40backend%2Fpath"],
+      [`https://host/a,https://alice:${secret}@host/b`, "https://host/a,https://[credential]@host/b"],
+      // A URL in a URL in a URL, plain and encoded.
+      [`https://a.example/?u=https://b.example/?v=https://alice:${secret}@c.example/`, "https://a.example/?u=https://b.example/?v=https://[credential]@c.example/"],
+      [`https://a.example/?u=https://b.example/?v=https%3A%2F%2Falice%3A${secret}%40c.example`, "https://a.example/?u=https://b.example/?v=https%3A%2F%2F[credential]%40c.example"],
+      [
+        `https://a.example/?u=https%3A%2F%2Fb.example%2F%3Fv%3Dhttps%253A%252F%252Falice%253A${secret}%2540c.example`,
+        "https://a.example/?u=https%3A%2F%2Fb.example%2F%3Fv%3Dhttps%253A%252F%252F[credential]%2540c.example",
+      ],
+      [`https://a.example/?u=https%3A%2F%2Fb.example%2F%3Ftoken%3D${secret}`, "https://a.example/?u=https%3A%2F%2Fb.example%2F%3Ftoken%3D[credential]"],
+      // The fragment, the path, and a text without an outer URL.
+      [`https://host/page#https://alice:${secret}@backend/`, "https://host/page#https://[credential]@backend/"],
+      [`https://archive.example/web/2026/https://alice:${secret}@backend/path`, "https://archive.example/web/2026/https://[credential]@backend/path"],
+      [`--next=https%3A%2F%2Falice%3A${secret}%40backend`, "--next=https%3A%2F%2F[credential]%40backend"],
+      // A token in the place of the user, in an HTTP URL.
+      [`https://proxy/?next=https://${secret}@backend/`, "https://proxy/?next=https://[credential]@backend/"],
+      [`https://proxy/?next=git%2Bhttps%3A%2F%2F${secret}%40backend`, "https://proxy/?next=git%2Bhttps%3A%2F%2F[credential]%40backend"],
+      // After a separator.
+      [`https://host/a;https://alice:${secret}@host/b`, "https://host/a;https://[credential]@host/b"],
+      [`https://host/a|https://alice:${secret}@host/b`, "https://host/a|https://[credential]@host/b"],
+      [`url=https://alice:${secret}@host/b`, "url=https://[credential]@host/b"],
+      [`(https://alice:${secret}@host/b)`, "(https://[credential]@host/b)"],
+      [`"https://host/a","https://alice:${secret}@host/b"`, '"https://host/a","https://[credential]@host/b"'],
+      [`'https://alice:${secret}@host/b'`, "'https://[credential]@host/b'"],
+      [`https://host/a https://alice:${secret}@host/b\thttps://host/c\n`, "https://host/a https://[credential]@host/b\thttps://host/c\n"],
+      [`https://alice:${secret}@host/a,https://bob:${secret}@host/b`, "https://[credential]@host/a,https://[credential]@host/b"],
+      // The forms of #241 and #243.
+      [`postgresql://alice:${secret}@db.example/app`, "postgresql://[credential]@db.example/app"],
+      [`postgresql://alice%3A${secret}%40db.example/app`, "postgresql://[credential]%40db.example/app"],
+      [`https://alice:pa;ss${secret}@db.example/app`, "https://[credential]@db.example/app"],
+      [`https://db.example/app?pa%2573sword=${secret}#tok%65n=${secret}`, "https://db.example/app?pa%2573sword=[credential]#tok%65n=[credential]"],
+      [`https://db.example/app?q=a+b&api+key=${secret}`, "https://db.example/app?q=a+b&api+key=[credential]"],
+      // A login name, a host, and a placeholder stay.
+      ...[
+        "ssh://git@example.invalid/app.git",
+        "git+ssh://git@example.invalid/team/server@v1",
+        "git@example.invalid:you/app.git",
+        "postgresql://alice@db.example/app",
+        "SSH://git:@example.invalid/app.git",
+        "https://proxy/?next=ssh://git@example.invalid/app.git",
+        "https://proxy/?next=ssh%3A%2F%2Fgit%40example.invalid%2Fapp.git",
+        "https://proxy/?next=git@example.invalid:you/app.git",
+        "https://proxy/?next=https://backend/?to=alice@mail.example",
+        "https://registry.example/@scope/package",
+        "https://host/a,https://host/b",
+        "https://alice:xxxx@host/a,https://host/b?token=xxxx",
+        "https://db.example/app?q=50%25&mode=a+b&name=caf%C3%A9",
+        "https://db.example/app?na%zzme=value&rate=50%",
+        "rate=50% next?token=value",
+        "",
+      ].map((text): [string, string] => [text, text]),
+    ];
+
+    for (const [text, printed] of cases) {
+      const shown = text.replaceAll(secret, "<secret>");
+      expect([shown, redactUrlCredentials(text), hasUrlCredential(text)]).toEqual([shown, printed, printed !== text]);
+    }
+  });
+
+  test("a URL that is encoded more times than Ferry decodes counts as a credential", () => {
+    const secret = "box-only" + "-password";
+    const encoded = (rounds: number) => Array.from({ length: rounds }).reduce<string>((text) => encodeURIComponent(text), `https://alice:${secret}@backend`);
+
+    for (const rounds of [1, 4, 8]) {
+      const printed = redactUrlCredentials(`https://proxy/?next=${encoded(rounds)}`);
+      expect([rounds, printed.startsWith("https://proxy/?next=https%"), printed.includes("[credential]"), printed.includes(secret)]).toEqual([rounds, true, true, false]);
+    }
+    expect(redactUrlCredentials(`see https://proxy/?next=${encoded(9)} now`)).toBe("see [credential] now");
+    expect(hasUrlCredential(`https://proxy/?next=${encoded(9)}`)).toBe(true);
+    // A short text is enough: Ferry stops after a fixed number of rounds and does not keep a copy for each round.
+    expect(redactUrlCredentials(`https://proxy/?q=%${"25".repeat(200)}41`)).toBe("[credential]");
+    expect(redactUrlCredentials(`see https://proxy/?q=${encoded(9).replace(secret, "xxxx")} now`)).toBe("see [credential] now");
+  });
+
+  test("the URL check and the token check of a long line take a time in proportion to its length", () => {
+    const size = 128 * 1024;
+    const line = (unit: string, start = "", length = size) => start + unit.repeat(Math.ceil(length / unit.length));
+    const lines = [
+      line("https://"),
+      line("%"),
+      line("a"),
+      line("a:a@", "https://"),
+      line("https://a:a@a/"),
+      line("a", "https://host/path?"),
+      line("a", "https://host/path?q="),
+      line("%41", "https://host/path?q="),
+      // Each round of decoding takes one `25` away. The line is short, because a copy of the line for each round needs much memory.
+      line("25", "https://host/path?q=%", 8 * 1024),
+      line("a+", "https://host/path?q="),
+      line("?a=a"),
+      line("x-", "ghp_"),
+      line("github_pat_"),
+      line("AKIA"),
+      JSON.stringify(Array.from({ length: size / 128 }, (_, id) => ({ id, url: `https://api.example/v1/items/${id}?page=2`, text: "a short text with 50% of spaces", data: "QUJD+/==".repeat(4) }))),
+    ];
+
+    // A scan that takes a time in proportion to the square of the length needs more than this time for one line.
+    const started = performance.now();
+    for (const text of lines) {
+      redactUrlCredentials(text);
+      hasUrlCredential(text);
+      redactTokens(text);
+      holdsToken(text);
+    }
+    expect(performance.now() - started).toBeLessThan(5_000);
+  }, 120_000);
 
   test("the printed form of a text has a mark in the place of each token, also without a word boundary before it", () => {
     const token = "gh" + "p_" + "a".repeat(36);

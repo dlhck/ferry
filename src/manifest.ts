@@ -1218,7 +1218,7 @@ function urlReadings(text: string): string[] {
  * Each rule applies to each reading of `urlReadings`, because a URL consumer
  * decodes the percent escapes.
  */
-function hasUrlCredential(word: string): boolean {
+export function hasUrlCredential(word: string): boolean {
   return [...word.matchAll(ARGUMENT_URL)].some(
     ([, scheme = "", authority = "", rest = ""]) =>
       urlReadings(authority).some((reading) => {
