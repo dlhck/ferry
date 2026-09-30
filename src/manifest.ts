@@ -39,7 +39,7 @@ export type DenyRuleDescription = {
  * a box whose number is lower than this one, because older rules can pass a
  * file that this machine refuses.
  */
-export const DENY_RULES_VERSION = 9;
+export const DENY_RULES_VERSION = 10;
 
 const DENY_RULES = {
   dotenv: { code: "dotenv", reason: "environment file", verdict: "refuse" },
@@ -120,6 +120,11 @@ const DENY_RULES = {
   "mcp-script": {
     code: "mcp-script",
     reason: "stdio MCP server that runs an inline shell or interpreter script, which Ferry cannot check",
+    verdict: "skip",
+  },
+  "mcp-app-bundle": {
+    code: "mcp-app-bundle",
+    reason: "stdio MCP server whose command or arguments refer to a path in a macOS app bundle",
     verdict: "skip",
   },
 } as const satisfies Record<string, DenyRule>;
@@ -242,6 +247,12 @@ const HOME_REFERENCE = /^(?:~|\$HOME|\$\{HOME\})\/(.*)$/;
 const COMMAND_SEPARATORS = /[\s"'`;|&()<>=]+/;
 /** The home as a shell variable, `$HOME` or `${HOME}`, at any place in an argument. */
 const HOME_VARIABLE = /\$\{?HOME\b/;
+/**
+ * A path in a macOS app bundle, `<name>.app/Contents/`, at any place in a
+ * text. macOS does not compare the case of a path. It is a source, because
+ * the box compares its own MCP entries with it in jq.
+ */
+export const APP_BUNDLE_PATH = "[^/]\\.app/Contents/";
 /**
  * Whitespace and shell operators separate the words inside one MCP argument.
  * `&` and `=` stay, because they join the parameters of a URL and the parts of
@@ -423,17 +434,23 @@ export type StdioMcpServer = {
 
 export type McpServer = RemoteMcpServer | StdioMcpServer;
 
-/** The carried MCP servers one harness declares. `harness` is the harness id. */
-export type SeedMcp = { readonly harness: string; readonly servers: readonly McpServer[] };
+/**
+ * The carried MCP servers one harness declares. `harness` is the harness id.
+ * `appBundle` has the names of the stdio servers that Ferry skips because they
+ * run from a macOS app bundle. Sync removes such an entry of an earlier sync
+ * from the box.
+ */
+export type SeedMcp = { readonly harness: string; readonly servers: readonly McpServer[]; readonly appBundle?: readonly string[] };
 
 /**
- * A stdio server that Ferry does not carry. `home-path`: it refers to a path
+ * A stdio server that Ferry does not carry. `app-bundle`: it refers to a path
+ * in a macOS app bundle, which a box does not have. `home-path`: it refers to a path
  * in the operator home. `inline-script`: it runs an inline shell or
  * interpreter script, which Ferry cannot check. `unknown-options`: it runs a
  * shell or an interpreter with options that Ferry cannot classify, so Ferry
  * cannot tell if it runs an inline script.
  */
-export type NonPortableMcp = { readonly name: string; readonly reason: "home-path" | ScriptReason };
+export type NonPortableMcp = { readonly name: string; readonly reason: "app-bundle" | "home-path" | ScriptReason };
 
 /** Why `scriptReason` skips a stdio server. */
 type ScriptReason = "inline-script" | "unknown-options";
@@ -563,8 +580,10 @@ export function readSeed(
   const mcp: SeedMcp[] = [];
   for (const harness of harnesses) {
     if (!harness.mcp) continue;
-    const { servers } = readMcp(home, harness.mcp, forbidden, leftovers);
-    if (servers.length > 0) mcp.push({ harness: harness.id, servers });
+    const { servers, nonPortable } = readMcp(home, harness.mcp, forbidden, leftovers);
+    const appBundle = nonPortable.filter((server) => server.reason === "app-bundle").map((server) => server.name);
+    if (appBundle.length > 0) mcp.push({ harness: harness.id, servers, appBundle });
+    else if (servers.length > 0) mcp.push({ harness: harness.id, servers });
   }
 
   const instructions = readInstructions(home, leftovers);
@@ -1038,8 +1057,8 @@ export function readMcpSources(home: string, harnesses: readonly HarnessDescript
  * The file never leaves the machine. A remote server keeps only its name,
  * type, and URL. A stdio server keeps its command, its arguments, and the
  * names of its environment keys, never their values. Another server, and a
- * stdio server that refers to a path in the home or runs an inline script, is
- * noted in `leftovers`. A remote server with headers, environment values,
+ * stdio server that refers to a path in a macOS app bundle or in the home, or
+ * runs an inline script, is noted in `leftovers`. A remote server with headers, environment values,
  * arguments, or a credential, and a stdio server with a token, a secret, or a
  * URL credential in its command or arguments, refuse the seed.
  */
@@ -1099,6 +1118,16 @@ function readMcp(
           path,
           code: DENY_RULES["mcp-argument"].code,
           reason: `MCP server ${name} has a command or argument that matches the ${rules.join(", ")} rule`,
+        });
+        continue;
+      }
+      // Before the home rule: a bundle in `~/Applications` is a bundle, and the operator has nothing to change.
+      if (words.some((word) => new RegExp(APP_BUNDLE_PATH, "i").test(word))) {
+        nonPortable.push({ name, reason: "app-bundle" });
+        leftovers.push({
+          path,
+          code: DENY_RULES["mcp-app-bundle"].code,
+          reason: `MCP server ${name} runs from a macOS app bundle, which the box does not have`,
         });
         continue;
       }
@@ -1651,7 +1680,9 @@ function identify(
   for (const skill of skills) hash.update(`skill:${skill.name}:${contentKey(skill.files)}\n`);
   for (const root of roots) hash.update(`root:${root.path}:${contentKey(root.files)}\n`);
   for (const entry of settings) hash.update(`settings:${entry.harness}:${digest(entry.bytes)}\n`);
-  for (const entry of mcp) hash.update(`mcp:${entry.harness}:${JSON.stringify(entry.servers)}\n`);
+  for (const entry of mcp) {
+    if (entry.servers.length > 0) hash.update(`mcp:${entry.harness}:${JSON.stringify(entry.servers)}\n`);
+  }
   hash.update(`instructions:${instructions ? digest(instructions.bytes) : "none"}\n`);
   return hash.digest("hex");
 }

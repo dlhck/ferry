@@ -325,7 +325,7 @@ export async function runSync(
       }, operatorSteps);
   if (planned !== (input.dryRun ? 1 : operatorSteps + BOX_STEPS)) progress.plan(planned);
   for (const leftover of seed.leftovers) {
-    const label = leftover.code === "hook-path" ? "hook" : leftover.code === "mcp-local" || leftover.code === "mcp-path" || leftover.code === "mcp-script" ? "MCP server" : null;
+    const label = leftover.code === "hook-path" ? "hook" : leftover.code === "mcp-local" || leftover.code === "mcp-path" || leftover.code === "mcp-script" || leftover.code === "mcp-app-bundle" ? "MCP server" : null;
     if (!label) continue;
     warn(`Skipped ${label}: ${leftover.reason}: ${leftover.path}`);
   }

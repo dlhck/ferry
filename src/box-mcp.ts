@@ -3,7 +3,8 @@
  * servers need there.
  *
  * Ferry adds a carried server or updates it. It never removes a box server
- * that the operator does not carry. A login stays on the box: ferry declares
+ * that the operator does not carry, with one exception: an entry of an earlier
+ * sync that runs from a macOS app bundle. A login stays on the box: ferry declares
  * servers here and `AuthStart` starts their logins. The environment values of
  * a stdio server stay on the box too. The box merges its own entry with jq or
  * the harness CLI, and prints back only a status letter or key names, so an
@@ -17,7 +18,7 @@ import {
   quoteShell,
   type BoxSettingsLink,
 } from "./box-settings.ts";
-import type { McpSource, NonPortableMcp, RemoteMcpServer, SeedMcp, StdioMcpServer } from "./manifest.ts";
+import { APP_BUNDLE_PATH, type McpSource, type NonPortableMcp, type RemoteMcpServer, type SeedMcp, type StdioMcpServer } from "./manifest.ts";
 import type { Progress } from "./progress.ts";
 import type { HarnessDescriptor, ToolDescriptor, ToolMcp } from "./registry/types.ts";
 
@@ -37,6 +38,9 @@ const MERGE_FILE =
   'if type == "object" then with_entries(select(.key == "env" or .key == "env_vars")) else {} end))))';
 /** A jq filter for a JSON MCP file: set each carried entry of `$s` under the key `$k`. */
 const REPLACE_FILE = '.[$k] = ((.[$k] // {}) + $s)';
+/** A jq filter: the command or an argument of the box entry `$e` is a path in a macOS app bundle. `$r` is `APP_BUNDLE_PATH`. */
+const IN_APP_BUNDLE =
+  '($e | type) == "object" and ([$e.command, ($e.args // [])[]?] | any(type == "string" and test($r; "i")))';
 /** A shell test that fails when jq is not on the box. */
 const HAS_JQ = "command -v jq >/dev/null 2>&1";
 
@@ -77,6 +81,8 @@ export async function registerBoxMcp(input: {
   for (const { entry, recipe } of entries) {
     const file = input.harnesses.find((harness) => harness.id === entry.harness)?.mcp;
     const path = file ? posix.join(input.remoteHome, file.file) : null;
+    const box = path && file ? { path, file } : null;
+    for (const name of entry.appBundle ?? []) warnings.push(...(await removeAppBundle(entry.harness, name, recipe, box, input.link)));
     const remote = entry.servers.filter((server): server is RemoteMcpServer => server.type !== "stdio");
     const stdio = entry.servers.filter((server): server is StdioMcpServer => server.type === "stdio");
     if (remote.length > 0 && recipe.register) {
@@ -87,10 +93,9 @@ export async function registerBoxMcp(input: {
         remote.map((server) => [server.name, server.type === "sse" ? { type: "sse", url: server.url } : { url: server.url }]),
       );
       const names = remote.map((server) => server.name).join(", ");
-      warnings.push(...(await mergeFileOnBox(entry.harness, names, entries, REPLACE_FILE, path && file ? { path, file } : null, input.link)));
+      warnings.push(...(await mergeFileOnBox(entry.harness, names, entries, REPLACE_FILE, box, input.link)));
     }
     if (stdio.length === 0) continue;
-    const box = path && file ? { path, file } : null;
     warnings.push(...(await registerStdio(entry.harness, stdio, recipe, box, input.link, advance)));
   }
   return warnings;
@@ -102,13 +107,14 @@ export async function registerBoxMcp(input: {
  * cannot check `keys`. `command-missing`: `command` is not on the box PATH and
  * no registry tool supplies it. `not-portable`: ferry does not carry the
  * server, because it refers to a path in the operator home or runs an inline
- * script. `reason` says which.
+ * script. `reason` says which. A server that Ferry skips for a path in a macOS
+ * app bundle gives no issue, because the operator has nothing to do.
  */
 export type BoxMcpIssue =
   | { readonly kind: "env-missing"; readonly harness: string; readonly server: string; readonly keys: readonly string[]; readonly file: string }
   | { readonly kind: "env-unchecked"; readonly harness: string; readonly server: string; readonly keys: readonly string[] }
   | { readonly kind: "command-missing"; readonly harness: string; readonly server: string; readonly command: string }
-  | { readonly kind: "not-portable"; readonly harness: string; readonly server: string; readonly reason: NonPortableMcp["reason"] };
+  | { readonly kind: "not-portable"; readonly harness: string; readonly server: string; readonly reason: Exclude<NonPortableMcp["reason"], "app-bundle"> };
 
 /**
  * Check the carried stdio servers on the box, read-only. A command that a
@@ -128,7 +134,9 @@ export async function checkBoxMcp(input: {
   const recipes = new Map<string, ToolMcp>();
   for (const { entry, recipe } of declared(input.sources, input.tools)) {
     recipes.set(entry.harness, recipe);
-    for (const server of entry.nonPortable) issues.push({ kind: "not-portable", harness: entry.harness, server: server.name, reason: server.reason });
+    for (const server of entry.nonPortable) {
+      if (server.reason !== "app-bundle") issues.push({ kind: "not-portable", harness: entry.harness, server: server.name, reason: server.reason });
+    }
     for (const server of entry.servers) if (server.type === "stdio") stdio.push({ harness: entry.harness, server });
   }
 
@@ -328,6 +336,52 @@ async function mergeFileOnBox(
     return [`jq is not on the box, so Ferry did not update ${harness} MCP servers ${names}. Run ferry update to install jq.`];
   }
   if (stdout.startsWith("S")) return [`could not declare ${harness} MCP servers ${names}`];
+  return [];
+}
+
+/**
+ * Remove the box entry `name` of an earlier sync, only when its own command or
+ * an argument is a path in a macOS app bundle. Such an entry cannot run on the
+ * box. Another entry with that name stays. The box reads its entry from the
+ * JSON MCP file or with `getJson`, compares it with jq, and removes it with
+ * the harness CLI or from the JSON MCP file. It prints only a status letter:
+ * `R` removed, `J` jq is missing, `S` the removal failed.
+ */
+async function removeAppBundle(
+  harness: string,
+  name: string,
+  recipe: ToolMcp,
+  box: { readonly path: string; readonly file: McpFile } | null,
+  link: BoxSettingsLink,
+): Promise<string[]> {
+  const register = recipe.register;
+  const file = box?.file.format === "json" ? box : null;
+  const getJson = register?.getJson;
+  if (!file && !(register && getJson)) return [];
+  const args = `--arg k ${quoteShell(file?.file.key ?? "")} --arg n ${quoteShell(name)} --arg r ${quoteShell(APP_BUNDLE_PATH)}`;
+  const script = [
+    ...(register ? [`command -v ${mcpBinary(recipe)} >/dev/null 2>&1 || exit 0`] : []),
+    ...(file
+      ? [`f=${quoteShell(file.path)}`, `[ -f "$f" ] && grep -qF -- ${quoteShell(JSON.stringify(name))} "$f" || exit 0`]
+      : [`${mcpCommand((register as NonNullable<ToolMcp["register"]>).get, { name })} >/dev/null 2>&1 || exit 0`]),
+    `${HAS_JQ} || { printf 'J\\n'; exit 0; }`,
+    file
+      ? `jq -e ${args} ${quoteShell(`(.[$k][$n] // null) as $e | ${IN_APP_BUNDLE}`)} "$f" >/dev/null 2>&1 || exit 0`
+      : `${mcpCommand(getJson as string, { name })} 2>/dev/null | jq -e ${args} ${quoteShell(`(.transport // .) as $e | ${IN_APP_BUNDLE}`)} >/dev/null 2>&1 || exit 0`,
+    register
+      ? `${mcpCommand(register.remove, { name })} >/dev/null 2>&1 && printf 'R\\n' || printf 'S\\n'`
+      : `umask 077; if jq ${args} 'del(.[$k][$n])' "$f" > "$f.ferry-tmp" 2>/dev/null; then mv "$f.ferry-tmp" "$f" && printf 'R\\n'; else rm -f "$f.ferry-tmp"; printf 'S\\n'; fi`,
+  ].join("\n");
+  const { stdout } = await checked(link, `sh -c ${quoteShell(script)}`);
+  if (stdout.startsWith("R")) {
+    return [`Ferry removed ${harness} MCP server ${name} from the box, because it runs from a macOS app bundle, which the box does not have.`];
+  }
+  if (stdout.startsWith("J")) {
+    return [
+      `jq is not on the box, so Ferry cannot tell if ${harness} MCP server ${name} on the box runs from a macOS app bundle, and leaves it. Run ferry update to install jq.`,
+    ];
+  }
+  if (stdout.startsWith("S")) return [`could not remove ${harness} MCP server ${name} from the box`];
   return [];
 }
 

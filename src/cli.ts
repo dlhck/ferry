@@ -747,11 +747,14 @@ manual SSH flow, or off.`)
     .description(`Publish the snapshot and apply it to the selected boxes, or to all boxes.
 
 A file that looks like a secret stops the sync before the publish. The error
-names the file, never the value. Ferry skips MCP servers that are neither
-remote HTTPS servers nor stdio commands, stdio MCP servers and hooks that refer
-to home paths that the box does not have, and prints a line for each. A stdio
-MCP server carries its command, its arguments, and the names of its env keys,
-never their values.
+names the file, never the value. Ferry skips a hook that refers to a home path
+that the box does not have, and an MCP server that is neither a remote HTTPS
+server nor a stdio command. Ferry also skips a stdio MCP server that refers to
+a home path, runs an inline shell or interpreter script, runs a shell or an
+interpreter with options that Ferry cannot classify, or runs from a macOS app
+bundle. Sync prints a line for each skipped hook and server. A stdio MCP server
+carries its command, its arguments, and the names of its env keys, never their
+values.
 Ferry syncs up to 4 boxes at the same time. A failed box does not stop the
 other boxes. Sync also writes the ferry PATH block in ~/.profile on the box.
 

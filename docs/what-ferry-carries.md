@@ -61,6 +61,7 @@ Ferry carries the name, the command, the arguments, and the names of the `env` k
 - Set the values in the `env` of the server on the box. Ferry keeps them.
 - Ferry never installs the command. `ferry status --brief` names each missing env key and each command that is not on the box.
 - Ferry does not carry a server whose command or arguments refer to a path in your home, as an absolute path, `~`, `$HOME`, or `${HOME}`.
+- Ferry does not carry a server whose command or arguments refer to a path in a macOS app bundle, a path with a `<name>.app/Contents/` part, as in `/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl`. A box does not have the app. You have nothing to do, so `ferry status --brief` shows no item for it.
 - Ferry does not carry a server that runs an inline script for a shell or an interpreter, such as `sh -c` or `node -e`, because Ferry cannot check the script. A script file passes, as in `node /srv/server.js`.
 - A command or an argument with a token, a secret flag with a value, or a URL with a credential stops the sync.
 
