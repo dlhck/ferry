@@ -5,6 +5,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -74,7 +75,8 @@ function world() {
   installBoxFerry(box);
   const commands: { command: string; options: RunOptions }[] = [];
   const received: string[] = [];
-  return { root, operator, box, checkout, commands, received, link: boxLink(box, commands, received) };
+  const before = readdirSync(tmpdir()).filter((name) => name.startsWith("ferry-adopt-"));
+  return { root, operator, box, checkout, commands, received, before, link: boxLink(box, commands, received) };
 }
 
 /**
@@ -103,9 +105,14 @@ function boxLink(home: string, commands: { command: string; options: RunOptions 
 
 type World = ReturnType<typeof world>;
 
-/** True when `text` reached this machine, as plain text or in a base64 archive. */
+/** True when `text` reached this machine, as plain text or as base64, in a line of a pack too. */
 function crossed(w: World, text: string): boolean {
-  return w.received.some((output) => output.includes(text) || Buffer.from(output, "base64").includes(text));
+  return w.received.some((output) => output.includes(text) || output.split(/[\n"]/).some((part) => Buffer.from(part, "base64").includes(text)));
+}
+
+/** True for a command that tells the box to pack files: the only command that gives file content. */
+function isPack(options: RunOptions): boolean {
+  return Buffer.from(options.input ?? []).includes('"pack":true');
 }
 
 async function adopt(w: World, input: Partial<AdoptFromBoxInput> & { name: string }, overrides: Partial<AdoptFromBoxDependencies> = {}) {
@@ -241,6 +248,7 @@ describe("ferry adopt --from-box", () => {
       "Ferry refused demo from box a, and copied nothing to this machine: dotenv environment file: .env",
     );
     expect(w.commands.some(({ command }) => command.includes("tar "))).toBe(false);
+    expect(w.received.some((output) => output.includes('"data"'))).toBe(false);
     expect(crossed(w, "box-only-password")).toBe(false);
     expect(crossed(w, "box-only-body")).toBe(false);
     expect(existsSync(join(w.operator, ".agents"))).toBe(false);
@@ -289,24 +297,51 @@ describe("ferry adopt --from-box", () => {
     expect(w.received.some((output) => output.includes(Buffer.from(token).toString("hex")))).toBe(false);
   });
 
-  test("refuses a file that changes on the box after the check", async () => {
+  test("the box reads each file one time: a file that gets a secret before the box reads it stays on the box", async () => {
     const w = world();
     const skill = join(w.box, ".claude", "skills", "draft");
-    write(join(skill, "SKILL.md"), "# Draft\n");
+    write(join(skill, "SKILL.md"), "# Draft\nbox-only-body\n");
     write(join(skill, "notes.md"), "notes\n");
     const racing: Pick<Link, "run"> = {
-      run: (command, options) => {
-        if (command.includes("tar ")) writeFileSync(join(skill, "notes.md"), "PASSWORD=box-only-password\n");
+      run: (command, options = {}) => {
+        // The skill list shows a clean skill. The file changes before the one command that reads and checks the files.
+        if (isPack(options)) writeFileSync(join(skill, "notes.md"), `token ghp_${"a".repeat(36)}\n`);
         return w.link.run(command, options);
       },
     };
 
     const { error } = await adopt(w, { name: "draft" }, { createLink: () => racing });
 
-    expect(errorInfo(error).code).toBe("refused");
-    expect((error as Error).message).toBe("notes.md of draft changed on box a after the check. Run the command again.");
+    expect(errorInfo(error).code).toBe("deny-rule-match");
+    expect((error as Error).message).toBe(
+      "Ferry refused draft from box a, and copied nothing to this machine: github-token GitHub token in file content: notes.md",
+    );
+    expect(w.commands.filter(({ options }) => isPack(options))).toHaveLength(1);
+    expect(w.commands.some(({ command }) => command.includes("tar "))).toBe(false);
+    expect(crossed(w, `ghp_${"a".repeat(36)}`)).toBe(false);
+    expect(crossed(w, "box-only-body")).toBe(false);
     expect(existsSync(join(w.operator, ".claude"))).toBe(false);
     expect(existsSync(skill)).toBe(true);
+  });
+
+  test("applies the rules of this machine to the files of a box that gives a file with a secret, and writes nothing", async () => {
+    const w = world();
+    const token = `ghp_${"a".repeat(36)}`;
+    write(join(w.box, ".claude", "skills", "draft", "SKILL.md"), "# Draft\n");
+    const body = Buffer.from(`token ${token}\n`);
+    const file = { path: "notes.md", sha256: new Bun.CryptoHasher("sha256").update(body).digest("hex"), size: body.length, mode: 0o644, secrets: [], id: null };
+    // A Ferry that an attacker controls: it says that the file passes.
+    const lines = [{ pack: 1, rules: 1_000_000 }, { file }, { data: body.toString("base64") }, { end: 1 }];
+    installBoxFerry(w.box, `cat >/dev/null; printf '%s\\n' ${lines.map((line) => `'${JSON.stringify(line)}'`).join(" ")}`);
+
+    const { error } = await adopt(w, { name: "draft" });
+
+    expect(errorInfo(error).code).toBe("deny-rule-match");
+    expect((error as Error).message).toBe(
+      "Ferry refused draft from box a after the copy, and removed the copy from this machine: github-token GitHub token in file content: notes.md",
+    );
+    expect(existsSync(join(w.operator, ".claude"))).toBe(false);
+    expect(readdirSync(tmpdir()).filter((name) => name.startsWith("ferry-adopt-"))).toEqual(w.before);
   });
 
   test("refuses when the box has no Ferry, a Ferry without the scan command, or a Ferry with older rules, before it copies a file", async () => {

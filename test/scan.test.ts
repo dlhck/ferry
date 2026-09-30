@@ -1,12 +1,23 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DENY_RULES_VERSION } from "../src/manifest.ts";
 import { errorInfo } from "../src/output.ts";
 import type { Link, LinkResult } from "../src/link.ts";
-import { changedFiles, isInside, parseScanRequest, runScan, scanOnBox } from "../src/scan.ts";
+import {
+  isInside,
+  packLines,
+  packOnBox,
+  parseScanRequest,
+  recheckPack,
+  runPack,
+  runScan,
+  scanOnBox,
+  writePack,
+  type PackRequest,
+} from "../src/scan.ts";
 
 // Fake secrets, built at runtime so that no secret scanner flags this file.
 const TOKEN = "gh" + "p_" + "f".repeat(36);
@@ -73,7 +84,7 @@ describe("ferry scan of project files", () => {
     symlinkSync("AGENTS.md", join(app, "link.md"));
     const paths = ["AGENTS.md", "notes.md", ".env.local", "link.md", "gone.md"];
 
-    const scan = runScan({ kind: "files", root: "Developer/app", paths, allowSecrets: false, confirmed: false }, root);
+    const scan = runScan({ kind: "files", root: "Developer/app", paths, allowSecrets: false }, root);
 
     expect(scan.carry).toEqual([{ path: "AGENTS.md", sha256: sha256("# Agents\n"), secrets: [] }]);
     expect(scan.refused.map((hit) => [hit.path, hit.code])).toEqual([
@@ -92,12 +103,13 @@ describe("ferry scan of project files", () => {
     write(join(root, "Developer/app/.env.local"), body);
     write(join(root, "Developer/app/notes.md"), `token ${TOKEN}\n`);
 
-    const scan = runScan({ kind: "files", root: "Developer/app", paths: [".env.local", "notes.md"], allowSecrets: true, confirmed: true }, root);
+    const scan = runScan({ kind: "files", root: "Developer/app", paths: [".env.local", "notes.md"], allowSecrets: true }, root);
 
     expect(scan.carry).toEqual([
       {
         path: ".env.local",
-        sha256: sha256(body),
+        // Only a pack gives the hash of a file with secrets.
+        sha256: null,
         secrets: ["AWS access key ID in file content", "key PASSWORD holds a password or secret"],
       },
     ]);
@@ -125,7 +137,7 @@ describe("ferry scan of session files", () => {
     for (const [path, body] of Object.entries(files)) write(join(root, path), body);
     const paths = [...Object.keys(files), ".codex/sessions/gone.jsonl"];
 
-    const scan = runScan({ kind: "sessions", paths, project, confirmed: false }, root);
+    const scan = runScan({ kind: "sessions", paths, project }, root);
 
     expect(scan.files.map((file) => [file.path, file.id, file.blocked, file.hits.map((hit) => hit.code)])).toEqual([
       [".claude/projects/app/clean.jsonl", null, false, []],
@@ -154,7 +166,7 @@ describe("ferry scan gives no data about the content of a denied file", () => {
     const body = `${JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", content: `PASSWORD=${pin}x\n` }] } })}\n`;
     write(join(root, ".claude/projects/app/leaky.jsonl"), body);
 
-    const scan = runScan({ kind: "sessions", paths: [".claude/projects/app/leaky.jsonl"], project: join(root, "app"), confirmed: false }, root);
+    const scan = runScan({ kind: "sessions", paths: [".claude/projects/app/leaky.jsonl"], project: join(root, "app") }, root);
 
     expect(scan.files).toEqual([
       {
@@ -169,42 +181,28 @@ describe("ferry scan gives no data about the content of a denied file", () => {
     expect(JSON.stringify(scan)).not.toContain(sha256(body));
   });
 
-  test("a session with secrets gets its hash and its id only in a confirmed scan, and a blocked file never", () => {
+  test("a scan gives no hash and no id for a session with secrets, and no hash for an environment file with secrets", () => {
     const root = home();
     const project = join(root, "app");
+    const env = `PASSWORD=${PASSWORD}\n`;
     const leaky = `${meta(project, "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa")}${JSON.stringify({ text: TOKEN })}\n`;
     write(join(root, ".codex/sessions/clean.jsonl"), meta(project, "22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb"));
     write(join(root, ".codex/sessions/leaky.jsonl"), leaky);
     write(join(root, ".claude/projects/app/memory/id_rsa"), "key\n");
+    write(join(root, "app/.env"), env);
+    write(join(root, "app/notes.md"), `token ${TOKEN}\n`);
     const paths = [".codex/sessions/clean.jsonl", ".codex/sessions/leaky.jsonl", ".claude/projects/app/memory/id_rsa"];
-    const fields = (confirmed: boolean) =>
-      runScan({ kind: "sessions", paths, project, confirmed }, root).files.map((file) => [file.session, file.sha256, file.id]);
 
-    expect(fields(false)).toEqual([
+    const sessions = runScan({ kind: "sessions", paths, project }, root);
+    const files = runScan({ kind: "files", root: "app", paths: [".env", "notes.md"], allowSecrets: true }, root);
+
+    expect(sessions.files.map((file) => [file.session, file.sha256, file.id])).toEqual([
       [true, sha256(meta(project, "22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb")), "22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb"],
       [true, null, null],
       [false, null, null],
     ]);
-    expect(fields(true)).toEqual([
-      [true, sha256(meta(project, "22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb")), "22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb"],
-      [true, sha256(leaky), "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
-      [false, null, null],
-    ]);
-  });
-
-  test("an environment file with secrets gets its hash only in a confirmed scan, and a refused file never", () => {
-    const root = home();
-    const env = `PASSWORD=${PASSWORD}\n`;
-    write(join(root, "app/.env"), env);
-    write(join(root, "app/notes.md"), `token ${TOKEN}\n`);
-    const scan = (confirmed: boolean) => runScan({ kind: "files", root: "app", paths: [".env", "notes.md"], allowSecrets: true, confirmed }, root);
-
-    expect(scan(false).carry).toEqual([{ path: ".env", sha256: null, secrets: ["key PASSWORD holds a password or secret"] }]);
-    expect(scan(true).carry).toEqual([{ path: ".env", sha256: sha256(env), secrets: ["key PASSWORD holds a password or secret"] }]);
-    for (const confirmed of [false, true]) {
-      expect(JSON.stringify(scan(confirmed))).not.toContain(sha256(`token ${TOKEN}\n`));
-      expect(JSON.stringify(runScan({ kind: "files", root: "app", paths: [".env"], allowSecrets: false, confirmed }, root))).not.toContain(sha256(env));
-    }
+    expect(files.carry).toEqual([{ path: ".env", sha256: null, secrets: ["key PASSWORD holds a password or secret"] }]);
+    for (const body of [leaky, env, `token ${TOKEN}\n`]) expect(JSON.stringify([sessions, files])).not.toContain(sha256(body));
   });
 
   test("a session id that is not a UUID is not an id, so a token in its place stays on the machine", () => {
@@ -212,7 +210,7 @@ describe("ferry scan gives no data about the content of a denied file", () => {
     const project = join(root, "app");
     write(join(root, ".codex/sessions/odd.jsonl"), meta(project, TOKEN));
 
-    const scan = runScan({ kind: "sessions", paths: [".codex/sessions/odd.jsonl"], project, confirmed: false }, root);
+    const scan = runScan({ kind: "sessions", paths: [".codex/sessions/odd.jsonl"], project }, root);
 
     expect(scan.files.map((file) => [file.session, file.id, file.sha256, file.blocked, file.hits.map((hit) => hit.code)])).toEqual([
       [false, null, null, false, ["github-token"]],
@@ -243,8 +241,8 @@ describe("ferry scan gives no data about the content of a denied file", () => {
     write(join(root, `.claude/projects/app/${TOKEN}.jsonl`), `${JSON.stringify({ type: "user" })}\n`);
 
     const skill = runScan({ kind: "skill", root: ".claude/skills/demo" }, root);
-    const files = runScan({ kind: "files", root: "app", paths: [`${TOKEN}.md`], allowSecrets: true, confirmed: true }, root);
-    const sessions = runScan({ kind: "sessions", paths: [`.claude/projects/app/${TOKEN}.jsonl`], project: join(root, "app"), confirmed: true }, root);
+    const files = runScan({ kind: "files", root: "app", paths: [`${TOKEN}.md`], allowSecrets: true }, root);
+    const sessions = runScan({ kind: "sessions", paths: [`.claude/projects/app/${TOKEN}.jsonl`], project: join(root, "app") }, root);
 
     expect(skill.files.map((file) => file.path)).toEqual(["SKILL.md"]);
     expect(skill.forbidden).toEqual([
@@ -269,24 +267,39 @@ describe("ferry scan gives no data about the content of a denied file", () => {
 describe("the scan request", () => {
   test("reads each kind of request, and refuses other text with a usage error", () => {
     expect(parseScanRequest('{"kind":"skill","root":".claude/skills/demo"}')).toEqual({ kind: "skill", root: ".claude/skills/demo" });
-    expect(parseScanRequest('{"kind":"files","root":"app","paths":["a"]}')).toEqual({
-      kind: "files",
-      root: "app",
-      paths: ["a"],
-      allowSecrets: false,
-      confirmed: false,
-    });
-    expect(parseScanRequest('{"kind":"files","root":"app","paths":["a"],"allowSecrets":true,"confirmed":true}')).toMatchObject({
-      allowSecrets: true,
-      confirmed: true,
-    });
+    expect(parseScanRequest('{"kind":"files","root":"app","paths":["a"]}')).toEqual({ kind: "files", root: "app", paths: ["a"], allowSecrets: false });
     expect(parseScanRequest('{"kind":"sessions","paths":[],"project":"/home/user/app"}')).toEqual({
       kind: "sessions",
       paths: [],
       project: "/home/user/app",
-      confirmed: false,
     });
-    for (const text of ["", "null", "[]", '{"kind":"skill"}', '{"kind":"files","root":"app","paths":[1]}', '{"kind":"other","root":"app"}']) {
+    expect(parseScanRequest('{"pack":true,"kind":"skill","root":".claude/skills/demo"}')).toEqual({ pack: true, kind: "skill", root: ".claude/skills/demo" });
+    expect(parseScanRequest('{"pack":true,"kind":"files","root":"app","paths":["a",".env"],"secrets":[".env"]}')).toEqual({
+      pack: true,
+      kind: "files",
+      root: "app",
+      paths: ["a", ".env"],
+      secrets: [".env"],
+    });
+    expect(parseScanRequest('{"pack":true,"kind":"sessions","paths":["a"],"secrets":[],"project":"/home/user/app"}')).toEqual({
+      pack: true,
+      kind: "sessions",
+      paths: ["a"],
+      secrets: [],
+      project: "/home/user/app",
+    });
+    const invalid = [
+      "",
+      "null",
+      "[]",
+      '{"kind":"skill"}',
+      '{"kind":"files","root":"app","paths":[1]}',
+      '{"kind":"other","root":"app"}',
+      // A pack of files needs the list of the paths with secrets that the operator agreed to.
+      '{"pack":true,"kind":"files","root":"app","paths":["a"]}',
+      '{"pack":true,"kind":"sessions","paths":["a"],"secrets":[1],"project":"/home/user/app"}',
+    ];
+    for (const text of invalid) {
       let error: unknown = null;
       try {
         parseScanRequest(text);
@@ -371,13 +384,43 @@ describe("the scan on a box", () => {
     expect(await failure(result(DENY_RULES_VERSION + 1))).toBeNull();
   });
 
+  test("refuses a scan result that does not have the full form of the result for its request", async () => {
+    const request = { kind: "files", root: "app", paths: ["AGENTS.md", "notes.md"], allowSecrets: false } as const;
+    const carry = { path: "AGENTS.md", sha256: sha256("# Agents\n"), secrets: [] };
+    const hit = { path: "notes.md", code: "github-token", reason: "GitHub token in file content" };
+    const answer = async (result: object) => {
+      try {
+        await scanOnBox(link({ stdout: envelope({ result: { rules: DENY_RULES_VERSION, ...result } }) }).link, "box a", request);
+      } catch (error) {
+        return errorInfo(error).message;
+      }
+      return null;
+    };
+    const unreadable = "The Ferry on box a gave an answer that this Ferry cannot read. Ferry took no file from it.";
+
+    expect(await answer({ carry: [carry], refused: [hit] })).toBeNull();
+    const results: [string, object][] = [
+      ["no list of the refused files", { carry: [carry] }],
+      ["a path that the request does not name", { carry: [{ ...carry, path: "other.md" }], refused: [] }],
+      ["a path two times", { carry: [carry, carry], refused: [] }],
+      ["a hash that is not a SHA-256", { carry: [{ ...carry, sha256: "abc" }], refused: [] }],
+      ["secrets that are not a list of texts", { carry: [{ ...carry, secrets: "none" }], refused: [] }],
+      ["a hit without a code", { carry: [], refused: [{ path: "notes.md", reason: "x" }] }],
+      ["a reason with a token", { carry: [], refused: [{ ...hit, reason: `key ${TOKEN} holds a password or secret` }] }],
+      ["a reason with a line end", { carry: [], refused: [{ ...hit, reason: "first\nsecond" }] }],
+      ["a path with a token", { carry: [], refused: [{ ...hit, path: `${TOKEN}.md` }] }],
+      ["the result of another request", { files: [], forbidden: [], skipped: [] }],
+    ];
+    for (const [name, result] of results) expect([name, await answer(result)]).toEqual([name, unreadable]);
+  });
+
   test("each scan result has the rules version of the machine that ran it", () => {
     const root = home();
     write(join(root, "app/AGENTS.md"), "# Agents\n");
 
     expect(runScan({ kind: "skill", root: "app" }, root).rules).toBe(DENY_RULES_VERSION);
-    expect(runScan({ kind: "files", root: "app", paths: ["AGENTS.md"], allowSecrets: false, confirmed: false }, root).rules).toBe(DENY_RULES_VERSION);
-    expect(runScan({ kind: "sessions", paths: [], project: join(root, "app"), confirmed: false }, root).rules).toBe(DENY_RULES_VERSION);
+    expect(runScan({ kind: "files", root: "app", paths: ["AGENTS.md"], allowSecrets: false }, root).rules).toBe(DENY_RULES_VERSION);
+    expect(runScan({ kind: "sessions", paths: [], project: join(root, "app") }, root).rules).toBe(DENY_RULES_VERSION);
     expect(DENY_RULES_VERSION).toBeGreaterThanOrEqual(1);
   });
 
@@ -403,21 +446,216 @@ describe("the scan on a box", () => {
   });
 });
 
-describe("the check of copied files", () => {
-  test("names each file that is not a regular file with the hash of the scan", () => {
-    const root = home();
-    write(join(root, "same.md"), "same\n");
-    write(join(root, "other.md"), "other\n");
-    symlinkSync("same.md", join(root, "link.md"));
-    const file = (path: string) => ({ path, sha256: sha256("same\n") });
+describe("the pack", () => {
+  const meta = (cwd: string, id: string) => `${JSON.stringify({ type: "session_meta", payload: { id, cwd } })}\n`;
+  /** A link whose box runs the pack in `root` with this Ferry, as `ferry scan` does. `change` changes its lines. */
+  function boxLink(root: string, change: (lines: string[]) => string[] = (lines) => lines): { link: Pick<Link, "run">; received: string[] } {
+    const received: string[] = [];
+    return {
+      received,
+      link: {
+        async run(_command, options = {}) {
+          const request = parseScanRequest(Buffer.from(options.input ?? []).toString());
+          const stdout = `${change([...packLines(request as PackRequest, root)]).join("\n")}\n`;
+          received.push(stdout);
+          return { ok: true, address: "user@box.example", stdout, stderr: "" };
+        },
+      },
+    };
+  }
+  async function refusal(link: Pick<Link, "run">, request: PackRequest) {
+    try {
+      await packOnBox(link, "box a", request);
+    } catch (error) {
+      return errorInfo(error).message;
+    }
+    return null;
+  }
+  const UNREADABLE = "The Ferry on box a gave an answer that this Ferry cannot read. Ferry took no file from it.";
 
-    expect(changedFiles(root, [file("same.md"), file("other.md"), file("link.md"), file("gone.md")])).toEqual([
-      "other.md",
-      "link.md",
-      "gone.md",
+  test("reads each file one time and gives the bytes that pass, and a file with secrets only for a path that the operator agreed to", () => {
+    const root = home();
+    const env = `PASSWORD=${PASSWORD}\n`;
+    write(join(root, "app/AGENTS.md"), "# Agents\n", 0o640);
+    write(join(root, "app/.env"), env, 0o644);
+    write(join(root, "app/.env.local"), env);
+    write(join(root, "app/notes.md"), `token ${TOKEN}\n`);
+    symlinkSync("AGENTS.md", join(root, "app/link.md"));
+    const paths = ["AGENTS.md", ".env", ".env.local", "notes.md", "link.md", "gone.md"];
+
+    const pack = runPack({ kind: "files", root: "app", paths, secrets: [".env", "notes.md"] }, root);
+
+    expect(pack.files.map((file) => ({ ...file, bytes: Buffer.from(file.bytes).toString() }))).toEqual([
+      { path: "AGENTS.md", sha256: sha256("# Agents\n"), mode: 0o640, bytes: "# Agents\n", secrets: [], id: null },
+      { path: ".env", sha256: sha256(env), mode: 0o644, bytes: env, secrets: ["key PASSWORD holds a password or secret"], id: null },
+    ]);
+    expect(pack.refused.map((hit) => [hit.path, hit.code])).toEqual([
+      [".env.local", "secret-field"],
+      ["notes.md", "github-token"],
+      ["link.md", "symlink"],
+      ["gone.md", "missing"],
     ]);
   });
 
+  test("gives a session with secrets and its id only for a path that the operator agreed to, and a blocked file never", () => {
+    const root = home();
+    const project = join(root, "app");
+    const leaky = (id: string) => `${meta(project, id)}${JSON.stringify({ text: TOKEN })}\n`;
+    write(join(root, ".codex/sessions/clean.jsonl"), meta(project, "22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb"));
+    write(join(root, ".codex/sessions/agreed.jsonl"), leaky("11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa"));
+    write(join(root, ".codex/sessions/other.jsonl"), leaky("33333333-cccc-4ccc-8ccc-cccccccccccc"));
+    write(join(root, ".claude/projects/app/memory/id_rsa"), "key\n");
+    const paths = [".codex/sessions/clean.jsonl", ".codex/sessions/agreed.jsonl", ".codex/sessions/other.jsonl", ".claude/projects/app/memory/id_rsa"];
+
+    const pack = runPack({ kind: "sessions", paths, secrets: [".codex/sessions/agreed.jsonl", ".claude/projects/app/memory/id_rsa"], project }, root);
+
+    expect(pack.files.map((file) => [file.path, file.id, file.secrets])).toEqual([
+      [".codex/sessions/clean.jsonl", "22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb", []],
+      [".codex/sessions/agreed.jsonl", "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ["GitHub token in file content"]],
+    ]);
+    expect(pack.refused.map((hit) => [hit.path, hit.code])).toEqual([
+      [".codex/sessions/other.jsonl", "github-token"],
+      [".claude/projects/app/memory/id_rsa", "private-key"],
+    ]);
+    expect(JSON.stringify(pack.refused)).not.toContain("33333333");
+  });
+
+  test("gives no file of a skill when a rule refuses one of its files", () => {
+    const root = home();
+    write(join(root, ".claude/skills/demo/SKILL.md"), "# Demo\n");
+    write(join(root, ".claude/skills/demo/scripts/run.sh"), "#!/bin/sh\n", 0o755);
+    write(join(root, ".claude/skills/demo/data.sqlite"), "data\n");
+
+    const clean = runPack({ kind: "skill", root: ".claude/skills/demo" }, root);
+    write(join(root, ".claude/skills/demo/.env"), `PASSWORD=${PASSWORD}\n`);
+    const refused = runPack({ kind: "skill", root: ".claude/skills/demo" }, root);
+
+    expect(clean.files.map((file) => [file.path, file.mode, Buffer.from(file.bytes).toString()])).toEqual([
+      ["SKILL.md", 0o644, "# Demo\n"],
+      ["scripts/run.sh", 0o755, "#!/bin/sh\n"],
+    ]);
+    expect(clean.skipped.map((hit) => [hit.path, hit.code])).toEqual([["data.sqlite", "database"]]);
+    expect(refused.files).toEqual([]);
+    expect(refused.refused).toEqual([{ path: ".env", code: "dotenv", reason: "environment file" }]);
+  });
+
+  test("the lines of a pack have no byte of a refused file, and the operator side reads the files back", async () => {
+    const root = home();
+    const large = Buffer.alloc(7 * 1024 * 1024 + 5, 0);
+    for (let index = 0; index < large.length; index += 4093) large[index] = index % 251;
+    write(join(root, "app/AGENTS.md"), "# Agents\n");
+    writeFileSync(join(root, "app/large.bin"), large);
+    write(join(root, "app/empty.md"), "");
+    write(join(root, "app/notes.md"), `token ${TOKEN}\n`);
+    write(join(root, "app/.env"), `PASSWORD=${PASSWORD}\n`);
+    const request: PackRequest = { kind: "files", root: "app", paths: ["AGENTS.md", "large.bin", "empty.md", "notes.md", ".env"], secrets: [] };
+    const box = boxLink(root);
+
+    const pack = await packOnBox(box.link, "box a", request);
+
+    expect(pack.files.map((file) => [file.path, file.bytes.length])).toEqual([
+      ["AGENTS.md", 9],
+      ["large.bin", large.length],
+      ["empty.md", 0],
+    ]);
+    expect(Buffer.from(pack.files[1]!.bytes).equals(large)).toBe(true);
+    expect(pack.refused.map((hit) => [hit.path, hit.code])).toEqual([
+      ["notes.md", "github-token"],
+      [".env", "secret-field"],
+    ]);
+    const lines = box.received.join("").split("\n").filter(Boolean);
+    expect(JSON.parse(lines[0]!)).toEqual({ pack: 1, rules: DENY_RULES_VERSION });
+    expect(JSON.parse(lines.at(-1)!)).toEqual({ end: 3 });
+    // The large file is in three data lines, so one line has 3 MiB of the file at most.
+    expect(lines.filter((line) => line.startsWith('{"data"'))).toHaveLength(4);
+    const decoded = lines.map((line) => Buffer.from(String(JSON.parse(line).data ?? ""), "base64").toString("latin1")).join("\n");
+    for (const secret of [TOKEN, PASSWORD, sha256(`token ${TOKEN}\n`), sha256(`PASSWORD=${PASSWORD}\n`)]) {
+      expect(box.received.join("").includes(secret) || decoded.includes(secret)).toBe(false);
+    }
+  });
+
+  test("refuses a pack that is not in the form of the request: an unasked file, a path outside the root, other bytes, or a broken line", async () => {
+    const root = home();
+    write(join(root, "app/AGENTS.md"), "# Agents\n");
+    write(join(root, "app/notes.md"), "notes\n");
+    write(join(root, "app/.env"), `PASSWORD=${PASSWORD}\n`);
+    const request: PackRequest = { kind: "files", root: "app", paths: ["AGENTS.md", "notes.md"], secrets: [] };
+    const file = (line: string, fields: object) => JSON.stringify({ file: { ...JSON.parse(line).file, ...fields } });
+    const changes: [string, (lines: string[]) => string[]][] = [
+      ["a file that the request does not name", (lines) => lines.map((line, index) => (index === 1 ? file(line, { path: "other.md" }) : line))],
+      ["a path that leaves the root", (lines) => lines.map((line, index) => (index === 1 ? file(line, { path: "../AGENTS.md" }) : line))],
+      ["an absolute path", (lines) => lines.map((line, index) => (index === 1 ? file(line, { path: "/tmp/AGENTS.md" }) : line))],
+      ["a file two times", (lines) => [lines[0]!, lines[1]!, lines[2]!, lines[1]!, lines[2]!, JSON.stringify({ end: 2 })]],
+      ["bytes with another hash", (lines) => lines.map((line, index) => (index === 2 ? JSON.stringify({ data: Buffer.from("# Other!\n").toString("base64") }) : line))],
+      ["a size that the bytes do not have", (lines) => lines.map((line, index) => (index === 1 ? file(line, { size: 3 }) : line))],
+      ["no bytes", (lines) => lines.filter((_line, index) => index !== 2)],
+      ["a mode with other bits", (lines) => lines.map((line, index) => (index === 1 ? file(line, { mode: 0o4755 }) : line))],
+      ["secrets for a path that the operator did not agree to", (lines) => lines.map((line, index) => (index === 1 ? file(line, { secrets: ["key PASSWORD holds a password or secret"] }) : line))],
+      ["an id that is not a UUID", (lines) => lines.map((line, index) => (index === 1 ? file(line, { id: TOKEN }) : line))],
+      ["a hit with a token in its reason", (lines) => [...lines.slice(0, -1), JSON.stringify({ refused: { path: "x", code: "secret-field", reason: `key ${TOKEN} holds` } }), lines.at(-1)!]],
+      ["a line that is not JSON", (lines) => [...lines.slice(0, -1), "tar: removing leading /", lines.at(-1)!]],
+      ["a line of another kind", (lines) => [...lines.slice(0, -1), JSON.stringify({ link: { path: "a", target: "/etc/passwd" } }), lines.at(-1)!]],
+      ["no last line", (lines) => lines.slice(0, -1)],
+      ["a wrong number of files", (lines) => [...lines.slice(0, -1), JSON.stringify({ end: 1 })]],
+      ["a line after the last line", (lines) => [...lines, JSON.stringify({ refused: { path: "x", code: "missing", reason: "gone" } })]],
+    ];
+
+    expect(await refusal(boxLink(root).link, request)).toBeNull();
+    for (const [name, change] of changes) expect([name, await refusal(boxLink(root, change).link, request)]).toEqual([name, UNREADABLE]);
+  });
+
+  test("refuses the pack of a box without Ferry, with a Ferry before the pack, and with older rules", async () => {
+    const request: PackRequest = { kind: "skill", root: ".claude/skills/demo" };
+    const answer = (stdout: string): Pick<Link, "run"> => ({ run: async () => ({ ok: true, address: "user@box.example", stdout, stderr: "" }) });
+    const scan = (rules: number) => JSON.stringify({ schemaVersion: 1, command: "scan", ok: true, result: { rules, files: [], forbidden: [], skipped: [] }, warnings: [], error: null });
+
+    expect(await refusal(answer("MISSING\n"), request)).toStartWith("Ferry is not installed on box a.");
+    expect(await refusal(answer("Usage: ferry [options] [command]\n"), request)).toStartWith("The Ferry on box a is too old to check the files there.");
+    // A Ferry with the scan and without the pack answers with the result of a scan.
+    expect(await refusal(answer(`${scan(DENY_RULES_VERSION - 1)}\n`), request)).toStartWith("The Ferry on box a has older deny rules than this machine");
+    expect(await refusal(answer(`${scan(DENY_RULES_VERSION)}\n`), request)).toStartWith("The Ferry on box a is too old to check the files there.");
+    expect(await refusal(answer(`${JSON.stringify({ pack: 1, rules: DENY_RULES_VERSION - 1 })}\n${JSON.stringify({ end: 0 })}\n`), request)).toStartWith(
+      "The Ferry on box a has older deny rules than this machine",
+    );
+    expect(await refusal(answer(`${JSON.stringify({ pack: 1 })}\n${JSON.stringify({ end: 0 })}\n`), request)).toStartWith(
+      "The Ferry on box a has older deny rules than this machine",
+    );
+  });
+
+  test("writes the files of a pack with their modes, and the rules of this machine find a file that the box must not give", () => {
+    const root = home();
+    const stage = join(root, "stage");
+    const project = join(root, "app");
+    const env = `PASSWORD=${PASSWORD}\n`;
+    const file = (path: string, body: string, secrets: string[] = [], mode = 0o644) => ({ path, sha256: sha256(body), mode, bytes: Buffer.from(body), secrets, id: null });
+    const files = [
+      file("AGENTS.md", "# Agents\n", [], 0o600),
+      file("docs/notes.md", `token ${TOKEN}\n`),
+      file(".env", env, ["key PASSWORD holds a password or secret"]),
+      file(".env.local", env),
+      file("id_rsa.md", "-----BEGIN OPENSSH PRIVATE KEY-----\n", ["private key"]),
+    ];
+    const sessions = [
+      file("clean.jsonl", `${JSON.stringify({ type: "user", message: "hello" })}\n`),
+      file("leaky.jsonl", `${JSON.stringify({ text: TOKEN })}\n`),
+      file("agreed.jsonl", `${JSON.stringify({ text: TOKEN })}\n`, ["GitHub token in file content"]),
+    ];
+
+    writePack(stage, files);
+    writePack(join(root, "sessions"), sessions);
+
+    expect(readFileSync(join(stage, "docs/notes.md"), "utf8")).toBe(`token ${TOKEN}\n`);
+    expect(statSync(join(stage, "AGENTS.md")).mode & 0o777).toBe(0o600);
+    expect(recheckPack(stage, files).map((hit) => [hit.path, hit.code])).toEqual([
+      ["docs/notes.md", "github-token"],
+      [".env.local", "secret-field"],
+      ["id_rsa.md", "private-key"],
+    ]);
+    expect(recheckPack(join(root, "sessions"), sessions, project).map((hit) => [hit.path, hit.code])).toEqual([["leaky.jsonl", "github-token"]]);
+  });
+});
+
+describe("a path of a result", () => {
   test("a path of a scan result must stay inside its root", () => {
     expect(["SKILL.md", "scripts/run.sh", "a..b"].map(isInside)).toEqual([true, true, true]);
     expect(["", "/etc/passwd", "../x", "a/../../x"].map(isInside)).toEqual([false, false, false, false]);

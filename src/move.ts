@@ -11,11 +11,14 @@
  * the destination. With `remove`, the source copy goes to a trash directory.
  * Ferry never deletes it.
  *
- * The deny rules run on the source machine. For a source box, the Ferry on the
- * box runs them with `ferry scan`, and the preflight copies no file. After the
- * plan and the confirmation, Ferry copies only the files that it carries, and
- * compares each one with the SHA-256 of the scan. The scan gives the hash of a
- * file with secrets only after the confirmation.
+ * The deny rules run on the source machine. The preflight scans the files and
+ * copies none: for a source box, the Ferry on the box runs `ferry scan`. After
+ * the plan and the confirmation, the source packs the files that Ferry carries:
+ * it reads each file one time, applies the rules to those bytes, and gives
+ * exactly those bytes. A file that changed and no longer passes stays on the
+ * source. A file with secrets leaves the source only in the pack. For a source
+ * box, this machine applies its own rules to the bytes that arrive, before it
+ * writes them to the destination.
  *
  * The output of each command on a source box goes through `ferry redact` on
  * the box, so a file name, a branch name, or a commit subject with the form of
@@ -48,7 +51,19 @@ import { FerryError } from "./errors.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
 import { BUILTIN_HARNESSES } from "./registry/builtin.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
-import { changedFiles, runScan, scanOnBox, tokenNameHit, type ScanOf, type ScanRequest } from "./scan.ts";
+import {
+  packOnBox,
+  recheckPack,
+  runPack,
+  runScan,
+  scanOnBox,
+  tokenNameHit,
+  writePack,
+  type Pack,
+  type PackRequest,
+  type ScanOf,
+  type ScanRequest,
+} from "./scan.ts";
 import { groupSessions, listSessionFiles, stageSessions, UNKNOWN_ID, type Session } from "./sessions.ts";
 
 export type MoveInput = {
@@ -119,7 +134,7 @@ export type MoveResult = {
   readonly git: GitSource | null;
   /**
    * `secrets` holds the kinds of secret in a carried environment file, never the values. `sha256` is null for
-   * a file with secrets on a box, in a dry run: the box gives that hash only after the confirmation.
+   * a file with secrets in a dry run: the source gives that hash only after the confirmation.
    */
   readonly carry: readonly Planned[];
   readonly refused: readonly Hit[];
@@ -129,7 +144,7 @@ export type MoveResult = {
   readonly trash: string | null;
   /**
    * The carried sessions and the refused session files. A memory file is a session with a null `id`. A Codex
-   * session with secrets on a box also has a null `id` in a dry run.
+   * session with secrets also has a null `id` in a dry run.
    */
   readonly sessions: {
     readonly carry: readonly { harness: string; id: string | null; files: readonly string[]; secrets: readonly string[] }[];
@@ -187,10 +202,11 @@ type Side = {
   readonly label: string;
   readonly home: string;
   readonly trash: string;
-  /** With `raw`, the output of a source box does not go through `ferry redact`. Only the file archive is raw. */
-  run(command: string, options?: { readonly input?: Uint8Array; readonly timeoutMs?: number; readonly raw?: boolean }): Promise<SideResult>;
+  run(command: string, options?: { readonly input?: Uint8Array; readonly timeoutMs?: number }): Promise<SideResult>;
   /** Apply the deny rules to files of this machine, on this machine. */
   scan<Request extends ScanRequest>(request: Request): Promise<ScanOf<Request>>;
+  /** Read each file of the request one time on this machine, apply the deny rules to those bytes, and give them. */
+  pack(request: PackRequest): Promise<Pack>;
 };
 
 type GitSource = {
@@ -208,8 +224,6 @@ type SessionPlan = {
   readonly refused: readonly Hit[];
   /** One line for each refused file. */
   readonly warnings: readonly string[];
-  /** The SHA-256 of each source file that the scan gave a hash for, by its path relative to the source home. */
-  readonly sha256: ReadonlyMap<string, string>;
   /** The absolute project paths on the source and on the destination. */
   readonly sourceProject: string;
   readonly targetProject: string;
@@ -294,8 +308,8 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
         .join(", "),
   );
   const warnings: string[] = [];
-  // The local directory with the carried files: the project on this machine, or a copy of the files of a source box.
-  let stage: string | null = fromBox ? null : join(home, rel);
+  // The local directories with the bytes of the carried files and of the staged sessions, from the pack of the source.
+  let stage: string | null = null;
   let sessionStage: string | null = null;
   try {
     writeLine(input.dryRun ? "Move plan (no changes will be made):" : "Move plan:");
@@ -376,29 +390,37 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       }
     }
 
-    // After the confirmation, the source gives the hashes of the files with secrets.
-    const changedSince = (paths: readonly string[]) =>
-      new MoveError(`${paths.join(", ")} changed on ${source.label} after the check. Run the move again.`);
-    const pending = plan.carry.filter((file) => file.sha256 === null).map((file) => file.path);
-    const confirmed =
-      pending.length > 0
-        ? (await source.scan({ kind: "files", root: rel, paths: pending, allowSecrets: true, confirmed: true })).carry
-        : [];
-    const carry: Carried[] = plan.carry.map((file) => {
-      const sha256 = file.sha256 ?? confirmed.find((entry) => entry.path === file.path)?.sha256;
-      if (typeof sha256 !== "string") throw changedSince([file.path]);
-      return { ...file, sha256 };
-    });
+    // After the confirmation, the source packs the files: it reads each one one time, checks those bytes, and gives them.
+    let carry: Carried[] = [];
     let carriedSessions = plan.sessions.carry;
-
-    if (fromBox && carry.length === 0) progress.skip("Reading the files", "no files to carry");
-    else if (fromBox) {
-      await step(progress, `Reading ${plural(carry.length, "file")} on ${source.label}`, async () => {
-        stage = await fetchFiles(source, sourcePath, carry.map((file) => file.path));
-        const changed = changedFiles(stage, carry);
-        if (changed.length > 0) throw changedSince(changed);
+    const readFiles = async () => {
+      const pack = await source.pack({
+        kind: "files",
+        root: rel,
+        paths: plan.carry.map((file) => file.path),
+        secrets: secretFiles.map((file) => file.path),
       });
-    }
+      const changed = plan.carry.filter((file) => !pack.files.some((packed) => packed.path === file.path)).map((file) => file.path);
+      if (changed.length > 0) {
+        throw new MoveError(`${changed.join(", ")} changed on ${source.label} after the check. Run the move again.`);
+      }
+      stage = mkdtempSync(join(tmpdir(), "ferry-move-"));
+      writePack(stage, pack.files);
+      // A box can have other rules, or a Ferry that an attacker controls. The rules of this machine decide what it carries on.
+      const hits = fromBox ? recheckPack(stage, pack.files) : [];
+      if (hits.length > 0) {
+        throw new FerryError(
+          "deny-rule-match",
+          `Ferry refused files from ${source.label} after the copy, and removed the copy from this machine: ${hits.map((hit) => `${hit.code} ${hit.reason}: ${hit.path}`).join("; ")}`,
+          { hint: `Run ferry update, so that the Ferry on ${source.label} has the rules of this machine.` },
+        );
+      }
+      carry = pack.files.map((file) => ({ path: file.path, sha256: file.sha256, secrets: file.secrets }));
+    };
+    if (plan.carry.length === 0) {
+      if (fromBox) progress.skip("Reading the files", "no files to carry");
+    } else if (fromBox) await step(progress, `Reading ${plural(plan.carry.length, "file")} on ${source.label}`, readFiles);
+    else await readFiles();
 
     const incomplete = `The copy at ~/${rel} on ${destination.label} is incomplete. Move it away before you try again.`;
     await step(progress, `Cloning on ${destination.label}`, async () => {
@@ -441,31 +463,43 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
     else if (input.sessions) {
       progress.start(`Carrying ${plural(carriedSessions.flatMap((session) => session.files).length, "session file")}`);
       try {
-        // After the confirmation, the source gives the hashes and the ids of the sessions with secrets.
-        const sha256 = new Map(plan.sessions.sha256);
-        const held = carriedSessions.flatMap((session) => session.files.map((file) => file.source)).filter((path) => !sha256.has(path));
-        const given =
-          held.length > 0
-            ? (await source.scan({ kind: "sessions", paths: held, project: plan.sessions.sourceProject, confirmed: true })).files
-            : [];
-        for (const file of given) if (file.sha256 !== null) sha256.set(file.path, file.sha256);
-        carriedSessions = carriedSessions.map((session) =>
-          session.id === UNKNOWN_ID
-            ? { ...session, id: given.find((file) => file.path === session.files[0]!.source)?.id ?? UNKNOWN_ID }
-            : session,
-        );
-        const staged = await stageSessions({
-          // A session that still has no id is not the checked session. It has no hash, so it counts as changed.
-          sessions: carriedSessions,
-          sha256,
-          targetProject: plan.sessions.targetProject,
-          fetch: (paths) => fetchFiles(source, source.home, paths),
+        const sources = (sessions: readonly CarriedSession[]) => sessions.flatMap((session) => session.files.map((file) => file.source));
+        const pack = await source.pack({
+          kind: "sessions",
+          paths: sources(carriedSessions),
+          secrets: sources(carriedSessions.filter((session) => session.secrets.length > 0)),
+          project: plan.sessions.sourceProject,
         });
+        const fetched = mkdtempSync(join(tmpdir(), "ferry-sessions-"));
+        let staged;
+        // The rules of this machine decide what it carries on from a box. A file with a hit here stays out.
+        let refused = new Set<string>();
+        try {
+          writePack(fetched, pack.files);
+          if (fromBox) refused = new Set(recheckPack(fetched, pack.files, plan.sessions.sourceProject).map((hit) => hit.path));
+          // The pack gives the id of a session with secrets. A session that still has none is not the checked session.
+          carriedSessions = carriedSessions.map((session) =>
+            session.id === UNKNOWN_ID
+              ? { ...session, id: pack.files.find((file) => file.path === session.files[0]!.source)?.id ?? UNKNOWN_ID }
+              : session,
+          );
+          staged = stageSessions({
+            sessions: carriedSessions,
+            fetched,
+            present: new Set(pack.files.map((file) => file.path).filter((path) => !refused.has(path))),
+            targetProject: plan.sessions.targetProject,
+          });
+        } finally {
+          rmSync(fetched, { recursive: true, force: true });
+        }
         sessionStage = staged.stage;
         for (const session of staged.changed) {
           const what = session.id === null ? "the memory file" : "the session of";
+          const path = `~/${session.files[0]!.source}`;
           warnings.push(
-            `WARNING: Ferry skips ${what} ~/${session.files[0]!.source} (a file changed after the check). Run the move again to carry it.`,
+            session.files.some((file) => refused.has(file.source))
+              ? `WARNING: Ferry skips ${what} ${path} (the rules of this machine refuse a file that ${source.label} gave). Run ferry update.`
+              : `WARNING: Ferry skips ${what} ${path} (a file changed after the check). Run the move again to carry it.`,
           );
         }
         const secret = new Set(carriedSessions.filter((session) => session.secrets.length > 0).map((session) => session.files[0]!.source));
@@ -530,7 +564,7 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
     }
     return { ...result(carry, carriedSessions), trash };
   } finally {
-    if (fromBox && stage) rmSync(stage, { recursive: true, force: true });
+    if (stage) rmSync(stage, { recursive: true, force: true });
     if (sessionStage) rmSync(sessionStage, { recursive: true, force: true });
   }
 }
@@ -561,7 +595,7 @@ async function preflight(
   const notes: string[] = [];
 
   // A source box must have a Ferry with the rules of this machine, before it runs a command that lists its files.
-  await source.scan({ kind: "files", root: rel, paths: [], allowSecrets: false, confirmed: false });
+  await source.scan({ kind: "files", root: rel, paths: [], allowSecrets: false });
 
   const kind = await must(
     source.run(
@@ -617,7 +651,7 @@ async function preflight(
   // The source machine reads the files. A source box returns the hits and the hashes, never the content.
   const scanned =
     wanted.length > 0
-      ? await source.scan({ kind: "files", root: rel, paths: wanted, allowSecrets: input.allowSecrets, confirmed: false })
+      ? await source.scan({ kind: "files", root: rel, paths: wanted, allowSecrets: input.allowSecrets })
       : { carry: [], refused: [] };
   const carry = scanned.carry.filter((file) => wanted.includes(file.path));
   refused.push(...scanned.refused);
@@ -630,7 +664,7 @@ async function preflight(
   return { git, carry, refused, skipped, notes, problems };
 }
 
-const NO_SESSIONS: SessionPlan = { carry: [], refused: [], warnings: [], sha256: new Map(), sourceProject: "", targetProject: "" };
+const NO_SESSIONS: SessionPlan = { carry: [], refused: [], warnings: [], sourceProject: "", targetProject: "" };
 
 /**
  * List the sessions of the project and apply the deny rules to each file on
@@ -661,7 +695,7 @@ async function sessionPreflight(
   // The box put the mark in the place of a name with a token. Such a file has no scan: its session stays on the source.
   const named = paths.filter((path) => path.includes(TOKEN_MARK));
   const scanned = new Map(
-    (await source.scan({ kind: "sessions", paths: paths.filter((path) => !named.includes(path)), project: sourceProject, confirmed: false })).files.map(
+    (await source.scan({ kind: "sessions", paths: paths.filter((path) => !named.includes(path)), project: sourceProject })).files.map(
       (file) => [file.path, file],
     ),
   );
@@ -685,8 +719,7 @@ async function sessionPreflight(
     const what = session.id === null ? "the memory file" : "the session of";
     for (const hit of hits) warnings.push(`WARNING: Ferry skips ${what} ${hit.path} (${hit.reason}).${hint}`);
   }
-  const sha256 = new Map([...scanned].flatMap(([path, file]) => (file.sha256 === null ? [] : [[path, file.sha256] as const])));
-  return { carry, refused, warnings, sha256, sourceProject, targetProject };
+  return { carry, refused, warnings, sourceProject, targetProject };
 }
 
 /**
@@ -928,28 +961,6 @@ function isSkipped(path: string): boolean {
   );
 }
 
-/** Copy `paths` under `path` on the source into a new local temporary directory. The source scan names the paths. */
-async function fetchFiles(source: Side, path: string, paths: readonly string[]): Promise<string> {
-  const stage = mkdtempSync(join(tmpdir(), "ferry-move-"));
-  if (paths.length === 0) return stage;
-  try {
-    const encoded = await must(
-      source.run(`cd ${path} && tar --null -cf - -T - | base64`, {
-        input: nulList(paths),
-        timeoutMs: TRANSFER_TIMEOUT_MS,
-        raw: true,
-      }),
-      `Ferry could not read the local-only files on ${source.label}`,
-    );
-    const extracted = await exec(["tar", "-xf", "-", "-C", stage], { input: Buffer.from(encoded, "base64") });
-    if (extracted.exitCode !== 0) throw new MoveError(`Ferry could not unpack the box files: ${extracted.stderr.trim()}`);
-  } catch (error) {
-    rmSync(stage, { recursive: true, force: true });
-    throw error;
-  }
-  return stage;
-}
-
 /**
  * A tar archive of `paths` under `stage`. `COPYFILE_DISABLE` and `--no-xattrs`
  * keep macOS tar from adding `._*` AppleDouble entries and extended attributes.
@@ -993,17 +1004,18 @@ function redacted(command: string): string {
   ].join("\n");
 }
 
-/** With `redact`, the box is the source: its output goes through `ferry redact`, except the file archive. */
+/** With `redact`, the box is the source: the output of each command goes through `ferry redact`. The pack has its own checks. */
 function boxSide(link: Pick<Link, "run">, label: string, redact = false): Side {
   return {
     label,
     home: '"$HOME"',
     trash: '"$HOME"/.ferry/trash',
-    async run(command, { raw, ...options } = {}) {
-      const result = await link.run(redact && !raw ? redacted(command) : command, options);
+    async run(command, options = {}) {
+      const result = await link.run(redact ? redacted(command) : command, options);
       return result.ok ? { ok: true, stdout: result.stdout } : { ok: false, message: result.error.message };
     },
     scan: (request) => scanOnBox(link, label, request),
+    pack: (request) => packOnBox(link, label, request),
   };
 }
 
@@ -1020,8 +1032,8 @@ function localSide(home: string, platform: NodeJS.Platform): Side {
       if (result.exitCode === 0) return { ok: true, stdout };
       return { ok: false, message: result.stderr.trim() || stdout.trim() || `the command exited with ${result.exitCode}` };
     },
-    // No hash leaves this machine in a scan, so the scan gives each hash at once.
-    scan: async (request) => runScan((request.kind === "skill" ? request : { ...request, confirmed: true }) as typeof request, home),
+    scan: async (request) => runScan(request, home),
+    pack: async (request) => runPack(request, home),
   };
 }
 
