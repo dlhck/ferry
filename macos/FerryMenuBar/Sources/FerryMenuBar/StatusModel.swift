@@ -21,9 +21,14 @@ struct BriefIssue: Decodable, Sendable {
     let kind: String
     let name: String
     let state: String
+    /// A short title. Nil in a status file of a Ferry before the summary.
+    let summary: String?
     let message: String
     /// The Ferry command that fixes the issue, or nil when a person must act on the box.
     let command: String?
+
+    /// The menu item title: the summary, else the message without its middle.
+    var title: String { cutMiddle(summary ?? message) }
 }
 
 /// The content of ~/.ferry/tunnels/<box>.json, which `ferry tunnel --follow` writes.
@@ -222,6 +227,12 @@ final class StatusModel: ObservableObject {
         } catch {
             refreshError = "Cannot open Terminal: \(error.localizedDescription)"
         }
+    }
+
+    /// Put the text on the clipboard.
+    func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     /// Open a forwarded port in the default browser.
