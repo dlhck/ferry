@@ -8,8 +8,9 @@ The box `~/.paseo/config.json` can hold credentials, such as the `env` block of 
 
 - The box merges each carried value into the file itself, with jq. It sends back only a status letter: written, no jq, not valid, or failed.
 - For provider definitions, the box also compares its entries with the local entries. It sends back one fixed word for each provider ID that Ferry sent: `absent`, `same`, `differs`, or `legacy`. It never sends a field value.
+- For plugins, the box compares the output of `paseo plugin ls --json` with the local plugins. It sends back fixed words for each plugin ID that Ferry sent: `absent`, `same`, or `differs` for the source, `on` or `off` for the enabled state, and `current` or `stale` for the revision. It never sends the list. A box Git remote can hold a credential, so the remote, the path, and the revision of a box plugin stay on the box.
 - The box writes the file only when a carried value changes. Then Ferry runs `paseo daemon reload`.
-- `ferry install` and `ferry update` install jq on each box. Without jq on the box, Ferry leaves the file as it is and warns: "Run ferry update to install jq". Agent profiles, provider definitions, preferences, terminal profiles, and the global plugin switch wait for jq. Plugin installs and updates use the Paseo CLI and do not need jq.
+- `ferry install` and `ferry update` install jq on each box. Without jq on the box, Ferry leaves the file as it is and warns: "Run ferry update to install jq". Agent profiles, provider definitions, preferences, terminal profiles, plugins, and the global plugin switch wait for jq. Without jq, Ferry does not install, update, enable, or disable a box plugin.
 - A value of `null` for `daemon`, `agents`, or a carried list counts as not set.
 
 ## Git and npm plugins
@@ -25,7 +26,7 @@ For an npm plugin, Ferry reads the installed version from the plugin's `package-
 - Turning on the switch starts every plugin that is enabled on the box, including box-only plugins. Ferry disables locally disabled plugins before it turns on the switch.
 - Ferry never turns off the switch. With no enabled plugin to carry, or when all plugins are skipped, disabled, or in conflict, the switch stays as it is.
 - Ferry preserves box-only plugins. Removing a local plugin does not uninstall its box copy.
-- A matching ID with a different source kind, repository, package, or subdirectory produces a warning. Ferry does not replace it.
+- A matching ID with a different source kind, repository, package, or subdirectory produces a warning. Ferry does not replace it. The box makes this comparison with jq. Ferry sends the local repository URL, which has no credential, and the box does not send its URL back.
 - New plugins that are disabled locally are skipped. Paseo's install command enables new plugins, so installing then disabling would briefly run their code. Existing box plugins can be disabled and updated.
 - Local-directory plugins, unknown source kinds, and dirty Git checkouts produce warnings and are skipped. Local paths and URLs with embedded credentials are refused.
 - Plugin settings, credentials, acquisition caches, build output, and source files are not copied. Paseo acquires and prepares the plugin on the box.

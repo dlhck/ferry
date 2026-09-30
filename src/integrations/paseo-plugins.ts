@@ -2,7 +2,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
-import { quoteShell } from "../box-settings.ts";
+import { jqCommandScript, quoteShell } from "../box-settings.ts";
 import { carriedContentHits } from "../manifest.ts";
 import { CONFIG_FILE, editBoxConfig, noJqWarning, PaseoError } from "./paseo.ts";
 import type { IntegrationLink } from "./types.ts";
@@ -207,9 +207,30 @@ async function enableGlobalSwitch(link: IntegrationLink): Promise<readonly strin
 }
 
 /**
+ * A jq filter for the output of `paseo plugin ls --json`: print
+ * `<id>\t<source>\t<enabled>\t<revision>` for each plugin of `$p`. Each
+ * entry of `$p` has the local `id`, `identity`, and `revision`. The source is
+ * `absent`, `differs` for a box plugin with another identity, or `same`. The
+ * enabled state is `on` or `off`. The revision is `current` or `stale`. The
+ * filter prints `E` for an input that is not a plugin list.
+ * A box remote can hold a credential. Only the IDs that Ferry sent and these
+ * fixed words leave the box.
+ */
+const STATES = [
+  'if type == "array" and all(.[]; type == "object" and (.id | type) == "string" and (.enabled | type) == "boolean") then',
+  ". as $b | $p[] | . as $x | ([$b[] | select(.id == $x.id)][0]) as $c |",
+  '($c.installation | if type == "object" then . else {} end) as $i | ($i.identity | if type == "object" then . else {} end) as $n |',
+  '[$x.id, (if $c == null then "absent" elif ($x.identity | to_entries | all(.[]; $n[.key] == .value)) then "same" else "differs" end),',
+  '(if $c.enabled then "on" else "off" end), (if $i.currentRevision == $x.revision then "current" else "stale" end)] | join("\\t")',
+  'else "E" end',
+].join(" ");
+
+/**
  * Keep box-only plugins. A conflicting ID requires the operator to resolve its source.
  * After at least one enabled plugin is current, enable the box's global plugin switch.
  * The switch also starts enabled box-only plugins. Disabled plugins are disabled first.
+ * The box compares its plugin list with the local plugins with jq, and prints back
+ * only state words for each plugin ID. Without jq, the box plugins stay as they are.
  */
 export async function carryPaseoPlugins(link: IntegrationLink, source: PaseoPlugins): Promise<readonly string[]> {
   const warnings = [...source.warnings];
@@ -219,25 +240,29 @@ export async function carryPaseoPlugins(link: IntegrationLink, source: PaseoPlug
     if (!result.ok) throw new PaseoError("Paseo plugin command failed on the box. Check paseo plugin ls and the box daemon's Git or npm registry access.");
     return result.stdout;
   };
-  let installed: unknown;
-  try { installed = JSON.parse(await run("paseo plugin ls --json")); }
-  catch { throw new PaseoError("Ferry could not read paseo plugin ls --json on the box"); }
-  if (!Array.isArray(installed) || !installed.every((item) => object(item) && typeof item.id === "string" && typeof item.enabled === "boolean")) {
-    throw new PaseoError("paseo plugin ls --json on the box did not return a plugin list");
-  }
+  const want = source.plugins.map((plugin) => ({
+    id: plugin.id,
+    identity: plugin.kind === "git"
+      ? { kind: plugin.kind, pluginPath: plugin.path, remote: listedRemote(plugin.remote) }
+      : { kind: plugin.kind, pluginPath: plugin.path, packageName: plugin.packageName },
+    revision: plugin.kind === "git" ? plugin.commit : plugin.version,
+  }));
+  const script = jqCommandScript("paseo plugin ls --json", `--argjson p ${quoteShell(JSON.stringify(want))}`, STATES);
+  const lines = (await run(`sh -c ${quoteShell(script)}`)).split("\n");
+  if (lines.includes("J")) return [...warnings, noJqWarning("the Paseo plugins")];
+  const invalid = new PaseoError("paseo plugin ls --json on the box did not return a plugin list");
+  if (lines.includes("E")) throw invalid;
+  const states = new Map(lines.map((line) => { const [id, ...state] = line.split("\t"); return [id, state]; }));
   let reconciled = false;
   for (const plugin of source.plugins) {
-    const current = installed.find((item) => item.id === plugin.id);
-    const installation = current?.installation;
-    const identity = object(installation) ? installation.identity : undefined;
-    const sameSource = object(identity) && identity.kind === plugin.kind && identity.pluginPath === plugin.path &&
-      (plugin.kind === "git" ? identity.remote === listedRemote(plugin.remote) : identity.packageName === plugin.packageName);
-    if (current && !sameSource) {
+    const [state, enabled, revision] = states.get(plugin.id) ?? [];
+    if (state !== "absent" && state !== "same" && state !== "differs") throw invalid;
+    if (state === "differs") {
       warnings.push(`Paseo plugin ${plugin.id} was skipped: the box has the same ID with a different source.`);
       continue;
     }
     const id = quoteShell(plugin.id);
-    if (!current) {
+    if (state === "absent") {
       // Paseo install enables new plugins. Do not briefly execute a disabled local plugin.
       if (!plugin.enabled) {
         warnings.push(`Paseo plugin ${plugin.id} was skipped: it is disabled locally and is not installed on the box.`);
@@ -249,12 +274,12 @@ export async function carryPaseoPlugins(link: IntegrationLink, source: PaseoPlug
       const ref = plugin.kind === "git" ? ` --ref ${quoteShell(plugin.commit)}` : "";
       await run(`paseo plugin install ${quoteShell(reference)} --id ${id}${ref} --json`);
     } else {
-      if (!plugin.enabled && current.enabled) await run(`paseo plugin disable ${id} --json`);
-      const [revision, flag] = plugin.kind === "git" ? [plugin.commit, "--ref"] : [plugin.version, "--version"];
-      if (installation.currentRevision !== revision) {
-        await run(`paseo plugin update ${id} ${flag} ${quoteShell(revision)} --json`);
+      if (!plugin.enabled && enabled === "on") await run(`paseo plugin disable ${id} --json`);
+      if (revision !== "current") {
+        const [target, flag] = plugin.kind === "git" ? [plugin.commit, "--ref"] : [plugin.version, "--version"];
+        await run(`paseo plugin update ${id} ${flag} ${quoteShell(target)} --json`);
       }
-      if (plugin.enabled && !current.enabled) await run(`paseo plugin enable ${id} --json`);
+      if (plugin.enabled && enabled !== "on") await run(`paseo plugin enable ${id} --json`);
     }
     if (plugin.enabled) reconciled = true;
   }
