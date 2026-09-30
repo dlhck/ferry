@@ -7,7 +7,14 @@ import { hostname, homedir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { apply as applyStore, type ApplyPlan, type RemoteApplyInput } from "./apply.ts";
-import { BOX_INSTRUCTIONS, boxInstructionsInput, readBoxInstructions, writeBoxFilesCommand } from "./box-identity.ts";
+import {
+  BOX_IDENTITY,
+  BOX_INSTRUCTIONS,
+  boxInstructionsInput,
+  readBoxInstructions,
+  recordManagedPathsCommand,
+  writeBoxFilesCommand,
+} from "./box-identity.ts";
 import {
   ConfigMissingError,
   readConfig as readOperatorConfig,
@@ -584,8 +591,8 @@ async function applyOnBox(context: {
   try {
     applyPlan = await boxStep(
       "Applying the snapshot on the box",
-      () =>
-        context.apply({
+      async () => {
+        const applied = await context.apply({
           checkout: required(plan.remoteCheckout),
           targetHome: required(plan.remoteHome),
           harnesses,
@@ -593,7 +600,19 @@ async function applyOnBox(context: {
           force: context.force,
           dryRun: false,
           link,
-        }),
+        });
+        // The box has no operator config, so ferry whoami on the box reads the paths from this record.
+        const result = await link.run(
+          recordManagedPathsCommand(required(plan.remoteHome), box.name, instructions !== null, applied.managed),
+        );
+        if (!result.ok) {
+          throw new Error(
+            `could not write ~/${BOX_IDENTITY}: ${result.error.origin}/${result.error.code}: ${result.error.message}`,
+            { cause: linkFailure(result.error) },
+          );
+        }
+        return applied;
+      },
       (result) => plural(result.actions.length, "change"),
     );
   } catch (cause) {

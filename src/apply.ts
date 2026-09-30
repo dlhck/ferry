@@ -23,7 +23,7 @@ import {
   type TargetInspection,
   type TargetInspectionRequest,
 } from "./apply-remote.ts";
-import { BOX_INSTRUCTIONS } from "./box-identity.ts";
+import { BOX_INSTRUCTIONS, type ManagedPaths } from "./box-identity.ts";
 import type { Link } from "./link.ts";
 import { CODEX_SYSTEM_SKILLS } from "./manifest.ts";
 import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
@@ -92,6 +92,8 @@ export type ApplyPlan = {
   readonly targetHome: string;
   readonly actions: readonly ApplyAction[];
   readonly unmanaged: readonly UnmanagedExtra[];
+  /** The paths that are links of Ferry after the commit of this plan. Sync records them on a box. */
+  readonly managed: ManagedPaths;
 };
 
 export class ApplyError extends Error {
@@ -274,6 +276,8 @@ function planInspection(
   const snapshotNames = new Set(skillNames);
   const actions: ApplyAction[] = [];
   const unmanaged: UnmanagedExtra[] = [];
+  // Two harnesses can have the same path, so each list is a set.
+  const managed = { instructionFiles: new Set<string>(), skillRoots: new Set<string>(), roots: new Set<string>() };
 
   for (const harness of harnesses) {
     if (!harness.skillRoot) continue;
@@ -281,6 +285,7 @@ function planInspection(
     const owns = ownsSkills(harness);
     const backups = backupDirectory(joinPath, targetHome, timestamp, harness.id);
     if (owns) {
+      managed.skillRoots.add(harness.skillRoot);
       for (const name of skillNames) {
         planLink(
           harness.name,
@@ -309,6 +314,7 @@ function planInspection(
   if (inspection.instructionExists) {
     for (const harness of harnesses) {
       if (!harness.instructionFile) continue;
+      managed.instructionFiles.add(harness.instructionFile);
       planLink(
         harness.name,
         joinPath(targetHome, harness.instructionFile),
@@ -329,6 +335,7 @@ function planInspection(
     for (const root of harness.extraRoots ?? []) {
       const source = joinPath(checkout, "roots", root);
       if (!inspection.rootSources.has(source)) continue;
+      managed.roots.add(root);
       planLink(
         harness.name,
         joinPath(targetHome, root),
@@ -362,7 +369,17 @@ function planInspection(
     }
   }
 
-  return { checkout, targetHome, actions, unmanaged };
+  return {
+    checkout,
+    targetHome,
+    actions,
+    unmanaged,
+    managed: {
+      instructionFiles: [...managed.instructionFiles],
+      skillRoots: [...managed.skillRoots],
+      roots: [...managed.roots],
+    },
+  };
 }
 
 function planLink(

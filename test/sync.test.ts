@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { boxInstructionsHeader, writeBoxFilesCommand } from "../src/box-identity.ts";
+import { boxInstructionsHeader, recordManagedPathsCommand, writeBoxFilesCommand } from "../src/box-identity.ts";
 import { errorInfo } from "../src/output.ts";
 import {
   existsSync,
@@ -16,8 +16,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
-import { ApplyError } from "../src/apply.ts";
-import { buildProgram } from "../src/cli.ts";
+import { ApplyError, apply } from "../src/apply.ts";
+import { buildProgram, runCli } from "../src/cli.ts";
 import type { OperatorConfig } from "../src/config.ts";
 import { denyRules, type Seed } from "../src/manifest.ts";
 import { unitFile } from "../src/integrations/paseo.ts";
@@ -451,6 +451,7 @@ describe("runSync", () => {
             targetHome: input.targetHome,
             actions: [],
             unmanaged: [],
+            managed: { instructionFiles: [".claude/CLAUDE.md"], skillRoots: [".claude/skills"], roots: [] },
           };
         },
         adopt: () => events.push("adopt"),
@@ -469,6 +470,7 @@ describe("runSync", () => {
       "update-box",
       "write-box-files",
       "apply",
+      "write-box-files",
       "write-path",
       "unlock",
       "adopt",
@@ -481,6 +483,15 @@ describe("runSync", () => {
         options: { agentForwarding: "git" },
       },
       { command: writeBoxFilesCommand("/srv/ferry", "/srv/ferry/.ferry/store", "default"), options: undefined },
+      // After Apply, the box gets the record of the paths that Apply keeps linked.
+      {
+        command: recordManagedPathsCommand("/srv/ferry", "default", false, {
+          instructionFiles: [".claude/CLAUDE.md"],
+          skillRoots: [".claude/skills"],
+          roots: [],
+        }),
+        options: undefined,
+      },
       { command: profileBlockCommand(BUILTIN_BOX_PATH_DIRS), options: undefined },
     ]);
     expect(applyInput).toMatchObject({
@@ -541,7 +552,7 @@ describe("runSync", () => {
         }),
         apply: async (input) => {
           events.push("apply");
-          return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] };
+          return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } };
         },
         adopt: () => events.push("adopt"),
       },
@@ -593,7 +604,7 @@ describe("runSync", () => {
         }),
         apply: async (input) => {
           events.push("apply");
-          return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] };
+          return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } };
         },
         adopt: () => events.push("adopt"),
       },
@@ -680,7 +691,7 @@ describe("runSync", () => {
           checkout: input.checkout,
           targetHome: input.targetHome,
           actions: [],
-          unmanaged: [],
+          unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] },
         }),
         writePlan: () => {},
       },
@@ -756,7 +767,7 @@ describe("runSync", () => {
             checkout: input.checkout,
             targetHome: input.targetHome,
             actions: [],
-            unmanaged: [],
+            unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] },
           };
         },
       },
@@ -813,7 +824,7 @@ describe("runSync", () => {
               checkout: input.checkout,
               targetHome: input.targetHome,
               actions: [],
-              unmanaged: [],
+              unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] },
             };
           },
         },
@@ -965,7 +976,7 @@ describe("runSync", () => {
             checkout: input.checkout,
             targetHome: input.targetHome,
             actions: [],
-            unmanaged: [],
+            unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] },
           }),
           adopt: () => {},
         },
@@ -1053,7 +1064,7 @@ describe("runSync progress", () => {
         path: "/operator/.ferry/store",
         publish: async () => ({ published: true, tip: "abc123" }),
       }),
-      apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
+      apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }),
       adopt: () => {},
       progress,
     };
@@ -1229,7 +1240,7 @@ describe("a store update from one harness root", () => {
             checkout: input.checkout,
             targetHome: input.targetHome,
             actions: [],
-            unmanaged: [],
+            unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] },
           }),
           writePlan: (plan) => plans.push(plan),
           writeLine: (line) => lines.push(line),
@@ -1412,7 +1423,7 @@ describe("sync with the Paseo integration", () => {
         path: "/operator/.ferry/store",
         publish: async () => ({ published: false, tip: null }),
       }),
-      apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
+      apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }),
       adopt: () => {},
       progress: {
         ...noProgress,
@@ -1637,7 +1648,7 @@ describe("sync locks", () => {
         events.push(`${destination}:apply`);
         await hooks.apply?.();
         events.push(`${destination}:applied`);
-        return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] };
+        return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } };
       },
       adopt: () => {
         events.push(`${destination}:adopt`);
@@ -1972,7 +1983,7 @@ describe("sync with more than one box", () => {
         events.push(`${name}:apply`);
         await options.apply?.(name);
         events.push(`${name}:applied`);
-        return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] };
+        return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } };
       },
       adopt: () => {
         events.push("adopt");
@@ -2008,7 +2019,7 @@ describe("sync with more than one box", () => {
           harnesses: input.harnesses.map((harness) => harness.id),
           off: (input.offHarnesses ?? []).map((harness) => harness.id),
         });
-        return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] };
+        return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } };
       },
     });
 
@@ -2438,7 +2449,7 @@ describe("sync with per-box instructions", () => {
       }),
       apply: async (input) => {
         events.push(`${posix.basename(input.targetHome)}:apply`);
-        return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] };
+        return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } };
       },
       adopt: () => {},
       writePlan: () => {},
@@ -2525,6 +2536,124 @@ describe("sync with per-box instructions", () => {
       `[a] Warning: Ferry did not apply ${join(home, ".ferry/boxes/a/AGENTS.md")}, because this machine has no ~/AGENTS.md. The box gets no instruction file.`,
     );
     expect(existsSync(join(home, "..", "box-a", ".ferry", "box", "AGENTS.md"))).toBe(false);
-    expect(JSON.parse(readFileSync(join(home, "..", "box-a", ".ferry", "box", "identity.json"), "utf8"))).toEqual({ name: "a", boxInstructions: false });
+    expect(JSON.parse(readFileSync(join(home, "..", "box-a", ".ferry", "box", "identity.json"), "utf8"))).toEqual({
+      name: "a",
+      boxInstructions: false,
+      managedPaths: { instructionFiles: [], skillRoots: [], roots: [] },
+    });
+  });
+});
+
+describe("sync records the managed paths of a box", () => {
+  const homes: string[] = [];
+  afterEach(() => {
+    for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+  });
+
+  const customHarness: HarnessDescriptor = {
+    id: "opencode",
+    name: "OpenCode",
+    skillRoot: ".config/opencode/skills",
+    instructionFile: ".config/opencode/AGENTS.md",
+  };
+
+  /**
+   * One box whose home is a directory of the temporary root, with a checkout.
+   * The fake SSH host runs the box files commands and the Apply commands with
+   * `sh`, and the sync uses the real Apply.
+   */
+  function box(record: LinkResult | null = null) {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "ferry-sync-managed-paths-")));
+    homes.push(root);
+    const boxHome = join(root, "box");
+    mkdirSync(join(boxHome, ".ferry", "store", "skills", "unslop"), { recursive: true });
+    writeFileSync(join(boxHome, ".ferry", "store", "AGENTS.md"), "shared\n");
+    const dependencies: SyncDependencies = {
+      readConfig: () => ({ ...config, tools: { pi: "off" }, harness: [customHarness] }) as OperatorConfig,
+      publisher: () => "operator-machine",
+      readSeed: () => ({ ...seed, instructions: { bytes: new TextEncoder().encode("shared\n") } }),
+      createLink: () => ({
+        run: async (command, options) => {
+          if (command.startsWith("printf")) return { ok: true, address: "box", stdout: `${boxHome}\n`, stderr: "" };
+          if (record && command.includes("identity.json") && command.includes("managedPaths")) return record;
+          if (!command.includes("ferry_dir=") && !command.includes("worker=$1") && !command.includes("action_path=$2")) {
+            return { ok: true, address: "box", stdout: "", stderr: "" };
+          }
+          const child = Bun.spawn(["sh", "-c", command], { stdin: options?.input ?? "ignore", stdout: "pipe", stderr: "pipe" });
+          const [exitCode, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+          expect(exitCode).toBe(0);
+          return { ok: true, address: "box", stdout, stderr: "" };
+        },
+      }),
+      openStore: async () => ({
+        path: join(root, "operator", ".ferry", "store"),
+        publish: async () => ({ published: true, tip: "abc123" }),
+      }),
+      apply,
+      adopt: () => {},
+      writePlan: () => {},
+      writeLine: () => {},
+      warn: () => {},
+      acquireStoreLock: async () => () => {},
+      acquireLock: () => () => {},
+    };
+    const whoami = async (args: string[] = []) => {
+      const out: string[] = [];
+      await runCli(["whoami", ...args], {
+        isBoxMode: () => true,
+        home: () => boxHome,
+        readConfig: () => null,
+        writeLine: (line) => out.push(line),
+      }, { renderError: (message) => out.push(message), setExitCode: () => {} });
+      return out;
+    };
+    return { home: join(root, "operator"), boxHome, dependencies, whoami };
+  }
+
+  test("ferry whoami on the box lists the paths of the harnesses that are on, with a custom harness and without Pi", async () => {
+    const { home, boxHome, dependencies, whoami } = box();
+
+    await runSync({ home }, dependencies);
+
+    expect(JSON.parse(readFileSync(join(boxHome, ".ferry", "box", "identity.json"), "utf8"))).toEqual({
+      name: "default",
+      boxInstructions: false,
+      managedPaths: {
+        instructionFiles: ["AGENTS.md", ".claude/CLAUDE.md", ".codex/AGENTS.md", ".config/opencode/AGENTS.md"],
+        skillRoots: [".agents/skills", ".claude/skills", ".config/opencode/skills"],
+        roots: [],
+      },
+    });
+    const out = await whoami();
+    expect(out.slice(out.indexOf("Managed paths:"))).toEqual([
+      "Managed paths:",
+      "  ~/AGENTS.md",
+      "  ~/.claude/CLAUDE.md",
+      "  ~/.codex/AGENTS.md",
+      "  ~/.config/opencode/AGENTS.md",
+      "  ~/.agents/skills/<skill>",
+      "  ~/.claude/skills/<skill>",
+      "  ~/.config/opencode/skills/<skill>",
+    ]);
+    expect(existsSync(join(boxHome, ".pi"))).toBe(false);
+    expect(lstatSync(join(boxHome, ".config", "opencode", "AGENTS.md")).isSymbolicLink()).toBe(true);
+    expect(JSON.parse((await whoami(["--json"]))[0] ?? "").result.managedPaths).toEqual({
+      instructionFiles: ["~/AGENTS.md", "~/.claude/CLAUDE.md", "~/.codex/AGENTS.md", "~/.config/opencode/AGENTS.md"],
+      skillRoots: ["~/.agents/skills", "~/.claude/skills", "~/.config/opencode/skills"],
+      roots: [],
+    });
+  });
+
+  test("a sync fails when the box cannot take the record", async () => {
+    const { home, dependencies } = box({
+      ok: false,
+      error: { origin: "box", code: "command-failed", message: "disk full" },
+    } as LinkResult);
+
+    const error = await runSync({ home }, dependencies).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(SyncError);
+    expect(error).toMatchObject({ code: "apply-failure", origin: "box" });
+    expect((error as Error).message).toContain("could not write ~/.ferry/box/identity.json");
   });
 });

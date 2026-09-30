@@ -182,7 +182,7 @@ function fakeStack(
             target: "/box/home/.ferry/store/skills/tdd",
           },
         ],
-        unmanaged: [],
+        unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] },
       };
     },
     createAuthStart: (_link: unknown, tools: readonly ToolDescriptor[]) => {
@@ -247,7 +247,7 @@ describe("ferry status command", () => {
       readConfig: () => ({ version: 1, host: { tailscale: "box", sshUser: "ferry" }, harness: [{ id: "custom" }], tools: { codex: "off" } }),
       inspectApply: async (input) => {
         applyInput = input;
-        return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] };
+        return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } };
       },
       createAuthStart: (_link, tools) => {
         authTools = tools;

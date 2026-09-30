@@ -86,6 +86,8 @@ On each sync, a box gets the generated file `~/.ferry/box/AGENTS.md`. The instru
 
 Agents run `ferry whoami` to check where they are. It prints the role of the machine (operator machine or box), the box name, and the paths that Ferry manages. On a box, it also prints the parts of the merged instruction file.
 
+Each sync writes the paths that it linked on the box into `~/.ferry/box/identity.json`. `ferry whoami` on the box lists those paths. So the list has no path of an agent that is off for the box, and it has the paths of your custom harnesses. A box that an earlier Ferry synced has no such record until the next sync. Until then, `ferry whoami` lists the paths of the built-in harnesses that are links of Ferry on the box.
+
 ## Per-box instructions
 
 Write the instructions for one box in `~/.ferry/boxes/<name>/AGENTS.md` on the operator machine, for example "this box runs the staging database". Then run `ferry sync`.
