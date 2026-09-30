@@ -18,6 +18,10 @@
  * path that the operator agreed to carry. The pack is a list of files with
  * their bytes. It has no links and no other kind of entry.
  *
+ * A scan and a pack hold one file in memory. They do not read a file of more
+ * than `MAX_FILE_BYTES`: it stays on its machine, and the operator copies it
+ * by hand.
+ *
  * The source can be a box with a Ferry that an attacker controls. Then no
  * check on the box is true. The operator machine reads each result against
  * its full form, takes only the files that it asked for, and applies its own
@@ -29,12 +33,12 @@
  */
 
 import { createHash } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { BOX_MARKER } from "./box-ferry.ts";
 import { FerryError } from "./errors.ts";
 import type { Link } from "./link.ts";
-import { carriedContentHits, carriedNameHit, DENY_RULES_VERSION, holdsToken, scanSkill, TOKEN_MARK } from "./manifest.ts";
+import { carriedContentHits, carriedNameHit, DENY_RULES_VERSION, holdsToken, readLimited, scanSkill, TOKEN_MARK } from "./manifest.ts";
 import { sessionContentHits } from "./session-scan.ts";
 
 export type ScanHit = { readonly path: string; readonly code: string; readonly reason: string };
@@ -111,6 +115,16 @@ export type Pack = { readonly files: readonly PackedFile[]; readonly refused: re
 
 type PackEntry = { readonly file: PackedFile } | { readonly refused: ScanHit } | { readonly skipped: ScanHit };
 
+/**
+ * The largest file that a scan or a pack reads: 128 MiB. The rules read the
+ * file as text and split it, so a check holds about 4 to 5 times the file in
+ * memory, which is about 600 MiB for a file at the limit. A box with 1 GB of
+ * memory can do that. A session or a local-only project file is much smaller.
+ */
+export const MAX_FILE_BYTES = 128 * 1024 * 1024;
+const TOO_LARGE = { code: "too-large", reason: "too large for Ferry to check" };
+/** A file that has more bytes in the read than its size said. The read stops at the limit, and the file is not sent. */
+const CHANGED = { code: "changed", reason: "file changed during the check" };
 /** Content rules that refuse a file also with `allowSecrets`. */
 const ALWAYS_REFUSED = new Set(["private-key", "executable"]);
 /** A session id that the scan returns: a UUID, as Codex writes it. Other text in its place is not an id. */
@@ -127,26 +141,26 @@ const BOX_SCAN_COMMAND = `if [ -f "$HOME/${BOX_MARKER}" ] && [ -x "$HOME/.local/
 const WHY = "Ferry checks the files with the Ferry on the box before it copies them, so that a file with a secret stays on the box.";
 const BUILD = "A development build of Ferry puts no Ferry on a box. Use a release of Ferry.";
 
-/** Run `request` on this machine, whose home is `home`. */
-export function runScan<Request extends ScanRequest>(request: Request, home: string): ScanOf<Request>;
-export function runScan(request: ScanRequest, home: string): ScanOf<ScanRequest> {
+/** Run `request` on this machine, whose home is `home`. A file of more than `maxBytes` is not read. */
+export function runScan<Request extends ScanRequest>(request: Request, home: string, maxBytes?: number): ScanOf<Request>;
+export function runScan(request: ScanRequest, home: string, maxBytes = MAX_FILE_BYTES): ScanOf<ScanRequest> {
   const rules = DENY_RULES_VERSION;
   if (request.kind === "skill") {
-    const { files, forbidden, skipped } = checkSkill(join(home, request.root));
+    const { files, forbidden, skipped } = checkSkill(join(home, request.root), maxBytes);
     return { rules, files: files.map((file) => ({ path: file.path, sha256: file.sha256, executable: (file.mode & 0o100) !== 0 })), forbidden, skipped };
   }
   if (request.kind === "files") {
     const carry: FilesScan["carry"][number][] = [];
     const refused: ScanHit[] = [];
     for (const path of request.paths) {
-      const checked = checkFile(join(home, request.root), path, request.allowSecrets);
+      const checked = checkFile(join(home, request.root), path, request.allowSecrets, maxBytes);
       if ("refused" in checked) refused.push(...checked.refused);
       else carry.push({ path, sha256: checked.secrets.length > 0 ? null : checked.sha256, secrets: checked.secrets });
     }
     return { rules, carry, refused };
   }
   const files = request.paths.map((path) => {
-    const { file, session, hits, blocked } = checkSession(home, path, request.project);
+    const { file, session, hits, blocked } = checkSession(home, path, request.project, maxBytes);
     // Only a file that passes gives its hash and its id.
     const passes = file !== null && hits.length === 0;
     return { path, session, sha256: passes ? file.sha256 : null, id: passes ? file.id : null, hits, blocked };
@@ -154,9 +168,13 @@ export function runScan(request: ScanRequest, home: string): ScanOf<ScanRequest>
   return { rules, files };
 }
 
-/** Run `request` on this machine, whose home is `home`: read each file one time, check those bytes, and return them. */
-export function runPack(request: PackRequest, home: string): Pack {
-  const entries = [...packEntries(request, home)];
+/**
+ * Run `request` on this machine, whose home is `home`: read each file one
+ * time, check those bytes, and return them. A file of more than `maxBytes` is
+ * not read.
+ */
+export function runPack(request: PackRequest, home: string, maxBytes = MAX_FILE_BYTES): Pack {
+  const entries = [...packEntries(request, home, maxBytes)];
   return {
     files: entries.flatMap((entry) => ("file" in entry ? [entry.file] : [])),
     refused: entries.flatMap((entry) => ("refused" in entry ? [entry.refused] : [])),
@@ -173,7 +191,7 @@ export function runPack(request: PackRequest, home: string): Pack {
 export function* packLines(request: PackRequest, home: string): Generator<string> {
   yield JSON.stringify({ pack: 1, rules: DENY_RULES_VERSION });
   let count = 0;
-  for (const entry of packEntries(request, home)) {
+  for (const entry of packEntries(request, home, MAX_FILE_BYTES)) {
     if (!("file" in entry)) {
       yield JSON.stringify(entry);
       continue;
@@ -325,10 +343,10 @@ export function recheckPack(directory: string, files: readonly PackedFile[], pro
   return files.flatMap((file) => {
     const agreed = file.secrets.length > 0;
     if (project === undefined) {
-      const checked = checkFile(directory, file.path, agreed);
+      const checked = checkFile(directory, file.path, agreed, MAX_FILE_BYTES);
       return "refused" in checked ? checked.refused : [];
     }
-    const { hits, blocked } = checkSession(directory, file.path, project);
+    const { hits, blocked } = checkSession(directory, file.path, project, MAX_FILE_BYTES);
     return agreed && !blocked ? [] : hits;
   });
 }
@@ -352,9 +370,9 @@ export function isInside(path: string): boolean {
 }
 
 /** Read each file of the request one time, and give the file with those bytes or the hits that keep it on this machine. */
-function* packEntries(request: PackRequest, home: string): Generator<PackEntry> {
+function* packEntries(request: PackRequest, home: string, maxBytes: number): Generator<PackEntry> {
   if (request.kind === "skill") {
-    const { files, forbidden, skipped } = checkSkill(join(home, request.root));
+    const { files, forbidden, skipped } = checkSkill(join(home, request.root), maxBytes);
     for (const hit of forbidden) yield { refused: hit };
     for (const hit of skipped) yield { skipped: hit };
     // A rule refuses a file of the skill, so no file of the skill leaves.
@@ -364,12 +382,12 @@ function* packEntries(request: PackRequest, home: string): Generator<PackEntry> 
   const agreed = new Set(request.secrets);
   for (const path of request.paths) {
     if (request.kind === "files") {
-      const checked = checkFile(join(home, request.root), path, agreed.has(path));
+      const checked = checkFile(join(home, request.root), path, agreed.has(path), maxBytes);
       if ("refused" in checked) for (const hit of checked.refused) yield { refused: hit };
       else yield { file: checked };
       continue;
     }
-    const { file, hits, blocked } = checkSession(home, path, request.project);
+    const { file, hits, blocked } = checkSession(home, path, request.project, maxBytes);
     if (file !== null && (hits.length === 0 || (agreed.has(path) && !blocked))) {
       yield { file: { ...file, secrets: [...new Set(hits.map((hit) => hit.reason))] } };
     } else for (const hit of hits) yield { refused: hit };
@@ -377,8 +395,8 @@ function* packEntries(request: PackRequest, home: string): Generator<PackEntry> 
 }
 
 /** The files of a skill directory that pass the rules of a publish, with their bytes, and the hits. */
-function checkSkill(directory: string): { files: PackedFile[]; forbidden: ScanHit[]; skipped: ScanHit[] } {
-  const scan = scanSkill(directory);
+function checkSkill(directory: string, maxBytes: number): { files: PackedFile[]; forbidden: ScanHit[]; skipped: ScanHit[] } {
+  const scan = scanSkill(directory, maxBytes);
   const named = new Map<string, ScanHit>();
   /** The path relative to the skill, or null after a hit for a name with a token. */
   const shown = (path: string): string | null => {
@@ -407,7 +425,7 @@ function checkSkill(directory: string): { files: PackedFile[]; forbidden: ScanHi
  * only the token or secret-field rules passes, and `secrets` names the kinds
  * of secret.
  */
-function checkFile(root: string, path: string, allowSecrets: boolean): PackedFile | { refused: ScanHit[] } {
+function checkFile(root: string, path: string, allowSecrets: boolean, maxBytes: number): PackedFile | { refused: ScanHit[] } {
   const named = tokenNameHit(path);
   if (named) return { refused: [named] };
   const full = join(root, path);
@@ -419,7 +437,9 @@ function checkFile(root: string, path: string, allowSecrets: boolean): PackedFil
   }
   if (stat.isSymbolicLink()) return { refused: [{ path, code: "symlink", reason: "symbolic link" }] };
   if (!stat.isFile()) return { refused: [{ path, code: "not-a-file", reason: "not a regular file" }] };
-  const bytes = readFileSync(full);
+  if (stat.size > maxBytes) return { refused: [{ path, ...TOO_LARGE }] };
+  const bytes = readLimited(full, maxBytes);
+  if (bytes === null) return { refused: [{ path, ...CHANGED }] };
   const file = { path, sha256: sha256(bytes), mode: stat.mode & 0o777, bytes, id: null };
   const hits = carriedContentHits(path, bytes);
   if (hits.length === 0) return { ...file, secrets: [] };
@@ -450,18 +470,23 @@ function checkSession(
   home: string,
   path: string,
   project: string,
+  maxBytes: number,
 ): { file: PackedFile | null; session: boolean; hits: ScanHit[]; blocked: boolean } {
   // The list of the session store names the file, so it counts as a session of the project.
   const named = tokenNameHit(path);
   if (named) return { file: null, session: true, hits: [named], blocked: true };
-  let bytes: Buffer;
+  const kept = (hit: { code: string; reason: string }) => ({ file: null, session: false, hits: [{ path, ...hit }], blocked: true });
+  let bytes: Buffer | null;
   let mode: number;
   try {
-    bytes = readFileSync(join(home, path));
-    mode = lstatSync(join(home, path)).mode & 0o777;
+    const stat = lstatSync(join(home, path));
+    if (stat.size > maxBytes) return kept(TOO_LARGE);
+    bytes = readLimited(join(home, path), maxBytes);
+    mode = stat.mode & 0o777;
   } catch {
-    return { file: null, session: false, hits: [{ path, code: "missing", reason: "file changed during the preflight" }], blocked: true };
+    return kept({ code: "missing", reason: "file changed during the preflight" });
   }
+  if (bytes === null) return kept(CHANGED);
   const nameHit = carriedNameHit(path);
   const content = nameHit ? [] : carriedContentHits(path, bytes);
   // The session scan finds a token in the file bytes again. One hit for each rule is enough.

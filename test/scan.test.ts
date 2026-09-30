@@ -1,13 +1,26 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  truncateSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { DENY_RULES_VERSION } from "../src/manifest.ts";
+import { DENY_RULES_VERSION, readLimited } from "../src/manifest.ts";
 import { errorInfo } from "../src/output.ts";
 import type { Link, LinkResult } from "../src/link.ts";
 import {
   isInside,
+  MAX_FILE_BYTES,
   packLines,
   packOnBox,
   parseScanRequest,
@@ -652,6 +665,84 @@ describe("the pack", () => {
       ["id_rsa.md", "private-key"],
     ]);
     expect(recheckPack(join(root, "sessions"), sessions, project).map((hit) => [hit.path, hit.code])).toEqual([["leaky.jsonl", "github-token"]]);
+  });
+});
+
+describe("the size limit of a checked file", () => {
+  const LIMIT = 128 * 1024 * 1024;
+  /** A file of `size` bytes that uses no disk space. */
+  function sparse(path: string, size: number): void {
+    write(path, "");
+    truncateSync(path, size);
+  }
+
+  test("the limit is 128 MiB", () => {
+    expect(MAX_FILE_BYTES).toBe(LIMIT);
+  });
+
+  test("a scan and a pack do not read a larger file: it stays on the machine with the reason too large for Ferry to check", () => {
+    const root = home();
+    const project = join(root, "app");
+    write(join(root, "app/AGENTS.md"), "# Agents\n");
+    sparse(join(root, "app/model.bin"), LIMIT + 1);
+    sparse(join(root, "app/limit.bin"), LIMIT);
+    sparse(join(root, ".claude/projects/app/large.jsonl"), LIMIT + 1);
+    write(join(root, ".claude/skills/demo/SKILL.md"), "# Demo\n");
+    sparse(join(root, ".claude/skills/demo/data.bin"), LIMIT + 1);
+    const hit = (path: string) => ({ path, code: "too-large", reason: "too large for Ferry to check" });
+
+    const files = runScan({ kind: "files", root: "app", paths: ["AGENTS.md", "model.bin"], allowSecrets: true }, root);
+    const sessions = runScan({ kind: "sessions", paths: [".claude/projects/app/large.jsonl"], project }, root);
+    const skill = runScan({ kind: "skill", root: ".claude/skills/demo" }, root);
+    const packedFiles = runPack({ kind: "files", root: "app", paths: ["AGENTS.md", "model.bin"], secrets: ["model.bin"] }, root);
+    const packedSessions = runPack({ kind: "sessions", paths: [".claude/projects/app/large.jsonl"], secrets: [".claude/projects/app/large.jsonl"], project }, root);
+    const packedSkill = runPack({ kind: "skill", root: ".claude/skills/demo" }, root);
+
+    expect(files.carry.map((file) => file.path)).toEqual(["AGENTS.md"]);
+    expect(files.refused).toEqual([hit("model.bin")]);
+    expect(sessions.files).toEqual([{ path: ".claude/projects/app/large.jsonl", session: false, sha256: null, id: null, hits: [hit(".claude/projects/app/large.jsonl")], blocked: true }]);
+    // A large file of a skill is left out, as a file that a skip rule covers. The other files of the skill pass.
+    expect(skill.files.map((file) => file.path)).toEqual(["SKILL.md"]);
+    expect(skill.forbidden).toEqual([]);
+    expect(skill.skipped).toEqual([hit("data.bin")]);
+    expect(packedFiles.files.map((file) => file.path)).toEqual(["AGENTS.md"]);
+    expect(packedFiles.refused).toEqual([hit("model.bin")]);
+    expect(packedSessions.files).toEqual([]);
+    expect(packedSessions.refused).toEqual([hit(".claude/projects/app/large.jsonl")]);
+    expect(packedSkill.files.map((file) => file.path)).toEqual(["SKILL.md"]);
+    expect(packedSkill.skipped).toEqual([hit("data.bin")]);
+    // A file of exactly the limit is read.
+    expect(runScan({ kind: "files", root: "app", paths: ["limit.bin"], allowSecrets: false }, root).carry.map((file) => file.path)).toEqual(["limit.bin"]);
+  });
+
+  test("a read stops at the limit: a file that grows past it after the size check has no bytes", () => {
+    const root = home();
+    write(join(root, "small.md"), "12345");
+    write(join(root, "grown.md"), "123456");
+
+    expect(readLimited(join(root, "small.md"), 5)?.toString()).toBe("12345");
+    expect(readLimited(join(root, "grown.md"), 5)).toBeNull();
+    expect(readLimited(join(root, "small.md"), 0)).toBeNull();
+  });
+
+  // The files under /proc have the size 0 and give bytes when a process reads them, as a file that grows after the size check.
+  test.skipIf(!existsSync("/proc/self/status"))("a file that grows past the limit after the size check counts as changed and is not sent", () => {
+    const changed = (path: string) => ({ path, code: "changed", reason: "file changed during the check" });
+
+    const files = runPack({ kind: "files", root: "self", paths: ["status"], secrets: [] }, "/proc", 16);
+    const scanned = runScan({ kind: "files", root: "self", paths: ["status"], allowSecrets: false }, "/proc", 16);
+    const sessions = runPack({ kind: "sessions", paths: ["self/status"], secrets: [], project: "/home/user/app" }, "/proc", 16);
+    const skill = runPack({ kind: "skill", root: "self/net" }, "/proc", 16);
+    const whole = runPack({ kind: "files", root: "self", paths: ["status"], secrets: [] }, "/proc");
+
+    expect(files).toEqual({ files: [], refused: [changed("status")], skipped: [] });
+    expect(scanned.carry).toEqual([]);
+    expect(scanned.refused).toEqual([changed("status")]);
+    expect(sessions).toEqual({ files: [], refused: [changed("self/status")], skipped: [] });
+    // Some of these files are empty. Each file with more bytes than the limit is left out.
+    expect(skill.files.every((file) => file.bytes.length <= 16)).toBe(true);
+    expect(skill.skipped.some((hit) => hit.code === "changed" && hit.reason === "file changed during the check")).toBe(true);
+    expect(whole.files.map((file) => file.path)).toEqual(["status"]);
   });
 });
 
