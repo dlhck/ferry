@@ -341,12 +341,31 @@ With `--json`, Ferry never asks:
 | `missing-values` | A value that the command needs is missing. |
 | `deny-rule-match` | A deny rule refused a file. The message names the file, never the value. |
 | `refused` | A safety check refused the change, such as a clash, a live path, an unpushed commit, or an untrusted host key. `ferry auth` of a tool that is off also has this code. |
-| `sync-busy` | Another sync, or a command that changes the box (`update`, `install`, `move`, `integrations enable\|disable`, `box remove --uninstall`), is active for the box. |
+| `sync-busy` | Another sync, or a command that changes the box (`watch`, `update`, `install`, `move`, `revert`, `integrations enable\|disable`, `box remove --uninstall`), works on the box. `error.details` is `{ box, owner }`. See [A busy box](#a-busy-box). |
 | `sync-failed` | The sync failed on one or more boxes, or the publish failed. |
 | `update-failed` | One or more updates failed. |
 | `login-failed` | The login on the box did not finish. |
 | `command-failed` | A child command, such as `npx skills add`, failed. |
 | `failed` | Any other error. |
+
+### A busy box
+
+One Ferry command at a time changes a box. A second command fails with `sync-busy`. The message names the box and the command that holds the lock:
+
+- `The watch service syncs box fsn1 now (pid 1234). Try again in a moment.`
+- `ferry update works on box fsn1 now (pid 1234). Wait for it to end, then try again.`
+
+`error.details` is `{ "box": "fsn1", "owner": { "pid": 1234, "command": "watch", "earlierVersion": false } }`.
+
+- `command` is the command without `ferry`: `sync`, `watch`, `watch update` (the daily update of the watch), `update`, `install`, `move`, `revert`, `box remove`, `integrations enable`, or `integrations disable`. It is `null` for a lock that Ferry 0.10.0 or an earlier version wrote.
+- `earlierVersion` is `true` for a lock of a Ferry version before 0.10.0. Ferry keeps such a lock while a process has its pid.
+- `owner` is `null` when the owner released the lock before Ferry read it.
+
+What to do:
+
+1. Run the command again. For `watch` and `watch update`, wait some seconds. For another command, wait until it ends.
+2. Never remove a lock file in `~/.ferry` (`sync-*.lock`, `store.lock`, `*.claim`), and never stop the process of the owner yourself. Ferry replaces the lock of a process that stopped.
+3. If the error stays, or `earlierVersion` is `true`, run `ferry doctor --json`. The `box-lock` check of each box shows the owner of a held lock. It has the status `failed` and a `fix` only for a lock of an earlier version whose pid is alive. Show the fix to the operator. Do not run it yourself.
 
 ### Results
 
