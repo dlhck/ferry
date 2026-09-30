@@ -8,7 +8,7 @@ import { parseGitIdentity, type GitIdentity } from "./git-identity.ts";
 import type { UncarriedHookPath } from "./hook-paths.ts";
 import type { LinkError, LinkResult } from "./link.ts";
 import type { IntegrationHealth, IntegrationId } from "./integrations/types.ts";
-import type { DenyRuleDescription } from "./manifest.ts";
+import { MCP_SKIPS, type DenyRuleDescription, type NonPortableMcp } from "./manifest.ts";
 import { groupProgress, noProgress, plural, step, type Progress } from "./progress.ts";
 import type { TipReport } from "./store.ts";
 import { changedPaths } from "./sync.ts";
@@ -46,7 +46,7 @@ export type BoxStatusDependencies = {
     status(): Promise<AuthStatusReport>;
     mcpStatus(): Promise<readonly McpLoginStatus[]>;
   };
-  /** The carried stdio MCP servers of this box. Only the brief check reads them. */
+  /** The carried stdio MCP servers of this box. Only the brief check reads them. The full status has the skipped servers in `skippedMcp` of the report. */
   readonly mcpServers?: {
     check(): Promise<readonly BoxMcpIssue[]>;
   };
@@ -78,6 +78,8 @@ export type StatusDependencies = {
   };
   readonly manifest: {
     denyRules(): readonly DenyRuleDescription[];
+    /** The stdio MCP servers of the operator machine that Ferry does not carry. */
+    skippedMcp(): readonly SkippedMcp[];
   };
   /** The selected boxes, in config order. */
   readonly boxes: readonly BoxStatusDependencies[];
@@ -162,6 +164,9 @@ export type BoxStatus = {
   readonly errors: readonly StatusError[];
 };
 
+/** One stdio MCP server of the operator machine that Ferry does not carry. It has no command and no argument of the server. */
+export type SkippedMcp = { readonly harness: string; readonly name: string; readonly reason: NonPortableMcp["reason"] };
+
 export type StatusReport = {
   readonly schemaVersion: 2;
   /** The local and remote store tips. Each box has its own tip. */
@@ -176,6 +181,8 @@ export type StatusReport = {
     readonly error: StatusDependencyError | null;
   };
   readonly denyList: readonly DenyRuleDescription[];
+  /** The skipped stdio MCP servers of the operator machine. The list is the same for each box. */
+  readonly skippedMcp: readonly SkippedMcp[];
   /** One entry for each selected box, in config order. */
   readonly boxes: readonly BoxStatus[];
   /** The integration checks on this machine. Present only when an enabled integration has one. */
@@ -455,16 +462,10 @@ function mcpServerIssue(issue: BoxMcpIssue, flag: string): BriefIssue {
         summary: summarize(name, "command not on the box"),
         message: `${name} runs ${issue.command}, which is not on the box. Install ${issue.command} on the box, or add a tool for it to the registry.`,
       };
-    case "not-portable":
-      return {
-        ...base,
-        summary: summarize(name, "not carried"),
-        message: {
-          "home-path": `${name} refers to a path in your home, so Ferry does not carry it. Use a command on the PATH or a path outside the home.`,
-          "inline-script": `${name} runs an inline shell or interpreter script, which Ferry cannot check, so Ferry does not carry it. Put the script in a file that Ferry carries, or run the server through a tool on the PATH.`,
-          "unknown-options": `${name} runs a shell or interpreter with options that Ferry cannot classify, so Ferry does not carry it. Remove the options that come before the script file, or run the server through a tool on the PATH.`,
-        }[issue.reason],
-      };
+    case "not-portable": {
+      const { cause, fix } = MCP_SKIPS[issue.reason];
+      return { ...base, summary: summarize(name, "not carried"), message: `${name} ${cause}, so Ferry does not carry it. ${fix}.` };
+    }
   }
 }
 
@@ -532,6 +533,12 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
   } catch (cause) {
     errors.push(dependencyError("operator", cause));
   }
+  let skippedMcp: readonly SkippedMcp[] = [];
+  try {
+    skippedMcp = dependencies.manifest.skippedMcp();
+  } catch (cause) {
+    errors.push(dependencyError("operator", cause));
+  }
 
   let operatorIdentity: GitIdentity | null = null;
   let operatorError: StatusDependencyError | null = null;
@@ -580,6 +587,7 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     store: { local, remote, localMatchesRemote: local !== null && local === remote, error: storeError },
     operator: { gitIdentity: operatorIdentity, error: operatorError },
     denyList,
+    skippedMcp,
     boxes,
     ...(operatorIntegrations.length > 0 ? { integrations } : {}),
     errors,

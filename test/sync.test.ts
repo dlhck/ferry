@@ -646,7 +646,7 @@ describe("runSync", () => {
       expect(lines).toEqual([
         `Skipped MCP server: MCP server flagged runs a shell or interpreter with options that Ferry cannot classify. Remove the options that come before the script file, or run the server through a tool on the PATH: ${join(home, ".claude.json")}`,
         `Skipped MCP server: MCP server node_repl runs from a macOS app bundle, which the box does not have: ${join(home, ".claude.json")}`,
-        `Skipped MCP server: MCP server repl refers to a path in the home, which the box does not have: ${join(home, ".claude.json")}`,
+        `Skipped MCP server: MCP server repl refers to a path in your home. Use a command on the PATH or a path outside the home: ${join(home, ".claude.json")}`,
         `Skipped MCP server: MCP server wrapped runs an inline shell or interpreter script, which Ferry cannot check. Put the script in a file that Ferry carries, or run the server through a tool on the PATH: ${join(home, ".claude.json")}`,
       ]);
       expect(printed[0]?.mcpServers).toEqual(["claude/linear"]);

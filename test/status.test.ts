@@ -141,6 +141,7 @@ function dependencies(
         calls.reads.push("manifest.denyRules");
         return denyRules;
       },
+      skippedMcp: () => [],
     },
     ...overrides,
     boxes: [box(calls, boxOverrides)],
@@ -167,6 +168,7 @@ describe("Status composer", () => {
       store: { local: "local-tip", remote: "remote-tip", localMatchesRemote: false, error: null },
       operator: { gitIdentity: { name: "Operator O'Neil", email: "operator@example.com" }, error: null },
       denyList: denyRules,
+      skippedMcp: [],
       boxes: [
         {
           name: "default",
@@ -489,6 +491,44 @@ describe("Status composer", () => {
       origin: "box",
       message: "box: unexpected sudo check output",
     });
+  });
+});
+
+describe("Status composer skipped MCP servers", () => {
+  const skipped = [
+    { harness: "claude", name: "local", reason: "home-path" },
+    { harness: "codex", name: "node_repl", reason: "app-bundle" },
+  ] as const;
+
+  test("has the skipped stdio MCP servers of the operator machine in the report, and in no box", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const deps = dependencies(calls, {}, { manifest: { denyRules: () => denyRules, skippedMcp: () => skipped } });
+
+    const report = await composeStatus({ ...deps, boxes: [box(calls, { name: "a" }), box(calls, { name: "b" })] });
+
+    expect(report.schemaVersion).toBe(2);
+    expect(report.skippedMcp).toEqual(skipped);
+    for (const entry of report.boxes) expect(entry).not.toHaveProperty("skippedMcp");
+    expect(report.errors).toEqual([]);
+  });
+
+  test("reports an operator error and an empty list when the MCP files cannot be read", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const deps = dependencies(calls, {}, {
+      manifest: {
+        denyRules: () => denyRules,
+        skippedMcp() {
+          throw new Error("cannot read the MCP servers");
+        },
+      },
+    });
+
+    const report = await composeStatus(deps);
+
+    expect(report.skippedMcp).toEqual([]);
+    expect(report.errors).toEqual([
+      { code: "inspection-failed", origin: "operator", message: "operator: cannot read the MCP servers" },
+    ]);
   });
 });
 
