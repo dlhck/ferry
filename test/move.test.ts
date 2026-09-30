@@ -2249,6 +2249,27 @@ describe("ferry move sessions", () => {
     expect(allowed.lines.join("\n")).not.toContain(password);
   });
 
+  test.each([
+    ["a triple-quoted string with double quotes", 'password = """hunter2"""'],
+    ["a triple-quoted string with single quotes", "password = \'\'\'hunter2\'\'\'"],
+    ["a YAML block scalar", "password: |\n  hunter2\n"],
+    ["an empty string next to the value", 'password = "" "hunter2"'],
+  ])("a session with a password in %s stays on the box", async (_name, content) => {
+    const w = world();
+    const boxApp = project(w, w.box);
+    const sessions = join(w.box, ".claude/projects", projectDirectoryName(boxApp));
+    const record = { type: "assistant", message: { content: [{ type: "tool_use", name: "Write", input: { file_path: "config.toml", content } }] } };
+    write(join(sessions, "s.jsonl"), `${JSON.stringify(record)}\n`);
+
+    const result = await move(w, { path: "Developer/app", fromBox: "default" });
+
+    expect(result.error).toBeNull();
+    expect(result.value?.sessions.carry).toEqual([]);
+    expect(result.value?.sessions.refused.map((hit) => [hit.code, hit.reason])).toEqual([["secret-field", "key password holds a password or secret"]]);
+    expect(existsSync(join(w.operator, ".claude"))).toBe(false);
+    expect(crossed(w, "hunter2")).toBe(false);
+  });
+
   test("skips a session with a token that is written with a JSON escape", async () => {
     const w = world();
     const app = project(w, w.operator);

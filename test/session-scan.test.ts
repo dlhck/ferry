@@ -296,6 +296,106 @@ describe("sessionContentHits", () => {
     expect(JSON.stringify(sessionContentHits("session.jsonl", Buffer.from(record)))).not.toContain(token);
   });
 
+  test("a triple-quoted string is a literal, with each quote, with a prefix, and with its text on later lines", () => {
+    const word = "hunt" + "er2";
+    const hits: [string, string][] = [
+      [`password = """${word}"""`, "password"],
+      [`password = \'\'\'${word}\'\'\'`, "password"],
+      [`password = r"""${word}"""`, "password"],
+      [`password = f\'\'\'${word}{suffix}\'\'\'`, "password"],
+      [`api_key = """\n${word}\n"""`, "api_key"],
+      [`api_key = \'\'\'\n  ${word}\n\'\'\'\nport = 1`, "api_key"],
+      [`  password: """${word}""",`, "password"],
+      [`tool --password """${word}"""`, "password"],
+      [`PASSWORD="""${word}"""`, "PASSWORD"],
+      [`password = """ab"cd"""`, "password"],
+    ];
+    const passes = [
+      'password = """"""',
+      "password = ",
+      'password = """\n"""',
+      'password = """${PASSWORD}"""',
+      'password = f"""{password}"""',
+      'password = """\n  {{ password }}\n"""',
+      // The text after the closing quotes is not in the string.
+      'password = """""" + get_password()',
+    ];
+
+    for (const [text, key] of hits) {
+      expect([text, reasons(jsonl(toolUse("Write", { file_path: "config.toml", content: text })))]).toEqual([text, [`key ${key} holds a password or secret`]]);
+    }
+    for (const text of passes) expect([text, reasons(jsonl(toolResult(text)))]).toEqual([text, []]);
+  });
+
+  test("strings next to each other are one value, so an empty first string does not hide the value", () => {
+    const hits: [string, string][] = [
+      ['password = "hun" "ter2"', "password"],
+      ['password = "" "hunter2"', "password"],
+      ["password = '' 'hunter2'", "password"],
+      ['password = "" + "hunter2"', "password"],
+      ['password = ("" "hunter2")', "password"],
+      ['password = (\n    "hun"\n    "ter2"\n)', "password"],
+      ['PASSWORD=""hunter2', "PASSWORD"],
+      ["PASSWORD=''\"hunter2\"", "PASSWORD"],
+      ['tool --password ""hunter2', "password"],
+      ['PASSWORD="hun"ter2', "PASSWORD"],
+    ];
+    const passes = [
+      'password = ""',
+      'password = "",',
+      "password: '' # none",
+      'password = "" if missing else load()',
+      'password = "" + load()',
+      'password = "".join(parts)',
+      'password = "" "" ""',
+      'PASSWORD=""$OTHER',
+      'PASSWORD="" tool --verbose',
+      'token = "" or os.environ["TOKEN"]',
+    ];
+
+    for (const [text, key] of hits) expect([text, reasons(jsonl(toolResult(text)))]).toEqual([text, [`key ${key} holds a password or secret`]]);
+    for (const text of passes) expect([text, reasons(jsonl(toolResult(text)))]).toEqual([text, []]);
+  });
+
+  test("a YAML value on the next lines is a value: a block scalar and an indented value", () => {
+    const hits: [string, string][] = [
+      ["db:\n  password: |\n    hunter2\n  port: 1\n", "password"],
+      ["password: >-\n  hunter2\n", "password"],
+      ["password: |+\n  first line\n  second line\n", "password"],
+      ["password: | # the password\n  hunter2\n", "password"],
+      ["password:\n  hunter2\n", "password"],
+      ['password:\n  "swordfish"\n', "password"],
+      ["api_keys:\n  - hunter2\n  - other3\n", "api_keys"],
+    ];
+    const passes = [
+      "password: |\nport: 1\n",
+      "password: |\n\nport: 1\n",
+      "password: |\n  ${PASSWORD}\n",
+      "password: >\n  {{ password }}\n",
+      "password:\nport: 1\n",
+      "password:\n  from: vault\n  path: secret/app\n",
+      "password:\n  string\n",
+      "tokens:\n  - name\n  - other\n",
+      "token:\n    getToken(),\n",
+      "password: |\n  xxxx\n",
+    ];
+
+    for (const [text, key] of hits) expect([text, reasons(jsonl(toolResult(text)))]).toEqual([text, [`key ${key} holds a password or secret`]]);
+    for (const text of passes) expect([text, reasons(jsonl(toolResult(text)))]).toEqual([text, []]);
+  });
+
+  test("the text of a heredoc is scanned as config lines, and a heredoc in a command substitution is not a literal", () => {
+    const yaml = "cat > config.yml <<EOF\ndb:\n  password: hunter2\nEOF";
+    const env = "cat > .env <<-'EOF'\n\tDB_PASSWORD=swordfish\n\tEOF";
+    const substitution = "PASSWORD=$(cat <<EOF\nplain words\nEOF\n)";
+    const quoted = 'export TOKEN="$(cat <<EOF\nplain words\nEOF\n)"';
+
+    expect(reasons(jsonl(toolUse("Bash", { command: yaml })))).toEqual(["key password holds a password or secret"]);
+    expect(reasons(jsonl(toolUse("Bash", { command: env })))).toEqual(["key DB_PASSWORD holds a password or secret"]);
+    expect(reasons(jsonl(toolUse("Bash", { command: substitution })))).toEqual([]);
+    expect(reasons(jsonl(toolUse("Bash", { command: quoted })))).toEqual([]);
+  });
+
   test("a vendor token after an underscore in a session is a content hit", () => {
     const token = "gh" + "p_" + "c".repeat(36);
     const bytes = jsonl(toolResult(`export MY_${token}=1`));
