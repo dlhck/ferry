@@ -1,5 +1,7 @@
 # Paseo sync
 
+<!-- {% raw %} -->
+
 With the Paseo integration enabled for a box, `ferry sync` carries agent profiles, managed Git and npm plugins, provider definitions, metadata model preferences, shared system instructions, portable terminal profiles, and, with an explicit setting, the auto-archive switch from the operator machine. These go directly to the box. They are not stored in the snapshot repository. `ferry watch` detects changes to plugin commits, npm versions, enabled states, provider definitions, the preferences, and terminal profiles.
 
 ## The box config stays on the box
@@ -188,3 +190,5 @@ The daemon caches the catalog and commits label changes with workspace transacti
 - [Auto-archive after merge](https://github.com/getpaseo/paseo/blob/main/packages/server/src/server/auto-archive-on-merge/index.ts)
 - [Reloadable configuration, including terminal profiles](https://paseo.sh/docs/configuration)
 - [Terminal profile defaults and prompt placeholder](https://github.com/getpaseo/paseo/blob/main/packages/protocol/src/terminal-profiles.ts)
+
+<!-- {% endraw %} -->
