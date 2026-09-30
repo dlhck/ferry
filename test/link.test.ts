@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { BunHostAdapter, Link } from "../src/link.ts";
+import { BunHostAdapter, Link, reachCommand } from "../src/link.ts";
 import type { HostAdapter, HostCommand, HostCommandResult } from "../src/link.ts";
 
 const onlineStatus = JSON.stringify({
@@ -355,8 +355,13 @@ describe("Link", () => {
     ]);
   });
 
-  test("reach opens one connection from the box with ssh -W", async () => {
-    const host = new FakeHost([result(), result({ timedOut: true, exitCode: null })]);
+  const REACH_TIMEOUT_MS = 25_000;
+  const reachArgv = (host: string, port: number) => [
+    "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "user@box.example", `${BOX_PATH}${reachCommand(host, port, 10)}`,
+  ];
+
+  test("reach runs a TCP connect test on the box, with an IPv6 address without brackets", async () => {
+    const host = new FakeHost([result({ stdout: "exit 0\n" }), result({ stdout: "exit 0\n" })]);
     const link = new Link({ destination: "user@box.example" }, host);
 
     expect(await link.reach({ host: "db.example", port: 5432 })).toEqual({
@@ -365,32 +370,87 @@ describe("Link", () => {
       stdout: "",
       stderr: "",
     });
-    // A server that keeps the connection open until the timeout accepted it.
     expect((await link.reach({ host: "fd00::1", port: 5432 })).ok).toBe(true);
+    expect(reachCommand("fd00::1", 5432, 10)).toContain(`bash -c 'exec 3<>"/dev/tcp/$1/$2"' bash 'fd00::1' 5432`);
     expect(host.commands.map((command) => [command.argv, command.timeoutMs, command.input])).toEqual([
-      [["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-W", "db.example:5432", "user@box.example"], 10_000, undefined],
-      [["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-W", "[fd00::1]:5432", "user@box.example"], 10_000, undefined],
+      [reachArgv("db.example", 5432), REACH_TIMEOUT_MS, undefined],
+      [reachArgv("fd00::1", 5432), REACH_TIMEOUT_MS, undefined],
     ]);
   });
 
-  test("reach tells a host that the box cannot open from a box that OpenSSH cannot reach", async () => {
+  test("reach reports a target that does not answer, refuses, or has no address, with the origin box", async () => {
     const host = new FakeHost([
-      result({
-        exitCode: 255,
-        stderr: "channel 0: open failed: connect failed: Name or service not known\nstdio forwarding failed\n",
-      }),
-      result({ exitCode: 255, stderr: "ssh: connect to host box.example port 22: Connection refused\n" }),
+      result({ stdout: "exit 124\n" }),
+      result({ stdout: "bash: connect: Connection refused\nbash: line 1: /dev/tcp/db.example/5432: Connection refused\nexit 1\n" }),
+      result({ stdout: "bash: line 1: db.example: Name or service not known\nbash: line 1: /dev/tcp/db.example/5432: Invalid argument\nexit 1\n" }),
     ]);
     const link = new Link({ destination: "user@box.example" }, host);
+    const reach = () => link.reach({ host: "db.example", port: 5432 });
 
-    expect(await link.reach({ host: "db.example", port: 5432 })).toEqual({
-      ok: false,
-      error: { code: "forward-failed", origin: "box", message: "connect failed: Name or service not known" },
-    });
-    expect(await link.reach({ host: "db.example", port: 5432 })).toEqual({
+    // A target that drops the packets of the box runs to the timeout on the box.
+    expect(await reach()).toEqual({ ok: false, error: { code: "forward-timeout", origin: "box", message: "no answer in 10 s" } });
+    expect(await reach()).toEqual({ ok: false, error: { code: "forward-failed", origin: "box", message: "Connection refused" } });
+    expect(await reach()).toEqual({ ok: false, error: { code: "forward-failed", origin: "box", message: "Name or service not known" } });
+    expect(host.commands).toHaveLength(3);
+  });
+
+  test("reach reports a box that does not answer with the origin network, not as a reached target", async () => {
+    const host = new FakeHost([
+      result({ exitCode: 255, stderr: "ssh: connect to host box.example port 22: Connection refused\n" }),
+      result({ timedOut: true, exitCode: null }),
+      result({ exitCode: 1, stderr: "sh: broken profile\n" }),
+    ]);
+    const link = new Link({ destination: "user@box.example" }, host);
+    const reach = () => link.reach({ host: "db.example", port: 5432 });
+
+    expect(await reach()).toEqual({
       ok: false,
       error: { code: "ssh-failed", origin: "network", message: "ssh: connect to host box.example port 22: Connection refused" },
     });
+    expect(await reach()).toEqual({
+      ok: false,
+      error: { code: "ssh-failed", origin: "network", message: "the check on the box failed: the command on the box timed out" },
+    });
+    expect(await reach()).toEqual({
+      ok: false,
+      error: { code: "ssh-failed", origin: "network", message: "the check on the box failed: sh: broken profile" },
+    });
+    expect(host.commands).toHaveLength(3);
+  });
+
+  test("reach uses ssh -W on a box without bash, timeout, or /dev/tcp", async () => {
+    const stdio = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-W", "db.example:5432", "user@box.example"];
+    const host = new FakeHost([
+      result({ stdout: "unsupported\n" }),
+      result({ timedOut: true, exitCode: null }),
+      result({ stdout: "bash: line 1: /dev/tcp/db.example/5432: No such file or directory\nexit 1\n" }),
+      result(),
+      result({ stdout: "timeout: unrecognized option\nexit 125\n" }),
+      result({ exitCode: 255, stderr: "channel 0: open failed: connect failed: Name or service not known\nstdio forwarding failed\n" }),
+      result({ stdout: "unsupported\n" }),
+      result({ exitCode: 255, stderr: "ssh: connect to host box.example port 22: Connection refused\n" }),
+    ]);
+    const link = new Link({ destination: "user@box.example" }, host);
+    const reach = () => link.reach({ host: "db.example", port: 5432 });
+
+    // With ssh -W, the box did not refuse a connection that stays open until the timeout.
+    expect((await reach()).ok).toBe(true);
+    expect((await reach()).ok).toBe(true);
+    expect(await reach()).toEqual({
+      ok: false,
+      error: { code: "forward-failed", origin: "box", message: "connect failed: Name or service not known" },
+    });
+    expect(await reach()).toEqual({
+      ok: false,
+      error: { code: "ssh-failed", origin: "network", message: "ssh: connect to host box.example port 22: Connection refused" },
+    });
+    expect(host.commands.map((command) => [command.argv, command.timeoutMs])).toEqual(
+      [1, 2, 3, 4].flatMap(() => [[reachArgv("db.example", 5432), REACH_TIMEOUT_MS], [stdio, 10_000]]),
+    );
+    expect((await new Link({ destination: "user@box.example" }, new FakeHost([
+      result({ stdout: "unsupported\n" }),
+      result({ exitCode: 255, stderr: "channel 0: open failed: connect failed: Connection refused\n" }),
+    ])).reach({ host: "fd00::1", port: 5432 })).ok).toBe(false);
   });
 
   test("an aborted signal stops the tunnel and reports it as stopped", async () => {
@@ -514,5 +574,102 @@ describe("Link.master", () => {
       ok: false,
       error: { code: "forward-failed", origin: "network", message: "ssh: connect to host box.example port 22: Connection refused" },
     });
+  });
+});
+
+/** The box command of reach, run in a local shell against local listeners. */
+describe("reachCommand", () => {
+  const supported = Bun.which("bash") !== null && Bun.which("timeout") !== null;
+  const shellTest = supported ? test : test.skip;
+
+  async function run(host: string, port: number, seconds = 5): Promise<string> {
+    const child = Bun.spawn(["/bin/sh", "-c", reachCommand(host, port, seconds)], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const [stdout] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+    return stdout;
+  }
+
+  function freePort(hostname: string): number {
+    const server = Bun.listen({ hostname, port: 0, socket: { data() {} } });
+    const port = server.port;
+    server.stop(true);
+    return port;
+  }
+
+  shellTest("exits 0 for a listener that accepts the connection and sends nothing", async () => {
+    const server = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+    try {
+      expect(await run("127.0.0.1", server.port)).toBe("exit 0\n");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  shellTest("opens an IPv6 address without brackets", async () => {
+    const listen = () => Bun.listen({ hostname: "::1", port: 0, socket: { data() {} } });
+    let server: ReturnType<typeof listen>;
+    try {
+      server = listen();
+    } catch {
+      // This machine has no IPv6 loopback address.
+      return;
+    }
+    try {
+      expect(await run("::1", server.port)).toBe("exit 0\n");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  shellTest("prints the refusal and exits 1 for a port without a listener", async () => {
+    const output = await run("127.0.0.1", freePort("127.0.0.1"));
+
+    expect(output.split("\n")[0]).toBe("bash: connect: Connection refused");
+    expect(output.endsWith("exit 1\n")).toBe(true);
+  });
+
+  // Linux drops the SYN for a listener whose accept queue is full, as a firewall drops it.
+  const dropTest = supported && process.platform === "linux" && Bun.which("python3") !== null ? test : test.skip;
+  dropTest("exits 124 for a target that drops the packets", async () => {
+    const listener = Bun.spawn(
+      [
+        "python3",
+        "-c",
+        [
+          "import socket, sys",
+          "server = socket.socket()",
+          "server.bind(('127.0.0.1', 0))",
+          "server.listen(0)",
+          "held = []",
+          "for _ in range(3):",
+          "    client = socket.socket()",
+          "    client.setblocking(False)",
+          "    try:",
+          "        client.connect(server.getsockname())",
+          "    except BlockingIOError:",
+          "        pass",
+          "    held.append(client)",
+          "print(server.getsockname()[1], flush=True)",
+          "sys.stdin.read()",
+        ].join("\n"),
+      ],
+      { stdin: "pipe", stdout: "pipe", stderr: "inherit" },
+    );
+    try {
+      const reader = listener.stdout.getReader();
+      const port = Number(new TextDecoder().decode((await reader.read()).value).trim());
+      reader.releaseLock();
+
+      expect(await run("127.0.0.1", port, 1)).toBe("exit 124\n");
+    } finally {
+      listener.kill();
+      await listener.exited;
+    }
+  }, 20_000);
+
+  shellTest("quotes the host, so a host with shell characters runs no command", async () => {
+    const output = await run("x'; echo injected; '", 5432);
+
+    expect(output).not.toContain("\ninjected");
+    expect(output.endsWith("exit 1\n")).toBe(true);
   });
 });
