@@ -89,7 +89,7 @@ describe("registerBoxMcp", () => {
   });
 
   test("runs one box command for each CLI server and counts all carried servers", async () => {
-    const link = new FakeLink((command) => (command.includes("mv ") ? ok() : ok("F{}")));
+    const link = new FakeLink(() => ok());
     const progress = recordProgress();
     const server = (name: string) => ({ name, type: "http" as const, url: `https://${name}.example/mcp` });
 
@@ -106,33 +106,11 @@ describe("registerBoxMcp", () => {
       progress,
     });
 
-    expect(link.runs.map((run) => run.command.includes("command -v claude"))).toEqual([true, true, false, false, false]);
+    expect(link.runs.map((run) => run.command.includes("command -v claude"))).toEqual([true, true, false, false]);
     expect(link.runs[0]!.command).toContain("'\"'\"'linear'\"'\"'");
     expect(link.runs[0]!.command).not.toContain("notion");
-    expect(link.runs[4]!.command).toContain("command -v codex");
+    expect(link.runs[3]!.command).toContain("command -v codex");
     expect(progress.events).toEqual(["count:1/5", "count:2/5", "count:4/5", "count:5/5"]);
-  });
-
-  test("merges Cursor servers into the box mcp.json and keeps the other box servers", async () => {
-    const box = { mcpServers: { local: { command: "tool" }, linear: { url: "https://old.example/mcp" } }, other: 1 };
-    const link = new FakeLink((command) => (command.includes("mv ") ? ok() : ok(`F${JSON.stringify(box)}`)));
-
-    await registerBoxMcp({
-      remoteHome: "/home/agent",
-      harnesses: BUILTIN_HARNESSES,
-      tools: BUILTIN_TOOLS,
-      mcp: [{ harness: "cursor", servers: [{ name: "linear", type: "http", url: "https://mcp.linear.app/mcp" }] }],
-      link,
-    });
-
-    expect(link.runs[0]!.command).toContain("/home/agent/.cursor/mcp.json");
-    const write = link.runs[1]!.command;
-    expect(write).toContain("mv ");
-    const written = JSON.parse(write.match(/printf '%s' '([\s\S]*)' > /)![1]!);
-    expect(written).toEqual({
-      mcpServers: { local: { command: "tool" }, linear: { url: "https://mcp.linear.app/mcp" } },
-      other: 1,
-    });
   });
 
   test("the box script passes a URL with shell metacharacters to the CLI as one argument", async () => {
@@ -521,6 +499,102 @@ describe("box env values", () => {
       { kind: "env-missing", harness: "codex", server: "docs", keys: ["DOCS_TEAM"], file: ".codex/config.toml" },
       { kind: "env-missing", harness: "cursor", server: "github", keys: ["GITHUB_ORG"], file: ".cursor/mcp.json" },
     ]);
+  });
+});
+
+describe("box Cursor MCP file", () => {
+  const SECRET = `ghp_${"s".repeat(36)}`;
+  const linear = { name: "linear", type: "http" as const, url: "https://mcp.linear.app/mcp" };
+
+  jqTest("merges remote servers into the box mcp.json and keeps the other box servers", async () => {
+    const box = shellBox();
+    box.put(
+      ".cursor/mcp.json",
+      JSON.stringify({ mcpServers: { local: { command: "tool" }, linear: { url: "https://old.example/mcp", headers: { A: "b" } } }, other: 1 }),
+    );
+
+    await registerBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      mcp: [{ harness: "cursor", servers: [linear, { name: "events", type: "sse", url: "https://events.example/sse" }] }],
+      link: box.link,
+    });
+
+    expect(JSON.parse(box.read(".cursor/mcp.json"))).toEqual({
+      mcpServers: {
+        local: { command: "tool" },
+        linear: { url: "https://mcp.linear.app/mcp" },
+        events: { type: "sse", url: "https://events.example/sse" },
+      },
+      other: 1,
+    });
+  });
+
+  jqTest("does not rewrite a box file that already holds the remote servers", async () => {
+    const box = shellBox();
+    const text = JSON.stringify({ mcpServers: { linear: { url: "https://mcp.linear.app/mcp" } } });
+    box.put(".cursor/mcp.json", text);
+
+    const warnings = await registerBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      mcp: [{ harness: "cursor", servers: [linear] }],
+      link: box.link,
+    });
+
+    expect(warnings).toEqual([]);
+    expect(box.read(".cursor/mcp.json")).toBe(text);
+  });
+
+  test("without jq, leaves the box file as it is and warns", async () => {
+    const box = shellBox({ jq: false });
+    const text = JSON.stringify({ mcpServers: {} });
+    box.put(".cursor/mcp.json", text);
+
+    const warnings = await registerBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      mcp: [{ harness: "cursor", servers: [linear] }],
+      link: box.link,
+    });
+
+    expect(warnings).toEqual([
+      "jq is not on the box, so Ferry did not update cursor MCP servers linear. Run ferry update to install jq.",
+    ]);
+    expect(box.read(".cursor/mcp.json")).toBe(text);
+  });
+
+  jqTest("never reaches Ferry when the box merges a remote server", async () => {
+    const box = shellBox();
+    box.put(
+      ".cursor/mcp.json",
+      JSON.stringify({
+        mcpServers: {
+          github: { command: "github-mcp", env: { GITHUB_TOKEN: SECRET } },
+          linear: { url: "https://old.example/mcp" },
+        },
+      }),
+    );
+
+    const warnings = await registerBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      mcp: [{ harness: "cursor", servers: [{ name: "linear", type: "http", url: "https://mcp.linear.app/mcp" }] }],
+      link: box.link,
+    });
+
+    expect(JSON.stringify({ runs: box.link.runs, outputs: box.outputs, warnings })).not.toContain(SECRET);
+    expect(warnings).toEqual([]);
+    expect(JSON.parse(box.read(".cursor/mcp.json"))).toEqual({
+      mcpServers: {
+        github: { command: "github-mcp", env: { GITHUB_TOKEN: SECRET } },
+        linear: { url: "https://mcp.linear.app/mcp" },
+      },
+    });
   });
 });
 
