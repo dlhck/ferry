@@ -9,6 +9,9 @@
 #   FERRY_DOWNLOAD_BASE  Base URL of the releases. Default: https://github.com/dlhck/ferry/releases.
 #   FERRY_SKIP_CHECKSUM  Set to 1 to install a release that has no SHA256SUMS file (v0.1.1 and earlier).
 #                        The script then does not verify the download.
+#
+# A release is visible before the release workflow attaches its files. The script stops when
+# the release does not have its files yet. It does not install an older release in its place.
 
 set -eu
 
@@ -35,8 +38,10 @@ main() {
   asset="ferry-$os-$arch"
   if [ -n "$version" ]; then
     url="$base/download/$version"
+    release="Ferry ${version#v}"
   else
     url="$base/latest/download"
+    release="The latest Ferry release"
   fi
 
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/ferry-install.XXXXXX")
@@ -44,16 +49,24 @@ main() {
   trap cleanup EXIT
   trap 'exit 1' HUP INT TERM
 
-  echo "Downloading $asset from $url"
-  download "$url/$asset" "$tmp/$asset" || fail "Cannot download $url/$asset."
-
+  # SHA256SUMS first: a release without it does not have its files yet, so the script stops
+  # before it downloads a binary.
+  expected=
   if [ "${FERRY_SKIP_CHECKSUM:-}" = 1 ]; then
     echo "Warning: FERRY_SKIP_CHECKSUM=1. The script does not verify the download." >&2
   else
     download "$url/SHA256SUMS" "$tmp/SHA256SUMS" ||
-      fail "Cannot download SHA256SUMS from $url. Releases v0.1.1 and earlier have no SHA256SUMS. To install such a release without a checksum check, set FERRY_SKIP_CHECKSUM=1."
+      fail "$release is not ready for download. The release is still in its build. Try again in some minutes.
+If the release is not new: $url has no SHA256SUMS. Make sure that the release exists. Releases v0.1.1 and earlier have no SHA256SUMS. To install such a release without a checksum check, set FERRY_SKIP_CHECKSUM=1."
     expected=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1; exit }' "$tmp/SHA256SUMS")
     [ -n "$expected" ] || fail "SHA256SUMS has no checksum for $asset."
+  fi
+
+  echo "Downloading $asset from $url"
+  download "$url/$asset" "$tmp/$asset" ||
+    fail "Cannot download $url/$asset. If the release is new, it is still in its build. Try again in some minutes."
+
+  if [ -n "$expected" ]; then
     actual=$(sha256 "$tmp/$asset")
     [ "$actual" = "$expected" ] || fail "Checksum mismatch for $asset. Expected $expected, got $actual."
   fi

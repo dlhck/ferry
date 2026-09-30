@@ -317,7 +317,7 @@ const JSON_RESULTS: Record<string, string> = {
   whoami:
     '{ role: "operator" or "box", box, instructions: { file, sources: [{ part: "header", "box", or "shared", path }] }, managedPaths: { instructionFiles, skillRoots, roots } }. box is null on the operator machine and before the first sync of a box. instructions is null on the operator machine and on a box without the generated file. sources has the merged parts in order, and path is the file on the operator machine. On a box, managedPaths has the paths that the last sync linked there',
   "self-update":
-    "{ current, latest, updated, services: [{ service, action, message }], skill }. skill is the message of the skill update, or null. The output of the installer goes to stderr",
+    "{ current, latest, updated, state, services: [{ service, action, message }], skill }. state is updated, up-to-date, or not-ready. not-ready: the release latest does not have its files yet, and Ferry did not start the update. skill is the message of the skill update, or null. The output of the installer goes to stderr",
   "box list": "{ boxes: [{ name, transport, destination, default }] }",
   "box add": "{ name, transport, destination, gitAuth, migrated, instructionFile }",
   "box remove":
@@ -1428,7 +1428,8 @@ The app also shows the ports of each running ferry tunnel --follow, from
 
 Ferry downloads ferry-menubar-macos.zip of the release of this Ferry,
 verifies it against SHA256SUMS of the release, and unpacks it to
-~/Applications/Ferry Menu Bar.app. --app installs a local build of
+~/Applications/Ferry Menu Bar.app. When the release does not have these
+files yet, Ferry stops and the installed app stays. --app installs a local build of
 macos/build.sh, a .app directory or its zip, without a checksum. A
 development build of Ferry needs --app.
 
@@ -1464,9 +1465,15 @@ version to ~/.agents/skills/ferry, unless ferry init --no-skill turned it off
 or the skill folder has local changes. Then run ferry update to put the new
 version on the boxes.
 
+A release is visible before its build attaches the files. When the latest
+release does not have its files yet, Ferry says that the release is not ready
+and does not start the update. This is not an error. Run the command again
+some minutes later.
+
 On a terminal, each command also asks to update when a newer release is
 there. Ferry reads the latest release at most once a day. It does not ask
-with --json, with CI set, or with FERRY_NO_UPDATE_CHECK=1.`)
+with --json, with CI set, or with FERRY_NO_UPDATE_CHECK=1, and it does not
+ask for a release that does not have its files yet.`)
     .action(async () => {
       const selfUpdateDependencies: Partial<SelfUpdateDependencies> = {
         writeLine,

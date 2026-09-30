@@ -37,6 +37,14 @@ async function fakeReleases(options: { readonly latestSums?: string } = {}) {
     options.latestSums,
   );
   await writeRelease(join(base, "download", "v0.2.0"), { "ferry-linux-x64": stub("0.2.0") });
+  // Releases in their build. The release workflow attaches the files after the release is visible.
+  await mkdir(join(base, "download", "v0.4.0"), { recursive: true });
+  await writeRelease(join(base, "download", "v0.4.1"), { "ferry-linux-x64": stub("0.4.1") }, "none");
+  await writeRelease(
+    join(base, "download", "v0.4.2"),
+    { "ferry-linux-arm64": stub("0.4.2") },
+    `${"0".repeat(64)}  ferry-linux-arm64\n${"0".repeat(64)}  ferry-linux-x64\n`,
+  );
   return pathToFileURL(base).href;
 }
 
@@ -185,7 +193,10 @@ describe.each(shells)("install.sh with %s", (shell) => {
     const refused = await run(shell, { FERRY_DOWNLOAD_BASE: base, FERRY_INSTALL_DIR: dir });
 
     expect(refused.exitCode).not.toBe(0);
-    expect(refused.stderr).toContain("Cannot download SHA256SUMS");
+    expect(refused.stderr).toContain(
+      "The latest Ferry release is not ready for download. The release is still in its build. Try again in some minutes.",
+    );
+    expect(refused.stderr).toContain("FERRY_SKIP_CHECKSUM=1");
     expect(await Bun.file(join(dir, "ferry")).exists()).toBe(false);
 
     const skipped = await run(shell, { FERRY_DOWNLOAD_BASE: base, FERRY_INSTALL_DIR: dir, FERRY_SKIP_CHECKSUM: "1" });
@@ -193,6 +204,33 @@ describe.each(shells)("install.sh with %s", (shell) => {
     expect(skipped.exitCode).toBe(0);
     expect(skipped.stderr).toContain("Warning: FERRY_SKIP_CHECKSUM=1");
     expect(await installedVersion(dir)).toBe("0.3.0");
+  });
+
+  test.each([
+    ["no files", "v0.4.0"],
+    ["a binary and no SHA256SUMS", "v0.4.1"],
+  ])("stops for a release with %s, downloads no binary, and keeps the existing binary", async (_name, version) => {
+    const dir = await newInstallDir();
+    const base = await fakeReleases();
+    await run(shell, { FERRY_DOWNLOAD_BASE: base, FERRY_INSTALL_DIR: dir, FERRY_VERSION: "v0.2.0" });
+    const result = await run(shell, { FERRY_DOWNLOAD_BASE: base, FERRY_INSTALL_DIR: dir, FERRY_VERSION: version });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain(
+      `Error: Ferry ${version.slice(1)} is not ready for download. The release is still in its build. Try again in some minutes.`,
+    );
+    expect(result.stdout).not.toContain("Downloading");
+    expect(await installedVersion(dir)).toBe("0.2.0");
+  });
+
+  test("stops for a release with SHA256SUMS and without the binary of the platform", async () => {
+    const dir = await newInstallDir();
+    const result = await run(shell, { FERRY_DOWNLOAD_BASE: await fakeReleases(), FERRY_INSTALL_DIR: dir, FERRY_VERSION: "v0.4.2" });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("Cannot download");
+    expect(result.stderr).toContain("If the release is new, it is still in its build. Try again in some minutes.");
+    expect(await Bun.file(join(dir, "ferry")).exists()).toBe(false);
   });
 
   test("refuses an unsupported operating system", async () => {

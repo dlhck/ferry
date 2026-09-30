@@ -132,12 +132,22 @@ Commands:
                                  ferry update to put the new
                                  version on the boxes.
 
+                                 A release is visible before its build attaches
+                                 the files. When the latest
+                                 release does not have its files yet, Ferry says
+                                 that the release is not ready
+                                 and does not start the update. This is not an
+                                 error. Run the command again
+                                 some minutes later.
+
                                  On a terminal, each command also asks to update
                                  when a newer release is
                                  there. Ferry reads the latest release at most
                                  once a day. It does not ask
                                  with --json, with CI set, or with
-                                 FERRY_NO_UPDATE_CHECK=1.
+                                 FERRY_NO_UPDATE_CHECK=1, and it does not
+                                 ask for a release that does not have its files
+                                 yet.
   whoami                         Print the role of this machine: the operator
                                  machine or a Ferry box.
 
@@ -1011,7 +1021,9 @@ The app also shows the ports of each running ferry tunnel --follow, from
 
 Ferry downloads ferry-menubar-macos.zip of the release of this Ferry,
 verifies it against SHA256SUMS of the release, and unpacks it to
-~/Applications/Ferry Menu Bar.app. --app installs a local build of
+~/Applications/Ferry Menu Bar.app. When the release does not have these
+files yet, Ferry stops and the installed app stays. --app installs a local build
+of
 macos/build.sh, a .app directory or its zip, without a checksum. A
 development build of Ferry needs --app.
 
@@ -1058,14 +1070,20 @@ version to ~/.agents/skills/ferry, unless ferry init --no-skill turned it off
 or the skill folder has local changes. Then run ferry update to put the new
 version on the boxes.
 
+A release is visible before its build attaches the files. When the latest
+release does not have its files yet, Ferry says that the release is not ready
+and does not start the update. This is not an error. Run the command again
+some minutes later.
+
 On a terminal, each command also asks to update when a newer release is
 there. Ferry reads the latest release at most once a day. It does not ask
-with --json, with CI set, or with FERRY_NO_UPDATE_CHECK=1.
+with --json, with CI set, or with FERRY_NO_UPDATE_CHECK=1, and it does not
+ask for a release that does not have its files yet.
 
 Options:
   -h, --help  display help for command
 
-With --json: { current, latest, updated, services: [{ service, action, message }], skill }. skill is the message of the skill update, or null. The output of the installer goes to stderr.
+With --json: { current, latest, updated, state, services: [{ service, action, message }], skill }. state is updated, up-to-date, or not-ready. not-ready: the release latest does not have its files yet, and Ferry did not start the update. skill is the message of the skill update, or null. The output of the installer goes to stderr.
 ```
 
 ## ferry whoami
