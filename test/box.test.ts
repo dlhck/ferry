@@ -2,10 +2,19 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { boxListLines, runBoxAdd, runBoxDefault, runBoxList, runBoxRemove, type BoxCommandDependencies } from "../src/box.ts";
+import {
+  boxListLines,
+  runBoxAdd,
+  runBoxDefault,
+  runBoxList,
+  runBoxRemove,
+  type BoxCommandDependencies,
+  type BoxRemoveDependencies,
+} from "../src/box.ts";
 import { readConfig, writeConfig, type BoxesOperatorConfig } from "../src/config.ts";
 import type { LinkOptions } from "../src/link.ts";
 import { noProgress } from "../src/progress.ts";
+import { tunnelServicePath, uninstallTunnelService } from "../src/tunnel-service.ts";
 import { recordProgress } from "./fake-progress.ts";
 
 const homes: string[] = [];
@@ -378,23 +387,95 @@ describe("ferry box add --git-auth box", () => {
 });
 
 describe("ferry box remove", () => {
-  test("removes the table and does not connect to the box", () => {
+  /** The dependencies of a removal. The service manager commands go to `commands` and do not run. */
+  function removal(home: string, overrides: Partial<BoxRemoveDependencies> = {}) {
+    const lines: string[] = [];
+    const warnings: string[] = [];
+    const commands: string[][] = [];
+    const deps: BoxRemoveDependencies = {
+      home,
+      readConfig: () => readConfig(home),
+      writeConfig: (config: BoxesOperatorConfig) => writeConfig(config, home),
+      uninstallTunnelService: (input) =>
+        uninstallTunnelService({ ...input, uid: 501 }, {
+          run: async (command) => {
+            commands.push([...command]);
+            return { ok: true, stderr: "" };
+          },
+        }),
+      writeLine: (line) => lines.push(line),
+      warn: (line) => warnings.push(line),
+      ...overrides,
+    };
+    return { deps, lines, warnings, commands };
+  }
+
+  function tunnelService(home: string, box: string): string {
+    const path = tunnelServicePath(box, home);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, "service\n");
+    return path;
+  }
+
+  test("removes the table and does not connect to the box", async () => {
     const home = makeHome(BOXES_CONFIG.replace('default_box = "a"\n', "") + "[box.c]\ntransport = \"ssh\"\ndestination = \"dev@box-c.example\"\n");
-    const { deps, links, lines } = dependencies(home);
+    const { deps, lines, commands } = removal(home);
 
-    runBoxRemove({ name: "b" }, deps);
+    expect(await runBoxRemove({ name: "b" }, deps)).toEqual({ name: "b", defaultBoxRemoved: false, tunnelService: null, instructionFile: null });
 
-    expect(links).toEqual([]);
     expect(readConfig(home)?.boxes?.map((box) => box.name)).toEqual(["a", "c"]);
     expect(lines).toEqual(["Removed box b from the config. Ferry did not change the box."]);
+    expect(commands).toEqual([]);
   });
 
-  test("warns and removes default_box when it named the removed box", () => {
+  test("stops and removes the tunnel service of the box, and names the instruction file that stays", async () => {
     const home = makeHome(BOXES_CONFIG);
-    const warnings: string[] = [];
-    const { deps, lines } = dependencies(home, { warn: (line) => warnings.push(line) });
+    const service = tunnelService(home, "b");
+    const other = tunnelService(home, "a");
+    const instructionFile = join(home, ".ferry/boxes/b/AGENTS.md");
+    mkdirSync(dirname(instructionFile), { recursive: true });
+    writeFileSync(instructionFile, "This box runs the staging database.\n");
+    const { deps, lines, commands } = removal(home);
 
-    expect(runBoxRemove({ name: "a" }, deps)).toEqual({ name: "a", defaultBoxRemoved: true });
+    expect(await runBoxRemove({ name: "b" }, deps)).toEqual({ name: "b", defaultBoxRemoved: false, tunnelService: service, instructionFile });
+
+    expect(existsSync(service)).toBe(false);
+    expect(existsSync(other)).toBe(true);
+    // launchd or systemd stops the service of box b only.
+    expect(commands.length).toBeGreaterThan(0);
+    expect(commands[0]?.join(" ")).toMatch(/ferry[-.]tunnel[-.]b\b/);
+    expect(readFileSync(instructionFile, "utf8")).toBe("This box runs the staging database.\n");
+    expect(readConfig(home)?.boxes?.map((box) => box.name)).toEqual(["a"]);
+    expect(lines).toEqual([
+      `Removed the tunnel service ${service} from this machine.`,
+      "Removed box b from the config. Ferry did not change the box.",
+      `The instruction file ${instructionFile} stays on this machine, because it is your text. A later box with the name b gets it. Delete the file when you do not need it.`,
+    ]);
+  });
+
+  test("warns when the tunnel service does not go, and removes the box from the config", async () => {
+    const home = makeHome(BOXES_CONFIG);
+    const service = tunnelService(home, "b");
+    const { deps, lines, warnings } = removal(home, {
+      uninstallTunnelService: async () => {
+        throw new Error("systemctl failed: Failed to connect to bus");
+      },
+    });
+
+    await runBoxRemove({ name: "b" }, deps);
+
+    expect(readConfig(home)?.boxes?.map((box) => box.name)).toEqual(["a"]);
+    expect(warnings).toEqual([
+      `Warning: Ferry could not remove the tunnel service of box b: systemctl failed: Failed to connect to bus. Look at ${service}.`,
+    ]);
+    expect(lines).toEqual([...warnings, "Removed box b from the config. Ferry did not change the box."]);
+  });
+
+  test("warns and removes default_box when it named the removed box", async () => {
+    const home = makeHome(BOXES_CONFIG);
+    const { deps, lines, warnings } = removal(home);
+
+    expect(await runBoxRemove({ name: "a" }, deps)).toMatchObject({ name: "a", defaultBoxRemoved: true });
 
     expect(readConfig(home)?.defaultBox).toBeUndefined();
     expect(readConfig(home)?.boxes?.map((box) => box.name)).toEqual(["b"]);
@@ -405,19 +486,21 @@ describe("ferry box remove", () => {
     expect(warnings).toEqual(lines.slice(1));
   });
 
-  test("refuses the last box", () => {
+  test("refuses the last box, and keeps its tunnel service", async () => {
     const oneBox = makeHome(BOXES_CONFIG.replace('default_box = "a"\n', "").split("[box.b]")[0]);
-    expect(() => runBoxRemove({ name: "a" }, dependencies(oneBox).deps)).toThrow("box a is the last box");
+    const service = tunnelService(oneBox, "a");
+    await expect(runBoxRemove({ name: "a" }, removal(oneBox).deps)).rejects.toThrow("box a is the last box");
+    expect(existsSync(service)).toBe(true);
 
     const host = makeHome(HOST_CONFIG);
-    expect(() => runBoxRemove({ name: "default" }, dependencies(host).deps)).toThrow("box default is the last box");
+    await expect(runBoxRemove({ name: "default" }, removal(host).deps)).rejects.toThrow("box default is the last box");
     expect(configText(host)).toBe(HOST_CONFIG);
   });
 
-  test("refuses an unknown box", () => {
-    const { deps } = dependencies(makeHome(BOXES_CONFIG));
+  test("refuses an unknown box", async () => {
+    const { deps } = removal(makeHome(BOXES_CONFIG));
 
-    expect(() => runBoxRemove({ name: "c" }, deps)).toThrow("unknown box c. Known boxes: a, b.");
+    await expect(runBoxRemove({ name: "c" }, deps)).rejects.toThrow("unknown box c. Known boxes: a, b.");
   });
 });
 

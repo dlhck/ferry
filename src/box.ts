@@ -14,7 +14,7 @@ import {
   type OperatorHostConfig,
   type PartialOperatorConfig,
 } from "./config.ts";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { boxInstructionsSource } from "./box-identity.ts";
 import { FerryError } from "./errors.ts";
@@ -22,6 +22,8 @@ import { boxCheckSteps, checkBoxAccess, type InitDependencies, type InitLink } f
 import type { LinkOptions } from "./link.ts";
 import { step, type Progress } from "./progress.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
+import { acquireBoxLock } from "./sync.ts";
+import { tunnelServicePath, type TunnelServiceInput } from "./tunnel-service.ts";
 
 export type BoxCommandDependencies = {
   /** The operator home, for the per-box instruction file of `ferry box add`. */
@@ -73,12 +75,21 @@ export type BoxAddInput = {
   readonly yes: boolean;
 };
 
-export type BoxRemoveResult = { readonly name: string; readonly defaultBoxRemoved: boolean };
+export type BoxRemoveResult = {
+  readonly name: string;
+  readonly defaultBoxRemoved: boolean;
+  /** The file of the tunnel user service of the box that Ferry removed from the operator machine, or null. */
+  readonly tunnelService: string | null;
+  /** The per-box instruction file that stays on the operator machine, or null when the box has none. */
+  readonly instructionFile: string | null;
+};
 
-export type BoxUninstallDependencies = Pick<
-  BoxCommandDependencies,
-  "readConfig" | "writeConfig" | "createLink" | "writeLine" | "warn" | "progress"
-> & {
+export type BoxRemoveDependencies = Pick<BoxCommandDependencies, "home" | "readConfig" | "writeConfig" | "writeLine" | "warn"> & {
+  /** Stops and removes the tunnel user service of a box on the operator machine. */
+  readonly uninstallTunnelService: (input: TunnelServiceInput) => Promise<unknown>;
+};
+
+export type BoxUninstallDependencies = BoxRemoveDependencies & Pick<BoxCommandDependencies, "createLink" | "progress"> & {
   /** The harnesses of the registry. Ferry reads their skill roots, instruction files, and extra roots on the box. */
   readonly harnesses: readonly HarnessDescriptor[];
   /** Asks the operator to type the box name. Returns the text. */
@@ -88,7 +99,8 @@ export type BoxUninstallDependencies = Pick<
 /**
  * The result of `ferry box remove --uninstall`. `remaining` has the names that
  * stay in `~/.ferry` on the box. A dry run changes nothing, so its
- * `defaultBoxRemoved` is false and its `remaining` is empty.
+ * `defaultBoxRemoved` is false, its `tunnelService` is null, and its
+ * `remaining` is empty.
  */
 export type BoxUninstallResult = BoxRemoveResult & {
   readonly uninstall: { readonly dryRun: boolean; readonly plan: BoxUninstallPlan; readonly remaining: readonly string[] };
@@ -183,14 +195,15 @@ export async function runBoxAdd(input: BoxAddInput, dependencies: BoxCommandDepe
   };
 }
 
-/** Write the config without the box. Ferry does not connect to the box and does not change it. */
-export function runBoxRemove(
-  input: { readonly name: string },
-  dependencies: Dependencies<"readConfig" | "writeConfig" | "writeLine" | "warn">,
-): BoxRemoveResult {
+/**
+ * Remove the tunnel service of the box from the operator machine, and write
+ * the config without the box. Ferry does not connect to the box and does not
+ * change it.
+ */
+export async function runBoxRemove(input: { readonly name: string }, dependencies: BoxRemoveDependencies): Promise<BoxRemoveResult> {
   const config = readComplete(dependencies.readConfig);
   removableBox(config, input.name);
-  return removeFromConfig(config, input.name, dependencies, "Ferry did not change the box.");
+  return removeFromOperator(config, input.name, dependencies, "Ferry did not change the box.");
 }
 
 /**
@@ -198,13 +211,32 @@ export function runBoxRemove(
  * the box name, remove Ferry from the box, then write the config without the
  * box. A box that Ferry cannot read, or a failed removal, leaves the config as
  * it is. Returns null when the operator does not type the box name.
+ *
+ * Ferry holds the box lock from before it connects until the config has no
+ * box, so a sync cannot write the links on the box again. A sync for the box
+ * fails with `concurrent-sync` during that time, and this command fails with
+ * it when a sync for the box runs. A dry run takes no lock.
  */
 export async function runBoxUninstall(
   input: { readonly name: string; readonly yes: boolean; readonly dryRun: boolean },
   dependencies: BoxUninstallDependencies,
 ): Promise<BoxUninstallResult | null> {
-  const { name } = input;
-  const box = removableBox(readComplete(dependencies.readConfig), name);
+  const box = removableBox(readComplete(dependencies.readConfig), input.name);
+  if (input.dryRun) return uninstallBox(box, input, dependencies);
+  const release = acquireBoxLock(dependencies.home, box);
+  try {
+    return await uninstallBox(box, input, dependencies);
+  } finally {
+    release();
+  }
+}
+
+async function uninstallBox(
+  box: ResolvedBox,
+  input: { readonly yes: boolean; readonly dryRun: boolean },
+  dependencies: BoxUninstallDependencies,
+): Promise<BoxUninstallResult | null> {
+  const { name } = box;
   const link = dependencies.createLink(resolveLinkOptions(box.host));
   const keep = `To remove the box from the config only, run ferry box remove ${name}.`;
   dependencies.writeLine(`Remove Ferry from box ${name}: ${transport(box.host)} ${destination(box.host)}`);
@@ -216,9 +248,17 @@ export async function runBoxUninstall(
     },
   );
   for (const line of boxUninstallLines(plan)) dependencies.writeLine(line);
+  const service = tunnelServiceOf(dependencies.home, name);
+  if (service !== null) dependencies.writeLine(`On this machine: stop and remove the tunnel service ${service}`);
   if (input.dryRun) {
     dependencies.writeLine("Dry run: Ferry made no changes.");
-    return { name, defaultBoxRemoved: false, uninstall: { dryRun: true, plan, remaining: [] } };
+    return {
+      name,
+      defaultBoxRemoved: false,
+      tunnelService: null,
+      instructionFile: instructionFileOf(dependencies.home, name),
+      uninstall: { dryRun: true, plan, remaining: [] },
+    };
   }
   if (!input.yes) {
     dependencies.progress.pause();
@@ -240,7 +280,7 @@ export async function runBoxUninstall(
       ? `Removed Ferry from box ${name}.`
       : `Removed Ferry from box ${name}. ~/.ferry stays on the box with: ${remaining.join(", ")}.`,
   );
-  const removed = removeFromConfig(readComplete(dependencies.readConfig), name, dependencies, "");
+  const removed = await removeFromOperator(readComplete(dependencies.readConfig), name, dependencies, "");
   return { ...removed, uninstall: { dryRun: false, plan, remaining } };
 }
 
@@ -253,23 +293,57 @@ function removableBox(config: PartialOperatorConfig, name: string): ResolvedBox 
   return box;
 }
 
-function removeFromConfig(
+/** The file of the tunnel user service of the box on the operator machine, or null when the box has no service. */
+function tunnelServiceOf(home: string, name: string): string | null {
+  const path = tunnelServicePath(name, home);
+  return existsSync(path) ? path : null;
+}
+
+/** The per-box instruction file on the operator machine, or null when the box has none. */
+function instructionFileOf(home: string, name: string): string | null {
+  const path = join(home, boxInstructionsSource(name));
+  return existsSync(path) ? path : null;
+}
+
+/**
+ * Remove the tunnel service of the box from the operator machine, then write
+ * the config without the box. The per-box instruction file stays, because it
+ * is the text of the operator.
+ */
+async function removeFromOperator(
   config: PartialOperatorConfig,
   name: string,
-  dependencies: Dependencies<"writeConfig" | "writeLine" | "warn">,
+  dependencies: BoxRemoveDependencies,
   note: string,
-): BoxRemoveResult {
+): Promise<BoxRemoveResult> {
+  const warn = (warning: string) => {
+    dependencies.warn?.(warning);
+    dependencies.writeLine(warning);
+  };
+  // The service goes before the config change. Else it starts a tunnel for an unknown box again and again.
+  const tunnelService = tunnelServiceOf(dependencies.home, name);
+  if (tunnelService !== null) {
+    try {
+      await dependencies.uninstallTunnelService({ box: name, home: dependencies.home });
+      dependencies.writeLine(`Removed the tunnel service ${tunnelService} from this machine.`);
+    } catch (cause) {
+      // The box leaves the config also then. Else the next sync puts Ferry on the box again.
+      warn(`Warning: Ferry could not remove the tunnel service of box ${name}: ${messageOf(cause)}. Look at ${tunnelService}.`);
+    }
+  }
   const wasDefault = config.defaultBox === name;
   dependencies.writeConfig(
     withBoxes(config, (config.boxes ?? []).filter((entry) => entry.name !== name), wasDefault ? undefined : config.defaultBox),
   );
   dependencies.writeLine(`Removed box ${name} from the config.${note === "" ? "" : ` ${note}`}`);
-  if (wasDefault) {
-    const warning = `Warning: box ${name} was the default_box. Ferry removed default_box. Set a new one with ferry box default <name>.`;
-    dependencies.warn?.(warning);
-    dependencies.writeLine(warning);
+  if (wasDefault) warn(`Warning: box ${name} was the default_box. Ferry removed default_box. Set a new one with ferry box default <name>.`);
+  const instructionFile = instructionFileOf(dependencies.home, name);
+  if (instructionFile !== null) {
+    dependencies.writeLine(
+      `The instruction file ${instructionFile} stays on this machine, because it is your text. A later box with the name ${name} gets it. Delete the file when you do not need it.`,
+    );
   }
-  return { name, defaultBoxRemoved: wasDefault };
+  return { name, defaultBoxRemoved: wasDefault, tunnelService, instructionFile };
 }
 
 /** Set `default_box`, the box of `install`, `auth`, `move`, `tunnel`, and `integrations enable|disable` without --box. */
