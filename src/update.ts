@@ -74,6 +74,8 @@ export type UpdateCommandDependencies = {
    * does not give the lock. Without it, the update takes no lock.
    */
   readonly home?: string;
+  /** The command name in the lock file of each box. The default is `update`. The watch gives `watch update`. */
+  readonly lockCommand?: string;
 };
 
 /** The plan of each box and of the operator machine, and the updates that ran. */
@@ -301,7 +303,7 @@ async function updateBoxes(
   }
 
   // The plan and the confirmation can take a long time, so the box can leave the config before this point.
-  const lockBox = resolved.home === undefined ? null : boxLocker(resolved.home, resolved.readConfig, "update");
+  const lockBox = resolved.home === undefined ? null : boxLocker(resolved.home, resolved.readConfig, "update", resolved.lockCommand);
   for (const box of reached) {
     if (lockBox === null) break;
     if (box.integrations.length === 0 && !steps.some((step) => step.box === box)) continue;

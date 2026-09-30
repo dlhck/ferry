@@ -56,7 +56,7 @@ export type RevertResult = {
 
 export type RevertDependencies = Pick<SyncDependencies, "readConfig" | "loadRegistry" | "readSeed" | "publisher"> & {
   readonly git?: GitRunner;
-  readonly acquireStoreLock?: (home: string) => Promise<() => void>;
+  readonly acquireStoreLock?: (home: string, command: string) => Promise<() => void>;
   readonly runSync?: typeof runSync;
   /** The dependencies of the sync after the revert. */
   readonly syncDependencies?: SyncDependencies;
@@ -93,7 +93,7 @@ export async function runRevert(input: RevertInput, dependencies: RevertDependen
   const home = input.home ?? homedir();
   const writeLine = dependencies.writeLine ?? console.log;
   const source = inspectSyncSource(home, dependencies);
-  const release = await (dependencies.acquireStoreLock ?? acquireStoreLock)(home);
+  const release = await (dependencies.acquireStoreLock ?? acquireStoreLock)(home, "revert");
   let result: Omit<RevertResult, "sync">;
   try {
     const store = await openStore(source.config.snapshotUrl, source.seed, {
@@ -142,7 +142,7 @@ export async function runRevert(input: RevertInput, dependencies: RevertDependen
 
   if (input.sync === false) return { ...result, sync: null };
   const sync = await (dependencies.runSync ?? runSync)(
-    { home },
+    { home, command: "revert" },
     { progress: dependencies.progress, writeLine, ...dependencies.syncDependencies },
   );
   return { ...result, sync };

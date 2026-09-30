@@ -1479,7 +1479,7 @@ describe("ferry move and the box lock", () => {
 
     expect(typeof held).toBe("function");
     expect(errorInfo(result.error).code).toBe("sync-busy");
-    expect(result.error?.message).toBe("operator: box default is busy: a sync or another Ferry command is active for it");
+    expect(result.error?.message).toBe(`operator: ferry update works on box default now (pid ${process.pid}). Wait for it to end, then try again.`);
     expect(w.commands.some(({ command }) => command.includes("git clone") || command.startsWith("tar -xf"))).toBe(false);
     expect(existsSync(join(w.box, "Developer"))).toBe(false);
     expect(probe(w, HOST)).toBe("free");
@@ -1550,7 +1550,7 @@ describe("ferry move and the box lock", () => {
     const moved = await move(w, { path: "Developer/app", fromBox: "a", toBox: "b" }, { readConfig: BOXES, createLink: watching, lockBox });
 
     expect(errorInfo(busy.error).code).toBe("sync-busy");
-    expect(busy.error?.message).toBe("operator: box b is busy: a sync or another Ferry command is active for it");
+    expect(busy.error?.message).toBe(`operator: ferry update works on box b now (pid ${process.pid}). Wait for it to end, then try again.`);
     expect(afterBusy).toEqual(["free", "busy"]);
     expect(moved.error).toBeNull();
     expect(seen).toEqual(["busy busy", "busy busy"]);

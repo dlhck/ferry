@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCli } from "../src/cli.ts";
@@ -8,6 +10,7 @@ import { formatDoctor, runDoctor, type DoctorCheck, type DoctorDependencies } fr
 import type { HostAdapter, HostCommandResult, LinkErrorCode, LinkOptions, LinkResult } from "../src/link.ts";
 import { noProgress } from "../src/progress.ts";
 import { RealGitRunner, type GitInvocation, type GitRunner } from "../src/store.ts";
+import { acquireBoxLock } from "../src/sync.ts";
 
 const SNAPSHOT = "git@github.com:you/ferry-snapshot.git";
 const HOME = "/home/user";
@@ -140,11 +143,105 @@ describe("ferry doctor", () => {
       "a box-tailscale ok",
       "a box-snapshot ok",
       "a box-linger ok",
+      "a box-lock ok",
       "b box-ssh ok",
       "b box-snapshot ok",
       "b box-linger skipped",
+      "b box-lock ok",
     ]);
     expect(formatDoctor(report).endsWith("All checks passed.")).toBe(true);
+  });
+
+  describe("box lock", () => {
+    const lockOf = (report: { readonly checks: readonly DoctorCheck[] }, box: string) =>
+      report.checks.find((check) => check.box === box && check.id === "box-lock");
+    const lockPath = (home: string, target: string) =>
+      join(home, ".ferry", `sync-${createHash("sha256").update(target).digest("hex").slice(0, 16)}.lock`);
+
+    test("a held box lock is information, with its owner command and pid", async () => {
+      const home = await mkdtemp(join(tmpdir(), "ferry-doctor-lock-"));
+      const release = acquireBoxLock(home, CONFIG.boxes![1]!, "watch");
+      try {
+        const report = await runDoctor({}, { ...fakes({}).dependencies, home });
+
+        expect(report.ok).toBe(true);
+        expect(lockOf(report, "a")).toEqual({ id: "box-lock", box: "a", status: "ok", message: "No Ferry command holds the lock of the box.", fix: null });
+        expect(lockOf(report, "b")).toEqual({
+          id: "box-lock",
+          box: "b",
+          status: "ok",
+          message: `The watch service syncs box b now (pid ${process.pid}).`,
+          fix: null,
+        });
+      } finally {
+        release();
+        await rm(home, { recursive: true, force: true });
+      }
+    });
+
+    test("a lock of an earlier Ferry version whose pid a different program has now fails, and the fix removes the lock file", async () => {
+      const home = await mkdtemp(join(tmpdir(), "ferry-doctor-lock-"));
+      await mkdir(join(home, ".ferry"));
+      // The test process has the pid, and it is not a Ferry process.
+      await writeFile(lockPath(home, "ssh:user@box.example"), JSON.stringify({ pid: process.pid, token: "old" }));
+      // No process has the pid of this lock, so the next command replaces it.
+      await writeFile(lockPath(home, "tailscale:user@box-a"), JSON.stringify({ pid: 2_147_483_647, token: "old" }));
+      const expected = {
+        id: "box-lock",
+        box: "b",
+        status: "failed" as const,
+        message: `The lock of an earlier Ferry version for box b names pid ${process.pid}, which another program has now, so the lock stays. Remove the lock file.`,
+        fix: `rm '${lockPath(home, "ssh:user@box.example")}'`,
+      };
+      try {
+        const bare = await runDoctor({}, { ...fakes({}).dependencies, home });
+        const watch = await runDoctor({}, { ...fakes({ files: { [WATCH_UNIT]: serviceFile(FERRY, "watch") } }).dependencies, home });
+
+        expect(bare.ok).toBe(false);
+        expect(lockOf(bare, "a")?.status).toBe("ok");
+        expect(lockOf(bare, "b")).toEqual(expected);
+        expect(lockOf(watch, "b")).toEqual(expected);
+        expect(formatDoctor(watch)).not.toContain("kill");
+      } finally {
+        await rm(home, { recursive: true, force: true });
+      }
+    });
+
+    test("a lock of an earlier Ferry version that a Ferry process holds fails, with the fix for the installed watch service", async () => {
+      const home = await mkdtemp(join(tmpdir(), "ferry-doctor-lock-"));
+      await mkdir(join(home, ".ferry"));
+      const script = join(home, "ferry", "src", "cli.ts");
+      await mkdir(join(home, "ferry", "src"), { recursive: true });
+      await writeFile(script, `require("node:fs").writeFileSync(${JSON.stringify(join(home, "started"))}, ""); setInterval(() => {}, 1000);`);
+      const ferry = Bun.spawn([process.execPath, script, "watch"], { stdout: "inherit", stderr: "inherit" });
+      try {
+        while (!existsSync(join(home, "started"))) await Bun.sleep(2);
+        await writeFile(lockPath(home, "ssh:user@box.example"), JSON.stringify({ pid: ferry.pid, token: "old" }));
+        const line = `A process of an earlier Ferry version holds the lock of box b (pid ${ferry.pid}). A sync of the box fails while a process has that pid.`;
+
+        const bare = await runDoctor({}, { ...fakes({}).dependencies, home });
+        const watch = await runDoctor({}, { ...fakes({ files: { [WATCH_UNIT]: serviceFile(FERRY, "watch") } }).dependencies, home });
+
+        expect(lockOf(bare, "b")).toEqual({
+          id: "box-lock",
+          box: "b",
+          status: "failed",
+          message: `${line} The process is ${process.execPath} ${script} watch. Stop it.`,
+          fix: `kill ${ferry.pid}`,
+        });
+        expect(lockOf(watch, "b")).toEqual({
+          id: "box-lock",
+          box: "b",
+          status: "failed",
+          message: `${line} If the fix does not free the lock, stop the process with kill ${ferry.pid}.`,
+          fix: "ferry watch install",
+        });
+      } finally {
+        ferry.kill();
+        await ferry.exited;
+        await rm(home, { recursive: true, force: true });
+      }
+    });
   });
 
   test("a broken setup completes and names every failed check with its fix", async () => {

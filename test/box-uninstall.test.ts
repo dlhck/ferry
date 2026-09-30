@@ -551,12 +551,16 @@ describe("ferry box remove --uninstall", () => {
     test("fails and changes nothing while a sync holds the lock, and a dry run takes no lock", async () => {
       const box = await ferryBox();
       const { home, deps, links, text } = operator(box);
-      const release = acquireBoxLock(home, { name: "b", host: { transport: "ssh", destination: "user@box.example" } });
+      const release = acquireBoxLock(home, { name: "b", host: { transport: "ssh", destination: "user@box.example" } }, "sync");
 
       const error = await runBoxUninstall({ name: "b", yes: true, dryRun: false }, deps).catch((error) => error);
 
-      expect(error.message).toBe("operator: a sync or another Ferry command is active for box b");
-      expect(errorInfo(error)).toMatchObject({ code: "sync-busy", hint: "Wait for the other Ferry command to end, then run the command again." });
+      expect(error.message).toBe(`operator: ferry sync works on box b now (pid ${process.pid}). Wait for it to end, then try again.`);
+      expect(errorInfo(error)).toMatchObject({
+        code: "sync-busy",
+        hint: "Wait for the other Ferry command to end, then run the command again.",
+        details: { box: "b", owner: { pid: process.pid, command: "sync", earlierVersion: false, otherProgram: false } },
+      });
       expect(links).toEqual([]);
       expect(text()).toBe(CONFIG);
       expect(await runBoxUninstall({ name: "b", yes: true, dryRun: true }, deps)).toMatchObject({ uninstall: { dryRun: true } });

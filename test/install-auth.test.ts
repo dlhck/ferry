@@ -66,7 +66,7 @@ describe("install command", () => {
 
     test("stops with sync-busy before it changes a box that a sync holds", async () => {
       const { home, runs, linkRuns, lockBox } = locked();
-      const release = acquireBoxLock(home, box);
+      const release = acquireBoxLock(home, box, "sync");
 
       const error = await runInstallCommand(
         { yes: true },
@@ -76,7 +76,7 @@ describe("install command", () => {
 
       expect(errorInfo(error)).toMatchObject({
         code: "sync-busy",
-        message: "operator: box default is busy: a sync or another Ferry command is active for it",
+        message: `operator: ferry sync works on box default now (pid ${process.pid}). Wait for it to end, then try again.`,
       });
       expect(runs).toEqual([]);
       expect(linkRuns).not.toContain(identityCommand);

@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { acquireBoxLock, acquireStoreLock } from "../src/sync.ts";
+import { errorInfo } from "../src/output.ts";
+import { acquireBoxLock, acquireStoreLock, boxLockOwner } from "../src/sync.ts";
 
 const box = { name: "box", host: { transport: "ssh" as const, destination: "user@box.example" } };
 const digest = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 16);
@@ -11,7 +12,7 @@ const lockFile = `sync-${digest("ssh:user@box.example")}.lock`;
 /** No process has this pid: it is more than the largest pid of Linux and of macOS. */
 const DEAD_PID = 2_147_483_647;
 const staleLock = JSON.stringify({ pid: DEAD_PID, token: "stale" });
-const BUSY = "a sync or another Ferry command is active for box box";
+const BUSY = `operator: ferry sync works on box box now (pid ${process.pid}). Wait for it to end, then try again.`;
 
 describe("lock recovery", () => {
   let home: string;
@@ -115,7 +116,7 @@ describe("lock recovery", () => {
   });
 
   test("no contender removes a live lock", async () => {
-    const release = acquireBoxLock(home, box);
+    const release = acquireBoxLock(home, box, "sync");
     const live = readFileSync(lockPath, "utf8");
 
     const results = await race(4);
@@ -127,16 +128,16 @@ describe("lock recovery", () => {
   });
 
   test("the release of a lock that another process replaced leaves the new lock", () => {
-    const releaseOld = acquireBoxLock(home, box);
+    const releaseOld = acquireBoxLock(home, box, "sync");
     // Make the lock look like the lock of a dead process, so a second owner replaces it.
     writeFileSync(lockPath, staleLock);
-    const releaseNew = acquireBoxLock(home, box);
+    const releaseNew = acquireBoxLock(home, box, "sync");
     const live = readFileSync(lockPath, "utf8");
 
     releaseOld();
 
     expect(readFileSync(lockPath, "utf8")).toBe(live);
-    expect(() => acquireBoxLock(home, box)).toThrow(BUSY);
+    expect(() => acquireBoxLock(home, box, "sync")).toThrow(BUSY);
     releaseNew();
     expect(locks()).toEqual([]);
   });
@@ -148,7 +149,7 @@ describe("lock recovery", () => {
   ])("replaces a lock file that is %s", (_name, content) => {
     writeFileSync(lockPath, content);
 
-    const release = acquireBoxLock(home, box);
+    const release = acquireBoxLock(home, box, "sync");
 
     expect(owner()).toBe(process.pid);
     expect(locks()).toEqual([lockFile]);
@@ -157,14 +158,14 @@ describe("lock recovery", () => {
   });
 
   test("replaces the lock of a dead process when a new process has its pid", () => {
-    acquireBoxLock(home, box)();
+    acquireBoxLock(home, box, "sync")();
     // This process is live and has the pid, but it did not start at the recorded time.
     writeFileSync(lockPath, JSON.stringify({ pid: process.pid, start: "another-start", token: "stale" }));
 
-    const release = acquireBoxLock(home, box);
+    const release = acquireBoxLock(home, box, "sync");
 
     expect(JSON.parse(readFileSync(lockPath, "utf8"))).toMatchObject({ pid: process.pid, start: expect.any(String) });
-    expect(() => acquireBoxLock(home, box)).toThrow(BUSY);
+    expect(() => acquireBoxLock(home, box, "sync")).toThrow(BUSY);
     release();
   });
 
@@ -173,7 +174,7 @@ describe("lock recovery", () => {
     const old = JSON.stringify({ pid: process.pid, token: "old" });
     writeFileSync(lockPath, old);
 
-    expect(() => acquireBoxLock(home, box)).toThrow(BUSY);
+    expect(() => acquireBoxLock(home, box, "sync")).toThrow("The lock of an earlier Ferry version for box box names pid");
     expect(readFileSync(lockPath, "utf8")).toBe(old);
   });
 
@@ -181,17 +182,147 @@ describe("lock recovery", () => {
     writeFileSync(lockPath, staleLock);
     writeFileSync(`${lockPath}.${digest(staleLock)}.claim`, JSON.stringify({ pid: DEAD_PID, token: "claim" }));
 
-    const release = acquireBoxLock(home, box);
+    const release = acquireBoxLock(home, box, "sync");
 
     expect(owner()).toBe(process.pid);
     expect(locks()).toEqual([lockFile]);
     release();
   });
 
+  test("the lock file names the command next to the pid, the start, and the token", async () => {
+    const release = acquireBoxLock(home, box, "box remove");
+    const lock = JSON.parse(readFileSync(lockPath, "utf8"));
+    expect(lock).toEqual({ pid: process.pid, start: expect.any(String), command: "box remove", token: expect.any(String) });
+    // A process of Ferry 0.10.0 reads only the pid, the start, and the token.
+    expect(Object.keys(lock)).toEqual(["pid", "start", "command", "token"]);
+    expect(boxLockOwner(home, box)).toEqual({ pid: process.pid, command: "box remove", earlierVersion: false, otherProgram: false });
+    release();
+    expect(boxLockOwner(home, box)).toBeNull();
+
+    const releaseStore = await acquireStoreLock(home, "revert");
+    expect(JSON.parse(readFileSync(join(home, ".ferry", "store.lock"), "utf8"))).toMatchObject({ pid: process.pid, command: "revert" });
+    releaseStore();
+  });
+
+  test.each([
+    ["watch", "The watch service syncs box box now (pid PID). Try again in a moment."],
+    ["watch update", "The watch service updates box box now (pid PID). Try again in a moment."],
+    ["integrations enable", "ferry integrations enable works on box box now (pid PID). Wait for it to end, then try again."],
+  ])("the busy error names the box and the owner %s", (command, text) => {
+    const release = acquireBoxLock(home, box, command);
+    let error: unknown;
+    try {
+      acquireBoxLock(home, box, "sync");
+    } catch (caught) {
+      error = caught;
+    }
+    release();
+
+    expect(error).toMatchObject({ code: "concurrent-sync" });
+    expect(errorInfo(error)).toEqual({
+      code: "sync-busy",
+      message: `operator: ${text.replace("PID", String(process.pid))}`,
+      hint: "Wait for the other Ferry command to end, then run the command again.",
+      details: { box: "box", owner: { pid: process.pid, command, earlierVersion: false, otherProgram: false } },
+    });
+  });
+
+  test("a lock of Ferry 0.10.0 has no command, and the busy error names the box", () => {
+    const release = acquireBoxLock(home, box, "sync");
+    const { command: _command, ...old } = JSON.parse(readFileSync(lockPath, "utf8"));
+    writeFileSync(lockPath, JSON.stringify(old));
+
+    expect(() => acquireBoxLock(home, box, "sync")).toThrow(
+      `operator: A sync or another Ferry command works on box box now (pid ${process.pid}). Wait for it to end, then try again.`,
+    );
+    expect(boxLockOwner(home, box)).toEqual({ pid: process.pid, command: null, earlierVersion: false, otherProgram: false });
+    expect(readFileSync(lockPath, "utf8")).toBe(JSON.stringify(old));
+    // The release compares only the token, as the release of Ferry 0.10.0 does.
+    release();
+    expect(locks()).toEqual([]);
+  });
+
+  /** Start a process with the command line of Ferry under bun, which only waits. */
+  async function ferryProcess(): Promise<Bun.Subprocess> {
+    const script = join(home, "ferry", "src", "cli.ts");
+    mkdirSync(join(home, "ferry", "src"), { recursive: true });
+    writeFileSync(script, `require("node:fs").writeFileSync(${JSON.stringify(join(home, "ferry.started"))}, ""); setInterval(() => {}, 1000);`);
+    const child = Bun.spawn([process.execPath, script, "watch"], { stdout: "inherit", stderr: "inherit" });
+    children.push(child);
+    while (!existsSync(join(home, "ferry.started"))) await Bun.sleep(2);
+    return child;
+  }
+
+  test("a lock of an earlier Ferry version whose pid a different program has now gives no advice to stop that program", () => {
+    // The test process has the pid, and it is not a Ferry process.
+    const old = JSON.stringify({ pid: process.pid, token: "old" });
+    writeFileSync(lockPath, old);
+    let error: unknown;
+    try {
+      acquireBoxLock(home, box, "sync");
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(errorInfo(error)).toEqual({
+      code: "sync-busy",
+      message: `operator: The lock of an earlier Ferry version for box box names pid ${process.pid}, which another program has now, so the lock stays. Run ferry doctor for the fix.`,
+      hint: "Run ferry doctor. It gives the fix for the lock of an earlier Ferry version.",
+      details: { box: "box", owner: { pid: process.pid, command: null, earlierVersion: true, otherProgram: true } },
+    });
+    // Ferry keeps the lock.
+    expect(readFileSync(lockPath, "utf8")).toBe(old);
+  });
+
+  test("a lock without a start and a command that a Ferry process holds is the lock of an earlier Ferry version", async () => {
+    const ferry = await ferryProcess();
+    writeFileSync(lockPath, JSON.stringify({ pid: ferry.pid, token: "old" }));
+    let error: unknown;
+    try {
+      acquireBoxLock(home, box, "sync");
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(errorInfo(error)).toEqual({
+      code: "sync-busy",
+      message:
+        `operator: A process of an earlier Ferry version holds the lock of box box (pid ${ferry.pid}). Wait for it to end, then try again. ` +
+        "If the lock stays, run ferry watch install to start the watch service with this version, or stop that process.",
+      hint: "Run ferry doctor. It gives the fix for the lock of an earlier Ferry version.",
+      details: { box: "box", owner: { pid: ferry.pid, command: null, earlierVersion: true, otherProgram: false } },
+    });
+  });
+
+  test("a command in the lock file that is not a short name does not go into the message", () => {
+    const release = acquireBoxLock(home, box, "sync");
+    const lock = JSON.parse(readFileSync(lockPath, "utf8"));
+    writeFileSync(lockPath, JSON.stringify({ ...lock, command: "sync\u001b[2J" }));
+
+    expect(boxLockOwner(home, box)).toEqual({ pid: process.pid, command: null, earlierVersion: false, otherProgram: false });
+    release();
+  });
+
+  test("a process of Ferry 0.10.0 and a new process share one lock file", async () => {
+    // The lock of a dead process of Ferry 0.10.0, and then of a dead new process: a new contender replaces each.
+    for (const stale of [
+      JSON.stringify({ pid: DEAD_PID, start: "boot:1", token: "stale" }),
+      JSON.stringify({ pid: DEAD_PID, start: "boot:1", command: "watch", token: "stale" }),
+    ]) {
+      writeFileSync(lockPath, stale);
+      const id = `n${digest(stale)}`;
+      const child = contender(id);
+      expect(await reaches(id, "acquired", "busy")).toBe("acquired");
+      expect(JSON.parse(readFileSync(lockPath, "utf8"))).toMatchObject({ pid: child.pid, command: "sync" });
+      child.kill();
+      await child.exited;
+    }
+  });
+
   test("the store lock replaces a stale lock", async () => {
     writeFileSync(join(home, ".ferry", "store.lock"), staleLock);
 
-    const release = await acquireStoreLock(home);
+    const release = await acquireStoreLock(home, "sync");
 
     expect(locks()).toEqual(["store.lock"]);
     release();

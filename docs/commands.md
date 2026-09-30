@@ -179,7 +179,9 @@ JSON output (--json):
   lists them. A command that runs and exits prints one envelope:
     {"schemaVersion":1,"command","ok","result","warnings","error"}
   error is null, or {"code","message","hint"}. On failure, ok is false and
-  the exit code is not 0. A failed update, or a failed sync of more than
+  the exit code is not 0. A sync-busy error names the box and the command
+  that holds its lock, also in error.details.box and error.details.owner
+  ({"pid","command","earlierVersion","otherProgram"}). A failed update, or a failed sync of more than
   one box, keeps the outcome of each box in result. watch, tunnel,
   tunnel --follow, and expose print one event for each line. Each event
   has "type". An error event also has "code", "message", and "hint".
@@ -689,6 +691,13 @@ services run this Ferry. For each box, it checks that the box responds over
 SSH with host key checks on, that Tailscale reaches a Tailscale box, that the
 box can read the snapshot with the forwarded agent or the deploy key of
 git_auth = "box", and that linger is on when a Ferry service runs on the box.
+
+For each box, it also shows the lock of the box on this machine. A held lock
+names the command that holds it and its pid, and is not a failure. The check
+fails only for the lock of a Ferry version before 0.10.0 whose pid is alive.
+When a Ferry process has the pid, the fix is ferry watch install, or to stop
+that process. When a different program has the pid now, the fix removes the
+lock file.
 
 The exit code is 1 when a check fails. With --json, result has one entry for
 each check, also on failure.

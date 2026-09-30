@@ -256,7 +256,9 @@ const JSON_HELP = `JSON output (--json):
   lists them. A command that runs and exits prints one envelope:
     {"schemaVersion":1,"command","ok","result","warnings","error"}
   error is null, or {"code","message","hint"}. On failure, ok is false and
-  the exit code is not 0. A failed update, or a failed sync of more than
+  the exit code is not 0. A sync-busy error names the box and the command
+  that holds its lock, also in error.details.box and error.details.owner
+  ({"pid","command","earlierVersion","otherProgram"}). A failed update, or a failed sync of more than
   one box, keeps the outcome of each box in result. watch, tunnel,
   tunnel --follow, and expose print one event for each line. Each event
   has "type". An error event also has "code", "message", and "hint".
@@ -519,7 +521,7 @@ function createProgram(dependencies: CliDependencies): { program: Command; state
    * reads it at its start. The lock reads the whole config again, because the
    * command sees only the view of `boxConfig`.
    */
-  const boxLock = (command: string, selected: { config: PartialOperatorConfig; box: ResolvedBox } | undefined) => {
+  const boxLock = (command: string, selected: { config: PartialOperatorConfig; box: ResolvedBox } | undefined, owner = command) => {
     let box: ResolvedBox;
     try {
       box = selected?.box ?? resolveTargetBox(config());
@@ -527,7 +529,7 @@ function createProgram(dependencies: CliDependencies): { program: Command; state
       // The command reports a config that it cannot read, or that has no box.
       return {};
     }
-    const lock = boxLocker((dependencies.home ?? homedir)(), config, command);
+    const lock = boxLocker((dependencies.home ?? homedir)(), config, command, owner);
     return { lockBox: () => lock(box) };
   };
   /** With box tables, `integrations enable|disable` sets the key in `[box.<name>.integrations]`. */
@@ -1144,6 +1146,13 @@ SSH with host key checks on, that Tailscale reaches a Tailscale box, that the
 box can read the snapshot with the forwarded agent or the deploy key of
 git_auth = "box", and that linger is on when a Ferry service runs on the box.
 
+For each box, it also shows the lock of the box on this machine. A held lock
+names the command that holds it and its pid, and is not a failure. The check
+fails only for the lock of a Ferry version before 0.10.0 whose pid is alive.
+When a Ferry process has the pid, the fix is ferry watch install, or to stop
+that process. When a different program has the pid now, the fix removes the
+lock file.
+
 The exit code is 1 when a check fails. With --json, result has one entry for
 each check, also on failure.`)
     .action(async () => {
@@ -1223,7 +1232,7 @@ sherlock add, and ferry status checks each connection that it added.`)
             ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}),
             ...(json() ? { confirm: refuse(`Enable ${name} on the box?`) } : {}),
             ...integrationBox(selectBox("integrations enable")),
-            ...boxLock("change", selectBox("integrations enable")),
+            ...boxLock("change", selectBox("integrations enable"), "integrations enable"),
           },
         ),
       );
@@ -1250,7 +1259,7 @@ changes only the config.`)
             ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}),
             ...(json() ? { confirm: refuse(`Disable ${name} on the box?`) } : {}),
             ...integrationBox(selectBox("integrations disable")),
-            ...boxLock("change", selectBox("integrations disable")),
+            ...boxLock("change", selectBox("integrations disable"), "integrations disable"),
           },
         ),
       );

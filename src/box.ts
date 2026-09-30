@@ -242,7 +242,7 @@ export async function runBoxUninstall(
     );
   }
   if (input.dryRun) return uninstallBox(box, input, dependencies);
-  const release = acquireBoxLock(dependencies.home, box);
+  const release = acquireBoxLock(dependencies.home, box, "box remove");
   try {
     return await uninstallBox(box, input, dependencies);
   } finally {
