@@ -304,10 +304,10 @@ fi
 echo '{"connections":[]}'
 `;
 
-  /** Runs the SSH check and the `-W` check of reach. Else it waits for SIGTERM and records that it had no terminal. */
+  /** Answers the connect test of reach. Else it waits for SIGTERM and records that it had no terminal. */
   const FAKE_SSH = `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_SSH_LOG"
-case "$*" in *"; true" | *"-W "*) exit 0 ;; esac
+case "$*" in *"/dev/tcp/"*) echo "exit 0"; exit 0 ;; esac
 [ -t 0 ] && echo "stdin is a terminal" >> "$FAKE_SSH_LOG"
 trap 'echo stopped >> "$FAKE_SSH_LOG"; exit 0' TERM
 touch "$FAKE_SSH_LOG.ready"
@@ -450,7 +450,7 @@ while :; do sleep 0.05; done
     while (!readFileSync(log, "utf8").includes("Tunnel closed.") && Date.now() < closed) await Bun.sleep(20);
     const ssh = readFileSync(env.env.FAKE_SSH_LOG, "utf8").trim().split("\n");
     expect(ssh[0]).toContain("-o BatchMode=yes");
-    expect(ssh[2]).toContain(`-L 127.0.0.1:${port}:db.example:5432 user@box.example`);
+    expect(ssh[1]).toContain(`-L 127.0.0.1:${port}:db.example:5432 user@box.example`);
     expect(ssh).not.toContain("stdin is a terminal");
     expect(ssh.at(-1)).toBe("stopped");
     expect(readFileSync(log, "utf8")).toContain(`http://localhost:${port} -> lab:db.example:5432`);

@@ -223,25 +223,48 @@ export class Link {
   }
 
   /**
-   * Open one TCP connection from the box to `host:port` and close it, with
-   * `ssh -W`. A failure from the box has origin `box`.
+   * Open one TCP connection from the box to `host:port` and close it. A
+   * failure from the box has origin `box`.
    *
-   * A connection that stays open until the timeout is a success: the box did
-   * not refuse the connection in that time. A stalled SSH connection to the
-   * box also runs to the timeout, so a command on the box confirms the SSH
-   * connection first. A target that drops the packets of the box also runs to
-   * the timeout, and Ferry cannot tell it from an open connection.
+   * The box opens the connection with `bash` and `/dev/tcp`, under `timeout`.
+   * So a target that accepts the connection and sends nothing is a success at
+   * once, and a target that drops the packets of the box is a failure after
+   * the timeout.
+   *
+   * A box without `bash`, `timeout`, or `/dev/tcp` gets `ssh -W`. There, a
+   * connection that stays open until the timeout is a success, and Ferry
+   * cannot tell a target that drops the packets from an open connection.
    */
   async reach(target: { readonly host: string; readonly port: number }): Promise<LinkResult> {
     const connectTimeoutMs = this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
-    const probe = await this.run("true", { timeoutMs: connectTimeoutMs + DEFAULT_PROBE_TIMEOUT_MS });
-    if (!probe.ok) {
-      // A failure of the probe command is not a failure of the target, so it does not have the origin `box`.
-      return probe.error.origin === "box"
-        ? failure("ssh-failed", "network", `the SSH check of the box failed: ${probe.error.message}`)
-        : probe;
+    const seconds = Math.max(1, Math.ceil(connectTimeoutMs / 1_000));
+    // The time for the SSH connection and for the connect test on the box.
+    const checked = await this.run(reachCommand(target.host, target.port, seconds), {
+      timeoutMs: 2 * connectTimeoutMs + DEFAULT_PROBE_TIMEOUT_MS,
+    });
+    if (!checked.ok) {
+      // The command prints the result of the target and exits with 0. So its failure is not a failure of the target, and it does not have the origin `box`.
+      return checked.error.origin === "box"
+        ? failure("ssh-failed", "network", `the check on the box failed: ${checked.error.message}`)
+        : checked;
     }
+    const lines = checked.stdout.trimEnd().split("\n");
+    const exit = /^exit (\d+)$/.exec(lines.at(-1) ?? "");
+    const code = exit ? Number(exit[1]) : null;
+    if (code === 0) return { ok: true, address: checked.address, stdout: "", stderr: "" };
+    if (code === TIMEOUT_EXIT) return failure("forward-timeout", "box", `no answer in ${seconds} s`);
+    // `timeout` exits with 125 to 127 when it cannot run the command. A bash without network redirections has no /dev/tcp file.
+    const unsupported = code === null || (code >= 125 && code <= 127) || checked.stdout.includes("No such file or directory");
+    if (!unsupported) {
+      // Bash prints `bash: connect: <reason>` or `bash: line 1: <host>: <reason>`.
+      const detail = (lines[0] ?? "").replace(/^bash: (line \d+: )?(connect: )?/, "").replace(`${target.host}: `, "");
+      return failure("forward-failed", "box", detail === lines.at(-1) ? `the connection failed with exit code ${code}` : detail);
+    }
+    return this.reachWithStdio(target);
+  }
 
+  /** `reach` for a box that cannot run the connect test. The command of `reach` confirmed the SSH connection before. */
+  private async reachWithStdio(target: { readonly host: string; readonly port: number }): Promise<LinkResult> {
     const resolved = await this.resolve();
     if (!resolved.ok) return resolved;
 
@@ -249,7 +272,7 @@ export class Link {
     try {
       execution = await this.adapter.run({
         argv: ["ssh", ...this.sshOptions(), "-W", `${bracketHost(target.host)}:${target.port}`, resolved.destination],
-        timeoutMs: connectTimeoutMs,
+        timeoutMs: this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
       });
     } catch (error) {
       return failure("ssh-start-failed", "operator", messageOf(error, "could not start OpenSSH"));
@@ -615,6 +638,28 @@ function validateTunnel(options: TunnelOptions): LinkFailure | null {
     return failure("invalid-config", "operator", "port numbers must be integers from 1 through 65535");
   }
   return null;
+}
+
+/** The exit code of `timeout` for a command that it stopped. */
+const TIMEOUT_EXIT = 124;
+
+/**
+ * The box command of `reach`. It prints `unsupported` when the box has no
+ * `bash` or no `timeout`. Else it prints the error lines of bash, then
+ * `exit <code>` with the exit code of `timeout`: 0 for an open connection and
+ * 124 for no answer. It always exits with 0. The host is an argument of bash,
+ * so bash does not read it as code. `/dev/tcp` takes an IPv6 address without brackets.
+ */
+export function reachCommand(host: string, port: number, seconds: number): string {
+  return [
+    "if ! command -v bash >/dev/null 2>&1 || ! command -v timeout >/dev/null 2>&1; then echo unsupported; exit 0; fi",
+    `LC_ALL=C timeout ${seconds} bash -c 'exec 3<>"/dev/tcp/$1/$2"' bash ${quoteShell(host)} ${port} 2>&1`,
+    'echo "exit $?"',
+  ].join("; ");
+}
+
+function quoteShell(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 /** The `-L` spec of a port. OpenSSH needs an IPv6 address in brackets. */
