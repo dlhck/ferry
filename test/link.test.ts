@@ -433,9 +433,13 @@ describe("Link", () => {
     const link = new Link({ destination: "user@box.example" }, host);
     const reach = () => link.reach({ host: "db.example", port: 5432 });
 
-    // With ssh -W, the box did not refuse a connection that stays open until the timeout.
-    expect((await reach()).ok).toBe(true);
-    expect((await reach()).ok).toBe(true);
+    // With ssh -W, a timeout does not show that the connection opened.
+    expect(await reach()).toEqual({
+      ok: false,
+      unknown: true,
+      reason: "the box has no bash, timeout, or /dev/tcp for the connect test, and the test with ssh -W gave no answer in 10 s",
+    });
+    expect(await reach()).toEqual({ ok: true, address: "user@box.example", stdout: "", stderr: "" });
     expect(await reach()).toEqual({
       ok: false,
       error: { code: "forward-failed", origin: "box", message: "connect failed: Name or service not known" },

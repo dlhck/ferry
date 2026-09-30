@@ -11,6 +11,7 @@ import type {
   LinkOptions,
   LinkResult,
   MasterOptions,
+  ReachResult,
   TunnelOptions,
   TunnelPort,
 } from "../src/link.ts";
@@ -41,10 +42,10 @@ class FakeLink {
   constructor(
     private readonly tunnelResult: (options: TunnelOptions) => Promise<ForwardResult>,
     private readonly runResult: LinkResult = { ok: true, address: "dev@lab.example", stdout: "", stderr: "" },
-    private readonly reachResult: LinkResult = { ok: true, address: "dev@lab.example", stdout: "", stderr: "" },
+    private readonly reachResult: ReachResult = { ok: true, address: "dev@lab.example", stdout: "", stderr: "" },
   ) {}
 
-  async reach(target: { host: string; port: number }): Promise<LinkResult> {
+  async reach(target: { host: string; port: number }): Promise<ReachResult> {
     this.reached.push(target);
     return this.reachResult;
   }
@@ -240,6 +241,22 @@ describe("runTunnel", () => {
     );
     expect(link.tunnels).toEqual([]);
     expect(run.events).toEqual([]);
+  });
+
+  test("a host that Ferry could not check gets a warning, and the tunnel opens", async () => {
+    const link = new FakeLink(untilAborted, undefined, { ok: false, unknown: true, reason: "the test with ssh -W gave no answer in 10 s" });
+    const run = harness(link);
+
+    const done = runTunnel({ ports: ["db.example:5432:15432"], list: false, box: BOX }, run.dependencies);
+    await Bun.sleep(0);
+    run.interrupt();
+    await done;
+
+    expect(link.tunnels[0]?.ports).toEqual([{ remoteHost: "db.example", remotePort: 5432, localPort: 15432 }]);
+    expect(run.lines.slice(0, 2)).toEqual([
+      "Warning: Ferry could not check that lab can reach db.example:5432: the test with ssh -W gave no answer in 10 s. The tunnel opens without this check.",
+      "http://localhost:15432 -> lab:db.example:5432",
+    ]);
   });
 
   test("a failed connection to the box during the host check names the box", async () => {
