@@ -1146,8 +1146,9 @@ only on a box with one user. To connect Paseo Desktop, add the Remote SSH host
 ssh://<box destination>. With Paseo on, sync carries the Paseo agent profiles,
 managed Git and npm plugins, the portable fields of agents.providers,
 agents.metadataGeneration.providers, daemon.appendSystemPrompt, and the
-portable daemon.terminalProfiles, and move registers the project in Paseo on
-the box.
+portable daemon.terminalProfiles. move registers the project in Paseo on the
+box and imports each carried session as a Paseo agent. move --from-box does
+the same in the Paseo of this machine.
 
 For relay pairing, set paseo_relay = true in [integrations] of
 ~/.ferry/config.toml. A [box.<name>.integrations] table can override it.

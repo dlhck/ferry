@@ -249,8 +249,9 @@ describe("ferry --help", () => {
 
     expect(output).toEqual([
       "paseo  enabled  Paseo daemon on the box",
-      "  Parts: box",
+      "  Parts: box, operator",
       "  Local app: not found. The box version is not pinned.",
+      "  This machine: available",
       "  Connect to the box:",
       "    Open Paseo Desktop.",
       "    Open Settings → Add host → Remote SSH.",
@@ -1106,8 +1107,9 @@ describe("--box", () => {
     expect(await lines(["integrations", "--box", "b"])).toEqual([
       "Box b",
       "  paseo  disabled  Paseo daemon on the box",
-      "    Parts: box",
+      "    Parts: box, operator",
       "    Local app: not found. The box version is not pinned.",
+      "    This machine: available",
     ]);
   });
 

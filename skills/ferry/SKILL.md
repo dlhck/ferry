@@ -215,10 +215,11 @@ A skill that you write on a box stays on that box, and the next sync can refuse 
 
 ## Integrations
 
-An integration adds a service on the box, commands on the operator machine, or both. Paseo runs a service on the box. Sherlock adds commands on the operator machine. Each one is off by default. When it is off, Ferry prints nothing about it.
+An integration adds a service on the box, commands on the operator machine, or both. Paseo runs a service on the box, and takes a project that moves back into the Paseo of the operator machine. Sherlock adds commands on the operator machine. Each one is off by default. When it is off, Ferry prints nothing about it.
 
 - `ferry integrations` lists each integration, shows if it is enabled, and shows the local app version that the box gets. It changes nothing.
 - `ferry integrations enable paseo`, `ferry integrations disable paseo`, and the Paseo step of `ferry update` need the operator. Run them with `--dry-run` only, and tell the operator the command. An update restarts the Paseo daemon and stops the agents that run on the box.
+- When Paseo is enabled, `ferry move` registers the project in the Paseo of the destination and imports each carried session as a Paseo agent. The destination is the box, or the operator machine for a move with `--from-box`. A session that already has an agent there is skipped. A `WARNING: Ferry could not register <path> in Paseo: <reason>. The move is complete.` line means that only the Paseo step failed. Do not run the move again for it.
 - When Paseo is enabled, each sync carries the Paseo agent profiles to the box as its last step. Sync prints `Warning: Paseo agent profile <name> was not carried: provider <provider> is not available on the box.` for each profile that it skips. A profile with an `env` block or a secret stops the sync, as a deny rule does.
 
 On the box, do not edit these files. Ferry writes them, and it overwrites your change:
