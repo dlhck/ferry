@@ -39,7 +39,7 @@ export type DenyRuleDescription = {
  * a box whose number is lower than this one, because older rules can pass a
  * file that this machine refuses.
  */
-export const DENY_RULES_VERSION = 2;
+export const DENY_RULES_VERSION = 3;
 
 const DENY_RULES = {
   dotenv: { code: "dotenv", reason: "environment file", verdict: "refuse" },
@@ -175,15 +175,19 @@ const CACHE_DIRS = new Set([".git", "node_modules", ".cache", "__pycache__"]);
 const SETTINGS_NAMES = new Set(["settings.json", "settings.local.json", "mcp.json", ".mcp.json"]);
 const PRIVATE_KEY_HEADER = /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/;
 // A bare prefix in prose is not a token. Each pattern needs a token-length tail.
-// Group 1 is the body after the prefix.
+// Group 1 is the body after the prefix. A letter or a digit before the prefix
+// makes it a part of a longer word. An underscore does not, so `MY_<token>` is
+// a token. A word boundary is not the test, because `_` is a word character.
 const TOKEN_PATTERNS = [
-  [/\bgh[opsu]_([A-Za-z0-9]{30,})/g, DENY_RULES["github-token"]],
-  [/\bgithub_pat_([A-Za-z0-9_]{40,})/g, DENY_RULES["github-token"]],
-  [/\bsk-ant-([A-Za-z0-9_-]{20,})/g, DENY_RULES["anthropic-key"]],
-  [/\bsk-proj-([A-Za-z0-9_-]{20,})/g, DENY_RULES["openai-key"]],
-  [/\bxox[bp]-([A-Za-z0-9-]{20,})/g, DENY_RULES["slack-token"]],
-  [/\bAKIA([0-9A-Z]{16})\b/g, DENY_RULES["aws-access-key"]],
+  [/(?<![A-Za-z0-9])gh[opsu]_([A-Za-z0-9]{30,})/g, DENY_RULES["github-token"]],
+  [/(?<![A-Za-z0-9])github_pat_([A-Za-z0-9_]{40,})/g, DENY_RULES["github-token"]],
+  [/(?<![A-Za-z0-9])sk-ant-([A-Za-z0-9_-]{20,})/g, DENY_RULES["anthropic-key"]],
+  [/(?<![A-Za-z0-9])sk-proj-([A-Za-z0-9_-]{20,})/g, DENY_RULES["openai-key"]],
+  [/(?<![A-Za-z0-9])xox[bp]-([A-Za-z0-9-]{20,})/g, DENY_RULES["slack-token"]],
+  [/(?<![A-Za-z0-9])AKIA([0-9A-Z]{16})(?![A-Za-z0-9])/g, DENY_RULES["aws-access-key"]],
 ] as const satisfies readonly (readonly [RegExp, DenyRule])[];
+/** The source of each token pattern without its guards for the text before and after the token. */
+const TOKEN_SOURCES = TOKEN_PATTERNS.map(([pattern]) => pattern.source.replace("(?<![A-Za-z0-9])", "").replace("(?![A-Za-z0-9])", ""));
 /**
  * A documentation placeholder, not a token: a body that is one character
  * (`x`, `X`, or `0`) repeated, or a body of only `x`/`X` with the `-`/`_`
@@ -675,11 +679,10 @@ export function isSecretValue(value: string): boolean {
 }
 
 /**
- * The token patterns without a word boundary, for a name, a key, or a line
- * that Ferry prints or that leaves a box. `password_ghp_...` has no word
- * boundary before the token, and it must not be printed.
+ * The token patterns without a guard for the text before and after the token,
+ * for a name, a key, or a line that Ferry prints or that leaves a box.
  */
-const PRINTED_TOKEN_PATTERNS = TOKEN_PATTERNS.map(([pattern]) => new RegExp(pattern.source.replaceAll("\\b", ""), "g"));
+const PRINTED_TOKEN_PATTERNS = TOKEN_SOURCES.map((source) => new RegExp(source, "g"));
 
 /** True when a token pattern matches in `text`. Ferry does not print such a name, key, or id. */
 export function holdsToken(text: string): boolean {
@@ -697,8 +700,8 @@ export function redactTokens(text: string): string {
   );
 }
 
-/** The token patterns as one POSIX extended regular expression, for `grep -E` on a box. It has no word boundary. */
-export const TOKEN_ERE = TOKEN_PATTERNS.map(([pattern]) => pattern.source.replaceAll("\\b", "")).join("|");
+/** The token patterns as one POSIX extended regular expression, for `grep -E` on a box. It has no guard. */
+export const TOKEN_ERE = TOKEN_SOURCES.join("|");
 
 /** Name each token kind found in `bytes`. The hit never holds the token itself. */
 function tokenHits(path: string, bytes: Uint8Array): ForbiddenHit[] {

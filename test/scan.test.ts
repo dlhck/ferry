@@ -226,8 +226,8 @@ describe("ferry scan gives no data about the content of a denied file", () => {
 
     const scan = runScan({ kind: "skill", root: "app" }, root);
 
-    // The key has no word boundary before the token, so only the printed form finds it.
     expect(scan.forbidden.map((hit) => hit.reason)).toEqual([
+      "GitHub token in file content",
       "a key holds a password or secret",
       "key password holds a password or secret",
     ]);

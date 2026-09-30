@@ -495,6 +495,16 @@ describe("the deny set", () => {
     expect(JSON.stringify(refusal)).not.toContain(token);
   });
 
+  test.each(tokens)("a %s after an underscore, a hyphen, or another sign is a token", (code, token) => {
+    const hits = (text: string) => carriedContentHits("notes.md", Buffer.from(text)).map((hit) => hit.code);
+
+    for (const text of [`MY_${token}`, `password_${token}`, `x-${token}`, `key=${token}`, `"${token}"`, `${token}_suffix`]) {
+      expect([text.replace(token, "<token>"), hits(text)]).toEqual([text.replace(token, "<token>"), [code]]);
+    }
+    // A letter or a digit before the prefix makes it a part of a longer word.
+    for (const text of [`x${token}`, `9${token}`]) expect([text.replace(token, "<token>"), hits(text)]).toEqual([text.replace(token, "<token>"), []]);
+  });
+
   test("token prefixes in plain prose do not refuse", () => {
     const home = makeHome();
     write(
