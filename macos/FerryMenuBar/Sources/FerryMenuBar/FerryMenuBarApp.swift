@@ -36,24 +36,20 @@ struct MenuContent: View {
         Group {
             summary
             if let error = model.refreshError {
-                Text(error)
+                lines(error)
             }
             ForEach(Array(model.sections.enumerated()), id: \.offset) { _, section in
                 Divider()
                 if let box = section.box {
-                    Text("\(box.name)  \(box.online ? "ONLINE" : "OFFLINE")")
+                    Text(cutMiddle("\(box.name)  \(box.online ? "ONLINE" : "OFFLINE")"))
                     if let error = box.error {
-                        Text(error)
+                        lines(error)
                     }
                     ForEach(Array(box.issues.enumerated()), id: \.offset) { _, issue in
-                        if let command = issue.command {
-                            Button(issue.message) { model.openInTerminal(command) }
-                        } else {
-                            Text(issue.message)
-                        }
+                        item(issue)
                     }
                 } else {
-                    Text(section.name)
+                    Text(cutMiddle(section.name))
                 }
                 if let tunnel = section.tunnel {
                     Text("Ports")
@@ -63,14 +59,14 @@ struct MenuContent: View {
                         Text("No ports. Run ferry expose on the box.")
                     } else {
                         ForEach(Array(tunnel.forwards.enumerated()), id: \.offset) { _, forward in
-                            Button(forward.title) { model.openPort(forward.localPort) }
+                            Button(cutMiddle(forward.title)) { model.openPort(forward.localPort) }
                         }
                     }
                 }
             }
             Divider()
             if let message = model.syncMessage {
-                Text(message)
+                lines(message)
             }
             Button(model.syncing ? "Syncing..." : "Sync now") { model.sync() }
                 .disabled(model.syncing)
@@ -78,7 +74,7 @@ struct MenuContent: View {
                 .disabled(model.refreshing)
             Toggle("Notifications", isOn: $model.notificationsEnabled)
             if let error = model.notificationError {
-                Text(error)
+                lines(error)
             }
             Button("Quit") { NSApplication.shared.terminate(nil) }
                 .keyboardShortcut("q")
@@ -91,11 +87,42 @@ struct MenuContent: View {
         case .missing:
             Text("No Ferry status. Run ferry watch install.")
         case let .stale(date):
-            Text("ferry watch is not running. Last check \(age(date)).")
+            lines("ferry watch is not running. Last check \(age(date)).")
         case .clear:
-            Text("All clear. Checked \(age(model.checkedAt ?? Date())).")
+            lines("All clear. Checked \(age(model.checkedAt ?? Date())).")
         case let .issues(count):
-            Text("\(count) \(count == 1 ? "item needs" : "items need") action. Checked \(age(model.checkedAt ?? Date())).")
+            lines("\(count) \(count == 1 ? "item needs" : "items need") action. Checked \(age(model.checkedAt ?? Date())).")
+        }
+    }
+
+    /// One issue: the short title, and a submenu with the full message, the fix command, and Copy.
+    /// A click on the title runs the fix command in Terminal, when the issue has one.
+    @ViewBuilder
+    private func item(_ issue: BriefIssue) -> some View {
+        Group {
+            if let command = issue.command {
+                Menu(issue.title) { details(issue) } primaryAction: { model.openInTerminal(command) }
+            } else {
+                Menu(issue.title) { details(issue) }
+            }
+        }
+        .help(issue.message)
+    }
+
+    @ViewBuilder
+    private func details(_ issue: BriefIssue) -> some View {
+        lines(issue.message)
+        Divider()
+        if let command = issue.command {
+            Button(cutMiddle(command)) { model.openInTerminal(command) }
+        }
+        Button("Copy") { model.copy(issue.command ?? issue.message) }
+    }
+
+    /// A text as menu lines of at most `titleLimit` characters, because a menu item does not wrap its title.
+    private func lines(_ text: String) -> some View {
+        ForEach(Array(wrapped(text).enumerated()), id: \.offset) { _, line in
+            Text(line)
         }
     }
 

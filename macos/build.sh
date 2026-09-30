@@ -1,6 +1,7 @@
 #!/bin/sh
 # Build the Ferry menu bar app on macOS: a universal release binary (arm64 and x86_64),
-# "Ferry Menu Bar.app" with an ad-hoc signature, and the release asset ferry-menubar-macos.zip.
+# "Ferry Menu Bar.app" with its icon and an ad-hoc signature, and the release asset
+# ferry-menubar-macos.zip.
 #
 #   macos/build.sh [output directory]
 #
@@ -24,6 +25,19 @@ zip="$out/ferry-menubar-macos.zip"
 rm -rf "$app" "$zip"
 mkdir -p "$app/Contents/MacOS"
 cp "$bin/FerryMenuBar" "$app/Contents/MacOS/FerryMenuBar"
+
+# The app icon. macos/AppIcon.png is docs/favicon.svg at 824 px in the middle of a transparent
+# 1024 px image, which is the icon grid of macOS. An icon set has each size at 1x and at 2x.
+iconset="$out/AppIcon.iconset"
+rm -rf "$iconset"
+mkdir -p "$iconset" "$app/Contents/Resources"
+for size in 16 32 128 256 512; do
+  sips -z "$size" "$size" "$root/macos/AppIcon.png" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+  sips -z "$((size * 2))" "$((size * 2))" "$root/macos/AppIcon.png" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
+rm -rf "$iconset"
+
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -35,6 +49,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <string>Ferry Menu Bar</string>
   <key>CFBundleExecutable</key>
   <string>FerryMenuBar</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>

@@ -673,7 +673,7 @@ Options:
               logins, and the tools, and print what needs action
   -h, --help  display help for command
 
-With --json: the status report, schema version 2. With --brief, { schemaVersion: 1, checkedAt, boxes: [{ name, host, online, error, issues: [{ kind, name, state, message, command }], resources: { disk, memory, load } }] }.
+With --json: the status report, schema version 2. With --brief, { schemaVersion: 1, checkedAt, boxes: [{ name, host, online, error, summary, issues: [{ kind, name, state, summary, message, command }], resources: { disk, memory, load } }] }.
 ```
 
 ## ferry doctor

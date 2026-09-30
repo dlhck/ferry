@@ -302,7 +302,7 @@ const JSON_RESULTS: Record<string, string> = {
   "tunnel uninstall": "{ manager, path, removed }",
   expose: "events exposed and exited. The output of the command goes to stderr",
   status:
-    "the status report, schema version 2. With --brief, { schemaVersion: 1, checkedAt, boxes: [{ name, host, online, error, issues: [{ kind, name, state, message, command }], resources: { disk, memory, load } }] }",
+    "the status report, schema version 2. With --brief, { schemaVersion: 1, checkedAt, boxes: [{ name, host, online, error, summary, issues: [{ kind, name, state, summary, message, command }], resources: { disk, memory, load } }] }",
   doctor:
     "{ schemaVersion: 1, ok, checks: [{ id, box, status, message, fix }] }, also on failure. status is ok, failed, or skipped",
   integrations: "{ boxes: [{ name, destination, integrations: [{ id, description, enabled, parts, available, localVersion, localSource, connectSteps }] }] }",
