@@ -1075,7 +1075,7 @@ describe("--box", () => {
 
   test("install and integrations enable and disable get the lock of their box, and update gets the home of the locks", async () => {
     const home = await mkdtemp(join(tmpdir(), "ferry-cli-lock-"));
-    type Lock = () => (() => void) | { busy: boolean; reason: string };
+    type Lock = () => (() => void) | { busy: boolean; reason: string; owner?: unknown };
     try {
       let current = BOXES;
       const lockOf = async (config: PartialOperatorConfig, args: string[]): Promise<Lock | undefined> => {
@@ -1095,7 +1095,8 @@ describe("--box", () => {
         const release = lockBox!();
         expect(release).toBeFunction();
         expect(await readdir(join(home, ".ferry"))).toHaveLength(1);
-        expect(lockBox!()).toEqual({ busy: true, reason: "box b is busy: a sync or another Ferry command is active for it" });
+        // The lock file names the command, and a second command names it as the owner.
+        expect(lockBox!()).toMatchObject({ busy: true, owner: { pid: process.pid, command: args.slice(0, 2).join(" ").replace(" --box", "") } });
         (release as () => void)();
         expect(await readdir(join(home, ".ferry"))).toEqual([]);
         // The command reads box b at its start. The lock reads the config of that moment, not the view of the command.

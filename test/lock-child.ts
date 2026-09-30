@@ -55,7 +55,7 @@ if (existsSync(join(home, "barrier"))) {
 
 let release: () => void;
 try {
-  release = acquireBoxLock(home, { name: "box", host: { transport: "ssh", destination: "user@box.example" } });
+  release = acquireBoxLock(home, { name: "box", host: { transport: "ssh", destination: "user@box.example" } }, "sync");
 } catch (error) {
   if ((error as { code?: unknown }).code !== "concurrent-sync") throw error;
   mark(`${id}.busy`);

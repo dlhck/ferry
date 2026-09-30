@@ -755,7 +755,7 @@ describe("update command across boxes", () => {
 
     test("skips a box that a sync holds, updates the other box, and does not fail", async () => {
       const { recorder, onBoxes, paseo, home, deps } = locked();
-      const release = acquireBoxLock(home, boxA);
+      const release = acquireBoxLock(home, boxA, "sync");
 
       const result = await runUpdateCommand({ yes: true, dryRun: false, includeIntegrations: true }, deps);
       release();
@@ -763,10 +763,10 @@ describe("update command across boxes", () => {
       expect(onBoxes).toEqual(BOX_COMMANDS.map((command) => `dev@box-b.example: ${command}`));
       expect(paseo).toEqual([]);
       expect(recorder.local).toEqual(["claude update", "codex update"]);
-      expect(recorder.output).toContain("[a] Skipped box a: box a is busy: a sync or another Ferry command is active for it.");
+      expect(recorder.output).toContain(`[a] Skipped box a: ferry sync works on box a now (pid ${process.pid}).`);
       expect(recorder.output.slice(-2)).toEqual(["Box a: skipped.", "Box b: done."]);
       expect(result?.boxes.map(({ name, ok, skipped }) => ({ name, ok, skipped }))).toEqual([
-        { name: "a", ok: true, skipped: "box a is busy: a sync or another Ferry command is active for it" },
+        { name: "a", ok: true, skipped: `ferry sync works on box a now (pid ${process.pid})` },
         { name: "b", ok: true, skipped: undefined },
       ]);
       expect(result?.updated.some((name) => name.startsWith("[a] "))).toBe(false);
@@ -820,7 +820,7 @@ describe("update command across boxes", () => {
 
     test("a dry run takes no lock", async () => {
       const { home, deps } = locked();
-      const release = acquireBoxLock(home, boxA);
+      const release = acquireBoxLock(home, boxA, "sync");
 
       const result = await runUpdateCommand({ yes: true, dryRun: true }, deps);
       release();

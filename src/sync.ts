@@ -67,6 +67,8 @@ export type SyncInput = {
    * uses it for a box retry, when the snapshot already has the current identity.
    */
   readonly publish?: boolean;
+  /** The command that runs the sync, for the lock files, such as `watch` or `revert`. The default is `sync`. */
+  readonly command?: string;
 };
 
 export type SyncDependencies = {
@@ -81,9 +83,9 @@ export type SyncDependencies = {
     options: SyncStoreOptions,
   ) => Promise<SyncStore>;
   /** Lock the box steps for one target. It fails at once when another sync holds the lock. */
-  readonly acquireLock?: (home: string, host: string) => () => void;
+  readonly acquireLock?: (home: string, host: string, box: string, command: string) => () => void;
   /** Lock the local store around the publish. It waits while another sync publishes. */
-  readonly acquireStoreLock?: (home: string) => Promise<() => void>;
+  readonly acquireStoreLock?: (home: string, command: string) => Promise<() => void>;
   readonly apply?: (input: RemoteApplyInput) => Promise<ApplyPlan>;
   readonly adopt?: typeof adoptPublishedSkills;
   readonly writePlan?: (plan: SyncPlan) => void;
@@ -256,6 +258,7 @@ export async function runSync(
   dependencies: SyncDependencies = {},
 ): Promise<SyncResult> {
   const home = input.home ?? homedir();
+  const command = input.command ?? "sync";
   const progress = dependencies.progress ?? noProgress;
   const writeLine = dependencies.writeLine ?? console.log;
   const warn = (line: string) => {
@@ -342,9 +345,7 @@ export async function runSync(
     return { dryRun: true, published: false, plan: results[0]!.plan, boxes: results };
   }
 
-  for (const box of boxes) {
-    refuseActiveSync(home, targetKey(box.host), several ? `box ${box.name} (${targetKey(box.host)})` : undefined);
-  }
+  for (const box of boxes) refuseActiveSync(home, box);
   // Without a publish, Ferry does not write the local store, and a null tip updates each box to the upstream tip.
   let storePath = join(home, ".ferry", "store");
   let publication: PublishResult = { published: false, tip: null };
@@ -354,7 +355,7 @@ export async function runSync(
         progress,
         "Publishing the snapshot",
         async () => {
-          const releaseStore = await takeStoreLock(dependencies, home);
+          const releaseStore = await takeStoreLock(dependencies, home, command);
           try {
             // A revert can change the files while this sync waits for the lock. Then the seed is old, and a publish would undo the revert.
             const current = (dependencies.readSeed ?? readManifest)(home, harnesses, { storeUpdates: true });
@@ -416,7 +417,7 @@ export async function runSync(
       const instructions = boxInstructions(home, box.name);
       current = "Locking the box";
       // Another sync for this box can take the box lock after refuseActiveSync. Then this box fails here, after the publish.
-      const release = takeLock(dependencies, home, targetKey(box.host));
+      const release = takeLock(dependencies, home, box, command);
       try {
         // `ferry box remove --uninstall` can remove the box while this sync waits in the publish. The config read is in the lock, so the box cannot leave after it.
         const skipped = staleBox(loadConfig(home, dependencies.readConfig ?? readOperatorConfig).source, box, "sync");
@@ -1149,19 +1150,21 @@ async function resolveRemoteHome(link: SyncLink, host: OperatorHostConfig): Prom
 function takeLock(
   dependencies: SyncDependencies,
   home: string,
-  host: string,
+  box: Pick<ResolvedBox, "name" | "host">,
+  command: string,
 ): () => void {
+  const host = targetKey(box.host);
   try {
-    return (dependencies.acquireLock ?? acquireSyncLock)(home, host);
+    return (dependencies.acquireLock ?? acquireSyncLock)(home, host, box.name, command);
   } catch (cause) {
     if (cause instanceof SyncError) throw cause;
     throw new SyncError("lock-failure", "operator", `could not lock sync for ${host}`, { cause });
   }
 }
 
-async function takeStoreLock(dependencies: SyncDependencies, home: string): Promise<() => void> {
+async function takeStoreLock(dependencies: SyncDependencies, home: string, command: string): Promise<() => void> {
   try {
-    return await (dependencies.acquireStoreLock ?? acquireStoreLock)(home);
+    return await (dependencies.acquireStoreLock ?? acquireStoreLock)(home, command);
   } catch (cause) {
     throw new SyncError("lock-failure", "operator", "could not lock the local store", { cause });
   }
@@ -1181,12 +1184,10 @@ function staleBox(config: PartialOperatorConfig, box: Pick<ResolvedBox, "name" |
   return null;
 }
 
-/** Fail before the publish when a live sync or another command holds the box lock of this target. `label` names the box in the error. */
-function refuseActiveSync(home: string, host: string, label = host): void {
-  const lock = readLock(boxLockPath(home, host));
-  if (lock !== null && !staleLock(lock)) {
-    throw new SyncError("concurrent-sync", "operator", `another sync or Ferry command is active for ${label}`);
-  }
+/** Fail before the publish when a live sync or another command holds the lock of the box. */
+function refuseActiveSync(home: string, box: Pick<ResolvedBox, "name" | "host">): void {
+  const owner = boxLockOwner(home, box);
+  if (owner !== null) throw busyError(box.name, owner);
 }
 
 /** The key stays the target string, so a running watch of an earlier version and a new CLI share the lock. */
@@ -1195,25 +1196,92 @@ function boxLockPath(home: string, host: string): string {
   return join(home, ".ferry", `sync-${digest}.lock`);
 }
 
-function acquireSyncLock(home: string, host: string): () => void {
-  const release = tryLock(boxLockPath(home, host));
-  if (!release) throw new SyncError("concurrent-sync", "operator", `another sync or Ferry command is active for ${host}`);
+/** The live process that holds a lock. */
+export type LockOwner = {
+  readonly pid: number;
+  /** The command that holds the lock, such as `watch` or `update`. Null when a Ferry version before the command record wrote the lock. */
+  readonly command: string | null;
+  /**
+   * True when the lock has no command and no process start. A Ferry version before 0.10.0 wrote
+   * it, and Ferry keeps it while a process has the pid.
+   */
+  readonly earlierVersion: boolean;
+};
+
+/** The live owner of the lock of a box, or null when no live process holds the lock. It only reads the lock. */
+export function boxLockOwner(home: string, box: Pick<ResolvedBox, "host">): LockOwner | null {
+  return liveOwner(boxLockPath(home, targetKey(box.host)));
+}
+
+function liveOwner(path: string): LockOwner | null {
+  const lock = readLock(path);
+  if (lock === null || staleLock(lock)) return null;
+  const owner = lockOwner(lock);
+  const command = owner?.command;
+  // The command goes into a message, so Ferry reads only a short name.
+  const named = typeof command === "string" && /^[a-z][a-z -]{0,39}$/.test(command);
+  return {
+    pid: owner?.pid as number,
+    command: named ? command : null,
+    earlierVersion: !named && typeof owner?.start !== "string",
+  };
+}
+
+/**
+ * What the owner of the lock of box `box` does, such as `The watch service syncs box fsn1 now
+ * (pid 1234).` `owner` is null when the owner released the lock before Ferry read it.
+ */
+export function lockOwnerLine(box: string, owner: LockOwner | null): string {
+  if (owner === null) return `A sync or another Ferry command works on box ${box} now.`;
+  const pid = `(pid ${owner.pid})`;
+  if (owner.earlierVersion) return `A process of an earlier Ferry version holds the lock of box ${box} ${pid}.`;
+  if (owner.command === null) return `A sync or another Ferry command works on box ${box} now ${pid}.`;
+  if (owner.command === "watch") return `The watch service syncs box ${box} now ${pid}.`;
+  if (owner.command === "watch update") return `The watch service updates box ${box} now ${pid}.`;
+  return `ferry ${owner.command} works on box ${box} now ${pid}.`;
+}
+
+/** The error of a command that did not get the lock of box `box`. The JSON error has `box` and `owner` in `details`. */
+function busyError(box: string, owner: LockOwner | null): SyncError {
+  const advice = owner?.earlierVersion
+    ? "Wait for it to end, then try again. If the lock stays, run ferry watch install to start the watch service with this version, or stop that process."
+    : owner?.command?.startsWith("watch")
+      ? "Try again in a moment."
+      : "Wait for it to end, then try again.";
+  const message = `${lockOwnerLine(box, owner)} ${advice}`;
+  return new SyncError("concurrent-sync", "operator", message, {
+    cause: new FerryError("sync-busy", message, {
+      ...(owner?.earlierVersion ? { hint: "Run ferry doctor. It gives the fix for the lock of an earlier Ferry version." } : {}),
+      details: { box, owner },
+    }),
+  });
+}
+
+function acquireSyncLock(home: string, host: string, box: string, command: string): () => void {
+  const path = boxLockPath(home, host);
+  const release = tryLock(path, command);
+  if (!release) throw busyError(box, liveOwner(path));
   return release;
 }
 
 /**
  * Take the box lock for a command that is not a sync, such as `ferry box
- * remove --uninstall`. While the command holds the lock, a sync for the box
- * fails with `concurrent-sync`. Throws that error when a sync holds the lock.
+ * remove --uninstall`. `command` names the command in the lock file, such as
+ * `box remove`. While the command holds the lock, a sync for the box fails
+ * with `concurrent-sync`. Throws that error when a sync holds the lock.
  */
-export function acquireBoxLock(home: string, box: Pick<ResolvedBox, "name" | "host">): () => void {
-  const release = tryLock(boxLockPath(home, targetKey(box.host)));
-  if (!release) throw new SyncError("concurrent-sync", "operator", `a sync or another Ferry command is active for box ${box.name}`);
-  return release;
+export function acquireBoxLock(home: string, box: Pick<ResolvedBox, "name" | "host">, command: string): () => void {
+  return acquireSyncLock(home, targetKey(box.host), box.name, command);
 }
 
-/** Why a command did not get the lock of a box. `busy` is true when a sync or another command holds the lock. */
-export type BoxLockRefusal = { readonly busy: boolean; readonly reason: string };
+/**
+ * Why a command did not get the lock of a box. `busy` is true when a sync or another command
+ * holds the lock. Then `owner` is the live owner, or null when it released the lock before Ferry
+ * read it.
+ */
+export type BoxLockRefusal =
+  | { readonly busy: false; readonly reason: string }
+  | { readonly busy: true; readonly reason: string; readonly box: string; readonly owner: LockOwner | null };
 
 /** Takes the lock of a box. Returns the function that releases the lock, or why the command must not change the box. */
 export type BoxLocker = (box: Pick<ResolvedBox, "name" | "host" | "gitAuth">) => (() => void) | BoxLockRefusal;
@@ -1223,15 +1291,19 @@ export type BoxLocker = (box: Pick<ResolvedBox, "name" | "host" | "gitAuth">) =>
  * `ferry update`. The command reads the box, and then waits for the box or
  * for the operator. So the locker reads the config again in the lock. It
  * refuses a box that left the config or that has a new target or git auth.
- * `command` names the command in the reason, such as `update`.
+ * `command` names the command in the reason, such as `update`. `owner` names
+ * it in the lock file, such as `integrations enable`.
  *
  * While the command holds the lock, a sync for the box fails with
  * `concurrent-sync`, and `ferry box remove --uninstall` does not start.
  */
-export function boxLocker(home: string, readConfig: () => PartialOperatorConfig | null, command: string): BoxLocker {
+export function boxLocker(home: string, readConfig: () => PartialOperatorConfig | null, command: string, owner = command): BoxLocker {
   return (box) => {
-    const release = tryLock(boxLockPath(home, targetKey(box.host)));
-    if (!release) return { busy: true, reason: `box ${box.name} is busy: a sync or another Ferry command is active for it` };
+    const release = tryLock(boxLockPath(home, targetKey(box.host)), owner);
+    if (!release) {
+      const holder = boxLockOwner(home, box);
+      return { busy: true, reason: lockOwnerLine(box.name, holder).slice(0, -1), box: box.name, owner: holder };
+    }
     let reason: string | null;
     try {
       reason = staleBox(readConfig() ?? {}, box, command);
@@ -1248,15 +1320,15 @@ export function boxLocker(home: string, readConfig: () => PartialOperatorConfig 
 /** The error of a command for one box that did not get the lock of the box. */
 export function boxLockError(refusal: BoxLockRefusal): Error {
   return refusal.busy
-    ? new SyncError("concurrent-sync", "operator", refusal.reason)
+    ? busyError(refusal.box, refusal.owner)
     : new FerryError("refused", `${refusal.reason}. Ferry did not change the box.`);
 }
 
 /** Wait while another sync publishes. Only the publish holds this lock, so the wait is short. */
-export async function acquireStoreLock(home: string): Promise<() => void> {
+export async function acquireStoreLock(home: string, command: string): Promise<() => void> {
   const path = join(home, ".ferry", "store.lock");
   for (;;) {
-    const release = tryLock(path);
+    const release = tryLock(path, command);
     if (release) return release;
     await sleep(100);
   }
@@ -1269,7 +1341,8 @@ let ownStart: string | undefined;
  * Take the lock at `path`. Return `null` when a live process holds it, or when another process
  * replaces a stale lock at this time.
  *
- * The lock file has the pid and the start of its process, and a token. A stale lock is the lock of
+ * The lock file has the pid and the start of its process, the command that holds the lock, and a
+ * token. A claim has no command. A stale lock is the lock of
  * a process that stopped, or a file that is not a lock. A process makes a new lock with a hard
  * link, which fails when the lock exists. It replaces a stale lock in three steps:
  *
@@ -1281,12 +1354,12 @@ let ownStart: string | undefined;
  * No step removes the lock file. Thus a process that read a stale lock cannot remove the live lock
  * that replaced it.
  */
-function tryLock(path: string): (() => void) | null {
+function tryLock(path: string, command?: string): (() => void) | null {
   const token = randomUUID();
   const temporary = `${path}.${process.pid}.${token}`;
   mkdirSync(dirname(path), { recursive: true });
   ownStart ??= processStart(process.pid) ?? "";
-  writeFileSync(temporary, JSON.stringify({ pid: process.pid, ...(ownStart ? { start: ownStart } : {}), token }), { mode: 0o600 });
+  writeFileSync(temporary, JSON.stringify({ pid: process.pid, ...(ownStart ? { start: ownStart } : {}), ...(command ? { command } : {}), token }), { mode: 0o600 });
   try {
     for (;;) {
       try {
@@ -1331,7 +1404,9 @@ function readLock(path: string): string | null {
   }
 }
 
-function lockOwner(lock: string): { readonly pid?: unknown; readonly start?: unknown; readonly token?: unknown } | null {
+function lockOwner(
+  lock: string,
+): { readonly pid?: unknown; readonly start?: unknown; readonly command?: unknown; readonly token?: unknown } | null {
   try {
     const value: unknown = JSON.parse(lock);
     return typeof value === "object" ? value : null;

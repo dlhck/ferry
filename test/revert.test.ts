@@ -113,7 +113,7 @@ describe("ferry revert", () => {
     expect(readFileSync(join(setup.home, ".claude", "skills", "tdd", "SKILL.md"), "utf8")).toBe("v2\n");
     expect(await git(setup.remote, "rev-parse", "HEAD")).toBe(result.tip as string);
     expect(await git(setup.store, "log", "-n", "1", "--format=%s")).toBe("revert: chore: use sonnet");
-    expect(syncs).toEqual([{ home: setup.home }]);
+    expect(syncs).toEqual([{ home: setup.home, command: "revert" }]);
     // The local files match the snapshot, so the next watch or sync publishes nothing.
     expect((await setup.publish("chore: after revert")).published).toBe(false);
   });

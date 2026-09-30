@@ -19,6 +19,7 @@ import {
   type SelfUpdateDependencies,
 } from "./self-update.ts";
 import { RealGitRunner, type GitRunner } from "./store.ts";
+import { boxLockOwner, lockOwnerLine } from "./sync.ts";
 
 const STORE_RELATIVE_PATH = ".ferry/store";
 const LOCAL_TIMEOUT_MS = 10_000;
@@ -100,6 +101,7 @@ export async function runDoctor(input: DoctorInput = {}, dependencies: Partial<D
   for (const box of boxes) {
     const flag = config.boxes ? ` --box ${box.name}` : "";
     checks.push(...(await checkBox(box, flag, snapshotUrl, resolved.createLink(resolveLinkOptions(box.host)), progress)));
+    checks.push(checkBoxLock(box, resolved));
   }
   return { schemaVersion: 1, ok: checks.every((check) => check.status !== "failed"), checks };
 }
@@ -304,6 +306,30 @@ async function checkBox(
     }
   }
   return checks;
+}
+
+/**
+ * The lock of the box on this machine. A live owner of this Ferry version is information. The lock
+ * of an earlier Ferry version has no process start, so Ferry keeps it while a process has its pid.
+ */
+function checkBoxLock(box: ResolvedBox, dependencies: Pick<DoctorDependencies, "home" | "services">): DoctorCheck {
+  const base = { id: "box-lock", box: box.name } as const;
+  const owner = boxLockOwner(dependencies.home, box);
+  if (owner === null) return { ...base, status: "ok", message: "No Ferry command holds the lock of the box.", fix: null };
+  const line = lockOwnerLine(box.name, owner);
+  if (!owner.earlierVersion) return { ...base, status: "ok", message: line, fix: null };
+  const stop = `kill ${owner.pid}`;
+  const platform = dependencies.services.platform;
+  const watch = (platform === "darwin" || platform === "linux") &&
+    installedServices(dependencies.services).some((entry) => entry.box === undefined);
+  return {
+    ...base,
+    status: "failed",
+    message: `${line} A sync of the box fails while a process has that pid.${
+      watch ? ` If the fix does not free the lock, stop the process with ${stop}.` : ""
+    }`,
+    fix: watch ? "ferry watch install" : stop,
+  };
 }
 
 /** The fix of an SSH failure. A changed or unknown host key needs the operator to check the fingerprint. */

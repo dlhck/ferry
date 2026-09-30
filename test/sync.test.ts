@@ -32,6 +32,7 @@ import {
   BoxesSyncError,
   runSync,
   SyncError,
+  type BoxLockRefusal,
   type SyncDependencies,
   type SyncPlan,
 } from "../src/sync.ts";
@@ -1722,7 +1723,7 @@ describe("sync locks", () => {
     const release = deferred();
     try {
       const first = runSync(
-        { home },
+        { home, command: "watch" },
         lockedSync(home, "a@box-a", events, {
           apply: async () => {
             applying.resolve();
@@ -1732,12 +1733,13 @@ describe("sync locks", () => {
       );
       await applying.promise;
       expect(readdirSync(join(home, ".ferry"))).toEqual([boxLockFile("ssh:a@box-a")]);
+      expect(JSON.parse(readFileSync(join(home, ".ferry", boxLockFile("ssh:a@box-a")), "utf8"))).toMatchObject({ command: "watch" });
 
       await expect(runSync({ home }, lockedSync(home, "a@box-a", secondEvents))).rejects.toEqual(
         expect.objectContaining({
           code: "concurrent-sync",
           origin: "operator",
-          message: expect.stringContaining("a@box-a"),
+          message: `operator: The watch service syncs box default now (pid ${process.pid}). Try again in a moment.`,
         }),
       );
       expect(secondEvents).toEqual([]);
@@ -1818,8 +1820,18 @@ describe("sync locks", () => {
       expect(release).toBeFunction();
       expect(locks()).toEqual([boxLockFile("ssh:user@box.example")]);
       // A sync and a second command do not get the box while the command holds the lock.
-      expect(() => acquireBoxLock(home, box)).toThrow("a sync or another Ferry command is active for box b");
-      expect(lock(box)).toEqual({ busy: true, reason: "box b is busy: a sync or another Ferry command is active for it" });
+      const owner = { pid: process.pid, command: "update", earlierVersion: false };
+      expect(() => acquireBoxLock(home, box, "sync")).toThrow(
+        `operator: ferry update works on box b now (pid ${process.pid}). Wait for it to end, then try again.`,
+      );
+      const busy = lock(box);
+      expect(busy).toEqual({ busy: true, reason: `ferry update works on box b now (pid ${process.pid})`, box: "b", owner });
+      expect(errorInfo(boxLockError(busy as BoxLockRefusal))).toEqual({
+        code: "sync-busy",
+        message: `operator: ferry update works on box b now (pid ${process.pid}). Wait for it to end, then try again.`,
+        hint: "Wait for the other Ferry command to end, then run the command again.",
+        details: { box: "b", owner },
+      });
       (release as () => void)();
       expect(locks()).toEqual([]);
 
@@ -1837,7 +1849,6 @@ describe("sync locks", () => {
       expect(() => lock(box)).toThrow("no config");
       expect(locks()).toEqual([]);
 
-      expect(errorInfo(boxLockError({ busy: true, reason: "box b is busy" }))).toMatchObject({ code: "sync-busy", message: "operator: box b is busy" });
       expect(errorInfo(boxLockError({ busy: false, reason: "box b left the config during the install" }))).toMatchObject({
         code: "refused",
         message: "box b left the config during the install. Ferry did not change the box.",
@@ -2194,7 +2205,7 @@ describe("sync with more than one box", () => {
     await expect(runSync({ home: sync.home }, sync.dependencies)).rejects.toEqual(
       expect.objectContaining({
         code: "concurrent-sync",
-        message: "operator: another sync or Ferry command is active for box b (ssh:dev@box-b.example)",
+        message: `operator: A process of an earlier Ferry version holds the lock of box b (pid ${process.pid}). Wait for it to end, then try again. If the lock stays, run ferry watch install to start the watch service with this version, or stop that process.`,
       }),
     );
     expect(sync.events).toEqual([]);

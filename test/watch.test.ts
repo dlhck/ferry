@@ -563,6 +563,7 @@ describe("multi-box watch", () => {
           writeLine: () => {},
           runSync: async (input) => {
             requests.push({ boxes: input.boxes, publish: input.publish });
+            expect(input.command).toBe("watch");
             return { dryRun: false, published: false, plan: {} as SyncPlan, boxes: [] };
           },
         },
@@ -899,6 +900,7 @@ describe("watch daily update", () => {
           inputs.push(input);
           // The update takes the box locks in the home of the watch.
           expect(dependencies?.home).toBe(lockHome);
+          expect(dependencies?.lockCommand).toBe("watch update");
           return runUpdateCommand(input, {
             ...dependencies,
             tools: [],

@@ -519,7 +519,7 @@ function createProgram(dependencies: CliDependencies): { program: Command; state
    * reads it at its start. The lock reads the whole config again, because the
    * command sees only the view of `boxConfig`.
    */
-  const boxLock = (command: string, selected: { config: PartialOperatorConfig; box: ResolvedBox } | undefined) => {
+  const boxLock = (command: string, selected: { config: PartialOperatorConfig; box: ResolvedBox } | undefined, owner = command) => {
     let box: ResolvedBox;
     try {
       box = selected?.box ?? resolveTargetBox(config());
@@ -527,7 +527,7 @@ function createProgram(dependencies: CliDependencies): { program: Command; state
       // The command reports a config that it cannot read, or that has no box.
       return {};
     }
-    const lock = boxLocker((dependencies.home ?? homedir)(), config, command);
+    const lock = boxLocker((dependencies.home ?? homedir)(), config, command, owner);
     return { lockBox: () => lock(box) };
   };
   /** With box tables, `integrations enable|disable` sets the key in `[box.<name>.integrations]`. */
@@ -1223,7 +1223,7 @@ sherlock add, and ferry status checks each connection that it added.`)
             ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}),
             ...(json() ? { confirm: refuse(`Enable ${name} on the box?`) } : {}),
             ...integrationBox(selectBox("integrations enable")),
-            ...boxLock("change", selectBox("integrations enable")),
+            ...boxLock("change", selectBox("integrations enable"), "integrations enable"),
           },
         ),
       );
@@ -1250,7 +1250,7 @@ changes only the config.`)
             ...(dependencies.integrations ? { integrations: dependencies.integrations } : {}),
             ...(json() ? { confirm: refuse(`Disable ${name} on the box?`) } : {}),
             ...integrationBox(selectBox("integrations disable")),
-            ...boxLock("change", selectBox("integrations disable")),
+            ...boxLock("change", selectBox("integrations disable"), "integrations disable"),
           },
         ),
       );

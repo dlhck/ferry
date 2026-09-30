@@ -702,14 +702,14 @@ describe("integrations enable and disable", () => {
       test(`${input.action} stops with sync-busy before it changes a box that a sync holds`, async () => {
         const recorder: Recorder = { events: [], output: [] };
         const { home, lockBox } = locked();
-        const release = acquireBoxLock(home, box);
+        const release = acquireBoxLock(home, box, "sync");
 
         const error = await runIntegrationCommand(input, dependencies(recorder, { lockBox })).catch((error) => error);
         release();
 
         expect(errorInfo(error)).toMatchObject({
           code: "sync-busy",
-          message: "operator: box default is busy: a sync or another Ferry command is active for it",
+          message: `operator: ferry sync works on box default now (pid ${process.pid}). Wait for it to end, then try again.`,
         });
         expect(recorder.events).toEqual([`plan ${input.action}`, "confirm"]);
       });
@@ -783,7 +783,7 @@ describe("integrations enable and disable", () => {
     test("a dry run takes no lock", async () => {
       const recorder: Recorder = { events: [], output: [] };
       const { home, lockBox } = locked();
-      const release = acquireBoxLock(home, box);
+      const release = acquireBoxLock(home, box, "sync");
 
       const result = await runIntegrationCommand({ action: "enable", name: "paseo", yes: true, dryRun: true }, dependencies(recorder, { lockBox }));
       release();

@@ -137,7 +137,7 @@ export async function runWatch(
   const sync = dependencies.sync ??
     (async (request: WatchSyncRequest) => {
       const result = await (dependencies.runSync ?? runSync)(
-        { home: request.home, boxes: request.boxes, publish: request.publish },
+        { home: request.home, boxes: request.boxes, publish: request.publish, command: "watch" },
         { progress, writeLine },
       );
       return skippedBoxes(result.boxes);
@@ -160,7 +160,7 @@ export async function runWatch(
   const update = dependencies.update ??
     (() => (dependencies.runUpdate ?? runUpdateCommand)(
       { yes: true, dryRun: false, includeIntegrations: false, latestOnly: true },
-      { writeLine, progress, home },
+      { writeLine, progress, home, lockCommand: "watch update" },
     ));
   const now = dependencies.now ?? Date.now;
   const readUpdateState = dependencies.readUpdateState ?? readUpdateTime;
