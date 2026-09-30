@@ -9,7 +9,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { join, posix, relative, sep } from "node:path";
 import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
@@ -140,8 +140,12 @@ const NOTES = {
   "not-a-file": { code: "not-a-file", reason: "not a regular file" },
   "ferry-backup": { code: "ferry-backup", reason: "Ferry backup directory" },
   "invalid-settings": { code: "invalid-settings", reason: "settings file that is not a JSON object" },
+  "too-large": { code: "too-large", reason: "too large for Ferry to check" },
+  changed: { code: "changed", reason: "file changed during the check" },
 } as const satisfies Record<string, Note>;
 
+/** The bytes of one read of `readLimited`. */
+const READ_CHUNK = 1024 * 1024;
 const FERRY_BACKUP_NAME = /\.ferry-backup-\d{8}T\d{6}Z$/;
 /**
  * Codex writes its bundled skills to this entry of its skill root and rewrites
@@ -648,15 +652,40 @@ function collectOccurrences(
 
 type Scan = { files: SeedFile[]; leftovers: Leftover[]; forbidden: ForbiddenHit[] };
 
-/** The carried files of one skill directory, and the hits of the deny rules in it. The hit paths are absolute. */
-export function scanSkill(skillDir: string): Scan {
+/**
+ * The carried files of one skill directory, and the hits of the deny rules in
+ * it. The hit paths are absolute. With `maxBytes`, a larger file is not read
+ * and is a leftover, and so is a file that grows past it during the read.
+ */
+export function scanSkill(skillDir: string, maxBytes?: number): Scan {
   const scan: Scan = { files: [], leftovers: [], forbidden: [] };
-  walk(skillDir, skillDir, realpathSync(skillDir), new Set(), scan);
+  walk(skillDir, skillDir, realpathSync(skillDir), new Set(), scan, maxBytes);
   scan.files.sort((a, b) => compare(a.path, b.path));
   return scan;
 }
 
-function walk(root: string, dir: string, rootReal: string, seen: Set<string>, scan: Scan): void {
+/**
+ * The bytes of the file `path`, or null when it has more than `maxBytes`
+ * bytes. The read stops there, so a file that grows cannot fill the memory.
+ */
+export function readLimited(path: string, maxBytes: number): Buffer | null {
+  const file = openSync(path, "r");
+  try {
+    const chunks: Buffer[] = [];
+    for (let length = 0; ; ) {
+      const chunk = Buffer.allocUnsafe(Math.min(READ_CHUNK, maxBytes - length + 1));
+      const read = readSync(file, chunk, 0, chunk.length, null);
+      if (read === 0) return Buffer.concat(chunks);
+      length += read;
+      if (length > maxBytes) return null;
+      chunks.push(chunk.subarray(0, read));
+    }
+  } finally {
+    closeSync(file);
+  }
+}
+
+function walk(root: string, dir: string, rootReal: string, seen: Set<string>, scan: Scan, maxBytes?: number): void {
   for (const entry of readdirSync(dir, { withFileTypes: true }).sort(byName)) {
     const path = join(dir, entry.name);
 
@@ -686,7 +715,7 @@ function walk(root: string, dir: string, rootReal: string, seen: Set<string>, sc
       const real = realpathSync(path);
       if (seen.has(real)) continue;
       seen.add(real);
-      walk(root, path, rootReal, seen, scan);
+      walk(root, path, rootReal, seen, scan, maxBytes);
       continue;
     }
     if (!stat.isFile()) {
@@ -694,7 +723,15 @@ function walk(root: string, dir: string, rootReal: string, seen: Set<string>, sc
       continue;
     }
 
-    const bytes = readFileSync(path);
+    if (maxBytes !== undefined && stat.size > maxBytes) {
+      scan.leftovers.push(note(path, NOTES["too-large"]));
+      continue;
+    }
+    const bytes = maxBytes === undefined ? readFileSync(path) : readLimited(path, maxBytes);
+    if (bytes === null) {
+      scan.leftovers.push(note(path, NOTES.changed));
+      continue;
+    }
     // A key renamed to notes.md is still a key. Read the header, not the name.
     if (PRIVATE_KEY_HEADER.test(bytes.subarray(0, 4096).toString("latin1"))) {
       scan.forbidden.push(note(path, DENY_RULES["private-key"]));

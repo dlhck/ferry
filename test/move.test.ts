@@ -10,6 +10,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1085,6 +1086,39 @@ describe("ferry move --from-box checks the files on the box", () => {
     expect(result.error).toBeNull();
     expect(readFileSync(join(w.operator, "Developer/app/AGENTS.md"), "utf8")).toBe("# Agents\nnew line\n");
     expect(result.value?.carry.map((file) => file.sha256)).toEqual([new Bun.CryptoHasher("sha256").update("# Agents\nnew line\n").digest("hex")]);
+  });
+
+  test("a file and a session of more than 128 MiB stay on the source: the plan skips them and tells the operator to copy them by hand", async () => {
+    const w = world();
+    const boxApp = project(w, w.box);
+    write(join(boxApp, "AGENTS.md"), "# Agents\n");
+    write(join(boxApp, "model.bin"), "");
+    truncateSync(join(boxApp, "model.bin"), 128 * 1024 * 1024 + 1);
+    const sessions = join(w.box, ".claude/projects", projectDirectoryName(boxApp));
+    write(join(sessions, "clean.jsonl"), `${JSON.stringify({ type: "user", message: "hello" })}\n`);
+    write(join(sessions, "large.jsonl"), "");
+    truncateSync(join(sessions, "large.jsonl"), 128 * 1024 * 1024 + 1);
+    const warnings: string[] = [];
+
+    const result = await move(w, { path: "Developer/app", fromBox: "default" }, { warn: (line) => warnings.push(line) });
+    const removing = await move(w, { path: "Developer/app", fromBox: "default", remove: true, dryRun: true });
+
+    expect(result.error).toBeNull();
+    expect(result.lines).toContain("Skip: model.bin (too large for Ferry to check)");
+    expect(result.lines).toContain("Note: Ferry does not read a file of more than 128 MiB. Copy model.bin by hand.");
+    expect(result.value?.skipped).toEqual([{ path: "model.bin", code: "too-large", reason: "too large for Ferry to check" }]);
+    expect(result.value?.refused).toEqual([]);
+    const large = `~/${join(sessions, "large.jsonl").slice(w.box.length + 1)}`;
+    expect(warnings).toEqual([`WARNING: Ferry skips the session of ${large} (too large for Ferry to check). Copy it by hand.`]);
+    const localApp = join(w.operator, "Developer/app");
+    expect(existsSync(join(localApp, "AGENTS.md"))).toBe(true);
+    expect(existsSync(join(localApp, "model.bin"))).toBe(false);
+    const local = join(w.operator, ".claude/projects", projectDirectoryName(localApp));
+    expect(existsSync(join(local, "clean.jsonl"))).toBe(true);
+    expect(existsSync(join(local, "large.jsonl"))).toBe(false);
+    expect(removing.lines).toContain(
+      "Problem: --remove needs every local-only file carried, and Ferry refuses 1. Move them by hand or leave out --remove.",
+    );
   });
 
   test("a file of this machine that gets a secret after the check does not go to the box", async () => {
