@@ -17,6 +17,7 @@ import { createPaseo } from "../src/integrations/paseo.ts";
 import { EXAMPLE_ID, operatorIntegration } from "./fake-integration.ts";
 import { denyRules } from "../src/manifest.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
+import { runToolsCommand } from "../src/tools/command.ts";
 import { Link } from "../src/link.ts";
 import type { PartialOperatorConfig } from "../src/config.ts";
 import type { SyncInput, SyncResult } from "../src/sync.ts";
@@ -2278,7 +2279,12 @@ describe("--json", () => {
   test("ferry tools lists the off policy of [tools] and of each box", async () => {
     const off: PartialOperatorConfig = { ...BOXES, tools: { pi: "off" }, boxes: [BOXES.boxes![0]!, { ...BOXES.boxes![1]!, tools: { pi: "latest" } }] };
 
-    const result = await run(["tools"], { readConfig: () => off });
+    const result = await run(["tools"], {
+      readConfig: () => off,
+      // A machine without the tools: no test runs a real version command.
+      runTools: (dependencies) =>
+        runToolsCommand({ ...dependencies, local: { run: async () => ({ exitCode: 127, stdout: "", stderr: "", timedOut: false }) } }),
+    });
 
     const pi = result.json[0].result.tools.find((tool: { id: string }) => tool.id === "pi");
     expect(pi.policy).toEqual({ policy: "off", default: false });

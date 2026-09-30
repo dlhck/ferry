@@ -28,6 +28,8 @@ Some box MCP tests run box scripts with a real `jq`. They skip when `jq` is not 
 
 The tests do not connect to a real box. They use fake SSH hosts, temporary home directories, and local git remotes. Do not add a test that needs network access, a Tailscale peer, or a vendor login.
 
+A test must not start a real tool binary, such as `gh`, `claude`, `ssh`, `npm`, or `systemctl`: inject a fake through the dependencies of the command, or put a fake program in front of `PATH`. The guard in `test/preload.ts` puts stubs with these names in front of `PATH`, and a test that starts one fails with the command in the message.
+
 Use example values in tests and docs: `user@box.example`, `/home/user`, `operator@example.com`, and `git@github.com:you/ferry-snapshot.git`. Do not use a real host name, IP address, user name, or home path.
 
 ## Commits

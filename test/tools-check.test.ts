@@ -216,33 +216,38 @@ describe("the box tools script in a shell", () => {
   test("reads each version with the ferry PATH and with a clean login shell that reads ~/.profile", async () => {
     const home = mkdtempSync(join(tmpdir(), "ferry-tools-check-"));
     try {
+      // The names are of no real program, so the login shell finds none of them on the machine that runs the test.
       for (const [dir, name, version] of [
-        [".bun/bin", "bun", "1.4.2"],
-        [".uv/bin", "uv", "uv 0.9.2"],
+        [".shown/bin", "ferry-test-shown", "1.4.2"],
+        [".hidden/bin", "ferry-test-hidden", "hidden 0.9.2"],
       ] as const) {
         mkdirSync(join(home, dir), { recursive: true });
         writeFileSync(join(home, dir, name), `#!/bin/sh\necho '${version}'\n`);
         chmodSync(join(home, dir, name), 0o755);
       }
-      writeFileSync(join(home, ".profile"), 'export PATH="$HOME/.bun/bin:$PATH"\n');
-      const tools = [tool("bun"), tool("uv"), tool("pnpm")];
+      writeFileSync(join(home, ".profile"), 'export PATH="$HOME/.shown/bin:$PATH"\n');
+      const tools = [tool("ferry-test-shown"), tool("ferry-test-hidden"), tool("ferry-test-missing")];
       const box = {
         /** Like Link, put the ferry PATH in front of the command. */
         async run(command: string): Promise<LinkResult> {
-          const child = Bun.spawnSync(["sh", "-c", `${pathExport([".bun/bin", ".uv/bin"])}; ${command}`], {
+          const child = Bun.spawnSync(["sh", "-c", `${pathExport([".shown/bin", ".hidden/bin"])}; ${command}`], {
             env: { HOME: home, PATH: "/usr/bin:/bin" },
           });
           return { ok: true, address: "local", stdout: child.stdout.toString(), stderr: child.stderr.toString() };
         },
       };
-      const local = fakeLocal({ "bun --version": "1.4.2", "uv --version": "0.9.2", "pnpm --version": "11.17.0" });
+      const local = fakeLocal({
+        "ferry-test-shown --version": "1.4.2",
+        "ferry-test-hidden --version": "0.9.2",
+        "ferry-test-missing --version": "11.17.0",
+      });
 
       const rows = await checkTools(tools, undefined, local, box);
 
       expect(rows.map((row) => [row.id, row.box, row.state])).toEqual([
-        ["bun", "1.4.2", "ok"],
-        ["uv", "0.9.2", "hidden"],
-        ["pnpm", null, "missing"],
+        ["ferry-test-shown", "1.4.2", "ok"],
+        ["ferry-test-hidden", "0.9.2", "hidden"],
+        ["ferry-test-missing", null, "missing"],
       ]);
     } finally {
       rmSync(home, { recursive: true, force: true });

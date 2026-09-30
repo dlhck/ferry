@@ -28,8 +28,10 @@ import { installBoxFerry } from "./box-ferry-shim.ts";
 import { recordProgress } from "./fake-progress.ts";
 
 const roots: string[] = [];
+const PATH = process.env.PATH;
 
 afterEach(() => {
+  process.env.PATH = PATH;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -54,7 +56,10 @@ function write(path: string, body: string | Uint8Array): void {
   writeFileSync(path, body);
 }
 
-/** A temp world: an operator home, a box home, and a bare origin. */
+/**
+ * A temp world: an operator home, a box home, and a bare origin. Each machine has a `gh` in front of its PATH
+ * that cannot read origin, so no test runs the real `gh` of the machine that runs the test.
+ */
 function world() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "ferry-move-test-")));
   roots.push(root);
@@ -65,6 +70,12 @@ function world() {
   mkdirSync(operator);
   mkdirSync(box);
   mkdirSync(bin);
+  const operatorBin = join(root, "operator-bin");
+  for (const dir of [bin, operatorBin]) {
+    write(join(dir, "gh"), "#!/bin/sh\nexit 1\n");
+    chmodSync(join(dir, "gh"), 0o755);
+  }
+  process.env.PATH = `${operatorBin}:${PATH}`;
   git(root, "init", "-q", "--bare", origin);
   const seed = join(root, "seed");
   git(root, "clone", "-q", origin, seed);

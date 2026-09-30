@@ -1,0 +1,3 @@
+[test]
+# The guard against a real tool binary in a test. See CONTRIBUTING.md.
+preload = ["./test/preload.ts"]
