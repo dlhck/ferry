@@ -24,6 +24,7 @@ import { noProgress, step, type Progress } from "./progress.ts";
 import { BUILTIN_TOOLS } from "./registry/builtin.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
 import { RealGitRunner } from "./store.ts";
+import { boxLockError, type BoxLockRefusal } from "./sync.ts";
 import { describeStep, effectivePolicy, ToolPlanError, type ToolStep } from "./tools/resolve.ts";
 import { VERSION } from "./version.ts";
 
@@ -65,6 +66,11 @@ export type InstallCommandDependencies = {
   readonly writeLine: (line: string) => void;
   /** The Ferry version to put on the box: the version of this Ferry. */
   readonly ferryVersion: string;
+  /**
+   * Takes the box lock of the box, from `boxLocker`. The install stops when
+   * the box does not give the lock. Without it, the install takes no lock.
+   */
+  readonly lockBox?: () => (() => void) | BoxLockRefusal;
 };
 
 export type AuthCommandDependencies = {
@@ -106,10 +112,30 @@ export class InstallAuthCommandError extends Error {
   }
 }
 
-/** Returns null when the operator does not confirm. */
+/**
+ * Returns null when the operator does not confirm.
+ *
+ * With `lockBox`, the install holds the box lock from after the confirmation
+ * to its end. It fails before it changes the box when a sync or another
+ * command holds the lock, or when the box left the config or changed in it.
+ */
 export async function runInstallCommand(
   input: InstallCommandInput,
   dependencies: Partial<InstallCommandDependencies> = {},
+): Promise<InstallCommandResult | null> {
+  const locks: (() => void)[] = [];
+  try {
+    return await installOnBox(input, dependencies, locks);
+  } finally {
+    for (const release of locks) release();
+  }
+}
+
+/** `runInstallCommand`. It adds the box lock that it takes to `locks`, and the caller releases it. */
+async function installOnBox(
+  input: InstallCommandInput,
+  dependencies: Partial<InstallCommandDependencies>,
+  locks: (() => void)[],
 ): Promise<InstallCommandResult | null> {
   const resolved = { ...defaultInstallDependencies, ...dependencies };
   const { target, config } = loadTarget(resolved.readConfig, resolved.writeLine);
@@ -145,6 +171,10 @@ export async function runInstallCommand(
     const confirmed = await resolved.confirm();
     if (confirmed !== true) return null;
   }
+  // The plan and the confirmation can take a long time, so the box can leave the config before this point.
+  const lock = resolved.lockBox?.();
+  if (typeof lock === "function") locks.push(lock);
+  else if (lock !== undefined) throw boxLockError(lock);
 
   const progress = resolved.progress;
   let active = false;

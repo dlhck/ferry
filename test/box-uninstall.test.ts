@@ -555,8 +555,8 @@ describe("ferry box remove --uninstall", () => {
 
       const error = await runBoxUninstall({ name: "b", yes: true, dryRun: false }, deps).catch((error) => error);
 
-      expect(error.message).toBe("operator: a sync is active for box b");
-      expect(errorInfo(error)).toMatchObject({ code: "sync-busy", hint: "Wait for the other sync to end, then run the command again." });
+      expect(error.message).toBe("operator: a sync or another Ferry command is active for box b");
+      expect(errorInfo(error)).toMatchObject({ code: "sync-busy", hint: "Wait for the other Ferry command to end, then run the command again." });
       expect(links).toEqual([]);
       expect(text()).toBe(CONFIG);
       expect(await runBoxUninstall({ name: "b", yes: true, dryRun: true }, deps)).toMatchObject({ uninstall: { dryRun: true } });

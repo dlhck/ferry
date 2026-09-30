@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { configPath, type PartialOperatorConfig } from "../src/config.ts";
@@ -9,6 +9,8 @@ import {
 } from "../src/integrations/command.ts";
 import { INTEGRATIONS, integrationLines, listIntegrations, operatorIntegrations } from "../src/integrations/index.ts";
 import { EXAMPLE_ID, operatorIntegration } from "./fake-integration.ts";
+import { errorInfo } from "../src/output.ts";
+import { acquireBoxLock, boxLocker } from "../src/sync.ts";
 
 /** The `ferry integrations` lines, as the CLI prints them. */
 async function integrationText(...args: Parameters<typeof listIntegrations>): Promise<string[]> {
@@ -680,6 +682,113 @@ describe("integrations enable and disable", () => {
       "  Open Settings → Add host → Remote SSH.",
       "  Enter ssh://ploi@box.",
     ]);
+  });
+
+  describe("the box lock", () => {
+    const box = { name: "default", host: { transport: "ssh" as const, destination: "ploi@box" }, gitAuth: "agent" as const };
+
+    /** Real box locks in a temporary home. `current` is the config that the locker reads again. */
+    function locked(current: () => PartialOperatorConfig = () => CONFIG) {
+      const home = tempRoot();
+      const lock = boxLocker(home, current, "change");
+      return { home, held: () => readdirSync(join(home, ".ferry")).length, lockBox: () => lock(box) };
+    }
+
+    for (const input of [
+      { action: "enable", name: "paseo", yes: false, dryRun: false },
+      { action: "disable", name: "paseo", yes: false, purge: false },
+    ] as const) {
+      test(`${input.action} stops with sync-busy before it changes a box that a sync holds`, async () => {
+        const recorder: Recorder = { events: [], output: [] };
+        const { home, lockBox } = locked();
+        const release = acquireBoxLock(home, box);
+
+        const error = await runIntegrationCommand(input, dependencies(recorder, { lockBox })).catch((error) => error);
+        release();
+
+        expect(errorInfo(error)).toMatchObject({
+          code: "sync-busy",
+          message: "operator: box default is busy: a sync or another Ferry command is active for it",
+        });
+        expect(recorder.events).toEqual([`plan ${input.action}`, "confirm"]);
+      });
+
+      test(`${input.action} stops before it changes a box that left the config during the confirmation`, async () => {
+        const recorder: Recorder = { events: [], output: [] };
+        let current = CONFIG;
+        const { held, lockBox } = locked(() => current);
+        const { host: _host, ...noBox } = CONFIG;
+
+        const error = await runIntegrationCommand(
+          input,
+          dependencies(recorder, {
+            lockBox,
+            // `ferry box remove default --uninstall` runs while the prompt waits.
+            confirm: async () => {
+              current = noBox;
+              return true;
+            },
+          }),
+        ).catch((error) => error);
+
+        expect(errorInfo(error)).toMatchObject({
+          code: "refused",
+          message: "box default left the config during the change. Ferry did not change the box.",
+        });
+        expect(recorder.events).toEqual([`plan ${input.action}`]);
+        expect(held()).toBe(0);
+      });
+    }
+
+    test("holds the lock during the box steps and the config write, and releases it, also after a failure", async () => {
+      const recorder: Recorder = { events: [], output: [] };
+      const { held, lockBox } = locked();
+      const during: number[] = [];
+      const base = fakeIntegration(recorder);
+      const observed: Integration = {
+        ...base,
+        box: {
+          ...base.box!,
+          enable: async (...args) => {
+            during.push(held());
+            return base.box!.enable(...args);
+          },
+        },
+      };
+
+      await runIntegrationCommand(
+        { action: "enable", name: "paseo", yes: true, dryRun: false },
+        dependencies(recorder, {
+          lockBox,
+          integrations: [observed],
+          setIntegration: () => {
+            during.push(held());
+          },
+        }),
+      );
+
+      expect(during).toEqual([1, 1]);
+      expect(held()).toBe(0);
+
+      await expect(
+        runIntegrationCommand(
+          { action: "enable", name: "paseo", yes: true, dryRun: false },
+          dependencies(recorder, { lockBox, integrations: [fakeIntegration(recorder, true)] }),
+        ),
+      ).rejects.toThrow("npm install failed");
+      expect(held()).toBe(0);
+    });
+
+    test("a dry run takes no lock", async () => {
+      const recorder: Recorder = { events: [], output: [] };
+      const { home, lockBox } = locked();
+      const release = acquireBoxLock(home, box);
+
+      const result = await runIntegrationCommand({ action: "enable", name: "paseo", yes: true, dryRun: true }, dependencies(recorder, { lockBox }));
+      release();
+
+      expect(result).toMatchObject({ dryRun: true });
+    });
   });
 
   test("names the box table when the flag goes to [box.<name>.integrations]", async () => {

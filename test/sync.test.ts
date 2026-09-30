@@ -25,6 +25,9 @@ import { loadRegistry, type RegistryConfig } from "../src/registry/load.ts";
 import type { LinkResult } from "../src/link.ts";
 import type { HarnessDescriptor } from "../src/registry/types.ts";
 import {
+  acquireBoxLock,
+  boxLocker,
+  boxLockError,
   remoteUpdateCommand,
   BoxesSyncError,
   runSync,
@@ -1781,6 +1784,48 @@ describe("sync locks", () => {
     }
   });
 
+  test("the box locker refuses a busy box and a box that left or changed in the config, and holds no lock then", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-box-locker-"));
+    const host = { transport: "ssh" as const, destination: "user@box.example" };
+    const box = { name: "b", host, gitAuth: "agent" as const };
+    const complete = { version: 1 as const, publisher: "operator", snapshotUrl: "snapshot.git" };
+    let current: Parameters<typeof boxLocker>[1] = () => ({ ...complete, boxes: [{ name: "b", host }] });
+    const lock = boxLocker(home, () => current(), "update");
+    const locks = () => readdirSync(join(home, ".ferry"));
+    try {
+      const release = lock(box);
+      expect(release).toBeFunction();
+      expect(locks()).toEqual([boxLockFile("ssh:user@box.example")]);
+      // A sync and a second command do not get the box while the command holds the lock.
+      expect(() => acquireBoxLock(home, box)).toThrow("a sync or another Ferry command is active for box b");
+      expect(lock(box)).toEqual({ busy: true, reason: "box b is busy: a sync or another Ferry command is active for it" });
+      (release as () => void)();
+      expect(locks()).toEqual([]);
+
+      current = () => ({ ...complete, boxes: [{ name: "a", host }] });
+      expect(lock(box)).toEqual({ busy: false, reason: "box b left the config during the update" });
+      current = () => complete;
+      expect(lock(box)).toEqual({ busy: false, reason: "box b left the config during the update" });
+      current = () => ({ ...complete, boxes: [{ name: "b", host: { transport: "ssh", destination: "user@new.example" } }] });
+      expect(lock(box)).toEqual({ busy: false, reason: "box b changed in the config during the update" });
+      current = () => ({ ...complete, boxes: [{ name: "b", host, gitAuth: "box" }] });
+      expect(lock(box)).toEqual({ busy: false, reason: "box b changed in the config during the update" });
+      current = () => {
+        throw new Error("no config");
+      };
+      expect(() => lock(box)).toThrow("no config");
+      expect(locks()).toEqual([]);
+
+      expect(errorInfo(boxLockError({ busy: true, reason: "box b is busy" }))).toMatchObject({ code: "sync-busy", message: "operator: box b is busy" });
+      expect(errorInfo(boxLockError({ busy: false, reason: "box b left the config during the install" }))).toMatchObject({
+        code: "refused",
+        message: "box b left the config during the install. Ferry did not change the box.",
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("changes no box when the publish fails, and releases the store lock", async () => {
     const home = mkdtempSync(join(tmpdir(), "ferry-sync-publish-failure-"));
     const events: string[] = [];
@@ -2128,7 +2173,7 @@ describe("sync with more than one box", () => {
     await expect(runSync({ home: sync.home }, sync.dependencies)).rejects.toEqual(
       expect.objectContaining({
         code: "concurrent-sync",
-        message: "operator: another sync is active for box b (ssh:dev@box-b.example)",
+        message: "operator: another sync or Ferry command is active for box b (ssh:dev@box-b.example)",
       }),
     );
     expect(sync.events).toEqual([]);

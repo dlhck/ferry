@@ -1,4 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { acquireBoxLock, boxLocker } from "../src/sync.ts";
 import type { AuthLink, AuthStartResult } from "../src/auth-start.ts";
 import {
   runAuthCommand,
@@ -41,6 +45,113 @@ describe("install command", () => {
     expect((await install(() => ({ ...noBox, host: { tailscale: "builder" } }))).message).toBe(
       "operator/invalid-config: Ferry config has no complete host. Run ferry init.",
     );
+  });
+
+  describe("the box lock", () => {
+    const homes: string[] = [];
+    afterEach(() => {
+      for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+    });
+    const box = { name: "default", host: config.host, gitAuth: "agent" as const };
+
+    /** Real box locks in a temporary home. `current` is the config that the locker reads again. */
+    function locked(current: () => typeof config | Omit<typeof config, "host"> = () => config) {
+      const home = mkdtempSync(join(tmpdir(), "ferry-install-lock-"));
+      homes.push(home);
+      const runs: string[] = [];
+      const linkRuns: string[] = [];
+      const lock = boxLocker(home, current, "install");
+      return { home, runs, linkRuns, lockBox: () => lock(box) };
+    }
+
+    test("stops with sync-busy before it changes a box that a sync holds", async () => {
+      const { home, runs, linkRuns, lockBox } = locked();
+      const release = acquireBoxLock(home, box);
+
+      const error = await runInstallCommand(
+        { yes: true },
+        { ...installDependencies({ plan, linkRuns, run: async () => (runs.push("run"), { ok: true }) }), lockBox },
+      ).catch((error) => error);
+      release();
+
+      expect(errorInfo(error)).toMatchObject({
+        code: "sync-busy",
+        message: "operator: box default is busy: a sync or another Ferry command is active for it",
+      });
+      expect(runs).toEqual([]);
+      expect(linkRuns).not.toContain(identityCommand);
+    });
+
+    test("stops before it changes a box that left the config while the command waited for the confirmation", async () => {
+      let current: typeof config | Omit<typeof config, "host"> = config;
+      const { home, runs, linkRuns, lockBox } = locked(() => current);
+      const { host: _host, ...noBox } = config;
+
+      const error = await runInstallCommand(
+        { yes: false },
+        {
+          ...installDependencies({
+            plan,
+            linkRuns,
+            run: async () => (runs.push("run"), { ok: true }),
+            // `ferry box remove default --uninstall` runs while the prompt waits.
+            confirm: async () => {
+              current = noBox;
+              return true;
+            },
+          }),
+          lockBox,
+        },
+      ).catch((error) => error);
+
+      expect(errorInfo(error)).toMatchObject({
+        code: "refused",
+        message: "box default left the config during the install. Ferry did not change the box.",
+      });
+      expect(runs).toEqual([]);
+      expect(linkRuns).not.toContain(identityCommand);
+      expect(readdirSync(join(home, ".ferry"))).toEqual([]);
+    });
+
+    test("holds the lock from the first install command to the git identity, and releases it, also after a failure", async () => {
+      const { home, linkRuns, lockBox } = locked();
+      const held = () => (existsSync(join(home, ".ferry")) ? readdirSync(join(home, ".ferry")).length : 0);
+      const during: number[] = [];
+      let atPrompt = -1;
+
+      await runInstallCommand(
+        { yes: false },
+        {
+          ...installDependencies({
+            plan,
+            linkRuns,
+            confirm: async () => ((atPrompt = held()), true),
+            run: async () => (during.push(held()), { ok: true }),
+          }),
+          createLink: () => ({
+            ...fakeLink(),
+            run: async (command) => {
+              if (command === identityCommand) during.push(held());
+              return { ok: true, address: "builder", stdout: "", stderr: "" };
+            },
+          }),
+          lockBox,
+        },
+      );
+
+      // The prompt can wait for a long time, so the command takes the lock after it.
+      expect(atPrompt).toBe(0);
+      expect(during).toEqual([1, 1]);
+      expect(held()).toBe(0);
+
+      await expect(
+        runInstallCommand(
+          { yes: true },
+          { ...installDependencies({ plan, run: async () => { throw new Error("install broke"); } }), lockBox },
+        ),
+      ).rejects.toThrow("install broke");
+      expect(held()).toBe(0);
+    });
   });
 
   test("prints the exact plan before confirmation", async () => {

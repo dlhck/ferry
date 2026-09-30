@@ -1,4 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { acquireBoxLock } from "../src/sync.ts";
 import { createPaseo } from "../src/integrations/paseo.ts";
 import type { BoxIntegration, Integration } from "../src/integrations/types.ts";
 import type { PartialOperatorConfig } from "../src/config.ts";
@@ -732,6 +736,97 @@ describe("update command across boxes", () => {
     expect(recorder.output).toContain("Updated [b] box gh.");
     expect(recorder.output.filter((line) => line.startsWith("Operator claude"))).toEqual(["Operator claude: claude update"]);
     expect(recorder.output.slice(-2)).toEqual(["Box a: done.", "Box b: done."]);
+  });
+
+  describe("the box lock", () => {
+    const homes: string[] = [];
+    afterEach(() => {
+      for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+    });
+    const boxA = { name: "a", host: { transport: "ssh" as const, destination: "dev@box-a.example" } };
+
+    /** The dependencies with real box locks in a temporary home. `current` is the config that the update reads. */
+    function locked(current: () => PartialOperatorConfig = () => boxes) {
+      const home = mkdtempSync(join(tmpdir(), "ferry-update-lock-"));
+      homes.push(home);
+      const setup = boxDependencies();
+      return { ...setup, home, deps: { ...setup.deps, home, readConfig: current } };
+    }
+
+    test("skips a box that a sync holds, updates the other box, and does not fail", async () => {
+      const { recorder, onBoxes, paseo, home, deps } = locked();
+      const release = acquireBoxLock(home, boxA);
+
+      const result = await runUpdateCommand({ yes: true, dryRun: false, includeIntegrations: true }, deps);
+      release();
+
+      expect(onBoxes).toEqual(BOX_COMMANDS.map((command) => `dev@box-b.example: ${command}`));
+      expect(paseo).toEqual([]);
+      expect(recorder.local).toEqual(["claude update", "codex update"]);
+      expect(recorder.output).toContain("[a] Skipped box a: box a is busy: a sync or another Ferry command is active for it.");
+      expect(recorder.output.slice(-2)).toEqual(["Box a: skipped.", "Box b: done."]);
+      expect(result?.boxes.map(({ name, ok, skipped }) => ({ name, ok, skipped }))).toEqual([
+        { name: "a", ok: true, skipped: "box a is busy: a sync or another Ferry command is active for it" },
+        { name: "b", ok: true, skipped: undefined },
+      ]);
+      expect(result?.updated.some((name) => name.startsWith("[a] "))).toBe(false);
+      expect(readdirSync(join(home, ".ferry"))).toEqual([]);
+    });
+
+    test("skips a box that left the config while the command waited for the confirmation", async () => {
+      let current = boxes;
+      const { recorder, onBoxes, deps } = locked(() => current);
+
+      const result = await runUpdateCommand(
+        { yes: false, dryRun: false },
+        {
+          ...deps,
+          // `ferry box remove a --uninstall` runs while the prompt waits.
+          confirm: async () => {
+            current = { ...boxes, boxes: boxes.boxes!.slice(1) };
+            return true;
+          },
+        },
+      );
+
+      expect(onBoxes).toEqual(BOX_COMMANDS.map((command) => `dev@box-b.example: ${command}`));
+      expect(recorder.output).toContain("[a] Skipped box a: box a left the config during the update.");
+      expect(result?.boxes[0]).toMatchObject({ name: "a", ok: true, skipped: "box a left the config during the update" });
+    });
+
+    test("holds the lock of each box while it changes the boxes, and releases it after a failure", async () => {
+      const { onBoxes, home, deps } = locked();
+      const during: string[] = [];
+      const createLink = (options: LinkOptions) => {
+        const link = deps.createLink!(options);
+        return {
+          ...link,
+          run: async (command: string, runOptions?: { timeoutMs?: number }): Promise<LinkResult> => {
+            if (command === "claude update") {
+              during.push(readdirSync(join(home, ".ferry")).length === 2 ? "both locked" : "not locked");
+              return { ok: false, error: { code: "command-failed", origin: "box", message: "update refused" } };
+            }
+            return link.run(command, runOptions);
+          },
+        };
+      };
+
+      await expect(runUpdateCommand({ yes: true, dryRun: false }, { ...deps, createLink })).rejects.toThrow("updates failed");
+
+      expect(during).toEqual(["both locked", "both locked"]);
+      expect(onBoxes.length).toBeGreaterThan(0);
+      expect(readdirSync(join(home, ".ferry"))).toEqual([]);
+    });
+
+    test("a dry run takes no lock", async () => {
+      const { home, deps } = locked();
+      const release = acquireBoxLock(home, boxA);
+
+      const result = await runUpdateCommand({ yes: true, dryRun: true }, deps);
+      release();
+
+      expect(result?.boxes.every((box) => box.skipped === undefined)).toBe(true);
+    });
   });
 
   test("an offline box does not stop the other box or the operator part, and the command fails", async () => {

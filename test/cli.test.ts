@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { UpdateError, type UpdateCommandInput, type UpdateCommandResult } from "../src/update.ts";
 import { BoxesSyncError, SyncError } from "../src/sync.ts";
 import { FerryError } from "../src/errors.ts";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildProgram, isBoxMode, runCli } from "../src/cli.ts";
@@ -1071,6 +1071,59 @@ describe("--box", () => {
       },
     }).parseAsync(["integrations", "enable", "paseo"], { from: "user" });
     expect(hostSet).toBeUndefined();
+  });
+
+  test("install and integrations enable and disable get the lock of their box, and update gets the home of the locks", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ferry-cli-lock-"));
+    type Lock = () => (() => void) | { busy: boolean; reason: string };
+    try {
+      let current = BOXES;
+      const lockOf = async (config: PartialOperatorConfig, args: string[]): Promise<Lock | undefined> => {
+        let lockBox: Lock | undefined;
+        current = config;
+        const capture = async (_input: unknown, dependencies?: { lockBox?: Lock }) => {
+          lockBox = dependencies?.lockBox;
+          return null;
+        };
+        await buildProgram({ readConfig: () => current, home: () => home, runInstall: capture, runIntegration: capture })
+          .parseAsync(args, { from: "user" });
+        return lockBox;
+      };
+
+      for (const args of [["install"], ["integrations", "enable", "paseo"], ["integrations", "disable", "paseo"]]) {
+        const lockBox = await lockOf(BOXES, [...args, "--box", "b"]);
+        const release = lockBox!();
+        expect(release).toBeFunction();
+        expect(await readdir(join(home, ".ferry"))).toHaveLength(1);
+        expect(lockBox!()).toEqual({ busy: true, reason: "box b is busy: a sync or another Ferry command is active for it" });
+        (release as () => void)();
+        expect(await readdir(join(home, ".ferry"))).toEqual([]);
+        // The command reads box b at its start. The lock reads the config of that moment, not the view of the command.
+        current = { ...BOXES, boxes: BOXES.boxes!.slice(0, 1) };
+        expect(lockBox!()).toEqual({ busy: false, reason: `box b left the config during the ${args[0] === "install" ? "install" : "change"}` });
+      }
+      // A [host] config has the box default.
+      const hostLock = await lockOf(HOST, ["install"]);
+      const release = hostLock!();
+      expect(release).toBeFunction();
+      (release as () => void)();
+      // The command reports a config without a box.
+      expect(await lockOf({ version: 1, publisher: "operator", snapshotUrl: "snapshot.git" }, ["install"])).toBeUndefined();
+
+      let updateHome: string | undefined;
+      await buildProgram({
+        readConfig: () => BOXES,
+        home: () => home,
+        runUpdate: async (_input, dependencies) => {
+          updateHome = dependencies?.home;
+          return null;
+        },
+        createProgress: () => noProgress,
+      }).parseAsync(["update", "--dry-run"], { from: "user" });
+      expect(updateHome).toBe(home);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   });
 
   test("update gets the whole config and the --box selection", async () => {
