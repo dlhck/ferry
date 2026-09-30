@@ -1440,6 +1440,8 @@ describe("ferry status skipped MCP servers", () => {
       ...stack.dependencies,
       home: () => home,
       loadRegistry: () => ({ ok: true as const, harnesses: BUILTIN_HARNESSES, tools: registry.tools }),
+      // A machine without the tools: no test runs a real version command.
+      local: { run: async () => ({ exitCode: 127, stdout: "", stderr: "", timedOut: false }) },
       inspectApply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }),
       createAuthStart: () => ({ status: async () => ({ providers: [] }), mcpStatus: async () => [] }),
     };
