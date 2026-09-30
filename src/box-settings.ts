@@ -287,6 +287,22 @@ export function jqReadScript(path: string, args: string, filter: string): string
   ].join("\n");
 }
 
+/**
+ * The box script that prints the output of the jq `filter` for the JSON that
+ * the box `command` prints. The script prints `J` without jq and `E` when jq
+ * fails. It exits with 1 when the command fails. The command output and
+ * stderr stay on the box. Ferry reads all that the filter prints, so the
+ * filter must print only the fields that Ferry compares, and never a value
+ * that can hold a secret.
+ */
+export function jqCommandScript(command: string, args: string, filter: string): string {
+  return [
+    `${HAS_JQ} || { printf 'J\\n'; exit 0; }`,
+    `out=$(${command} 2>/dev/null) || exit 1`,
+    `printf '%s' "$out" | jq -r ${args} ${quoteShell(filter)} 2>/dev/null || printf 'E\\n'`,
+  ].join("\n");
+}
+
 /** A shell function that prints the file `$f`, or `{}` for a missing or empty file. */
 const JQ_SOURCE = `src() { if grep -q '[^[:space:]]' "$f" 2>/dev/null; then cat "$f"; else printf '{}'; fi; }`;
 

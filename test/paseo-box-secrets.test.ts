@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { carryAgentProfiles, carryPaseoPreferences } from "../src/integrations/paseo.ts";
@@ -16,6 +16,9 @@ afterEach(() => { for (const remove of roots.splice(0)) remove(); });
 const PROVIDER_SECRET = "sk-" + "provider-" + "q7Zx9".repeat(6);
 const TERMINAL_SECRET = "gh" + "p_" + "T".repeat(36);
 const SECRETS = [PROVIDER_SECRET, TERMINAL_SECRET];
+const PLUGIN_SECRET = "gl" + "pat-" + "R4v".repeat(7);
+/** A Git remote with an embedded credential, as a box can hold it. */
+const credentialRemote = (repository: string) => `https://user:${PLUGIN_SECRET}@git.example.com/${repository}.git`;
 
 const revision = "a".repeat(40);
 const plugin: PaseoPlugin = {
@@ -24,6 +27,10 @@ const plugin: PaseoPlugin = {
 const installed = [{
   id: "review", enabled: true,
   installation: { identity: { kind: "git", remote: plugin.remote, pluginPath: plugin.path }, currentRevision: revision },
+}, {
+  // A box-only plugin. Its remote holds a box credential.
+  id: "box-only", enabled: true,
+  installation: { identity: { kind: "git", remote: credentialRemote("box-only"), pluginPath: "." }, currentRevision: revision },
 }];
 const models = [{ id: "glm-4.6", label: "GLM 4.6" }];
 const providers: PaseoProviders = {
@@ -73,7 +80,7 @@ function box(config: unknown, answer?: (command: string) => string | undefined):
 
 function expectNoSecret(value: unknown): void {
   const text = typeof value === "string" ? value : JSON.stringify(value);
-  for (const secret of SECRETS) expect(text).not.toContain(secret);
+  for (const secret of [...SECRETS, PLUGIN_SECRET]) expect(text).not.toContain(secret);
 }
 
 describe("box Paseo config secrets", () => {
@@ -127,7 +134,7 @@ describe("box Paseo config secrets", () => {
     }));
     // Only the Paseo commands run in the shell. The other box commands of a sync get a fixed reply.
     const b = box(boxConfig(), (command) =>
-      command.includes(".paseo/config.json") || command.startsWith("paseo ") || command.includes("paseo daemon status")
+      command.includes(".paseo/config.json") || command.startsWith("paseo ") || command.includes("paseo daemon status") || command.includes("paseo plugin ls")
         ? undefined
         : command.startsWith("printf") ? "/home/user\n" : command.includes("command -v -- 'lazygit'") ? "ok lazygit\n" : "");
     const lines: string[] = [];
@@ -151,14 +158,38 @@ describe("box Paseo config secrets", () => {
     expect(b.config()).toEqual(carried);
   });
 
-  test("without jq, the box config stays as it is and each step warns", async () => {
+  jqTest("a credential in a box plugin remote never reaches Ferry", async () => {
+    const tools: PaseoPlugin = { kind: "npm", id: "tools", packageName: "@acme/tools", path: ".", version: "1.2.3", enabled: true };
+    const created = shellBox({ config: { pluginsEnabled: true }, plugins: [
+      // The same ID and path as the local plugin. The box remote holds a credential.
+      { id: "review", enabled: true, installation: {
+        identity: { kind: "git", remote: credentialRemote("plugins"), pluginPath: plugin.path }, currentRevision: revision } },
+      { id: "tools", enabled: false, installation: {
+        identity: { kind: "npm", packageName: "@acme/tools", pluginPath: "." }, currentRevision: "1.0.0" } },
+      installed[1],
+    ] });
+    roots.push(created.remove);
+    // Each other `paseo` command echoes the remote to stdout and to stderr.
+    const paseo = join(created.home, "../bin/paseo");
+    const echo = `echo '${credentialRemote("tools")}'`;
+    writeFileSync(paseo, readFileSync(paseo, "utf8").replace("*) echo '{}' ;;", `*) ${echo}; ${echo} >&2 ;;`));
+    expect(readFileSync(paseo, "utf8")).toContain(PLUGIN_SECRET);
+
+    const warnings = await carryPaseoPlugins(created.link, { plugins: [plugin, tools], warnings: [] });
+
+    expectNoSecret({ outputs: created.outputs, commands: created.commands, warnings });
+    expect(warnings).toEqual(["Paseo plugin review was skipped: the box has the same ID with a different source."]);
+    expect(created.log()).toEqual(["paseo plugin update tools --version 1.2.3 --json", "paseo plugin enable tools --json"]);
+  });
+
+  test("without jq, the box config and plugins stay as they are and each step warns", async () => {
     const created = shellBox({ config: boxConfig(), status, plugins: installed, jq: false,
       answer: (command) => (command.includes("command -v -- 'lazygit'") ? "ok lazygit\n" : undefined) });
     roots.push(created.remove);
     const before = created.text();
     const warning = (what: string) => `jq is not on the box, so Ferry did not update ${what}. Run ferry update to install jq.`;
 
-    expect(await carryPaseoPlugins(created.link, { plugins: [plugin], warnings: [] })).toEqual([warning("the Paseo plugin switch")]);
+    expect(await carryPaseoPlugins(created.link, { plugins: [plugin], warnings: [] })).toEqual([warning("the Paseo plugins")]);
     expect(await carryPaseoProviders(created.link, providers)).toEqual({
       carried: [], warnings: [warning("the Paseo providers")], changed: false,
     });
