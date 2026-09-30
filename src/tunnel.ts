@@ -154,6 +154,13 @@ export async function runTunnel(
     if (port.remoteHost === undefined) continue;
     const reached = await link.reach({ host: port.remoteHost, port: port.remotePort });
     if (reached.ok) continue;
+    if ("unknown" in reached) {
+      // A target that accepts the connection and sends nothing, such as a database, can give this result.
+      resolved.writeLine(
+        `Warning: Ferry could not check that ${input.box.name} can reach ${remoteTarget(port)}: ${reached.reason}. The tunnel opens without this check.`,
+      );
+      continue;
+    }
     if (reached.error.origin === "box") {
       throw new Error(`${input.box.name} cannot reach ${remoteTarget(port)}: ${reached.error.message}`);
     }

@@ -162,7 +162,8 @@ export async function sherlockHealth(resolved: SherlockDependencies): Promise<In
 }
 
 type ConnectionCheck = SherlockRecord & {
-  readonly state: "reachable" | "unreachable" | "box-offline" | "unknown-box";
+  /** `unknown`: Ferry could not test the target from the box. `error` has the reason. */
+  readonly state: "reachable" | "unreachable" | "unknown" | "box-offline" | "unknown-box";
   readonly error: string | null;
 };
 
@@ -183,6 +184,9 @@ async function checkConnection(
     .createLink(resolveLinkOptions(host))
     .reach({ host: port!.remoteHost ?? "127.0.0.1", port: port!.remotePort });
   if (reached.ok) return { ...record, state: "reachable", error: null };
+  if ("unknown" in reached) {
+    return { ...record, state: "unknown", error: `Ferry could not check that ${record.box} can reach ${record.target}: ${reached.reason}` };
+  }
   if (reached.error.origin === "box") {
     return { ...record, state: "unreachable", error: `${record.box} cannot reach ${record.target}: ${reached.error.message}` };
   }
