@@ -314,7 +314,7 @@ describe("multi-box watch", () => {
       readonly boxes: readonly string[];
       readonly instructions?: Readonly<Record<string, string>>;
     } | null;
-    readonly sync?: (request: WatchSyncRequest, time: number) => Promise<void>;
+    readonly sync?: (request: WatchSyncRequest, time: number) => Promise<readonly string[] | void>;
     readonly pollMs?: number;
   }) {
     const controller = new AbortController();
@@ -339,7 +339,7 @@ describe("multi-box watch", () => {
         readBoxes: () => current.boxes,
         sync: async (request) => {
           record.requests.push({ ...request, time });
-          await options.sync?.(request, time);
+          return options.sync?.(request, time);
         },
         sleep: async (milliseconds) => {
           record.sleeps.add(milliseconds);
@@ -372,6 +372,38 @@ describe("multi-box watch", () => {
     expect(record.lines).toContain(
       "[b] Watch sync failed; retrying in 1000 ms: box: box-b.example is offline",
     );
+  });
+
+  test("a box that the sync skipped keeps its identity and syncs again in the next cycle", async () => {
+    let skips = 0;
+    const record = await watchBoxes({
+      script: (poll) => (poll > 6 ? null : { identity: poll === 0 ? "one" : "two", boxes: ["a", "b"] }),
+      // The target of box b changed in the config during the first sync.
+      sync: async (request) => (request.boxes.includes("b") && skips++ === 0 ? ["b"] : []),
+    });
+
+    expect(record.requests.map(({ boxes, publish }) => ({ boxes, publish }))).toEqual([
+      { boxes: ["a", "b"], publish: true },
+      { boxes: ["b"], publish: false },
+    ]);
+    expect(record.states[0]).toEqual({ published: "two", boxes: { a: "two", b: "one" } });
+    expect(record.states.at(-1)).toEqual({ published: "two", boxes: { a: "two", b: "two" } });
+    expect(record.lines.filter((line) => line === "[b] Synced Manifest two.")).toHaveLength(1);
+  });
+
+  test("a failed box does not hide a skipped box", async () => {
+    const record = await watchBoxes({
+      script: (poll) => (poll > 2 ? null : { identity: poll === 0 ? "one" : "two", boxes: ["a", "b"] }),
+      sync: async () => {
+        throw new BoxesSyncError([
+          { name: "a", plan: {} as SyncPlan, failure: { step: "Connecting", error: offline() } },
+          { name: "b", plan: {} as SyncPlan, skipped: "box b changed in the config during the sync" },
+        ], true);
+      },
+    });
+
+    expect(record.states.at(-1)).toEqual({ published: "two", boxes: { a: "one", b: "one" } });
+    expect(record.lines).not.toContain("[b] Synced Manifest two.");
   });
 
   test("the backoff of one box does not block the observe loop or a new change", async () => {

@@ -493,6 +493,61 @@ describe("ferry box remove --uninstall", () => {
       expect(events).toEqual([]);
     });
 
+    test("a sync that waits in its publish does not connect to the box after the removal", async () => {
+      const box = await ferryBox();
+      const { home, deps, boxes } = operator(box);
+      const events: string[] = [];
+      const lines: string[] = [];
+      let publishing = () => {};
+      const inPublish = new Promise<void>((resolve) => {
+        publishing = resolve;
+      });
+      let resume = () => {};
+      const paused = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      // The sync reads box b and finds no active sync. Then its publish waits, as a slow git push does.
+      const sync = runSync(
+        { home, boxes: ["b"] },
+        {
+          readConfig: () => readConfig(home) as never,
+          publisher: () => "operator",
+          readSeed: () => seed,
+          createLink: () => ({
+            run: async (command) => {
+              events.push(`box: ${command}`);
+              return { ok: true, address: "box", stdout: "/home/user\n", stderr: "" };
+            },
+          }),
+          openStore: async () => ({
+            path: join(home, ".ferry/store"),
+            publish: async () => {
+              publishing();
+              await paused;
+              return { published: true, tip: "abc123" };
+            },
+          }),
+          apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] }),
+          adopt: () => {},
+          writePlan: () => {},
+          writeLine: (line) => lines.push(line),
+        },
+      );
+      await inPublish;
+
+      await runBoxUninstall({ name: "b", yes: true, dryRun: false }, deps);
+      expect(boxes()).toEqual(["a"]);
+      resume();
+      const result = await sync;
+
+      expect(events).toEqual([]);
+      expect(result.boxes).toEqual([expect.objectContaining({ name: "b", skipped: "box b left the config during the sync" })]);
+      expect(result.boxes[0]?.failure).toBeUndefined();
+      expect(lines).toContain("Warning: box b left the config during the sync. Ferry did not connect to it.");
+      expect(box.exists(".ferry/store")).toBe(false);
+      expect(readdirSync(join(home, ".ferry"))).toEqual(["config.toml"]);
+    });
+
     test("fails and changes nothing while a sync holds the lock, and a dry run takes no lock", async () => {
       const box = await ferryBox();
       const { home, deps, links, text } = operator(box);

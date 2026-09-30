@@ -226,7 +226,9 @@ export async function runBoxRemove(input: { readonly name: string }, dependencie
  * Ferry holds the box lock from before it connects until the config has no
  * box, so a sync cannot write the links on the box again. A sync for the box
  * fails with `concurrent-sync` during that time, and this command fails with
- * it when a sync for the box runs. A dry run takes no lock.
+ * it when a sync for the box runs. A sync that read the box before the removal
+ * and takes the lock after it reads the config again in the lock and skips the
+ * box. A dry run takes no lock.
  */
 export async function runBoxUninstall(
   input: { readonly name: string; readonly yes: boolean; readonly dryRun: boolean },

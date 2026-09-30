@@ -1751,6 +1751,38 @@ describe("sync locks", () => {
     }
   });
 
+  test("skips the last box when it left the config during the publish, with real locks", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-sync-stale-box-"));
+    const events: string[] = [];
+    const lines: string[] = [];
+    let removed = false;
+    try {
+      const result = await runSync(
+        { home },
+        {
+          ...lockedSync(home, "ferry@box-a", events, {
+            // `ferry box remove default --uninstall` leaves a config without a box.
+            publish: async () => {
+              removed = true;
+            },
+          }),
+          readConfig: () =>
+            removed
+              ? { version: 1, publisher: config.publisher, snapshotUrl: config.snapshotUrl }
+              : { ...config, host: { transport: "ssh", destination: "ferry@box-a" } },
+          writeLine: (line) => lines.push(line),
+        },
+      );
+
+      expect(result.boxes).toEqual([expect.objectContaining({ name: "default", skipped: "box default left the config during the sync" })]);
+      expect(events).toEqual(["ferry@box-a:publish", "ferry@box-a:published", "ferry@box-a:adopt"]);
+      expect(lines).toEqual(["Warning: box default left the config during the sync. Ferry did not connect to it."]);
+      expect(readdirSync(join(home, ".ferry"))).toEqual([]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("changes no box when the publish fails, and releases the store lock", async () => {
     const home = mkdtempSync(join(tmpdir(), "ferry-sync-publish-failure-"));
     const events: string[] = [];
@@ -2029,6 +2061,48 @@ describe("sync with more than one box", () => {
     expect(sync.events.filter((event) => event.startsWith("b:"))).toEqual(["b:link", "b:resolve-home"]);
     expect(sync.events.filter((event) => event === "adopt")).toHaveLength(1);
     expect(readdirSync(join(sync.home, ".ferry"))).toEqual([]);
+  });
+
+  test("skips a box that left the config during the publish, syncs the other box, and does not fail", async () => {
+    let current = fleetConfig;
+    const sync = fleet({
+      publish: async () => {
+        current = { ...fleetConfig, boxes: [box("a")] };
+        return { published: true, tip: "abc123" };
+      },
+    });
+
+    const result = await runSync({ home: sync.home }, { ...sync.dependencies, readConfig: () => current });
+
+    expect(result.boxes.map(({ name, skipped, failure }) => ({ name, skipped, failure }))).toEqual([
+      { name: "a", skipped: undefined, failure: undefined },
+      { name: "b", skipped: "box b left the config during the sync", failure: undefined },
+    ]);
+    expect(sync.events).toContain("a:applied");
+    expect(sync.events.filter((event) => event.startsWith("b:"))).toEqual([]);
+    expect(sync.lines).toContain("[b] Warning: box b left the config during the sync. Ferry did not connect to it.");
+    expect(readdirSync(join(sync.home, ".ferry"))).toEqual([]);
+  });
+
+  test("skips a box whose destination or git auth changed during the publish", async () => {
+    for (const changed of [
+      { ...box("b", false), host: { transport: "ssh" as const, destination: "dev@box-new.example" } },
+      { ...box("b", false), gitAuth: "box" as const },
+    ]) {
+      let current = fleetConfig;
+      const sync = fleet({
+        publish: async () => {
+          current = { ...fleetConfig, boxes: [box("a"), changed] };
+          return { published: true, tip: "abc123" };
+        },
+      });
+
+      const result = await runSync({ home: sync.home }, { ...sync.dependencies, readConfig: () => current });
+
+      expect(result.boxes[1]).toMatchObject({ name: "b", skipped: "box b changed in the config during the sync" });
+      expect(sync.events).toContain("a:applied");
+      expect(sync.events.filter((event) => !event.startsWith("a:") && event !== "publish" && event !== "adopt")).toEqual([]);
+    }
   });
 
   test("the CLI exits 1 when one box fails", async () => {
