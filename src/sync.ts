@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname, homedir } from "node:os";
-import { dirname, join, posix } from "node:path";
+import { basename, dirname, join, posix } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { apply as applyStore, type ApplyPlan, type RemoteApplyInput } from "./apply.ts";
 import { BOX_INSTRUCTIONS, boxInstructionsInput, readBoxInstructions, writeBoxFilesCommand } from "./box-identity.ts";
@@ -1190,6 +1190,11 @@ function refuseActiveSync(home: string, box: Pick<ResolvedBox, "name" | "host">)
   if (owner !== null) throw busyError(box.name, owner);
 }
 
+/** The path of the lock file of a box on this machine. */
+export function boxLockFile(home: string, box: Pick<ResolvedBox, "host">): string {
+  return boxLockPath(home, targetKey(box.host));
+}
+
 /** The key stays the target string, so a running watch of an earlier version and a new CLI share the lock. */
 function boxLockPath(home: string, host: string): string {
   const digest = createHash("sha256").update(host).digest("hex").slice(0, 16);
@@ -1206,11 +1211,17 @@ export type LockOwner = {
    * it, and Ferry keeps it while a process has the pid.
    */
   readonly earlierVersion: boolean;
+  /**
+   * True when the lock is of an earlier version and the process with the pid is not a Ferry
+   * process, or Ferry cannot read its command. Then a different program has the pid of an owner
+   * that stopped. Ferry still keeps the lock.
+   */
+  readonly otherProgram: boolean;
 };
 
 /** The live owner of the lock of a box, or null when no live process holds the lock. It only reads the lock. */
 export function boxLockOwner(home: string, box: Pick<ResolvedBox, "host">): LockOwner | null {
-  return liveOwner(boxLockPath(home, targetKey(box.host)));
+  return liveOwner(boxLockFile(home, box));
 }
 
 function liveOwner(path: string): LockOwner | null {
@@ -1220,11 +1231,9 @@ function liveOwner(path: string): LockOwner | null {
   const command = owner?.command;
   // The command goes into a message, so Ferry reads only a short name.
   const named = typeof command === "string" && /^[a-z][a-z -]{0,39}$/.test(command);
-  return {
-    pid: owner?.pid as number,
-    command: named ? command : null,
-    earlierVersion: !named && typeof owner?.start !== "string",
-  };
+  const pid = owner?.pid as number;
+  const earlierVersion = !named && typeof owner?.start !== "string";
+  return { pid, command: named ? command : null, earlierVersion, otherProgram: earlierVersion && ferryProcess(pid) === null };
 }
 
 /**
@@ -1234,6 +1243,9 @@ function liveOwner(path: string): LockOwner | null {
 export function lockOwnerLine(box: string, owner: LockOwner | null): string {
   if (owner === null) return `A sync or another Ferry command works on box ${box} now.`;
   const pid = `(pid ${owner.pid})`;
+  if (owner.otherProgram) {
+    return `The lock of an earlier Ferry version for box ${box} names pid ${owner.pid}, which another program has now, so the lock stays.`;
+  }
   if (owner.earlierVersion) return `A process of an earlier Ferry version holds the lock of box ${box} ${pid}.`;
   if (owner.command === null) return `A sync or another Ferry command works on box ${box} now ${pid}.`;
   if (owner.command === "watch") return `The watch service syncs box ${box} now ${pid}.`;
@@ -1243,7 +1255,9 @@ export function lockOwnerLine(box: string, owner: LockOwner | null): string {
 
 /** The error of a command that did not get the lock of box `box`. The JSON error has `box` and `owner` in `details`. */
 function busyError(box: string, owner: LockOwner | null): SyncError {
-  const advice = owner?.earlierVersion
+  const advice = owner?.otherProgram
+    ? "Run ferry doctor for the fix."
+    : owner?.earlierVersion
     ? "Wait for it to end, then try again. If the lock stays, run ferry watch install to start the watch service with this version, or stop that process."
     : owner?.command?.startsWith("watch")
       ? "Try again in a moment."
@@ -1454,6 +1468,39 @@ function processStart(pid: number): string | null {
   } catch {
     return null;
   }
+}
+
+/** The command line of the process `pid`, as its arguments. `null` when Ferry cannot read it. */
+function processCommand(pid: number): readonly string[] | null {
+  try {
+    if (process.platform === "linux") {
+      const command = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+      return command.length > 0 ? command : null;
+    }
+    const ps = spawnSync("/bin/ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8", env: { LC_ALL: "C" } });
+    return ps.status === 0 && ps.stdout.trim() ? ps.stdout.trim().split(/\s+/) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The command line of the process `pid` when it is a Ferry process: the `ferry` binary, node with
+ * the npm launcher, or bun with the Ferry `cli.ts`. `null` for another program, and when Ferry
+ * cannot read the command.
+ */
+export function ferryProcess(pid: number): string | null {
+  const command = processCommand(pid);
+  if (command === null) return null;
+  const [program = "", first = "", second = ""] = command;
+  const runtime = basename(program);
+  const script = first === "run" ? second : first;
+  const ferry =
+    runtime === "ferry" ||
+    (/^node/.test(runtime) && /^ferry(\.js)?$/.test(basename(script))) ||
+    (/^bun(\.[^.]+)?$/.test(runtime) &&
+      (basename(script) === "ferry" || script === process.argv[1] || /(^|\/)ferry\/src\/cli\.ts$/.test(script)));
+  return ferry ? command.join(" ") : null;
 }
 
 function quoteShell(value: string): string {

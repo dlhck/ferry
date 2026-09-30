@@ -20,7 +20,7 @@ description: Find a problem with ferry doctor, and fix the common errors of sync
 | `box-tailscale` | Tailscale reaches a Tailscale box. | `sudo tailscale up` on the box |
 | `box-snapshot` | The box can read the snapshot, with the forwarded agent or the deploy key of `git_auth = "box"`. | Add the public key that the fix prints as a read-only deploy key. |
 | `box-linger` | Linger is on when a Ferry service runs on the box. | `sudo loginctl enable-linger "$USER"` on the box |
-| `box-lock` | The lock of the box on the operator machine. A held lock shows the command that holds it and its pid. This is not a failure. The check fails only for a lock of a Ferry version before 0.10.0 whose pid is alive. | `ferry watch install` when the watch service is installed. If not, `kill <pid>` |
+| `box-lock` | The lock of the box on the operator machine. A held lock shows the command that holds it and its pid. This is not a failure. The check fails only for a lock of a Ferry version before 0.10.0 whose pid is alive. | When a Ferry process has the pid: `ferry watch install` when the watch service is installed, else `kill <pid>`. When a different program has the pid now: `rm <lock file>` |
 
 Then run `ferry status`, or `ferry status --brief` for only the items that need action. See [Status and the menu bar](status.md).
 
@@ -47,13 +47,17 @@ operator: ferry update works on box fsn1 now (pid 1234). Wait for it to end, the
 
 Run the command again. A sync of `ferry watch` takes some seconds, for example after `ferry self-update` starts the watch service again. `ferry watch` tries its own sync again without your help.
 
-Do not remove a lock file in `~/.ferry`. Ferry replaces the lock of a process that stopped.
+Do not remove a lock file in `~/.ferry`, unless `ferry doctor` gives that fix. Ferry replaces the lock of a process that stopped.
 
 ```text
 operator: A process of an earlier Ferry version holds the lock of box fsn1 (pid 1234). ...
+operator: The lock of an earlier Ferry version for box fsn1 names pid 1234, which another program has now, so the lock stays. Run ferry doctor for the fix.
 ```
 
-A Ferry version before 0.10.0 wrote this lock. Ferry keeps it while a process has that pid. If the lock stays, run `ferry doctor`. The `box-lock` check gives the fix: `ferry watch install` starts the watch service with this version, or you stop the process.
+A Ferry version before 0.10.0 wrote this lock. It does not record the start of its process, so Ferry keeps it while a process has that pid. If the lock stays, run `ferry doctor`. The `box-lock` check reads the command of that process and gives the fix:
+
+- A Ferry process has the pid: `ferry watch install` starts the watch service with this version, or you stop the process with `kill <pid>`.
+- A different program has the pid now, because the owner stopped: `rm` with the path of the lock file. Ferry never tells you to stop that program.
 
 A message without a command, `A sync or another Ferry command works on box fsn1 now (pid 1234)`, is the lock of Ferry 0.10.0. Wait for that command to end.
 

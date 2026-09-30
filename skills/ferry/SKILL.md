@@ -355,17 +355,18 @@ One Ferry command at a time changes a box. A second command fails with `sync-bus
 - `The watch service syncs box fsn1 now (pid 1234). Try again in a moment.`
 - `ferry update works on box fsn1 now (pid 1234). Wait for it to end, then try again.`
 
-`error.details` is `{ "box": "fsn1", "owner": { "pid": 1234, "command": "watch", "earlierVersion": false } }`.
+`error.details` is `{ "box": "fsn1", "owner": { "pid": 1234, "command": "watch", "earlierVersion": false, "otherProgram": false } }`.
 
 - `command` is the command without `ferry`: `sync`, `watch`, `watch update` (the daily update of the watch), `update`, `install`, `move`, `revert`, `box remove`, `integrations enable`, or `integrations disable`. It is `null` for a lock that Ferry 0.10.0 or an earlier version wrote.
 - `earlierVersion` is `true` for a lock of a Ferry version before 0.10.0. Ferry keeps such a lock while a process has its pid.
+- `otherProgram` is `true` when the lock is of an earlier version and the process with the pid is not a Ferry process, or Ferry cannot read its command. The owner stopped, and a different program has its pid now. The message is `The lock of an earlier Ferry version for box fsn1 names pid 1234, which another program has now, so the lock stays. Run ferry doctor for the fix.`
 - `owner` is `null` when the owner released the lock before Ferry read it.
 
 What to do:
 
 1. Run the command again. For `watch` and `watch update`, wait some seconds. For another command, wait until it ends.
 2. Never remove a lock file in `~/.ferry` (`sync-*.lock`, `store.lock`, `*.claim`), and never stop the process of the owner yourself. Ferry replaces the lock of a process that stopped.
-3. If the error stays, or `earlierVersion` is `true`, run `ferry doctor --json`. The `box-lock` check of each box shows the owner of a held lock. It has the status `failed` and a `fix` only for a lock of an earlier version whose pid is alive. Show the fix to the operator. Do not run it yourself.
+3. If the error stays, or `earlierVersion` is `true`, run `ferry doctor --json`. The `box-lock` check of each box shows the owner of a held lock. It has the status `failed` and a `fix` only for a lock of an earlier version whose pid is alive. The fix is `ferry watch install` or `kill <pid>` when a Ferry process has the pid, and `rm <lock file>` when a different program has it. Show the fix to the operator. Do not run it yourself.
 
 ### Results
 

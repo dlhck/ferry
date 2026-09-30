@@ -174,7 +174,7 @@ describe("lock recovery", () => {
     const old = JSON.stringify({ pid: process.pid, token: "old" });
     writeFileSync(lockPath, old);
 
-    expect(() => acquireBoxLock(home, box, "sync")).toThrow("A process of an earlier Ferry version holds the lock of box box");
+    expect(() => acquireBoxLock(home, box, "sync")).toThrow("The lock of an earlier Ferry version for box box names pid");
     expect(readFileSync(lockPath, "utf8")).toBe(old);
   });
 
@@ -195,7 +195,7 @@ describe("lock recovery", () => {
     expect(lock).toEqual({ pid: process.pid, start: expect.any(String), command: "box remove", token: expect.any(String) });
     // A process of Ferry 0.10.0 reads only the pid, the start, and the token.
     expect(Object.keys(lock)).toEqual(["pid", "start", "command", "token"]);
-    expect(boxLockOwner(home, box)).toEqual({ pid: process.pid, command: "box remove", earlierVersion: false });
+    expect(boxLockOwner(home, box)).toEqual({ pid: process.pid, command: "box remove", earlierVersion: false, otherProgram: false });
     release();
     expect(boxLockOwner(home, box)).toBeNull();
 
@@ -223,7 +223,7 @@ describe("lock recovery", () => {
       code: "sync-busy",
       message: `operator: ${text.replace("PID", String(process.pid))}`,
       hint: "Wait for the other Ferry command to end, then run the command again.",
-      details: { box: "box", owner: { pid: process.pid, command, earlierVersion: false } },
+      details: { box: "box", owner: { pid: process.pid, command, earlierVersion: false, otherProgram: false } },
     });
   });
 
@@ -235,15 +235,48 @@ describe("lock recovery", () => {
     expect(() => acquireBoxLock(home, box, "sync")).toThrow(
       `operator: A sync or another Ferry command works on box box now (pid ${process.pid}). Wait for it to end, then try again.`,
     );
-    expect(boxLockOwner(home, box)).toEqual({ pid: process.pid, command: null, earlierVersion: false });
+    expect(boxLockOwner(home, box)).toEqual({ pid: process.pid, command: null, earlierVersion: false, otherProgram: false });
     expect(readFileSync(lockPath, "utf8")).toBe(JSON.stringify(old));
     // The release compares only the token, as the release of Ferry 0.10.0 does.
     release();
     expect(locks()).toEqual([]);
   });
 
-  test("a lock without a start and a command is the lock of an earlier Ferry version", () => {
-    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: "old" }));
+  /** Start a process with the command line of Ferry under bun, which only waits. */
+  async function ferryProcess(): Promise<Bun.Subprocess> {
+    const script = join(home, "ferry", "src", "cli.ts");
+    mkdirSync(join(home, "ferry", "src"), { recursive: true });
+    writeFileSync(script, `require("node:fs").writeFileSync(${JSON.stringify(join(home, "ferry.started"))}, ""); setInterval(() => {}, 1000);`);
+    const child = Bun.spawn([process.execPath, script, "watch"], { stdout: "inherit", stderr: "inherit" });
+    children.push(child);
+    while (!existsSync(join(home, "ferry.started"))) await Bun.sleep(2);
+    return child;
+  }
+
+  test("a lock of an earlier Ferry version whose pid a different program has now gives no advice to stop that program", () => {
+    // The test process has the pid, and it is not a Ferry process.
+    const old = JSON.stringify({ pid: process.pid, token: "old" });
+    writeFileSync(lockPath, old);
+    let error: unknown;
+    try {
+      acquireBoxLock(home, box, "sync");
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(errorInfo(error)).toEqual({
+      code: "sync-busy",
+      message: `operator: The lock of an earlier Ferry version for box box names pid ${process.pid}, which another program has now, so the lock stays. Run ferry doctor for the fix.`,
+      hint: "Run ferry doctor. It gives the fix for the lock of an earlier Ferry version.",
+      details: { box: "box", owner: { pid: process.pid, command: null, earlierVersion: true, otherProgram: true } },
+    });
+    // Ferry keeps the lock.
+    expect(readFileSync(lockPath, "utf8")).toBe(old);
+  });
+
+  test("a lock without a start and a command that a Ferry process holds is the lock of an earlier Ferry version", async () => {
+    const ferry = await ferryProcess();
+    writeFileSync(lockPath, JSON.stringify({ pid: ferry.pid, token: "old" }));
     let error: unknown;
     try {
       acquireBoxLock(home, box, "sync");
@@ -254,10 +287,10 @@ describe("lock recovery", () => {
     expect(errorInfo(error)).toEqual({
       code: "sync-busy",
       message:
-        `operator: A process of an earlier Ferry version holds the lock of box box (pid ${process.pid}). Wait for it to end, then try again. ` +
+        `operator: A process of an earlier Ferry version holds the lock of box box (pid ${ferry.pid}). Wait for it to end, then try again. ` +
         "If the lock stays, run ferry watch install to start the watch service with this version, or stop that process.",
       hint: "Run ferry doctor. It gives the fix for the lock of an earlier Ferry version.",
-      details: { box: "box", owner: { pid: process.pid, command: null, earlierVersion: true } },
+      details: { box: "box", owner: { pid: ferry.pid, command: null, earlierVersion: true, otherProgram: false } },
     });
   });
 
@@ -266,7 +299,7 @@ describe("lock recovery", () => {
     const lock = JSON.parse(readFileSync(lockPath, "utf8"));
     writeFileSync(lockPath, JSON.stringify({ ...lock, command: "sync\u001b[2J" }));
 
-    expect(boxLockOwner(home, box)).toEqual({ pid: process.pid, command: null, earlierVersion: false });
+    expect(boxLockOwner(home, box)).toEqual({ pid: process.pid, command: null, earlierVersion: false, otherProgram: false });
     release();
   });
 

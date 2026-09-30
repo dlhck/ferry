@@ -19,7 +19,7 @@ import {
   type SelfUpdateDependencies,
 } from "./self-update.ts";
 import { RealGitRunner, type GitRunner } from "./store.ts";
-import { boxLockOwner, lockOwnerLine } from "./sync.ts";
+import { boxLockFile, boxLockOwner, ferryProcess, lockOwnerLine } from "./sync.ts";
 
 const STORE_RELATIVE_PATH = ".ferry/store";
 const LOCAL_TIMEOUT_MS = 10_000;
@@ -311,6 +311,8 @@ async function checkBox(
 /**
  * The lock of the box on this machine. A live owner of this Ferry version is information. The lock
  * of an earlier Ferry version has no process start, so Ferry keeps it while a process has its pid.
+ * The fix stops the process only when it is a Ferry process. When a different program has the
+ * pid, the fix removes the lock file.
  */
 function checkBoxLock(box: ResolvedBox, dependencies: Pick<DoctorDependencies, "home" | "services">): DoctorCheck {
   const base = { id: "box-lock", box: box.name } as const;
@@ -318,6 +320,15 @@ function checkBoxLock(box: ResolvedBox, dependencies: Pick<DoctorDependencies, "
   if (owner === null) return { ...base, status: "ok", message: "No Ferry command holds the lock of the box.", fix: null };
   const line = lockOwnerLine(box.name, owner);
   if (!owner.earlierVersion) return { ...base, status: "ok", message: line, fix: null };
+  if (owner.otherProgram) {
+    return {
+      ...base,
+      status: "failed",
+      message: `${line} Remove the lock file.`,
+      fix: `rm ${quoteShell(boxLockFile(dependencies.home, box))}`,
+    };
+  }
+  const running = ferryProcess(owner.pid);
   const stop = `kill ${owner.pid}`;
   const platform = dependencies.services.platform;
   const watch = (platform === "darwin" || platform === "linux") &&
@@ -326,7 +337,9 @@ function checkBoxLock(box: ResolvedBox, dependencies: Pick<DoctorDependencies, "
     ...base,
     status: "failed",
     message: `${line} A sync of the box fails while a process has that pid.${
-      watch ? ` If the fix does not free the lock, stop the process with ${stop}.` : ""
+      watch
+        ? ` If the fix does not free the lock, stop the process with ${stop}.`
+        : running === null ? " Stop the process." : ` The process is ${running}. Stop it.`
     }`,
     fix: watch ? "ferry watch install" : stop,
   };

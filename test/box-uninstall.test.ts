@@ -559,7 +559,7 @@ describe("ferry box remove --uninstall", () => {
       expect(errorInfo(error)).toMatchObject({
         code: "sync-busy",
         hint: "Wait for the other Ferry command to end, then run the command again.",
-        details: { box: "b", owner: { pid: process.pid, command: "sync", earlierVersion: false } },
+        details: { box: "b", owner: { pid: process.pid, command: "sync", earlierVersion: false, otherProgram: false } },
       });
       expect(links).toEqual([]);
       expect(text()).toBe(CONFIG);

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -178,28 +179,66 @@ describe("ferry doctor", () => {
       }
     });
 
-    test("a lock of an earlier Ferry version with a live pid fails, with the fix for the installed watch service", async () => {
+    test("a lock of an earlier Ferry version whose pid a different program has now fails, and the fix removes the lock file", async () => {
       const home = await mkdtemp(join(tmpdir(), "ferry-doctor-lock-"));
       await mkdir(join(home, ".ferry"));
+      // The test process has the pid, and it is not a Ferry process.
       await writeFile(lockPath(home, "ssh:user@box.example"), JSON.stringify({ pid: process.pid, token: "old" }));
       // No process has the pid of this lock, so the next command replaces it.
       await writeFile(lockPath(home, "tailscale:user@box-a"), JSON.stringify({ pid: 2_147_483_647, token: "old" }));
-      const line = `A process of an earlier Ferry version holds the lock of box b (pid ${process.pid}). A sync of the box fails while a process has that pid.`;
+      const expected = {
+        id: "box-lock",
+        box: "b",
+        status: "failed" as const,
+        message: `The lock of an earlier Ferry version for box b names pid ${process.pid}, which another program has now, so the lock stays. Remove the lock file.`,
+        fix: `rm '${lockPath(home, "ssh:user@box.example")}'`,
+      };
       try {
         const bare = await runDoctor({}, { ...fakes({}).dependencies, home });
         const watch = await runDoctor({}, { ...fakes({ files: { [WATCH_UNIT]: serviceFile(FERRY, "watch") } }).dependencies, home });
 
         expect(bare.ok).toBe(false);
         expect(lockOf(bare, "a")?.status).toBe("ok");
-        expect(lockOf(bare, "b")).toEqual({ id: "box-lock", box: "b", status: "failed", message: line, fix: `kill ${process.pid}` });
+        expect(lockOf(bare, "b")).toEqual(expected);
+        expect(lockOf(watch, "b")).toEqual(expected);
+        expect(formatDoctor(watch)).not.toContain("kill");
+      } finally {
+        await rm(home, { recursive: true, force: true });
+      }
+    });
+
+    test("a lock of an earlier Ferry version that a Ferry process holds fails, with the fix for the installed watch service", async () => {
+      const home = await mkdtemp(join(tmpdir(), "ferry-doctor-lock-"));
+      await mkdir(join(home, ".ferry"));
+      const script = join(home, "ferry", "src", "cli.ts");
+      await mkdir(join(home, "ferry", "src"), { recursive: true });
+      await writeFile(script, `require("node:fs").writeFileSync(${JSON.stringify(join(home, "started"))}, ""); setInterval(() => {}, 1000);`);
+      const ferry = Bun.spawn([process.execPath, script, "watch"], { stdout: "inherit", stderr: "inherit" });
+      try {
+        while (!existsSync(join(home, "started"))) await Bun.sleep(2);
+        await writeFile(lockPath(home, "ssh:user@box.example"), JSON.stringify({ pid: ferry.pid, token: "old" }));
+        const line = `A process of an earlier Ferry version holds the lock of box b (pid ${ferry.pid}). A sync of the box fails while a process has that pid.`;
+
+        const bare = await runDoctor({}, { ...fakes({}).dependencies, home });
+        const watch = await runDoctor({}, { ...fakes({ files: { [WATCH_UNIT]: serviceFile(FERRY, "watch") } }).dependencies, home });
+
+        expect(lockOf(bare, "b")).toEqual({
+          id: "box-lock",
+          box: "b",
+          status: "failed",
+          message: `${line} The process is ${process.execPath} ${script} watch. Stop it.`,
+          fix: `kill ${ferry.pid}`,
+        });
         expect(lockOf(watch, "b")).toEqual({
           id: "box-lock",
           box: "b",
           status: "failed",
-          message: `${line} If the fix does not free the lock, stop the process with kill ${process.pid}.`,
+          message: `${line} If the fix does not free the lock, stop the process with kill ${ferry.pid}.`,
           fix: "ferry watch install",
         });
       } finally {
+        ferry.kill();
+        await ferry.exited;
         await rm(home, { recursive: true, force: true });
       }
     });

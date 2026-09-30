@@ -1820,7 +1820,7 @@ describe("sync locks", () => {
       expect(release).toBeFunction();
       expect(locks()).toEqual([boxLockFile("ssh:user@box.example")]);
       // A sync and a second command do not get the box while the command holds the lock.
-      const owner = { pid: process.pid, command: "update", earlierVersion: false };
+      const owner = { pid: process.pid, command: "update", earlierVersion: false, otherProgram: false };
       expect(() => acquireBoxLock(home, box, "sync")).toThrow(
         `operator: ferry update works on box b now (pid ${process.pid}). Wait for it to end, then try again.`,
       );
@@ -2205,7 +2205,8 @@ describe("sync with more than one box", () => {
     await expect(runSync({ home: sync.home }, sync.dependencies)).rejects.toEqual(
       expect.objectContaining({
         code: "concurrent-sync",
-        message: `operator: A process of an earlier Ferry version holds the lock of box b (pid ${process.pid}). Wait for it to end, then try again. If the lock stays, run ferry watch install to start the watch service with this version, or stop that process.`,
+        // The test process has the pid, and it is not a Ferry process.
+        message: `operator: The lock of an earlier Ferry version for box b names pid ${process.pid}, which another program has now, so the lock stays. Run ferry doctor for the fix.`,
       }),
     );
     expect(sync.events).toEqual([]);
