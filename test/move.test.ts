@@ -1112,6 +1112,143 @@ describe("ferry move --from-box checks the files on the box", () => {
   });
 });
 
+describe("ferry move and a credential in the origin URL", () => {
+  const SECRET = "box-only" + "-password";
+  const CLEAN = "https://example.invalid/app.git";
+  const ORIGINS: [string, string][] = [
+    ["a password before the host", `https://alice:${SECRET}@example.invalid/app.git`],
+    ["a token as the user", `https://${SECRET}@example.invalid/app.git`],
+    ["a secret query parameter", `https://example.invalid/app.git?access_token=${SECRET}`],
+  ];
+  const NOTE = "Note: The origin URL has a credential. Ferry carries the URL without it, so the destination needs its own login for the clone.";
+
+  const previous = process.env.PATH;
+  afterEach(() => {
+    process.env.PATH = previous;
+  });
+
+  /**
+   * A project in `home` whose origin is `url`. A `git` in front of the PATH of both machines reads `url` and the
+   * URL without the credential from the bare origin of the world, for `ls-remote` and `clone`, so no command
+   * needs the network. `git remote get-url` still prints `url`.
+   */
+  function credentialProject(w: World, home: string, url: string): string {
+    const app = project(w, home);
+    const rewrite = [url, CLEAN].map((from) => `-c 'url.${w.origin}.insteadOf=${from}'`).join(" ");
+    write(
+      join(w.bin, "git"),
+      `#!/bin/sh\ncase " $* " in *" ls-remote "*|*" clone "*) exec '${Bun.which("git")}' ${rewrite} "$@" ;; esac\nexec '${Bun.which("git")}' "$@"\n`,
+    );
+    chmodSync(join(w.bin, "git"), 0o755);
+    process.env.PATH = `${w.bin}:${previous}`;
+    git(app, "remote", "set-url", "origin", url);
+    return app;
+  }
+
+  /** Each text that this machine sends to a box: the commands and their input. */
+  function sent(commands: { command: string; options: RunOptions }[]): string {
+    return commands.map(({ command, options }) => `${command}\n${Buffer.from(options.input ?? []).toString("latin1")}`).join("\n");
+  }
+
+  test.each(ORIGINS)("from a box with %s, the credential stays on the box, also in a dry run", async (_name, url) => {
+    const w = world();
+    credentialProject(w, w.box, url);
+
+    const planned = await move(w, { path: "Developer/app", fromBox: "default", dryRun: true });
+    const moved = await move(w, { path: "Developer/app", fromBox: "default" });
+
+    expect(planned.error).toBeNull();
+    expect(planned.lines).toContain(`Clone: ${CLEAN} at branch main`);
+    expect(planned.lines).toContain(NOTE);
+    expect(planned.value?.git).toEqual({ url: CLEAN, branch: "main" });
+    expect(moved.error).toBeNull();
+    expect(git(join(w.operator, "Developer/app"), "remote", "get-url", "origin")).toBe(CLEAN);
+    expect(crossed(w, SECRET)).toBe(false);
+    expect([...planned.lines, ...moved.lines, JSON.stringify(moved.value)].join("\n")).not.toContain(SECRET);
+  });
+
+  test.each(ORIGINS)("to a box with %s, the credential stays on this machine", async (_name, url) => {
+    const w = world();
+    credentialProject(w, w.operator, url);
+
+    const result = await move(w, { path: "Developer/app" });
+
+    expect(result.error).toBeNull();
+    expect(result.lines).toContain(`Clone: ${CLEAN} at branch main`);
+    expect(result.lines).toContain(NOTE);
+    expect(git(join(w.box, "Developer/app"), "remote", "get-url", "origin")).toBe(CLEAN);
+    expect(sent(w.commands)).not.toContain(SECRET);
+    expect([...result.lines, JSON.stringify(result.value)].join("\n")).not.toContain(SECRET);
+  });
+
+  test("between two boxes, the credential stays on the source box", async () => {
+    const w = world();
+    credentialProject(w, w.box, ORIGINS[0]![1]);
+    const boxB = join(w.root, "box-b");
+    mkdirSync(boxB);
+    const commandsB: { command: string; options: RunOptions }[] = [];
+    const linkB = boxLink(boxB, w.bin, commandsB);
+    const boxes = () => ({
+      boxes: [
+        { name: "a", host: { transport: "ssh" as const, destination: "user@a.example" } },
+        { name: "b", host: { transport: "ssh" as const, destination: "user@b.example" } },
+      ],
+    });
+
+    const result = await move(
+      w,
+      { path: "Developer/app", fromBox: "a", toBox: "b" },
+      { readConfig: boxes, createLink: ((options: { destination?: string }) => (options.destination === "user@a.example" ? w.link : linkB)) as MoveDependencies["createLink"] },
+    );
+
+    expect(result.error).toBeNull();
+    expect(git(join(boxB, "Developer/app"), "remote", "get-url", "origin")).toBe(CLEAN);
+    expect(crossed(w, SECRET)).toBe(false);
+    expect(sent(commandsB)).not.toContain(SECRET);
+  });
+
+  test("an error text of git with the origin URL does not show the credential", async () => {
+    const w = world();
+    const app = project(w, w.box);
+    git(app, "remote", "set-url", "origin", `https://alice:${SECRET}@example.invalid/app.git`);
+    const failing: Pick<Link, "run"> = {
+      run: (command, options) =>
+        w.link.run(command.replace("git ls-remote --symref origin HEAD", `{ echo "fatal: unable to access '$(git remote get-url origin)/'" >&2; false; }`), options),
+    };
+
+    const result = await move(w, { path: "Developer/app", fromBox: "default", dryRun: true }, { createLink: () => failing });
+
+    expect(result.lines).toContain("Problem: Ferry could not read origin: fatal: unable to access 'https://[credential]@example.invalid/app.git/'");
+    expect(crossed(w, SECRET)).toBe(false);
+  });
+
+  test("a branch name with a token does not go to the destination", async () => {
+    const name = "gh" + "p_" + "2".repeat(36);
+    const w = world();
+    const app = project(w, w.operator);
+    git(app, "switch", "-q", "-c", `topic-${name}`);
+    git(app, "push", "-q", "origin", `topic-${name}`);
+
+    const result = await move(w, { path: "Developer/app" });
+
+    expect(result.error).toBeNull();
+    expect(result.lines).toContain("Note: The name of the branch has the form of a token. The clone uses the default branch.");
+    expect(git(join(w.box, "Developer/app"), "rev-parse", "--abbrev-ref", "HEAD")).toBe("main");
+    expect(sent(w.commands)).not.toContain(name);
+  });
+
+  test("an origin URL without a credential, and a login name, stay as they are", async () => {
+    const w = world();
+    const app = project(w, w.operator);
+
+    const result = await move(w, { path: "Developer/app", dryRun: true });
+
+    expect(result.lines).toContain(`Clone: ${w.origin} at branch main`);
+    expect(result.lines).not.toContain(NOTE);
+    expect(app).toBe(join(w.operator, "Developer/app"));
+  });
+});
+
 describe("ferry move with integrations", () => {
   const PASEO_ON = () => ({
     host: { transport: "ssh" as const, destination: "user@box.example" },
