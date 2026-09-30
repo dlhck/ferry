@@ -11,14 +11,10 @@
  */
 
 import { posix } from "node:path";
-import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import {
   BoxSettingsError,
   checked,
   quoteShell,
-  readCommand,
-  record,
-  writeCommand,
   type BoxSettingsLink,
 } from "./box-settings.ts";
 import type { McpSource, RemoteMcpServer, SeedMcp, StdioMcpServer } from "./manifest.ts";
@@ -39,6 +35,8 @@ const WITH_BOX_ENV = '$c + (if ($e | type) == "object" and ($e | has("env")) the
 const MERGE_FILE =
   '.[$k] = ((.[$k] // {}) as $b | $b + ($s | with_entries(.key as $n | .value += (($b[$n] // {}) | ' +
   'if type == "object" then with_entries(select(.key == "env" or .key == "env_vars")) else {} end))))';
+/** A jq filter for a JSON MCP file: set each carried entry of `$s` under the key `$k`. */
+const REPLACE_FILE = '.[$k] = ((.[$k] // {}) + $s)';
 /** A shell test that fails when jq is not on the box. */
 const HAS_JQ = "command -v jq >/dev/null 2>&1";
 
@@ -85,7 +83,11 @@ export async function registerBoxMcp(input: {
       warnings.push(...(await registerWithCli({ harness: entry.harness, servers: remote }, recipe, input.link, advance)));
     } else if (remote.length > 0) {
       advance(remote.length);
-      if (path && file) await mergeMcpFile(path, file, remote, input.link);
+      const entries = Object.fromEntries(
+        remote.map((server) => [server.name, server.type === "sse" ? { type: "sse", url: server.url } : { url: server.url }]),
+      );
+      const names = remote.map((server) => server.name).join(", ");
+      warnings.push(...(await mergeFileOnBox(entry.harness, names, entries, REPLACE_FILE, path && file ? { path, file } : null, input.link)));
     }
     if (stdio.length === 0) continue;
     const box = path && file ? { path, file } : null;
@@ -291,21 +293,39 @@ async function registerStdio(
 
   advance(servers.length);
   const names = servers.map((server) => server.name).join(", ");
-  if (!box || box.file.format !== "json") return [`could not declare ${harness} MCP servers ${names}`];
   const entries = Object.fromEntries(servers.map((server) => [server.name, { command: server.command, args: server.args }]));
+  return mergeFileOnBox(harness, names, entries, MERGE_FILE, box, link);
+}
+
+/**
+ * Merge `entries` into the JSON MCP file of the box with the jq `filter`, in
+ * one command. The box creates a missing file without jq, writes the file only
+ * when an entry changes, and prints only a status letter: `J` jq is missing,
+ * `S` the merge failed.
+ */
+async function mergeFileOnBox(
+  harness: string,
+  names: string,
+  entries: Record<string, unknown>,
+  filter: string,
+  box: { readonly path: string; readonly file: McpFile } | null,
+  link: BoxSettingsLink,
+): Promise<string[]> {
+  if (!box || box.file.format !== "json") return [`could not declare ${harness} MCP servers ${names}`];
   const created = `${JSON.stringify({ [box.file.key]: entries }, null, 2)}\n`;
-  const merge = `jq --arg k ${quoteShell(box.file.key)} --argjson s ${quoteShell(JSON.stringify(entries))} ${quoteShell(MERGE_FILE)} "$f"`;
-  const same = `jq -e --arg k ${quoteShell(box.file.key)} --argjson s ${quoteShell(JSON.stringify(entries))} ${quoteShell(`(${MERGE_FILE}) == .`)} "$f"`;
+  const args = `--arg k ${quoteShell(box.file.key)} --argjson s ${quoteShell(JSON.stringify(entries))}`;
   const script = [
     `f=${quoteShell(box.path)}`,
     "umask 077",
     `if [ ! -e "$f" ]; then mkdir -p "$(dirname "$f")" && printf '%s' ${quoteShell(created)} > "$f.ferry-tmp" && mv "$f.ferry-tmp" "$f" || printf 'S\\n'; exit 0; fi`,
     `${HAS_JQ} || { printf 'J\\n'; exit 0; }`,
-    `${same} >/dev/null 2>&1 && exit 0`,
-    `if ${merge} > "$f.ferry-tmp" 2>/dev/null; then mv "$f.ferry-tmp" "$f"; else rm -f "$f.ferry-tmp"; printf 'S\\n'; fi`,
+    `jq -e ${args} ${quoteShell(`(${filter}) == .`)} "$f" >/dev/null 2>&1 && exit 0`,
+    `if jq ${args} ${quoteShell(filter)} "$f" > "$f.ferry-tmp" 2>/dev/null; then mv "$f.ferry-tmp" "$f"; else rm -f "$f.ferry-tmp"; printf 'S\\n'; fi`,
   ].join("\n");
   const { stdout } = await checked(link, `sh -c ${quoteShell(script)}`);
-  if (stdout.startsWith("J")) return [noJq(`servers ${names}`)];
+  if (stdout.startsWith("J")) {
+    return [`jq is not on the box, so Ferry did not update ${harness} MCP servers ${names}. Run ferry update to install jq.`];
+  }
   if (stdout.startsWith("S")) return [`could not declare ${harness} MCP servers ${names}`];
   return [];
 }
@@ -369,51 +389,3 @@ function addStdioScript(register: NonNullable<ToolMcp["register"]>, server: Stdi
 }
 
 type McpFile = NonNullable<HarnessDescriptor["mcp"]>;
-
-/** Read a box MCP file. `current` is `null` when the file is missing. */
-async function readMcpFile(
-  path: string,
-  file: McpFile,
-  link: BoxSettingsLink,
-): Promise<{ current: string | null; parsed: Record<string, unknown>; servers: Record<string, unknown> }> {
-  const read = await checked(link, readCommand(path));
-  const current = read.stdout.startsWith("F") ? read.stdout.slice(1) : null;
-  let parsed: unknown = {};
-  if (current !== null && current.trim() !== "") {
-    try {
-      parsed = file.format === "toml" ? parseToml(current) : JSON.parse(current);
-    } catch {
-      parsed = null;
-    }
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new BoxSettingsError(`${path}: the box MCP file is not a ${file.format.toUpperCase()} object`);
-  }
-  const object = parsed as Record<string, unknown>;
-  return { current, parsed: object, servers: { ...record(object[file.key]) } };
-}
-
-/**
- * Set each carried remote server under the MCP key of the box file. Keep all
- * other entries and keys. Write only when a server changes, so a TOML file
- * keeps its comments.
- */
-async function mergeMcpFile(
-  path: string,
-  file: McpFile,
-  servers: readonly RemoteMcpServer[],
-  link: BoxSettingsLink,
-): Promise<void> {
-  const { current, parsed, servers: declared } = await readMcpFile(path, file, link);
-  let changed = current === null;
-  for (const server of servers) {
-    const entry = server.type === "sse" ? { type: "sse", url: server.url } : { url: server.url };
-    if (Bun.deepEquals(declared[server.name], entry)) continue;
-    declared[server.name] = entry;
-    changed = true;
-  }
-  if (!changed) return;
-  parsed[file.key] = declared;
-  const text = file.format === "toml" ? `${stringifyToml(parsed).trimEnd()}\n` : `${JSON.stringify(parsed, null, 2)}\n`;
-  if (text !== current) await checked(link, writeCommand(path, text));
-}
