@@ -68,6 +68,7 @@ Use `--host <tailscale host> --ssh-user <user>` instead of `--ssh-destination` f
 | `ferry tools` | List the tools and their version policies. |
 | `ferry self-update` | Update Ferry on this machine, restart its installed user services, and update its release menu bar app. |
 | `ferry skills add` | Install skills with `npx skills add` as a global copy, so that Ferry carries them. |
+| `ferry adopt --from-box <name> <skill>` | Copy a skill that an agent wrote on a box to this machine. Ferry runs the deny rules and shows the diff or the file list before it asks. Then run `ferry sync` to publish it to all boxes. `ferry status` lists the box-only skills. |
 | `ferry move <path>` | Continue a project on a box, back on this machine, or on another box. |
 | `ferry tunnel` | Open box ports, or ports of a host that the box can reach, on `127.0.0.1` of this machine. `ferry tunnel install` runs `--follow` for one box as a user service. |
 | `ferry expose` | On the box: run a dev server and announce its port to `ferry tunnel --follow`. |

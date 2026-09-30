@@ -699,6 +699,21 @@ describe("ferry --help", () => {
     expect(received).toEqual({ yes: true, dryRun: true, includeIntegrations: true, boxes: [] });
   });
 
+  test("wires ferry adopt to the box adopt module", async () => {
+    let received: unknown;
+    const program = buildProgram({
+      readConfig: () => null,
+      runAdoptFromBox: async (input) => {
+        received = input;
+        return null;
+      },
+    });
+
+    await program.parseAsync(["adopt", "draft", "--from-box", "a", "--yes"], { from: "user" });
+
+    expect(received).toEqual({ box: "a", name: "draft", yes: true });
+  });
+
   test("wires every move flag to the move module", async () => {
     let received: unknown;
     const program = buildProgram({
@@ -1881,7 +1896,7 @@ describe("--json", () => {
       });
     });
 
-    test("move carries no file with secrets without --yes, and auth reads the login code from stdin", async () => {
+    test("move carries no file with secrets and adopt adopts nothing without --yes, and auth reads the login code from stdin", async () => {
       let interactive: boolean | undefined;
       await run(["move", "Developer/app"], {
         runMove: async (_input, dependencies) => {
@@ -1890,6 +1905,15 @@ describe("--json", () => {
         },
       });
       expect(interactive).toBe(false);
+
+      let adoptInteractive: boolean | undefined;
+      await run(["adopt", "draft", "--from-box", "a"], {
+        runAdoptFromBox: async (_input, dependencies) => {
+          adoptInteractive = dependencies?.interactive;
+          return null;
+        },
+      });
+      expect(adoptInteractive).toBe(false);
 
       let readLoginCode: unknown;
       await run(["auth", "claude"], {

@@ -115,6 +115,7 @@ Each entry of `boxes` has these fields:
 | `auth.providers` | Login state per tool: `authenticated`, `login-required`, `manual` (with an `instruction`), or `unavailable`. |
 | `auth.loginRequired` | Tools that need a login. |
 | `mcpLogins.loginRequired` | Box MCP servers that need a login, as `tool/server`. |
+| `boxOnlySkills.skills` | The skills on the box that the snapshot does not have, as `{ name, paths }`. `null` when the box is offline or Ferry could not read them. See [Install skills](#install-skills). |
 | `tools` | The version state of each registry tool on the box, with Ferry itself last as `id: "ferry"`. Each row has `id`, `mode`, `policy`, `operator`, `target`, `box`, `state`, and a `reason` for `hidden`, `skipped`, `off`, and `unknown`. `off` is a tool with the policy `"off"`, not a problem. The operator fixes `drift` with `ferry update`, `missing` with `ferry install`, and `hidden` with `ferry sync`. |
 | `integrations` | Present only when an integration is on for this box. |
 | `errors` | Each inspection of this box that failed, with `origin`, `code`, and `message`. |
@@ -181,6 +182,14 @@ For example:
 ```sh
 ferry skills add owner/repo --skill some-skill
 ```
+
+A skill that you write on a box stays on that box, and the next sync can refuse or shadow it. `ferry status` lists it under `Box-only skills`. Tell the operator to run `ferry adopt --from-box <box> <skill>` on the operator machine. Do not run it yourself.
+
+- Ferry copies the skill, runs the deny rules, and shows the file list of a new skill or the diff against the copy on the operator machine. Then it asks.
+- A skill that fails a deny rule stays on the box, and nothing reaches the operator machine. The error has the code `deny-rule-match`.
+- Ferry skips the files that a skip rule covers, such as `node_modules`, and keeps the executable bit.
+- After the confirmation, Ferry writes the skill to the same skill root on the operator machine and moves the box copy to `~/.ferry/backups/<time>/adopt` on the box.
+- `ferry adopt` does not sync. The operator runs `ferry sync`, which publishes the skill and links it on all boxes.
 
 ## The Ferry skill
 
@@ -280,7 +289,7 @@ With `--json`, the stdout of the command of `ferry expose` goes to stderr.
 
 With `--json`, Ferry never asks:
 
-- A step that needs a confirmation fails with `confirmation-required`, unless the command has `--yes`. This applies to `install`, `update`, `uninstall`, `integrations enable|disable`, `box add` on a `[host]` config, and `.env` files and sessions with secrets in `move`. The message of the error names what needs the confirmation.
+- A step that needs a confirmation fails with `confirmation-required`, unless the command has `--yes`. This applies to `install`, `update`, `uninstall`, `integrations enable|disable`, `box add` on a `[host]` config, `.env` files and sessions with secrets in `move`, and `adopt`. The message of the error names what needs the confirmation.
 - The SSH host keys of the snapshot host in `init` and `box add` need `--accept-host-keys`. `--yes` does not trust them. Without `--accept-host-keys`, the command fails with `confirmation-required`, and `error.details.hostKeys` is a list of `{ host, type, fingerprint }`. With `--accept-host-keys`, Ferry trusts the keys and writes the fingerprints to stderr.
 - `ferry init --json` without the values that it needs fails with `missing-values`. The message lists the missing values, such as `host, sshUser, snapshotUrl`.
 - `ferry auth <tool> --json` prints a `login` event before the envelope: `{ "type": "login", "provider", "url", "userCode", "codeRequired", "localPort", "timeoutMs" }`, and for `--mcp` also `server`. The login ends in the browser. When `codeRequired` is `true`, Ferry reads the code that the browser shows as one line on stdin. Without a line, it fails with `missing-values`.
@@ -324,6 +333,7 @@ With `--json`, Ferry never asks:
 | `auth` | Without a tool: `{ providers: [{ id, login: "startable", "manual", or "off" }] }`. With a tool: the last login result, `{ kind, provider, ... }`, where `kind` is `logged-in`, `already-done`, `device-url`, `printed-url`, `local-port-forward`, or `manual-ssh`. |
 | `tools` | `{ tools: [{ id, name, kind, install, policy: { policy, default }, boxes: [{ name, policy, default }], operatorVersion }] }` |
 | `skills add` | `{ argv }`, the `npx skills add` command that ran. |
+| `adopt` | `{ box, name, source, destination, replaces, files: [{ path, executable }], skipped: [{ path, code, reason }], diff, adopted, boxBackup }`, or `null` when the operator says no. `diff` is `null` for a new skill. `adopted` is `false` when the copy on the operator machine is already the same. `boxBackup` is `null` when Ferry could not move the box copy, and `warnings` then says so. |
 | `move` | `{ path, source, destination, dryRun, git: { url, branch } or null, carry: [{ path, sha256, secrets }], refused: [{ path, code, reason }], skipped, notes, trash, sessions: { carry: [{ harness, id, files, secrets }], refused: [{ path, code, reason }] } }`. A memory file is a session with `id` null. |
 | `tunnel --list` | `{ box, listeners: [{ port, address, process }] }` |
 | `integrations` | `{ boxes: [{ name, destination, integrations: [{ id, description, enabled, localVersion, localSource, connectSteps }] }] }`. `name` is `null` for a `[host]` config. |

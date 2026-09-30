@@ -114,6 +114,12 @@ import {
 } from "./revert.ts";
 import { runSkillsAdd, SkillsAddError, type RunProcess } from "./skills-add.ts";
 import { runMove, type MoveDependencies, type MoveInput, type MoveResult } from "./move.ts";
+import {
+  runAdoptFromBox,
+  type AdoptFromBoxDependencies,
+  type AdoptFromBoxInput,
+  type AdoptFromBoxResult,
+} from "./adopt-box.ts";
 import { runExpose, type ExposeDependencies, type ExposeInput } from "./expose.ts";
 import { runTunnel, type Listener, type TunnelDependencies, type TunnelInput } from "./tunnel.ts";
 import {
@@ -158,6 +164,10 @@ type CliDependencies = {
   readonly runHistory?: typeof runHistory;
   readonly runRevert?: (input: RevertInput, dependencies?: RevertDependencies) => Promise<RevertResult>;
   readonly runMove?: (input: MoveInput, dependencies?: Partial<MoveDependencies>) => Promise<MoveResult | null>;
+  readonly runAdoptFromBox?: (
+    input: AdoptFromBoxInput,
+    dependencies?: Partial<AdoptFromBoxDependencies>,
+  ) => Promise<AdoptFromBoxResult | null>;
   readonly runTunnel?: (
     input: TunnelInput,
     dependencies?: Partial<TunnelDependencies>,
@@ -264,6 +274,7 @@ const JSON_RESULTS: Record<string, string> = {
   revert:
     "{ dryRun, commit, subject, tip, paths, settings: [{ file, keys }], sync }. sync is the sync result, or null with --dry-run or --no-sync",
   move: "{ path, source, destination, dryRun, git, carry, refused, skipped, notes, trash, sessions }",
+  adopt: "{ box, name, source, destination, replaces, files: [{ path, executable }], skipped, diff, adopted, boxBackup }, or null when cancelled",
   tunnel:
     "events forward-opened, forward-closed, forward-failed, following, connection-lost, tunnel-closed. " +
     "With --list, one envelope: { box, listeners: [{ port, address, process }] }",
@@ -849,6 +860,40 @@ rule. The source keeps its sessions.`)
       },
     );
 
+  program
+    .command("adopt")
+    .summary("Copy a skill that an agent wrote on a box to this machine")
+    .description(`Copy a skill that an agent wrote on a box to this machine.
+
+ferry status lists the box-only skills of each box: skills in a harness skill
+root or in the box checkout that the snapshot does not have. Ferry copies the
+skill from the box, runs the deny rules, and shows the file list of a new skill
+or the diff against the copy on this machine. A skill that fails a deny rule
+does not reach this machine. After the confirmation, Ferry writes the skill to
+the same skill root on this machine and moves the box copy to
+~/.ferry/backups on the box. Then run ferry sync. It publishes the skill,
+links it on this machine, and links it on all boxes.`)
+    .argument("<skill>", "the skill name that ferry status lists")
+    .requiredOption("--from-box <name>", "copy the skill from this box")
+    .option("--yes", "adopt the skill without a confirmation prompt")
+    .action(async (skill: string, options: { fromBox: string; yes?: boolean }) => {
+      const result = await withProgress((progress, writeLine) =>
+        (dependencies.runAdoptFromBox ?? runAdoptFromBox)(
+          { box: options.fromBox, name: skill, yes: options.yes === true },
+          {
+            createLink,
+            harnesses: registry().harnesses,
+            writeLine,
+            progress,
+            warn,
+            // With --json, Ferry asks nothing, so the adopt needs --yes.
+            ...(json() ? { interactive: false } : {}),
+          },
+        ),
+      );
+      report(result);
+    });
+
   const tunnel = program
     .command("tunnel")
     .summary("Open box ports on this machine until Ctrl-C, list the ports that listen on the box, or follow the ports of ferry expose")
@@ -991,7 +1036,9 @@ For example, a service script in paseo.json on the box:
 The Tools part of each box shows one state for each tool: ok; drift, run
 ferry update; missing, run ferry install; hidden, a login shell on the box
 does not find the tool, run ferry sync; skipped, the tool has no target;
-unknown, Ferry cannot read the box version. With --json, result is the
+unknown, Ferry cannot read the box version. Box-only skills lists the skills
+on each box that the snapshot does not have. ferry adopt --from-box copies one
+to this machine. With --json, result is the
 status report, schema version 2. The ferry agent skill describes its fields.
 Install the skill with ferry skills add dlhck/ferry --skill ferry.
 
