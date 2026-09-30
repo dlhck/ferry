@@ -39,7 +39,7 @@ export type DenyRuleDescription = {
  * a box whose number is lower than this one, because older rules can pass a
  * file that this machine refuses.
  */
-export const DENY_RULES_VERSION = 3;
+export const DENY_RULES_VERSION = 4;
 
 const DENY_RULES = {
   dotenv: { code: "dotenv", reason: "environment file", verdict: "refuse" },
@@ -246,22 +246,135 @@ const ARGUMENT_SEPARATORS = /[\s;|()<>]+/;
 const ARGUMENT_URL = /([a-z][a-z0-9+.-]*):\/\/([^\s/?#]*)(\S*)/gi;
 /** The HTTP schemes, also as `git+https`. A user without a password there is often a token. */
 const HTTP_SCHEME = /^(?:.+\+)?https?$/i;
-/** A `key=value` parameter in the query or the fragment of a URL. */
-const URL_PARAMETER = /[?&#]([^=&#]+)=([^&#]*)/g;
+/** A `key=value` parameter in the query or the fragment of a URL. A `?` also starts one, for a URL inside a value. */
+const URL_PARAMETER = /[?&#]([^=&#?]+)=([^&#?]*)/g;
 /** Shells and interpreters run a script argument that Ferry cannot check. */
 export const SCRIPT_RUNNERS = new Set([
   "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "env", "node", "deno", "bun",
   "python", "python3", "perl", "ruby", "php", "lua", "pwsh", "powershell", "cmd", "osascript",
 ]);
-const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"]);
-/** A shell option that takes the script as an argument: `-c`, alone or in a group such as `-lc`. */
-const SHELL_SCRIPT_OPTION = /^(?:-[A-Za-z]*c|--command)$/;
-/** An interpreter option that takes the script as an argument, such as `-e`, `-c`, `-pe`, or `--eval`. */
-const INTERPRETER_SCRIPT_OPTION = /^(?:-[A-Za-z]*[ce]|-p|--eval|--print|-[Cc]ommand|-[Ee]ncoded[Cc]ommand)$/;
-/** A script option of one interpreter only. Python has `-E` and Node.js has `-r` for other uses. */
-const RUNNER_SCRIPT_OPTION: Readonly<Record<string, RegExp>> = { perl: /^-[A-Za-z]*E$/, php: /^-r$/ };
-/** An interpreter option that takes the next word as its value, so that word is not the script file. */
-const INTERPRETER_VALUE_OPTION = /^(?:-r|--require|--import|--loader|-C|--conditions|-W|-X|-I)$/;
+/** A run of percent escapes in a URL, such as `%73` or `%C3%A9`. */
+const URL_ESCAPES = /(?:%[0-9a-f]{2})+/gi;
+/** A `data:` URL as a word or as the value of an option. An interpreter runs its text as a script. */
+const DATA_URL = /(?:^|=)data:/i;
+
+/** Option names of a shell or an interpreter. `short` holds the letters after one `-`, `long` the names after `--`. */
+type OptionNames = { readonly short: string; readonly long: readonly string[] };
+
+/**
+ * The documented options of a shell or an interpreter that `startsInlineScript`
+ * knows. `script` options take a script as text. `value` options take the next
+ * word, or the rest of their word, as a value. `flag` options take nothing.
+ * After an `end` option, the words belong to a module. The value of a `module`
+ * option is a module name. `inline` names a subcommand that takes a script as
+ * text. `pass` names a subcommand with its own options before the script file.
+ */
+type RunnerOptions = {
+  readonly script: OptionNames;
+  readonly value: OptionNames;
+  readonly flag: OptionNames;
+  readonly end?: string;
+  readonly module?: string;
+  readonly inline?: readonly string[];
+  readonly pass?: readonly string[];
+};
+
+/** Read option names from a list. A name of one letter is a short option. */
+function optionNames(list: string): OptionNames {
+  const names = list.split(" ");
+  return { short: names.filter((name) => name.length === 1).join(""), long: names.filter((name) => name.length > 1) };
+}
+
+function runnerOptions(
+  script: string,
+  value: string,
+  flag: string,
+  more: Pick<RunnerOptions, "end" | "module" | "inline" | "pass"> = {},
+): RunnerOptions {
+  return { script: optionNames(script), value: optionNames(value), flag: optionNames(flag), ...more };
+}
+
+const SHELL_OPTIONS = runnerOptions(
+  "c command",
+  "o O rcfile init-file",
+  "a b d e f h i k l m n p q r s t u v x B C D E H P T V X login noprofile norc posix restricted verbose",
+);
+const NODE_OPTIONS = runnerOptions(
+  "e p eval print",
+  "r C require import loader experimental-loader conditions input-type env-file env-file-if-exists title inspect-port watch-path",
+  "c i v h check interactive enable-source-maps experimental-strip-types experimental-transform-types expose-gc inspect no-deprecation no-warnings preserve-symlinks trace-deprecation trace-warnings watch",
+);
+const PACKAGE_RUNNER_OPTIONS = runnerOptions(
+  "c call shell-mode",
+  "p w package workspace cache userconfig registry prefix",
+  "y q yes no quiet no-install",
+  { pass: ["exec", "x", "dlx"] },
+);
+/**
+ * The shells and interpreters that `runsInlineScript` knows, with their
+ * options. It has each name of `SCRIPT_RUNNERS` except `cmd`, `pwsh`, and
+ * `powershell`, which have their own option syntax.
+ */
+const RUNNER_OPTIONS: ReadonlyMap<string, RunnerOptions> = new Map([
+  ...["sh", "bash", "zsh", "dash", "ash", "ksh", "csh", "tcsh"].map((name) => [name, SHELL_OPTIONS] as const),
+  [
+    "fish",
+    runnerOptions(
+      "c C command init-command",
+      "d o f debug debug-output features profile profile-startup",
+      "i l n N p P v h interactive login no-config no-execute private",
+    ),
+  ],
+  ["env", runnerOptions("S split-string", "u C a unset chdir argv0", "i 0 v ignore-environment null debug")],
+  ...["node", "nodejs", "tsx", "ts-node"].map((name) => [name, NODE_OPTIONS] as const),
+  [
+    "deno",
+    runnerOptions(
+      "eval",
+      "c L config import-map lock cert location seed ext log-level",
+      "A q r R W N E S I h V allow-all allow-net allow-read allow-write allow-env allow-run allow-sys allow-ffi allow-import quiet no-check no-lock no-prompt no-config no-remote no-npm cached-only",
+      { inline: ["eval"], pass: ["run", "serve", "repl", "task"] },
+    ),
+  ],
+  [
+    "bun",
+    runnerOptions(
+      "e p eval print",
+      "r c d l preload require import config cwd env-file define loader conditions port tsconfig-override",
+      "b i h v bun watch hot smol silent no-install prefer-offline if-present",
+      { inline: ["exec"], pass: ["run", "x"] },
+    ),
+  ],
+  ...["python", "pypy"].map(
+    (name) => [name, runnerOptions("c", "W X check-hash-based-pycs", "b B d E h i I O P q R s S u v V x", { end: "m" })] as const,
+  ),
+  ["perl", runnerOptions("e E", "I", "a c n p s S t T u U v w W X h", { module: "mM" })],
+  [
+    "ruby",
+    runnerOptions("e", "r I C E encoding external-encoding internal-encoding", "a c d h l n p s S v w y yjit jit verbose debug"),
+  ],
+  [
+    "php",
+    runnerOptions(
+      "r B R E run process-begin process-code process-end",
+      "c d f F z S t php-ini define file process-file zend-extension server docroot",
+      "a n e h H i l m q s v w C no-php-ini interactive",
+    ),
+  ],
+  ["lua", runnerOptions("e", "l", "i v E W")],
+  ["osascript", runnerOptions("e", "l s", "i")],
+  ...["npx", "npm", "pnpm"].map((name) => [name, PACKAGE_RUNNER_OPTIONS] as const),
+]);
+/** The value of a Perl `-M` or `-m` option that is only a module name, such as `strict` or `POSIX=floor`. Other text runs as code. */
+const PERL_MODULE = /^-?[\w:]+(?:=[\w:,]*)?$/;
+/** A `cmd` option that takes a command as text: `/c`, `/k`, or `/r`, also with the command joined to it. */
+const CMD_SCRIPT_OPTION = /^\/[ckr][^/]*$/i;
+/** The PowerShell option for a script file, `-File`, and its short forms. */
+const POWERSHELL_FILE_OPTION = /^f(?:i(?:le?)?)?$/;
+/** PowerShell options that take the next word as a value. */
+const POWERSHELL_VALUE_OPTION = /^(?:ex(?:ecutionpolicy)?|ep|w(?:indowstyle)?|wd|workingdirectory)$/;
+/** PowerShell options that take no value and run nothing. */
+const POWERSHELL_FLAG_OPTION = /^(?:nop(?:rofile)?|nol(?:ogo)?|noni(?:nteractive)?|l(?:ogin)?|mta|sta)$/;
 
 /**
  * A file whose path relative to its skill directory is `path`. `executable` is
@@ -925,7 +1038,7 @@ function readMcp(
         });
         continue;
       }
-      if (runsInlineScript(parts)) {
+      if (runsInlineScript(words) || runsInlineScript(parts)) {
         nonPortable.push({ name, reason: "inline-script" });
         leftovers.push({
           path,
@@ -1007,26 +1120,48 @@ function argumentRules(path: string, words: readonly string[], parts: readonly s
 }
 
 /**
+ * The readings of a part of a URL: the text itself, and the text after each
+ * round of decoding, until it does not change. A round decodes `+` to a space
+ * and each valid percent escape, so `pa%73sword` and `pa%2573sword` both read
+ * as `password`. A malformed escape such as `%zz` stays as text, and the
+ * escapes around it still decode, so it cannot hide a key.
+ */
+function urlReadings(text: string): string[] {
+  const readings = [text];
+  for (;;) {
+    const last = readings.at(-1)!;
+    const next = last
+      .replace(/\+/g, " ")
+      .replace(URL_ESCAPES, (run) => Buffer.from(run.replaceAll("%", ""), "hex").toString("utf8"));
+    if (next === last) return readings;
+    readings.push(next);
+  }
+}
+
+/**
  * True when a word holds a URL with a credential: a password before the host,
  * a user without a password in an HTTP URL, or a secret key with a value in
  * the query or the fragment. A user without a password can be a token there,
  * as in `https://<token>@host`. In another scheme it is a login name, as in
  * `ssh://git@host` or `postgresql://alice@host`. A placeholder value passes.
+ * Each rule applies to each reading of `urlReadings`, because a URL consumer
+ * decodes the percent escapes.
  */
 function hasUrlCredential(word: string): boolean {
-  return [...word.matchAll(ARGUMENT_URL)].some(([, scheme = "", authority = "", rest = ""]) => {
-    const at = authority.lastIndexOf("@");
-    const [user = "", ...more] = at < 0 ? [] : authority.slice(0, at).split(":");
-    const password = more.join(":");
-    return (
-      (password === ""
-        ? isSecretValue(user) && HTTP_SCHEME.test(scheme)
-        : isSecretValue(password)) ||
-      [...rest.matchAll(URL_PARAMETER)].some(
-        ([, key = "", value = ""]) => (isSecretKey(key) || SECRET_PARAMETER.test(key)) && isSecretValue(value),
-      )
-    );
-  });
+  return [...word.matchAll(ARGUMENT_URL)].some(
+    ([, scheme = "", authority = "", rest = ""]) =>
+      urlReadings(authority).some((reading) => {
+        const at = reading.lastIndexOf("@");
+        const [user = "", ...more] = at < 0 ? [] : reading.slice(0, at).split(":");
+        const password = more.join(":");
+        return password === "" ? isSecretValue(user) && HTTP_SCHEME.test(scheme) : isSecretValue(password);
+      }) ||
+      urlReadings(rest).some((reading) =>
+        [...reading.matchAll(URL_PARAMETER)].some(
+          ([, key = "", value = ""]) => (isSecretKey(key) || SECRET_PARAMETER.test(key)) && isSecretValue(value),
+        ),
+      ),
+  );
 }
 
 /** True when a word of a stdio command is `~`, `$HOME`, `${HOME}`, or the operator home, or a path in it. */
@@ -1041,28 +1176,105 @@ function refersToHome(words: readonly string[], home: string): boolean {
 }
 
 /**
- * True when the words start a shell or an interpreter with an inline script,
- * such as `sh -c`, `node -e`, `python -c`, or `deno eval`. The runner can be
- * the command or a later word, as in `env bash -c`. A shell takes its script
- * option at any place. An interpreter takes it before its script file, also
- * after other options, as in `node --require x -e`. The options after a script
- * file pass.
+ * True when a word of `words` names a shell or an interpreter, and the words
+ * after it give it a script as text, such as `sh -c`, `node --eval=...`,
+ * `python -c...`, `deno eval`, `npx -c`, `pwsh -Command`, or `cmd /c`. The
+ * name can be the command or a later word, as in `env bash -c`, `busybox sh
+ * -c`, or `docker run image sh -c`. `python3.12`, `node.exe`, and the image
+ * `node:22` name `python` and `node`.
  */
-function runsInlineScript(parts: readonly string[]): boolean {
-  return parts.some((part, index) => {
-    // `python3.12` is `python`.
-    const runner = posix.basename(part).toLowerCase().replace(/[\d.]+$/, "");
-    if (!SCRIPT_RUNNERS.has(runner)) return false;
-    const rest = parts.slice(index + 1);
-    if (SHELLS.has(runner)) return rest.some((word) => SHELL_SCRIPT_OPTION.test(word));
-    for (let at = 0; at < rest.length; at++) {
-      const word = rest[at]!;
-      if (!word.startsWith("-")) return word === "eval";
-      if (INTERPRETER_SCRIPT_OPTION.test(word) || RUNNER_SCRIPT_OPTION[runner]?.test(word)) return true;
-      if (INTERPRETER_VALUE_OPTION.test(word)) at++;
+function runsInlineScript(words: readonly string[]): boolean {
+  return words.some((word, index) => {
+    const name = word.split(/[\\/=]/).at(-1)!.split(":")[0]!.toLowerCase().replace(/\.exe$/, "").replace(/[\d.]+$/, "");
+    const rest = words.slice(index + 1);
+    if (name === "cmd") return rest.some((next) => CMD_SCRIPT_OPTION.test(next));
+    if (name === "pwsh" || name === "powershell") return startsPowerShellCommand(name, rest);
+    const options = RUNNER_OPTIONS.get(name);
+    // The value of an option, as in `--entrypoint sh`, does not have its own arguments next to it.
+    const direct = !word.includes("=") && !words[index - 1]?.startsWith("--");
+    return options !== undefined && startsInlineScript(options, rest, direct);
+  });
+}
+
+/**
+ * True when `rest`, the words after a shell or an interpreter, give it a
+ * script as text. The check reads the options before the script file. The
+ * first word that is not an option is the script file, and the words after it
+ * pass, as in `node /srv/server.js -c conf.json`.
+ *
+ * An option that is not in `options` can take the next word as its value.
+ * Then the script file has no sure position, and a script option at any later
+ * place counts, as in `node --new-option value --eval ...`. With `direct`
+ * false, the position is not sure from the start.
+ */
+function startsInlineScript(options: RunnerOptions, rest: readonly string[], direct: boolean): boolean {
+  let sure = direct;
+  let passed = false;
+  /** The index of a word that is the value of the option before it. */
+  let value = -1;
+  // A value that starts with `-` or `+` stays a word to check. An option with a missing value cannot hide a script option.
+  const takesNext = (at: number): boolean => rest[at + 1] !== undefined && !/^[-+]/.test(rest[at + 1]!);
+  for (let at = 0; at < rest.length; at++) {
+    const word = rest[at]!;
+    if (DATA_URL.test(word)) return true;
+    if (at === value) continue;
+    const long = word.match(/^--([^=]+)(=)?/);
+    if (long) {
+      const [, name = "", joined] = long;
+      // A program can accept the first letters of a long option.
+      if (options.script.long.some((script) => script.startsWith(name))) return true;
+      if (options.value.long.includes(name)) {
+        if (!joined && takesNext(at)) value = at + 1;
+      } else if (!joined && !options.flag.long.includes(name)) sure = false;
+      continue;
+    }
+    if (/^[-+]./.test(word) && word !== "--") {
+      const letters = word.slice(1);
+      for (let i = 0; i < letters.length; i++) {
+        const letter = letters[i]!;
+        if (options.script.short.includes(letter)) return true;
+        if (options.end?.includes(letter)) return false;
+        if (options.module?.includes(letter)) {
+          if (!PERL_MODULE.test(letters.slice(i + 1))) return true;
+          break;
+        }
+        if (options.value.short.includes(letter)) {
+          if (i === letters.length - 1 && takesNext(at)) value = at + 1;
+          break;
+        }
+        if (!options.flag.short.includes(letter)) sure = false;
+      }
+      continue;
+    }
+    if (options.inline?.includes(word)) return true;
+    if (!sure) continue;
+    if (!passed && options.pass?.includes(word)) {
+      passed = true;
+      continue;
     }
     return false;
-  });
+  }
+  return false;
+}
+
+/**
+ * True when `rest`, the words after `pwsh` or `powershell`, give it a command
+ * as text. Only the options that Ferry knows before `-File` pass. Each other
+ * option counts as a command, such as `-Command`, `-c`, and `-EncodedCommand`.
+ * A word without an option is a script file for `pwsh` and a command for
+ * `powershell`.
+ */
+function startsPowerShellCommand(name: string, rest: readonly string[]): boolean {
+  for (let at = 0; at < rest.length; at++) {
+    const word = rest[at]!;
+    if (!word.startsWith("-")) return name === "powershell";
+    const option = word.replace(/^-+/, "").toLowerCase();
+    if (POWERSHELL_FILE_OPTION.test(option)) return false;
+    if (POWERSHELL_VALUE_OPTION.test(option)) {
+      if (!rest[at + 1]?.startsWith("-")) at++;
+    } else if (!POWERSHELL_FLAG_OPTION.test(option)) return true;
+  }
+  return false;
 }
 
 /** The type and URL of a declaration with an HTTPS URL and an HTTP or SSE transport, else `null`. */
