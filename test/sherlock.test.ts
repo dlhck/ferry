@@ -14,7 +14,7 @@ import {
   type SherlockDependencies,
   type SherlockInput,
 } from "../src/integrations/sherlock.ts";
-import type { LinkResult } from "../src/link.ts";
+import type { LinkResult, ReachResult } from "../src/link.ts";
 
 const roots: string[] = [];
 
@@ -46,7 +46,7 @@ type Calls = { sherlock: { args: readonly string[]; input: SherlockInput }[]; re
 
 /** Fakes for Sherlock and the box. `list` is the output of `sherlock connection list`. */
 function fakes(
-  overrides: Partial<SherlockDependencies> & { list?: readonly string[]; reach?: (target: string) => LinkResult } = {},
+  overrides: Partial<SherlockDependencies> & { list?: readonly string[]; reach?: (target: string) => ReachResult } = {},
 ) {
   const home = tempRoot();
   const calls: Calls = { sherlock: [], reach: [] };
@@ -232,6 +232,21 @@ describe("the Sherlock status check", () => {
         { name: "old-box", box: "gone", target: "5432", state: "unknown-box", error: "box gone is not in the Ferry config." },
       ],
     });
+  });
+
+  test("says unknown with the reason when Ferry could not check the target", async () => {
+    const setup = fakes({
+      list: ["rds"],
+      reach: () => ({ ok: false, unknown: true, reason: "the test with ssh -W gave no answer in 10 s" }),
+    });
+    record(setup.home, [{ name: "rds", box: "edge", target: "rds.example:5432" }]);
+
+    const health = await sherlockHealth(setup.dependencies);
+
+    const error = "Ferry could not check that edge can reach rds.example:5432: the test with ssh -W gave no answer in 10 s";
+    expect(health.lines).toEqual(["rds  edge:rds.example:5432  unknown"]);
+    expect(health.warnings).toEqual([`Sherlock connection rds: ${error}`]);
+    expect(health.json).toEqual({ connections: [{ name: "rds", box: "edge", target: "rds.example:5432", state: "unknown", error }] });
   });
 
   test("says when the box does not answer", async () => {

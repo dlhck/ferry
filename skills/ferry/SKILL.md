@@ -256,7 +256,7 @@ When Paseo is enabled for a box, its `ferry status` block has an `Integrations` 
 - Do not type a password into a command. On a terminal, Ferry asks for it. Else tell the operator to run the command, or use `--password-env`.
 - Then query with `sherlock -c <name> ...`. Sherlock opens the tunnel on the first query and closes it when idle.
 - Ferry records `{ name, box, target }` in `~/.ferry/sherlock.json`. Do not edit it.
-- Full `ferry status` has `Integrations on this machine:` with one line `<name>  <box>:<target>  <state>` for each recorded connection that `sherlock connection list` still has. `ferry status --json` has `integrations.sherlock.state.connections: [{ name, box, target, state, error }]`. `state` is `reachable`, `unreachable` (the box cannot connect to the target), `box-offline`, or `unknown-box`. `--brief` does not check Sherlock.
+- Full `ferry status` has `Integrations on this machine:` with one line `<name>  <box>:<target>  <state>` for each recorded connection that `sherlock connection list` still has. `ferry status --json` has `integrations.sherlock.state.connections: [{ name, box, target, state, error }]`. `state` is `reachable`, `unreachable` (the box cannot connect to the target), `unknown`, `box-offline`, or `unknown-box`. `unknown` means that Ferry could not check the target: the box has no `bash`, `timeout`, or `/dev/tcp`, and the test connection gave no answer. `error` has the reason. The target can be up. A query through the tunnel shows it. `--brief` does not check Sherlock.
 
 ## JSON output
 

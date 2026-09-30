@@ -61,6 +61,14 @@ export type LinkSuccess = {
 
 export type LinkResult = LinkSuccess | LinkFailure;
 
+/**
+ * `reach` could not test the target, so Ferry does not know if the box can
+ * connect to it. This is not a failure of the target. `reason` says why.
+ */
+export type ReachUnknown = { readonly ok: false; readonly unknown: true; readonly reason: string };
+
+export type ReachResult = LinkResult | ReachUnknown;
+
 /** A port forward that its signal stopped. This is not an error. */
 export type ForwardStopped = LinkSuccess & { readonly stopped: true };
 
@@ -232,10 +240,12 @@ export class Link {
    * the timeout.
    *
    * A box without `bash`, `timeout`, or `/dev/tcp` gets `ssh -W`. There, a
-   * connection that stays open until the timeout is a success, and Ferry
-   * cannot tell a target that drops the packets from an open connection.
+   * connection that closes with exit code 0 is a success. A connection that
+   * stays open until the timeout is `ReachUnknown`: OpenSSH does not say if
+   * the connection opened, so a target that accepts the connection and sends
+   * nothing looks the same as a target that drops the packets of the box.
    */
-  async reach(target: { readonly host: string; readonly port: number }): Promise<LinkResult> {
+  async reach(target: { readonly host: string; readonly port: number }): Promise<ReachResult> {
     const connectTimeoutMs = this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     const seconds = Math.max(1, Math.ceil(connectTimeoutMs / 1_000));
     // The time for the SSH connection and for the connect test on the box.
@@ -264,20 +274,28 @@ export class Link {
   }
 
   /** `reach` for a box that cannot run the connect test. The command of `reach` confirmed the SSH connection before. */
-  private async reachWithStdio(target: { readonly host: string; readonly port: number }): Promise<LinkResult> {
+  private async reachWithStdio(target: { readonly host: string; readonly port: number }): Promise<ReachResult> {
     const resolved = await this.resolve();
     if (!resolved.ok) return resolved;
 
+    const connectTimeoutMs = this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     let execution: HostCommandResult;
     try {
       execution = await this.adapter.run({
         argv: ["ssh", ...this.sshOptions(), "-W", `${bracketHost(target.host)}:${target.port}`, resolved.destination],
-        timeoutMs: this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
+        timeoutMs: connectTimeoutMs,
       });
     } catch (error) {
       return failure("ssh-start-failed", "operator", messageOf(error, "could not start OpenSSH"));
     }
-    if (execution.timedOut || execution.exitCode === 0) return success(resolved.address, execution);
+    if (execution.timedOut) {
+      return {
+        ok: false,
+        unknown: true,
+        reason: `the box has no bash, timeout, or /dev/tcp for the connect test, and the test with ssh -W gave no answer in ${Math.ceil(connectTimeoutMs / 1_000)} s`,
+      };
+    }
+    if (execution.exitCode === 0) return success(resolved.address, execution);
     // OpenSSH prints `channel 0: open failed: ...` when the box cannot open the connection.
     const detail = /open failed: (.*)/.exec(execution.stderr)?.[1]?.trim();
     if (detail) return failure("forward-failed", "box", detail);
