@@ -95,4 +95,9 @@ export interface IntegrationOperatorPart {
   registerCommands?(program: Command, context: IntegrationCommandContext): void;
   /** Check the integration on this machine for `ferry status`. Ferry calls it only when the integration is enabled and available. */
   health?(): Promise<IntegrationHealth>;
+  /**
+   * Tell the local app about a project that `ferry move` put at `path` on this machine, and the sessions it carried.
+   * `path` is absolute. Ferry calls it only when the integration is enabled and available.
+   */
+  onProjectMoved?(path: string, sessions: readonly MovedSession[]): Promise<void>;
 }

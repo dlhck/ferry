@@ -1,4 +1,7 @@
-/** The Paseo integration. The Paseo daemon runs on the box, and Paseo Desktop connects to it over SSH. */
+/**
+ * The Paseo integration. The Paseo daemon runs on the box, and Paseo Desktop connects to it over SSH.
+ * On this machine, it puts a project that moves back into the local Paseo.
+ */
 
 import type { IntegrationsConfig } from "../config.ts";
 import { existsSync, readFileSync } from "node:fs";
@@ -15,8 +18,10 @@ import type {
   IntegrationBoxPart,
   IntegrationHealth,
   IntegrationLink,
+  IntegrationOperatorPart,
   LocalVersion,
   MovedSession,
+  OperatorIntegration,
 } from "./types.ts";
 
 export type PaseoOptions = {
@@ -26,6 +31,8 @@ export type PaseoOptions = {
   /** The install directory of the Linux `.deb` and `.rpm` packages. */
   readonly linuxInstallDir?: string;
   readonly host?: HostAdapter;
+  /** Finds a command on the PATH of this machine. */
+  readonly which?: (command: string) => string | null;
   /** The wait between two daemon status checks after a start. */
   readonly pollIntervalMs?: number;
   /** The time limit for the daemon to report `running` after a start. */
@@ -168,6 +175,7 @@ function installCommand(version: string | null): string {
 const VERSION_PATTERN = /\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/;
 const SECTION = "ferry-section";
 const BOX_TIMEOUT_MS = 30_000;
+const LOCAL_TIMEOUT_MS = 30_000;
 /**
  * Read the units and the daemon status in one box command. The command always
  * exits with 0. `paseo daemon status --json` also prints `serverId` and
@@ -181,11 +189,19 @@ const HEALTH_COMMAND = [
   "true",
 ].join("; ");
 
-export function createPaseo(options: PaseoOptions = {}): BoxIntegration {
+export function createPaseo(options: PaseoOptions = {}): BoxIntegration & OperatorIntegration {
   const platform = options.platform ?? process.platform;
   const macApp = options.macApp ?? "/Applications/Paseo.app";
   const linuxInstallDir = options.linuxInstallDir ?? "/opt/Paseo";
   const host = options.host ?? new BunHostAdapter();
+  const which = options.which ?? ((command: string) => Bun.which(command));
+  /** The CLI in the desktop app. Null on a platform without a known install directory. */
+  const appCli =
+    platform === "darwin"
+      ? join(macApp, "Contents/Resources/bin/paseo")
+      : platform === "linux"
+        ? join(linuxInstallDir, "resources/bin/paseo")
+        : null;
   const pollIntervalMs = options.pollIntervalMs ?? 2_000;
   const startTimeoutMs = options.startTimeoutMs ?? 60_000;
   const sleep = options.sleep ?? ((milliseconds: number) => Bun.sleep(milliseconds));
@@ -241,17 +257,14 @@ export function createPaseo(options: PaseoOptions = {}): BoxIntegration {
 
   const self: IntegrationBoxPart = {
     async localVersion(): Promise<LocalVersion> {
+      if (appCli !== null) {
+        const fromCli = await cliVersion(host, appCli);
+        if (fromCli) return { version: fromCli, source: appCli };
+      }
       if (platform === "darwin") {
-        const cli = join(macApp, "Contents/Resources/bin/paseo");
-        const fromCli = await cliVersion(host, cli);
-        if (fromCli) return { version: fromCli, source: cli };
         const plist = join(macApp, "Contents/Info.plist");
         const fromPlist = await plistVersion(host, plist);
         if (fromPlist) return { version: fromPlist, source: plist };
-      } else if (platform === "linux") {
-        const cli = join(linuxInstallDir, "resources/bin/paseo");
-        const fromCli = await cliVersion(host, cli);
-        if (fromCli) return { version: fromCli, source: cli };
       }
       return { version: null, source: null };
     },
@@ -404,21 +417,11 @@ export function createPaseo(options: PaseoOptions = {}): BoxIntegration {
       return parseHealth(result.stdout, local.version, config?.paseo_relay === true);
     },
     async onProjectMoved(link: IntegrationLink, path: string, sessions: readonly MovedSession[]): Promise<void> {
-      // `project create` is idempotent. It returns the existing project for a known directory.
-      const result = await link.run(`paseo project create ${boxPath(path)} >/dev/null`, { timeoutMs: BOX_TIMEOUT_MS });
-      if (!result.ok) throw new Error(`paseo project create failed: ${result.error.message}`);
-      // One failed import does not stop the other imports. The error names each failed session.
-      const failed: string[] = [];
-      for (const session of sessions) {
-        const imported = await link.run(
-          `paseo import ${quoteShell(session.id)} --provider ${quoteShell(session.provider)} --cwd ${boxPath(path)} >/dev/null`,
-          { timeoutMs: BOX_TIMEOUT_MS },
-        );
-        if (!imported.ok && !ALREADY_IMPORTED.test(imported.error.message)) {
-          failed.push(`${session.provider} session ${session.id} (${imported.error.message})`);
-        }
-      }
-      if (failed.length > 0) throw new Error(`paseo import failed for ${failed.join(", ")}`);
+      const run = async (words: readonly string[]) => {
+        const result = await link.run(`paseo ${words.join(" ")} >/dev/null`, { timeoutMs: BOX_TIMEOUT_MS });
+        return result.ok ? null : result.error.message;
+      };
+      await registerProject(run, quoteShell, boxPath(path), sessions);
     },
     connectSteps(destination: string): readonly string[] {
       // Paseo Desktop keeps its hosts in app storage and has no command to add one.
@@ -429,10 +432,51 @@ export function createPaseo(options: PaseoOptions = {}): BoxIntegration {
       ];
     },
   };
-  return { id: "paseo", name: "Paseo", description: "Paseo daemon on the box", box: self };
+  const operator: IntegrationOperatorPart = {
+    // The box part works without a local Paseo. So a missing local Paseo is a warning of the move, not of `ferry status`.
+    available: () => true,
+    async onProjectMoved(path: string, sessions: readonly MovedSession[]): Promise<void> {
+      const cli = which("paseo") ?? (appCli !== null && existsSync(appCli) ? appCli : null);
+      if (cli === null) throw new PaseoError("Ferry found no paseo command on this machine");
+      const run = async (words: readonly string[]) => {
+        const result = await host.run({ argv: [cli, ...words], timeoutMs: LOCAL_TIMEOUT_MS });
+        if (result.timedOut) return "the command timed out";
+        return result.exitCode === 0 ? null : result.stderr.trim() || result.stdout.trim() || `exit code ${result.exitCode}`;
+      };
+      await registerProject(run, (value) => value, path, sessions);
+    },
+  };
+  return { id: "paseo", name: "Paseo", description: "Paseo daemon on the box", box: self, operator };
 }
 
 export const paseo = createPaseo();
+
+/**
+ * Register the project at `path` in Paseo, then import each session as an
+ * agent of that project. The box part and the operator part share it. `run`
+ * runs `paseo` with `words` on the box or on this machine, and returns null or
+ * the message of a failed command. `word` makes one word from a value: a shell
+ * quote for the box, the value itself for a local argv. `path` is a word.
+ */
+async function registerProject(
+  run: (words: readonly string[]) => Promise<string | null>,
+  word: (value: string) => string,
+  path: string,
+  sessions: readonly MovedSession[],
+): Promise<void> {
+  // `project create` is idempotent. It returns the existing project for a known directory.
+  const created = await run(["project", "create", path]);
+  if (created !== null) throw new Error(`paseo project create failed: ${created}`);
+  // One failed import does not stop the other imports. The error names each failed session.
+  const failed: string[] = [];
+  for (const session of sessions) {
+    const imported = await run(["import", word(session.id), "--provider", word(session.provider), "--cwd", path]);
+    if (imported !== null && !ALREADY_IMPORTED.test(imported)) {
+      failed.push(`${session.provider} session ${session.id} (${imported})`);
+    }
+  }
+  if (failed.length > 0) throw new Error(`paseo import failed for ${failed.join(", ")}`);
+}
 
 /** Run one box command. Returns its stdout, or throws a PaseoError with `what` and the Link message. */
 async function boxRun(link: IntegrationLink, command: string, what: string, timeoutMs?: number): Promise<string> {

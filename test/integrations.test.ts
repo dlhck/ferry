@@ -439,6 +439,83 @@ describe("Paseo project move", () => {
     expect(commands.filter((command) => command.startsWith("paseo import"))).toHaveLength(3);
   });
 
+  /** A local `paseo` that records each argv. `answer` gives the stderr of a failed command, or null. */
+  function localPaseo(answer: (argv: readonly string[]) => string | null = () => null) {
+    const calls: string[][] = [];
+    const host: HostAdapter = {
+      async run(command: HostCommand) {
+        calls.push([...command.argv]);
+        const stderr = answer(command.argv);
+        return { exitCode: stderr === null ? 0 : 1, stdout: "", stderr: stderr ?? "", timedOut: false };
+      },
+    };
+    return { calls, paseo: createPaseo({ platform: "win32", which: () => "/usr/local/bin/paseo", host }) };
+  }
+
+  test("on this machine, registers the project and imports each moved session without a shell", async () => {
+    const { calls, paseo } = localPaseo();
+
+    await paseo.operator.onProjectMoved?.("/home/user/Developer/it's", [
+      { provider: "claude", id: "1a2b" },
+      { provider: "codex", id: "it's" },
+    ]);
+
+    expect(calls).toEqual([
+      ["/usr/local/bin/paseo", "project", "create", "/home/user/Developer/it's"],
+      ["/usr/local/bin/paseo", "import", "1a2b", "--provider", "claude", "--cwd", "/home/user/Developer/it's"],
+      ["/usr/local/bin/paseo", "import", "it's", "--provider", "codex", "--cwd", "/home/user/Developer/it's"],
+    ]);
+  });
+
+  test("on this machine, skips a session that an agent already has, and names each failed import after it tries all", async () => {
+    const { calls, paseo } = localPaseo((argv) =>
+      argv.includes("known")
+        ? "Error: Failed to import agent: Provider session is already imported: known\n"
+        : argv.includes("broken")
+          ? "Error: no session\n"
+          : null,
+    );
+
+    await expect(
+      paseo.operator.onProjectMoved?.("/home/user/app", [
+        { provider: "claude", id: "known" },
+        { provider: "codex", id: "broken" },
+        { provider: "claude", id: "new" },
+      ]),
+    ).rejects.toThrow("paseo import failed for codex session broken (Error: no session)");
+    expect(calls.filter((argv) => argv[1] === "import")).toHaveLength(3);
+
+    const again = localPaseo((argv) => (argv[1] === "import" ? "Error: Provider session is already imported: known" : null));
+    await again.paseo.operator.onProjectMoved?.("/home/user/app", [{ provider: "claude", id: "known" }]);
+  });
+
+  test("on this machine, fails with the message of a failed project create and imports nothing", async () => {
+    const { calls, paseo } = localPaseo(() => "Error: the daemon does not run");
+
+    await expect(paseo.operator.onProjectMoved?.("/home/user/app", [{ provider: "claude", id: "1a2b" }])).rejects.toThrow(
+      "paseo project create failed: Error: the daemon does not run",
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  test("on this machine, uses the CLI of the desktop app when paseo is not on the PATH, and fails without a CLI", async () => {
+    const app = join(tempRoot(), "Paseo.app");
+    const cli = join(app, "Contents/Resources/bin/paseo");
+    touch(cli);
+    const host = fakeHost({ stdout: "" });
+
+    await createPaseo({ platform: "darwin", macApp: app, which: () => null, host }).operator.onProjectMoved?.("/home/user/app", []);
+    expect(host.calls).toEqual([[cli, "project", "create", "/home/user/app"]]);
+
+    const none = createPaseo({ platform: "darwin", macApp: join(tempRoot(), "Paseo.app"), which: () => null, host });
+    await expect(none.operator.onProjectMoved?.("/home/user/app", [])).rejects.toThrow("Ferry found no paseo command on this machine");
+    expect(host.calls).toHaveLength(1);
+  });
+
+  test("the operator part is on without a local Paseo, so a box with Paseo gets no status warning", () => {
+    expect(createPaseo({ platform: "win32", which: () => null }).operator.available()).toBe(true);
+  });
+
   test("names the command that removes the source project from Paseo", () => {
     expect(paseoSourceHint("~/Developer/app", "this machine")).toBe(
       "Paseo still lists ~/Developer/app on this machine. Ferry does not remove it. To remove it from Paseo, run paseo project ls to find its ID, then paseo project delete <id>. The files stay.",
@@ -455,8 +532,9 @@ describe("integration list", () => {
 
     expect(await integrationText(CONFIG, [paseo])).toEqual([
       "paseo  disabled  Paseo daemon on the box",
-      "  Parts: box",
+      "  Parts: box, operator",
       `  Local app: 0.9.2 (${cli})`,
+      "  This machine: available",
     ]);
   });
 
@@ -465,8 +543,9 @@ describe("integration list", () => {
 
     expect(await integrationText({ ...CONFIG, integrations: { paseo: true } }, [paseo])).toEqual([
       "paseo  enabled  Paseo daemon on the box",
-      "  Parts: box",
+      "  Parts: box, operator",
       "  Local app: not found. The box version is not pinned.",
+      "  This machine: available",
       "  Connect to the box:",
       "    Open Paseo Desktop.",
       "    Open Settings → Add host → Remote SSH.",
@@ -502,16 +581,18 @@ describe("integration list with box tables", () => {
     expect(await integrationText(BOXES, [paseo()])).toEqual([
       "Box a",
       "  paseo  enabled  Paseo daemon on the box",
-      "    Parts: box",
+      "    Parts: box, operator",
       "    Local app: not found. The box version is not pinned.",
+      "    This machine: available",
       "    Connect to the box:",
       "      Open Paseo Desktop.",
       "      Open Settings → Add host → Remote SSH.",
       "      Enter ssh://dev@box-a.example.",
       "Box b",
       "  paseo  disabled  Paseo daemon on the box",
-      "    Parts: box",
+      "    Parts: box, operator",
       "    Local app: not found. The box version is not pinned.",
+      "    This machine: available",
     ]);
   });
 
@@ -728,10 +809,10 @@ describe("an integration with only an operator part", () => {
     const list = await listIntegrations(config, [paseo, operatorIntegration({ available: false })]);
 
     expect(list.boxes[0]?.integrations.map(({ id, parts, available }) => ({ id, parts, available }))).toEqual([
-      { id: "paseo", parts: ["box"], available: null },
+      { id: "paseo", parts: ["box", "operator"], available: true },
       { id: EXAMPLE_ID, parts: ["operator"], available: false },
     ]);
-    expect(integrationLines(list).slice(3)).toEqual([
+    expect(integrationLines(list).slice(4)).toEqual([
       "example  enabled  Example checks on this machine",
       "  Parts: operator",
       "  This machine: not available",
@@ -758,6 +839,6 @@ describe("an integration with only an operator part", () => {
     expect(operatorIntegrations({ ...CONFIG, integrations: { [EXAMPLE_ID]: true } }, [example])).toEqual([example]);
     expect(operatorIntegrations(boxes(undefined), [example])).toEqual([example]);
     expect(operatorIntegrations(boxes(false), [example])).toEqual([]);
-    expect(operatorIntegrations({ ...CONFIG, integrations: { paseo: true } }, INTEGRATIONS)).toEqual([]);
+    expect(operatorIntegrations({ ...CONFIG, integrations: { paseo: true } }, INTEGRATIONS).map(({ id }) => id)).toEqual(["paseo"]);
   });
 });

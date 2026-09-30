@@ -117,9 +117,11 @@ Ferry reads `daemon.terminalProfiles` from `~/.paseo/config.json` and merges the
 
 After `ferry move` carries a project to a box with Paseo, Ferry runs `paseo project create` for the project directory. Then it runs `paseo import <session-id> --provider <claude|codex> --cwd <project>` for each carried session.
 
-- Paseo refuses a session that an agent on the box already has, and Ferry skips it. For an archived agent, Paseo unarchives that agent. A second move creates no duplicate agent.
+- Paseo refuses a session that an agent on the destination already has, and Ferry skips it. For an archived agent, Paseo unarchives that agent. A second move creates no duplicate agent.
 - A failed import does not stop the other imports or the move. The move warning names each failed session.
-- A move to this machine imports nothing. The integration runs only on a box.
+- A move back to this machine with `--from-box` runs the same two commands on this machine, for the local Paseo. The step is on when `[integrations]` or at least one box enables Paseo.
+- On this machine, Ferry uses the `paseo` command on the PATH, else the CLI of the Paseo desktop app. When this machine has neither, or the local daemon does not run, the move prints one warning and completes.
+- A move between two boxes imports the sessions on the destination box only.
 
 ## Other sync candidates
 
