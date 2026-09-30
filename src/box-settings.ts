@@ -19,6 +19,8 @@ import type { HarnessDescriptor } from "./registry/types.ts";
 const CLAUDE_HARNESS = "claude";
 /** Marketplace installs clone git repositories, so they get more time than one command. */
 const PLUGIN_TIMEOUT_MS = 600_000;
+/** The end of each warning for a `claude` command that failed on the box. */
+const RUN_ON_BOX = "Run it on the box to see the error.";
 
 export type BoxSettingsLink = {
   run(command: string, options?: RunOptions): Promise<LinkResult>;
@@ -74,65 +76,138 @@ const MERGE_JSON = "reduce $k[] as $n (.; if $c | has($n) then .[$n] = $c[$n] el
  * key n, empty when the operator has none. The program replaces the root line
  * of each key and each table whose name starts with the key. It keeps all
  * other lines, comments included. It follows brackets and strings, so it never
- * reads a line of a multi-line value as a key or a table. It prints the new
- * file. It exits 3 when the file already holds the carried values, and 4 when
- * it cannot follow the file.
+ * reads a line of a multi-line value as a key or a table.
+ *
+ * It reads each key and table name as TOML does: it keeps the spaces in a
+ * quoted name, decodes the escapes of a basic string, and reads a literal
+ * string as it is. So `"model"` is the key `model`, and `["model "]` is
+ * not.
+ *
+ * It prints the new file only after it reads its own result again and finds
+ * the carried values and each line that it must keep. It exits 3 when the
+ * file already holds the carried values. It exits 4 when it cannot read a line
+ * as TOML, and then prints only the number of that line. It exits 5 when its
+ * result fails the check.
  */
 const MERGE_TOML = String.raw`
+function hex(s, want,   i, d, v) {
+  if (length(s) != want) return -1
+  for (i = 1; i <= want; i++) {
+    d = index("0123456789abcdef", tolower(substr(s, i, 1)))
+    if (!d) return -1
+    v = v * 16 + d - 1
+  }
+  return v + 0
+}
+# Decode the basic string at the start of s and set rest to the text after it.
+# A carried key is printable ASCII, so each other decoded character becomes
+# \001, which no carried key holds.
+function basic(s,   i, c, h, v, r) {
+  r = ""
+  for (i = 2; i <= length(s); i++) {
+    c = substr(s, i, 1)
+    if (c == "\"") { rest = substr(s, i + 1); return r }
+    if (c != "\\") { r = r c; continue }
+    c = substr(s, ++i, 1)
+    if (c == "\"" || c == "\\") { r = r c; continue }
+    h = c == "x" ? 2 : (c == "u" ? 4 : (c == "U" ? 8 : 0))
+    if (!h && (c == "" || !index("btnfre", c))) break
+    v = h ? hex(substr(s, i + 1, h), h) : 0
+    if (v < 0) break
+    i += h
+    r = r (v > 31 && v < 127 ? sprintf("%c", v) : "\001")
+  }
+  fail = 1
+}
+# Read the dotted key at the start of s. Set name to its decoded first part,
+# parts to the number of parts, canon to its text without the spaces around
+# the parts, and rest to the text after it. Return 0 for a key that is not TOML.
+function path(s,   c, j, part) {
+  parts = 0; canon = ""
+  while (1) {
+    sub(/^[ \t]+/, "", s); c = substr(s, 1, 1)
+    if (c == "\"") { part = basic(s); if (fail) return 0; j = length(s) - length(rest) }
+    else if (c == "'") { j = index(substr(s, 2), c); if (!j) return 0; part = substr(s, 2, j - 1); j++ }
+    else { if (!match(s, /^[A-Za-z0-9_-]+/)) return 0; j = RLENGTH; part = substr(s, 1, j) }
+    if (++parts == 1) name = part
+    canon = canon substr(s, 1, j); s = substr(s, j + 1)
+    sub(/^[ \t]+/, "", s)
+    if (substr(s, 1, 1) != ".") { rest = s; return 1 }
+    canon = canon "."; s = substr(s, 2)
+  }
+}
 function scan(s,   i, n, c, q) {
   cpos = 0; n = length(s); i = 1
   while (i <= n) {
+    c = substr(s, i, 1); q = substr(s, i, 3)
     if (mls != "") {
-      if (mls == "\"\"\"" && substr(s, i, 1) == "\\") { i += 2; continue }
-      if (substr(s, i, 3) == mls) { mls = ""; i += 3 } else i++
+      if (mls == "\"\"\"" && c == "\\") { i += 2; continue }
+      if (q != mls) { i++; continue }
+      # One or two quotes before the closing quotes are part of the string.
+      i += 3; if (substr(s, i, 1) == c) i++; if (substr(s, i, 1) == c) i++
+      mls = ""
       continue
     }
-    c = substr(s, i, 1); q = substr(s, i, 3)
     if (c == "#") { cpos = i; return }
     if (q == "\"\"\"" || q == "'''") { mls = q; i += 3; continue }
-    if (c == "\"") { for (i++; i <= n && substr(s, i, 1) != "\""; i++) if (substr(s, i, 1) == "\\") i++; i++; continue }
-    if (c == "'") { for (i++; i <= n && substr(s, i, 1) != "'"; i++); i++; continue }
+    if (c == "\"") { for (i++; i <= n && substr(s, i, 1) != "\""; i++) if (substr(s, i, 1) == "\\") i++; if (i > n) fail = 1; i++; continue }
+    if (c == "'") { for (i++; i <= n && substr(s, i, 1) != "'"; i++); if (i > n) fail = 1; i++; continue }
     if (c == "[" || c == "{") depth++
-    else if (c == "]" || c == "}") depth--
+    else if ((c == "]" || c == "}") && --depth < 0) fail = 1
     i++
   }
 }
 function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
-function head(s,   c, j) {
-  s = trim(s); c = substr(s, 1, 1)
-  if (c == "\"" || c == "'") { j = index(substr(s, 2), c); return j ? substr(s, 2, j - 1) : "" }
-  if (!match(s, /^[A-Za-z0-9_-]+/)) return ""
-  return substr(s, 1, RLENGTH)
-}
-function classify(s,   t, eq) {
-  if (depth != 0 || mls != "") { scan(s); kind = "cont"; norm = "~"; return }
+function classify(s,   t, fin) {
+  fail = 0
+  if (depth != 0 || mls != "") { scan(s); kind = fail ? "bad" : "cont"; norm = s; sub(/\r$/, "", norm); return }
   t = trim(s)
   if (t == "" || substr(t, 1, 1) == "#") { kind = "blank"; return }
+  kind = "bad"
   if (substr(t, 1, 1) == "[") {
-    scan(s)
-    t = cpos ? substr(s, 1, cpos - 1) : s
-    gsub(/[ \t\r]/, "", t)
-    kind = "header"; norm = t
-    t = substr(t, 2); if (substr(t, 1, 1) == "[") t = substr(t, 2)
-    name = head(t)
+    fin = substr(t, 2, 1) == "[" ? "]]" : "]"
+    if (!path(substr(t, length(fin) + 1)) || substr(rest, 1, length(fin)) != fin) return
+    t = trim(substr(rest, length(fin) + 1))
+    if (t != "" && substr(t, 1, 1) != "#") return
+    kind = "header"; norm = canon fin
     return
   }
-  eq = index(s, "=")
-  if (!eq) { kind = "bad"; return }
-  kind = "key"; name = head(substr(s, 1, eq - 1)); simple = trim(substr(s, 1, eq - 1)) == name
-  scan(substr(s, eq + 1))
-  t = cpos ? substr(s, eq + 1, cpos - 1) : substr(s, eq + 1)
-  norm = trim(substr(s, 1, eq - 1)) " = " trim(t)
-  if (depth != 0 || mls != "") norm = norm "~"
+  if (!path(t) || substr(rest, 1, 1) != "=") return
+  t = substr(rest, 2); scan(t)
+  if (fail) return
+  kind = "key"; norm = canon " = " trim(cpos ? substr(t, 1, cpos - 1) : t)
 }
-function out(s) { print s; printed = 1; prev = s }
+# Read the lines a[1..count]. Set type, own, and first for each line, top to
+# the first table header, and have[k] to the text that defines key k. Return
+# the number of the first line that is not TOML, or 0.
+function load(a, count,   i, k, root, section, last, at) {
+  depth = 0; mls = ""; root = 1; section = 0; top = 0
+  for (k = 1; k <= n; k++) have[k] = ""
+  for (i = 1; i <= count; i++) {
+    classify(a[i])
+    if (kind == "bad") return i
+    type[i] = kind; own[i] = 0; first[i] = 0
+    if (kind == "header") { if (root) top = i; root = 0; section = (name in slot) ? slot[name] : 0; own[i] = section }
+    else if (kind == "key") { at = i; own[i] = root ? ((name in slot) ? slot[name] : 0) : section; last = own[i]; first[i] = root && parts == 1 }
+    else if (kind == "cont") own[i] = last
+    if (own[i] && kind != "blank") have[own[i]] = have[own[i]] norm "\n"
+  }
+  return (depth != 0 || mls != "") ? at : 0
+}
+# The lines that an edit must keep: all but the empty lines and the lines of a changed key.
+function kept(a, count,   i, s) {
+  s = ""
+  for (i = 1; i <= count; i++) if (!(own[i] && !same[own[i]]) && !(type[i] == "blank" && trim(a[i]) == "")) s = s a[i] "\n"
+  return s
+}
+function out(s) { res[++rn] = s }
 function emit(k,   m, j, part) {
   done[k] = 1; m = split(text[k], part, "\n")
-  for (j = 1; j <= m; j++) if (j < m || part[j] != "") out(part[j])
+  for (j = 1; j <= m; j++) if (j < m || part[j] != "") out(part[j] eol)
 }
 function scalars(gap,   k, any) {
   for (k = 1; k <= n; k++) if (!same[k] && !done[k] && !table[k] && text[k] != "") { emit(k); any = 1 }
-  if (any && gap) out("")
+  if (any && gap) out(eol)
 }
 BEGIN {
   n = split(ENVIRON["FERRY_KEYS"], keys, " ")
@@ -140,26 +215,18 @@ BEGIN {
     slot[keys[k]] = k
     text[k] = ENVIRON["FERRY_V" k]
     table[k] = substr(text[k], 1, 1) == "["
-    m = split(text[k], part, "\n")
-    for (j = 1; j <= m; j++) { classify(part[j]); if (kind == "header" || kind == "key") want[k] = want[k] norm "\n" }
   }
-  depth = 0; mls = ""; root = 1
+  for (k = 1; k <= n; k++) { m = split(text[k], part, "\n"); load(part, m); want[k] = have[k] }
 }
-{
-  line[NR] = $0
-  classify($0)
-  type[NR] = kind
-  if (kind == "bad") bad = 1
-  if (kind == "header" && root) top = NR
-  if (kind == "header") { root = 0; section = (name in slot) ? slot[name] : 0; own[NR] = section }
-  else if (kind == "key") { own[NR] = root ? ((name in slot) ? slot[name] : 0) : section; last = own[NR]; first[NR] = root && simple }
-  else if (kind == "cont") own[NR] = last
-  if (own[NR] && kind != "blank") have[own[NR]] = have[own[NR]] norm "\n"
-}
+NR == 1 && sub(/^\357\273\277/, "") { bom = "\357\273\277" }
+NR == 1 && /\r$/ { eol = "\r" }
+{ line[NR] = $0 }
 END {
-  if (bad || depth != 0 || mls != "") exit 4
+  bad = load(line, NR)
+  if (bad) { print bad; exit 4 }
   for (k = 1; k <= n; k++) { same[k] = have[k] == want[k]; if (!same[k]) changed = 1 }
   if (!changed) exit 3
+  keep = kept(line, NR)
   # New root keys go before the comments and blank lines above the first table.
   lead = top ? top : NR + 1
   while (lead > 1 && type[lead - 1] == "blank") lead--
@@ -171,7 +238,12 @@ END {
     if (type[i] == "header" && table[k] || type[i] == "key" && first[i] && !table[k]) emit(k)
   }
   if (lead > NR) scalars(0)
-  for (k = 1; k <= n; k++) if (!same[k] && !done[k] && table[k]) { if (printed && prev != "") out(""); emit(k) }
+  for (k = 1; k <= n; k++) if (!same[k] && !done[k] && table[k]) { if (rn && trim(res[rn]) != "") out(eol); emit(k) }
+  # Read the result again. It must hold the carried values and each line to keep.
+  if (load(res, rn) || kept(res, rn) != keep) exit 5
+  for (k = 1; k <= n; k++) if (have[k] != want[k]) exit 5
+  res[1] = bom res[1]
+  for (i = 1; i <= rn; i++) print res[i]
 }
 `;
 
@@ -212,7 +284,12 @@ export async function mergeBoxSettings(input: {
       warnings.push(`jq is not on the box, so Ferry did not update ${descriptor.file}. Run ferry update to install jq.`);
     }
     if (stdout.startsWith("E")) {
-      throw new BoxSettingsError(`${path}: the box settings file is not a ${descriptor.format.toUpperCase()} object`);
+      const line = /^E (\d+)\n/.exec(stdout)?.[1];
+      throw new BoxSettingsError(
+        line
+          ? `${path}: Ferry cannot read line ${line} as TOML, so it left the file unchanged`
+          : `${path}: the box settings file is not a ${descriptor.format.toUpperCase()} object`,
+      );
     }
     if (stdout.startsWith("S")) throw new BoxSettingsError(`${path}: the box could not merge the settings file`);
   }
@@ -309,8 +386,9 @@ const JQ_SOURCE = `src() { if grep -q '[^[:space:]]' "$f" 2>/dev/null; then cat 
 /**
  * The box script for a TOML settings file. awk merges the carried keys into a
  * temporary file, and the script moves it into place only when a carried key
- * changed. awk is on every POSIX box. The status letters are those of
- * `jsonScript`; `E` also stands for a file that awk cannot follow.
+ * changed and awk accepted its own result. awk is on every POSIX box. The
+ * status letters are those of `jsonScript`. For a line that awk cannot read as
+ * TOML, the script prints `E` and the line number, never the line.
  */
 function tomlScript(path: string, keys: readonly string[], values: Record<string, unknown>): string {
   const env = [
@@ -325,11 +403,11 @@ function tomlScript(path: string, keys: readonly string[], values: Record<string
     "umask 077",
     `src="$f"; [ -e "$f" ] || src=/dev/null`,
     `mkdir -p "$(dirname "$f")" || { printf 'S\\n'; exit 0; }`,
-    `${env} awk ${quoteShell(MERGE_TOML)} "$src" > "$f.ferry-tmp" 2>/dev/null`,
+    `${env} LC_ALL=C awk ${quoteShell(MERGE_TOML)} "$src" > "$f.ferry-tmp" 2>/dev/null`,
     "case $? in",
     `  0) mv "$f.ferry-tmp" "$f" && printf 'W\\n' || printf 'S\\n' ;;`,
     `  3) rm -f "$f.ferry-tmp" ;;`,
-    `  4) rm -f "$f.ferry-tmp"; printf 'E\\n' ;;`,
+    `  4) read -r n < "$f.ferry-tmp"; rm -f "$f.ferry-tmp"; printf 'E %s\\n' "$n" ;;`,
     `  *) rm -f "$f.ferry-tmp"; printf 'S\\n' ;;`,
     "esac",
   ].join("\n");
@@ -340,6 +418,8 @@ function tomlScript(path: string, keys: readonly string[], values: Record<string
  * `claude` CLI. Claude does not install a plugin from settings alone. Each
  * marketplace and plugin is one box command, so progress can count them.
  * Return one warning for each marketplace or plugin the box could not take.
+ * A warning names the step, never the `claude` output: that output can hold a
+ * credential, such as a token in a git URL, so it stays on the box.
  */
 export async function installBoxPlugins(input: {
   readonly settings: readonly SeedSettings[];
@@ -352,7 +432,7 @@ export async function installBoxPlugins(input: {
   if (!entry) return [];
   const carried = parse(entry);
   const warnings: string[] = [];
-  const steps: string[] = [];
+  const steps: { failure: string; command: string }[] = [];
 
   for (const [name, value] of Object.entries(record(carried.extraKnownMarketplaces))) {
     const source = record(record(value).source);
@@ -369,41 +449,38 @@ export async function installBoxPlugins(input: {
       );
       continue;
     }
-    steps.push(step("M", name, `claude plugin marketplace add ${quoteShell(location)}`));
+    steps.push({
+      failure: `could not add marketplace ${name}: claude plugin marketplace add failed on the box. ${RUN_ON_BOX}`,
+      command: `claude plugin marketplace add ${quoteShell(location)}`,
+    });
   }
   for (const [id, enabled] of Object.entries(record(carried.enabledPlugins))) {
-    if (enabled === true) steps.push(step("P", id, `claude plugin install ${quoteShell(id)}`));
+    if (enabled === true) {
+      steps.push({
+        failure: `could not install plugin ${id}: claude plugin install failed on the box. ${RUN_ON_BOX}`,
+        command: `claude plugin install ${quoteShell(id)}`,
+      });
+    }
   }
 
-  for (const [index, command] of steps.entries()) {
+  for (const [index, step] of steps.entries()) {
     input.progress?.count(index + 1, steps.length);
-    const script = ["command -v claude >/dev/null 2>&1 || { printf 'C\\n'; exit 0; }", command].join("\n");
+    const script = [
+      "command -v claude >/dev/null 2>&1 || { printf 'C\\n'; exit 0; }",
+      `${step.command} >/dev/null 2>&1 || printf 'F\\n'`,
+    ].join("\n");
     const result = await checked(input.link, `sh -c ${quoteShell(script)}`, {
       ...(input.gitAuth === "box" ? {} : { agentForwarding: "git" as const }),
       timeoutMs: PLUGIN_TIMEOUT_MS,
     });
 
-    for (const line of result.stdout.split("\n")) {
-      const [kind, name, ...message] = line.split("\t");
-      const detail = message.join("\t").trim();
-      if (kind === "C") {
-        warnings.push("the claude CLI is not on the box PATH; no plugin was installed");
-        return warnings;
-      }
-      if (kind === "M") warnings.push(`could not add marketplace ${name}: ${detail}`);
-      if (kind === "P") warnings.push(`could not install plugin ${name}: ${detail}`);
+    if (result.stdout.startsWith("C")) {
+      warnings.push("the claude CLI is not on the box PATH; no plugin was installed");
+      return warnings;
     }
+    if (result.stdout.startsWith("F")) warnings.push(step.failure);
   }
   return warnings;
-}
-
-/** One `claude` call. On failure it prints the kind, the name, and the last output line. */
-function step(kind: "M" | "P", name: string, command: string): string {
-  return [
-    `if ! out=$(${command} 2>&1); then`,
-    `printf '${kind}\\t%s\\t%s\\n' ${quoteShell(name)} "$(printf '%s\\n' "$out" | tail -n 1)";`,
-    "fi",
-  ].join(" ");
 }
 
 export function readCommand(path: string): string {
