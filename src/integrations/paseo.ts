@@ -433,7 +433,9 @@ export function createPaseo(options: PaseoOptions = {}): BoxIntegration & Operat
     },
   };
   const operator: IntegrationOperatorPart = {
-    // The box part works without a local Paseo. So a missing local Paseo is a warning of the move, not of `ferry status`.
+    // Always true, also without a local `paseo` command. The box part works without a local Paseo. With false,
+    // `ferry status` shows a permanent warning for that operator, and `ferry integrations enable paseo` says that
+    // Ferry adds commands later. So `onProjectMoved` looks for the command, and a missing command is a warning of the move.
     available: () => true,
     async onProjectMoved(path: string, sessions: readonly MovedSession[]): Promise<void> {
       const cli = which("paseo") ?? (appCli !== null && existsSync(appCli) ? appCli : null);
