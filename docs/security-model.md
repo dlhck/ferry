@@ -63,6 +63,7 @@ The error names the server and the rule, never the value. Set secrets in the `en
 The sync continues and names the server when Ferry skips it:
 
 - A server whose command or arguments refer to a path in your home, as an absolute path, `~`, `$HOME`, or `${HOME}`.
+- A server whose command or arguments refer to a path in a macOS app bundle, a path with a `<name>.app/Contents/` part, as in `/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl`. The path can be at any place, also in `~/Applications` or inside a longer argument. A box does not have the app, and you have nothing to do, so `ferry status --brief` shows no item for this server. When an earlier sync put the server on a box, the next sync removes the box entry, but only when the command or an argument of the box entry is itself an app bundle path. Ferry removes no other box server.
 - A server that runs an inline script for a shell or an interpreter, such as `sh -c`, `bash -cl`, `node -e`, `node --eval=...`, `python -c`, `deno eval`, `npx -c`, `pwsh -Command`, `cmd /c`, or `env -S`, because Ferry cannot check the script. This includes a shell or an interpreter behind another command, as in `env bash -c` or `docker run <image> sh -c`.
 - A shell or an interpreter with an option that Ferry does not know before its script file, and a script option in a later argument. Then the message says that Ferry cannot classify the options.
 
