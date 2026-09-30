@@ -1416,6 +1416,55 @@ describe("ferry move sessions", () => {
     expect(result.lines.join("\n")).not.toContain(GITHUB_TOKEN);
   });
 
+  test("skips a session with a password in a tool call, names the file and the key, and carries it with --allow-secrets", async () => {
+    const password = "example" + "-pass";
+    const w = world();
+    const app = project(w, w.operator);
+    const source = claudeSession(w.operator, app, "clean");
+    const write_ = { type: "tool_use", name: "Write", input: { file_path: "config.json", content: JSON.stringify({ password }) } };
+    const records = [
+      { type: "user", sessionId: "leaky", cwd: app, message: "write the config" },
+      { type: "assistant", message: { content: [write_] } },
+    ];
+    write(join(source, "leaky.jsonl"), records.map((record) => `${JSON.stringify(record)}\n`).join(""));
+    const codex = codexSession(w.operator, app, "codex-leaky", "hello");
+    const call = { type: "response_item", payload: { type: "function_call", arguments: JSON.stringify({ cmd: `psql --password ${password}` }) } };
+    writeFileSync(join(w.operator, codex), `${readFileSync(join(w.operator, codex), "utf8")}${JSON.stringify(call)}\n`);
+    const warnings: string[] = [];
+
+    const result = await move(w, { path: "Developer/app" }, { warn: (line) => warnings.push(line) });
+
+    expect(result.error).toBeNull();
+    const target = join(w.box, ".claude/projects", projectDirectoryName(join(w.box, "Developer/app")));
+    expect(existsSync(join(target, "clean.jsonl"))).toBe(true);
+    expect(existsSync(join(target, "leaky.jsonl"))).toBe(false);
+    expect(existsSync(join(w.box, codex))).toBe(false);
+    const leaky = `~/${join(source, "leaky.jsonl").slice(w.operator.length + 1)}`;
+    expect(warnings).toEqual([
+      `WARNING: Ferry skips the session of ${leaky} (key password holds a password or secret). Add --allow-secrets to carry it.`,
+      `WARNING: Ferry skips the session of ~/${codex} (key password holds a password or secret). Add --allow-secrets to carry it.`,
+    ]);
+    expect(result.value?.sessions.refused.map((hit) => [hit.path, hit.code])).toEqual([
+      [leaky, "secret-field"],
+      [`~/${codex}`, "secret-field"],
+    ]);
+    expect([...result.lines, ...result.events, ...warnings, JSON.stringify(result.value)].join("\n")).not.toContain(password);
+    expect(w.commands.map(({ options }) => Buffer.from(options.input ?? []).toString("latin1")).join("\n")).not.toContain(password);
+
+    rmSync(join(w.box, "Developer"), { recursive: true, force: true });
+    const allowed = await move(w, { path: "Developer/app", allowSecrets: true, yes: true });
+
+    expect(allowed.error).toBeNull();
+    expect(readFileSync(join(target, "leaky.jsonl"), "utf8")).toContain(password);
+    expect(statSync(join(target, "leaky.jsonl")).mode & 0o777).toBe(0o600);
+    expect(readFileSync(join(w.box, codex), "utf8")).toContain(password);
+    expect(allowed.lines.filter((line) => line.startsWith("Carry session with secrets: ")).map((line) => line.slice(line.indexOf("(")))).toEqual([
+      "(key password holds a password or secret)",
+      "(key password holds a password or secret)",
+    ]);
+    expect(allowed.lines.join("\n")).not.toContain(password);
+  });
+
   test("passes the carried sessions to an enabled integration, and calls none without one", async () => {
     const calls: { path: string; sessions: readonly MovedSession[] }[] = [];
     const fake = {

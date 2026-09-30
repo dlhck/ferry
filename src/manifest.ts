@@ -583,7 +583,7 @@ function secretFieldHits(path: string, bytes: Uint8Array): ForbiddenHit[] {
 }
 
 /** The secret keys with a value in the `key: value` or `key = value` lines of `text`. */
-function secretLineKeys(text: string): string[] {
+export function secretLineKeys(text: string): string[] {
   return text.split("\n").flatMap((line) => {
     const match = line.match(CONFIG_LINE);
     if (!match || !isSecretKey(match[1]!)) return [];
@@ -592,7 +592,7 @@ function secretLineKeys(text: string): string[] {
   });
 }
 
-function secretKeyHits(path: string, keys: readonly string[]): ForbiddenHit[] {
+export function secretKeyHits(path: string, keys: readonly string[]): ForbiddenHit[] {
   return [...new Set(keys)].map((key) => ({
     path,
     code: DENY_RULES["secret-field"].code,
@@ -610,13 +610,13 @@ function secretKeys(value: unknown): string[] {
   );
 }
 
-function isSecretKey(key: string): boolean {
+export function isSecretKey(key: string): boolean {
   const normal = key.toLowerCase().replace(/[-_]/g, "");
   return SECRET_KEYS.has(normal) || SECRET_WORDS.some((word) => normal.includes(word));
 }
 
 /** A non-empty string that is not a placeholder by the token placeholder rule. */
-function isSecretValue(value: string): boolean {
+export function isSecretValue(value: string): boolean {
   return value !== "" && !PLACEHOLDER_BODY.test(value);
 }
 
