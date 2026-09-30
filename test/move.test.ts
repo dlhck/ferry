@@ -1416,6 +1416,26 @@ describe("ferry move sessions", () => {
     expect(result.lines.join("\n")).not.toContain(GITHUB_TOKEN);
   });
 
+  test("--allow-secrets carries a project file, a secret .env file, and a session with a token in one move", async () => {
+    const w = world();
+    const app = project(w, w.operator);
+    write(join(app, "note.txt"), "hello\n");
+    write(join(app, ".env"), "AWS_ACCESS_KEY_ID=AK" + "IA" + "Q2W3E4R5T6Y7U8I9\n");
+    const source = claudeSession(w.operator, app, "leaky", `use ${GITHUB_TOKEN}`);
+    chmodSync(join(source, "leaky.jsonl"), 0o644);
+
+    const result = await move(w, { path: "Developer/app", includeEnv: true, allowSecrets: true, yes: true });
+
+    expect(result.error).toBeNull();
+    const boxApp = join(w.box, "Developer/app");
+    const target = join(w.box, ".claude/projects", projectDirectoryName(boxApp));
+    expect(readFileSync(join(boxApp, "note.txt"), "utf8")).toBe("hello\n");
+    expect(statSync(join(boxApp, ".env")).mode & 0o777).toBe(0o600);
+    expect(readFileSync(join(target, "leaky.jsonl"), "utf8")).toContain(GITHUB_TOKEN);
+    expect(statSync(join(target, "leaky.jsonl")).mode & 0o777).toBe(0o600);
+    expect(w.commands.filter(({ command }) => command.includes("chmod 600")).map(({ command }) => command.includes("leaky"))).toEqual([false, true]);
+  });
+
   test("passes the carried sessions to an enabled integration, and calls none without one", async () => {
     const calls: { path: string; sessions: readonly MovedSession[] }[] = [];
     const fake = {
