@@ -1628,6 +1628,17 @@ describe("box mode", () => {
     });
 
     expect(output[1]).toBe("https://[credential]@example.invalid/app.git?token=[credential]\n");
+
+    await runCli(["redact"], {
+      isBoxMode: () => true,
+      readStdin: async () =>
+        "https://proxy/path?next=https://alice:box-only-password@backend/path\nhttps://proxy/path?next=https%3A%2F%2Falice%3Abox-only-password%40backend%2Fpath\nhttps://host/a,https://alice:box-only-password@host/b\n",
+      writeText: (text) => output.push(text),
+    });
+
+    expect(output[2]).toBe(
+      "https://proxy/path?next=https://[credential]@backend/path\nhttps://proxy/path?next=https%3A%2F%2F[credential]%40backend%2Fpath\nhttps://host/a,https://[credential]@host/b\n",
+    );
     expect(buildProgram().helpInformation()).not.toContain("redact");
   });
 
