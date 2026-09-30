@@ -30,7 +30,7 @@ For an npm plugin, Ferry reads the installed version from the plugin's `package-
 - New plugins that are disabled locally are skipped. Paseo's install command enables new plugins, so installing then disabling would briefly run their code. Existing box plugins can be disabled and updated.
 - Local-directory plugins, unknown source kinds, and dirty Git checkouts produce warnings and are skipped. Local paths and URLs with embedded credentials are refused.
 - Plugin settings, credentials, acquisition caches, build output, and source files are not copied. Paseo acquires and prepares the plugin on the box.
-- Plugin commands run before agent profiles, so a plugin can provide a profile's provider. A plugin command failure produces a warning and does not block the core sync.
+- Plugin commands run before agent profiles, so a plugin can provide a profile's provider. The output of each plugin command stays on the box. A plugin command failure produces a warning that names the command and the plugin ID, and does not block the core sync.
 
 Use `ferry sync --dry-run` to review IDs, commits, npm versions, enabled states, and local skip reasons without connecting to a box. Source conflicts require a box connection and are reported during sync.
 

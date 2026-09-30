@@ -103,7 +103,7 @@ describe("Paseo Git plugin reconciliation", () => {
   jqTest("installs the exact commit and subdirectory, then enables the missing global switch", async () => {
     const config = { daemon: { listen: "127.0.0.1:6767" }, plugins: { "box-only": { source: "directory", path: "/p" } } };
     const b = box([], config); await carry(b.link);
-    expect(b.commands.slice(0, 3)).toEqual([list, `paseo plugin install 'git:${remote}:plugins/review' --id 'review' --ref '${revision}' --json`, setSwitch]);
+    expect(b.commands.slice(0, 3)).toEqual([list, `paseo plugin install 'git:${remote}:plugins/review' --id 'review' --ref '${revision}' --json >/dev/null 2>&1`, setSwitch]);
     expect(b.written()).toEqual({ ...config, pluginsEnabled: true });
     expect(b.commands.at(-1)).toBe("paseo daemon reload");
   });
@@ -122,7 +122,7 @@ describe("Paseo Git plugin reconciliation", () => {
     const other = { ...plugin, id: "other" };
     const c = box([installed(), installed({ id: "other" })], { pluginsEnabled: false });
     await carryPaseoPlugins(c.link, { plugins: [other, { ...plugin, enabled: false }], warnings: [] });
-    expect(c.commands.indexOf("paseo plugin disable 'review' --json")).toBeLessThan(c.commands.findIndex(isSwitch));
+    expect(c.commands.indexOf("paseo plugin disable 'review' --json >/dev/null 2>&1")).toBeLessThan(c.commands.findIndex(isSwitch));
     expect(c.written()).toEqual({ pluginsEnabled: true });
   });
   jqTest("does not enable the global switch without an enabled reconciled plugin", async () => {
@@ -148,9 +148,9 @@ describe("Paseo Git plugin reconciliation", () => {
   jqTest("disables before updating and enables only after updating", async () => {
     const older = installed(); older.installation.currentRevision = "b".repeat(40);
     const b = box([older]); await carry(b.link, { ...plugin, enabled: false });
-    expect(b.commands.slice(1)).toEqual(["paseo plugin disable 'review' --json", `paseo plugin update 'review' --ref '${revision}' --json`]);
+    expect(b.commands.slice(1)).toEqual(["paseo plugin disable 'review' --json >/dev/null 2>&1", `paseo plugin update 'review' --ref '${revision}' --json >/dev/null 2>&1`]);
     const disabled = box([{ ...older, enabled: false }]); await carry(disabled.link);
-    expect(disabled.commands.slice(1)).toEqual([`paseo plugin update 'review' --ref '${revision}' --json`, "paseo plugin enable 'review' --json", setSwitch]);
+    expect(disabled.commands.slice(1)).toEqual([`paseo plugin update 'review' --ref '${revision}' --json >/dev/null 2>&1`, "paseo plugin enable 'review' --json >/dev/null 2>&1", setSwitch]);
   });
   jqTest("does not execute absent disabled plugins or replace conflicting sources", async () => {
     const b = box(); expect((await carry(b.link, { ...plugin, enabled: false }))[0]).toContain("disabled locally");
@@ -181,7 +181,8 @@ describe("Paseo Git plugin reconciliation", () => {
     const link: IntegrationLink = { run: async (command, options) => command.includes(" install ")
       ? { ok: false, error: { origin: "box", code: "command-failed", message: "secret" } }
       : b.link.run(command, options) };
-    await expect(carry(link)).rejects.toThrow("Check paseo plugin ls");
+    await expect(carry(link)).rejects.toThrow("paseo plugin install failed on the box for Paseo plugin review. Check paseo plugin ls");
+    await expect(carry(link)).rejects.not.toThrow("secret");
   });
 });
 
@@ -341,16 +342,16 @@ describe("Paseo npm plugin discovery", () => {
 describe("Paseo npm plugin reconciliation", () => {
   jqTest("installs the exact version of a scoped package without --ref, then enables the global switch", async () => {
     const b = box([], { pluginsEnabled: false }); await carry(b.link, tools);
-    expect(b.commands.slice(0, 3)).toEqual([list, "paseo plugin install 'npm:@acme/tools@1.2.3' --id 'tools' --json", setSwitch]);
+    expect(b.commands.slice(0, 3)).toEqual([list, "paseo plugin install 'npm:@acme/tools@1.2.3' --id 'tools' --json >/dev/null 2>&1", setSwitch]);
     expect(b.written()).toEqual({ pluginsEnabled: true });
     const nested = box([]); await carry(nested.link, { ...tools, packageName: "review-kit", path: "plugins/review" });
-    expect(nested.commands[1]).toBe("paseo plugin install 'npm:review-kit@1.2.3:plugins/review' --id 'tools' --json");
+    expect(nested.commands[1]).toBe("paseo plugin install 'npm:review-kit@1.2.3:plugins/review' --id 'tools' --json >/dev/null 2>&1");
   });
   jqTest("updates to the exact version in either direction and is idempotent", async () => {
     for (const boxVersion of ["1.0.0", "2.0.0"]) {
       const b = box([installedNpm({ installation: { ...installedNpm().installation, currentRevision: boxVersion } })]);
       await carry(b.link, tools);
-      expect(b.commands.slice(1)).toEqual(["paseo plugin update 'tools' --version '1.2.3' --json", setSwitch]);
+      expect(b.commands.slice(1)).toEqual(["paseo plugin update 'tools' --version '1.2.3' --json >/dev/null 2>&1", setSwitch]);
     }
     const current = box([installedNpm()]);
     expect(await carry(current.link, tools)).toEqual([]);
@@ -359,9 +360,9 @@ describe("Paseo npm plugin reconciliation", () => {
   jqTest("reconciles enabled state in a safe order", async () => {
     const older = installedNpm({ installation: { ...installedNpm().installation, currentRevision: "1.0.0" } });
     const b = box([older]); await carry(b.link, { ...tools, enabled: false });
-    expect(b.commands.slice(1)).toEqual(["paseo plugin disable 'tools' --json", "paseo plugin update 'tools' --version '1.2.3' --json"]);
+    expect(b.commands.slice(1)).toEqual(["paseo plugin disable 'tools' --json >/dev/null 2>&1", "paseo plugin update 'tools' --version '1.2.3' --json >/dev/null 2>&1"]);
     const disabled = box([{ ...older, enabled: false }]); await carry(disabled.link, tools);
-    expect(disabled.commands.slice(1)).toEqual(["paseo plugin update 'tools' --version '1.2.3' --json", "paseo plugin enable 'tools' --json", setSwitch]);
+    expect(disabled.commands.slice(1)).toEqual(["paseo plugin update 'tools' --version '1.2.3' --json >/dev/null 2>&1", "paseo plugin enable 'tools' --json >/dev/null 2>&1", setSwitch]);
     const absent = box([]);
     expect((await carry(absent.link, { ...tools, enabled: false }))[0]).toContain("disabled locally");
     expect(absent.commands).toHaveLength(1);

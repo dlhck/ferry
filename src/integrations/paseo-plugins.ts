@@ -235,9 +235,10 @@ const STATES = [
 export async function carryPaseoPlugins(link: IntegrationLink, source: PaseoPlugins): Promise<readonly string[]> {
   const warnings = [...source.warnings];
   if (source.plugins.length === 0) return warnings;
-  const run = async (command: string): Promise<string> => {
+  // A box can echo a remote with a credential. Report only the command and the plugin ID.
+  const run = async (command: string, failed: string): Promise<string> => {
     const result = await link.run(command, { timeoutMs: 600_000 });
-    if (!result.ok) throw new PaseoError("Paseo plugin command failed on the box. Check paseo plugin ls and the box daemon's Git or npm registry access.");
+    if (!result.ok) throw new PaseoError(`${failed} Check paseo plugin ls and the box daemon's Git or npm registry access.`);
     return result.stdout;
   };
   const want = source.plugins.map((plugin) => ({
@@ -248,7 +249,7 @@ export async function carryPaseoPlugins(link: IntegrationLink, source: PaseoPlug
     revision: plugin.kind === "git" ? plugin.commit : plugin.version,
   }));
   const script = jqCommandScript("paseo plugin ls --json", `--argjson p ${quoteShell(JSON.stringify(want))}`, STATES);
-  const lines = (await run(`sh -c ${quoteShell(script)}`)).split("\n");
+  const lines = (await run(`sh -c ${quoteShell(script)}`, "paseo plugin ls failed on the box.")).split("\n");
   if (lines.includes("J")) return [...warnings, noJqWarning("the Paseo plugins")];
   const invalid = new PaseoError("paseo plugin ls --json on the box did not return a plugin list");
   if (lines.includes("E")) throw invalid;
@@ -262,6 +263,11 @@ export async function carryPaseoPlugins(link: IntegrationLink, source: PaseoPlug
       continue;
     }
     const id = quoteShell(plugin.id);
+    // Ferry does not read the output of these commands, so it stays on the box.
+    const paseo = (action: string, args: string) => run(
+      `paseo plugin ${action} ${args} --json >/dev/null 2>&1`,
+      `paseo plugin ${action} failed on the box for Paseo plugin ${plugin.id}.`,
+    );
     if (state === "absent") {
       // Paseo install enables new plugins. Do not briefly execute a disabled local plugin.
       if (!plugin.enabled) {
@@ -272,14 +278,14 @@ export async function carryPaseoPlugins(link: IntegrationLink, source: PaseoPlug
       const source = plugin.kind === "git" ? `git:${plugin.remote}` : `npm:${plugin.packageName}@${plugin.version}`;
       const reference = `${source}${plugin.path === "." ? "" : `:${plugin.path}`}`;
       const ref = plugin.kind === "git" ? ` --ref ${quoteShell(plugin.commit)}` : "";
-      await run(`paseo plugin install ${quoteShell(reference)} --id ${id}${ref} --json`);
+      await paseo("install", `${quoteShell(reference)} --id ${id}${ref}`);
     } else {
-      if (!plugin.enabled && enabled === "on") await run(`paseo plugin disable ${id} --json`);
+      if (!plugin.enabled && enabled === "on") await paseo("disable", id);
       if (revision !== "current") {
         const [target, flag] = plugin.kind === "git" ? [plugin.commit, "--ref"] : [plugin.version, "--version"];
-        await run(`paseo plugin update ${id} ${flag} ${quoteShell(target)} --json`);
+        await paseo("update", `${id} ${flag} ${quoteShell(target)}`);
       }
-      if (plugin.enabled && enabled !== "on") await run(`paseo plugin enable ${id} --json`);
+      if (plugin.enabled && enabled !== "on") await paseo("enable", id);
     }
     if (plugin.enabled) reconciled = true;
   }

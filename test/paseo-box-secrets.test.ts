@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { carryAgentProfiles, carryPaseoPreferences } from "../src/integrations/paseo.ts";
@@ -169,6 +169,11 @@ describe("box Paseo config secrets", () => {
       installed[1],
     ] });
     roots.push(created.remove);
+    // Each other `paseo` command echoes the remote to stdout and to stderr.
+    const paseo = join(created.home, "../bin/paseo");
+    const echo = `echo '${credentialRemote("tools")}'`;
+    writeFileSync(paseo, readFileSync(paseo, "utf8").replace("*) echo '{}' ;;", `*) ${echo}; ${echo} >&2 ;;`));
+    expect(readFileSync(paseo, "utf8")).toContain(PLUGIN_SECRET);
 
     const warnings = await carryPaseoPlugins(created.link, { plugins: [plugin, tools], warnings: [] });
 
