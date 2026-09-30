@@ -2,7 +2,6 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readCommand, writeCommand } from "../src/box-settings.ts";
 import { BUILTIN_BOX_PATH_DIRS } from "../src/tools/path.ts";
 import { resolveBoxes } from "../src/boxes.ts";
 import { configPath, readConfig, setIntegration } from "../src/config.ts";
@@ -10,10 +9,13 @@ import { runIntegrationCommand } from "../src/integrations/command.ts";
 import { createPaseo, refreshUnitPath, unitFile } from "../src/integrations/paseo.ts";
 import type { IntegrationLink } from "../src/integrations/types.ts";
 import { noProgress } from "../src/progress.ts";
+import { shellBox } from "./paseo-shell-box.ts";
 
 const homes: string[] = [];
+const boxes: (() => void)[] = [];
 afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+  for (const remove of boxes.splice(0)) remove();
 });
 
 function configHome(lines: string[]): string {
@@ -52,19 +54,21 @@ test("relay config rejects non-booleans", () => {
   expect(() => readConfig(home)).toThrow("invalid boolean for paseo_relay");
 });
 
+const UNIT_PATH = ".config/systemd/user/ferry-paseo.service";
+const RESTART = "systemctl --user restart ferry-paseo.service";
+
+/** A box with the unit `current`. Only the commands for the unit and the daemon status run in the shell. */
 function box(current = "") {
-  const commands: string[] = [];
-  const link: IntegrationLink = {
-    async run(command) {
-      commands.push(command);
-      let stdout = "";
-      if (command === readCommand(".config/systemd/user/ferry-paseo.service")) stdout = current ? `F${current}` : "M";
-      if (command === "node --version") stdout = "v22.0.0";
-      if (command.includes("paseo daemon status")) stdout = JSON.stringify({ localDaemon: "running", daemonVersion: "0.9.2", relay: { enabled: true } });
-      return { ok: true, address: "box", stdout, stderr: "" };
-    },
-  };
-  return { link, commands };
+  const created = shellBox({
+    status: { localDaemon: "running", daemonVersion: "0.9.2", relay: { enabled: true } },
+    answer: (command) =>
+      command.includes("ferry-paseo.service") ? undefined : command === "node --version" ? "v22.0.0" : "",
+  });
+  boxes.push(created.remove);
+  const path = join(created.home, UNIT_PATH);
+  mkdirSync(join(path, ".."), { recursive: true });
+  if (current) writeFileSync(path, current);
+  return { link: created.link, commands: created.commands, unit: () => readFileSync(path, "utf8") };
 }
 
 test("enable uses config in the plan and service, and restarts a changed unit", async () => {
@@ -77,14 +81,14 @@ test("enable uses config in the plan and service, and restarts a changed unit", 
   });
   expect(result?.plan.join("\n")).toContain("PASEO_RELAY_ENABLED=true");
   expect(result?.output.join("\n")).toContain("The relay is on.");
-  expect(remote.commands).toContain(writeCommand(".config/systemd/user/ferry-paseo.service", unitFile(BUILTIN_BOX_PATH_DIRS, true)));
-  expect(remote.commands).toContain("systemctl --user restart ferry-paseo.service");
+  expect(remote.unit()).toBe(unitFile(BUILTIN_BOX_PATH_DIRS, true));
+  expect(remote.commands).toContain(RESTART);
 });
 
 test("PATH refresh preserves an enabled relay", async () => {
   const remote = box(unitFile([".local/bin"], true));
   await refreshUnitPath(remote.link, [".local/bin", ".bun/bin"]);
-  expect(remote.commands).toContain(writeCommand(".config/systemd/user/ferry-paseo.service", unitFile([".local/bin", ".bun/bin"], true)));
+  expect(remote.unit()).toBe(unitFile([".local/bin", ".bun/bin"], true));
 });
 
 test("status accepts the configured relay", async () => {
@@ -103,8 +107,8 @@ for (const relay of [false, true]) {
   test(`enable applies relay=${relay} without restarting an unchanged unit`, async () => {
     const remote = box(unitFile(BUILTIN_BOX_PATH_DIRS, relay));
     await createPaseo({ platform: "win32" }).box.enable(remote.link, noProgress, { paseo_relay: relay });
-    expect(remote.commands).not.toContain("systemctl --user restart ferry-paseo.service");
-    expect(remote.commands).toContain(writeCommand(".config/systemd/user/ferry-paseo.service", unitFile(BUILTIN_BOX_PATH_DIRS, relay)));
+    expect(remote.commands).not.toContain(RESTART);
+    expect(remote.unit()).toBe(unitFile(BUILTIN_BOX_PATH_DIRS, relay));
   });
 }
 
@@ -112,6 +116,6 @@ test("enable turns the relay off again", async () => {
   const remote = box(unitFile(BUILTIN_BOX_PATH_DIRS, true));
   const lines = await createPaseo({ platform: "win32" }).box.enable(remote.link, noProgress, { paseo_relay: false });
   expect(lines.at(-1)).toContain("The relay is off.");
-  expect(remote.commands).toContain(writeCommand(".config/systemd/user/ferry-paseo.service", unitFile(BUILTIN_BOX_PATH_DIRS)));
-  expect(remote.commands).toContain("systemctl --user restart ferry-paseo.service");
+  expect(remote.unit()).toBe(unitFile(BUILTIN_BOX_PATH_DIRS));
+  expect(remote.commands).toContain(RESTART);
 });

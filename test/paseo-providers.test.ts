@@ -231,7 +231,7 @@ describe("Paseo provider carry", () => {
         },
       },
     });
-    expect(b.commands.at(-1)).toBe("paseo daemon reload");
+    expect(b.commands.at(-1)).toBe("paseo daemon reload >/dev/null 2>&1");
   });
 
   jqTest("creates a portable provider that the box lacks, and a built-in override", async () => {
@@ -264,7 +264,7 @@ describe("Paseo provider carry", () => {
     });
     expect(result.warnings[0]).not.toContain("--experimental-acp");
     expect(missing.written()).toBeUndefined();
-    expect(missing.commands).not.toContain("paseo daemon reload");
+    expect(missing.commands).not.toContain("paseo daemon reload >/dev/null 2>&1");
   });
 
   jqTest("skips a new provider that needs local runtime fields, and updates it once the box defines it", async () => {
@@ -439,7 +439,7 @@ test("sync applies provider definitions before it checks provider availability f
     warn: (line) => warnings.push(line),
   });
   expect(result.boxes[0]?.failure).toBeUndefined();
-  const reload = commands.indexOf("paseo daemon reload");
+  const reload = commands.indexOf("paseo daemon reload >/dev/null 2>&1");
   const status = commands.findIndex((command) => command.includes("paseo daemon status --json"));
   expect(reload).toBeGreaterThan(-1);
   expect(reload).toBeLessThan(status);

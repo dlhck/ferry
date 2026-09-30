@@ -6,7 +6,7 @@
 import type { IntegrationsConfig } from "../config.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { jqEditScript, quoteShell, readCommand, writeCommand } from "../box-settings.ts";
+import { jqEditScript, quoteShell } from "../box-settings.ts";
 import { BunHostAdapter, type HostAdapter, type Link } from "../link.ts";
 import { carriedContentHits } from "../manifest.ts";
 import { step, type Progress } from "../progress.ts";
@@ -119,7 +119,34 @@ const LINGER_COMMAND = [
   'loginctl enable-linger "$USER" 2>/dev/null',
   'sudo -n loginctl enable-linger "$USER"',
 ].join(" || ");
-const STATUS_COMMAND = `systemctl --user is-active --quiet ${UNIT} && paseo daemon status --json`;
+/**
+ * The box script that writes the unit from its standard input. It prints
+ * `created` for a new unit, `unchanged` for the same text, and `changed` for
+ * another text. A unit on the box can hold an `Environment=` line with a
+ * credential, so the box compares the two texts and Ferry never reads the unit.
+ */
+const UNIT_WRITE_COMMAND = [
+  `f=${quoteShell(UNIT_PATH)}`,
+  "umask 077",
+  `mkdir -p "$(dirname "$f")" && cat > "$f.ferry-tmp" || { rm -f "$f.ferry-tmp"; exit 1; }`,
+  `if [ ! -e "$f" ]; then state=created; elif cmp -s "$f.ferry-tmp" "$f"; then state=unchanged; else state=changed; fi`,
+  `mv "$f.ferry-tmp" "$f" || { rm -f "$f.ferry-tmp"; exit 1; }`,
+  'echo "$state"',
+].join("\n");
+/**
+ * An awk program that prints the unit with the PATH line `FERRY_PATH_LINE`.
+ * With `FERRY_REPLACE=1`, the line replaces the first PATH line. Else it goes
+ * after the `[Service]` line. awk exits with 3 when it finds no place.
+ */
+const PATH_LINE_AWK = [
+  'BEGIN { want = ENVIRON["FERRY_PATH_LINE"]; replace = ENVIRON["FERRY_REPLACE"] == 1 }',
+  "!done && replace && /^Environment=PATH=/ { print want; done = 1; next }",
+  "{ print }",
+  '!done && !replace && $0 == "[Service]" { print want; done = 1 }',
+  "END { if (!done) exit 3 }",
+].join("\n");
+// The stderr of `paseo daemon status` stays on the box. Ferry keeps only the named fields of the JSON.
+const STATUS_COMMAND = `systemctl --user is-active --quiet ${UNIT} && paseo daemon status --json 2>/dev/null`;
 /**
  * Register each git clone under the home directory, to a depth of three
  * directories. Hidden directories such as ~/.paseo and ~/.ferry, and
@@ -139,10 +166,13 @@ const RESTART_COMMAND = `systemctl --user restart ${UNIT}`;
  * already has. For an archived agent, it unarchives that agent. So a second
  * move creates no duplicate agent.
  */
-const ALREADY_IMPORTED = /Provider session is already imported/;
+const ALREADY_IMPORTED = "Provider session is already imported";
+/** The Paseo error code for a directory that the daemon does not find. */
+const DIRECTORY_NOT_FOUND = "directory_not_found";
 /** The Paseo config, relative to the home directory, on the operator machine and on the box. */
 export const CONFIG_FILE = ".paseo/config.json";
-const RELOAD_COMMAND = "paseo daemon reload";
+// Ferry needs only the exit code of the reload, so its output stays on the box.
+const RELOAD_COMMAND = "paseo daemon reload >/dev/null 2>&1";
 const DISABLE_COMMAND = [
   "set -e",
   `if [ -f ${quoteShell(UNIT_PATH)} ]; then systemctl --user disable --now ${UNIT}; fi`,
@@ -170,6 +200,21 @@ function currentLine(check: UpdateCheck): string | null {
 
 function installCommand(version: string | null): string {
   return `npm install -g --prefix "$HOME/.local" ${PACKAGE}@${version ?? "latest"}`;
+}
+
+/**
+ * Run an npm command on the box. The npm output can hold a registry URL or a
+ * proxy URL of the box with a credential, so it stays on the box. After a
+ * failure, the error has only the npm error code.
+ */
+function boxNpm(link: IntegrationLink, command: string, what: string): Promise<string> {
+  const script = [
+    `out=$(${command} 2>&1) && exit 0`,
+    `code=$(printf '%s\\n' "$out" | sed -n -e 's/^npm error code \\([A-Za-z0-9_]*\\)$/\\1/p' -e 's/^npm ERR! code \\([A-Za-z0-9_]*\\)$/\\1/p' | head -n 1)`,
+    'echo "npm error code ${code:-unknown}" >&2',
+    "exit 1",
+  ].join("\n");
+  return boxRun(link, script, `${what}. Run ${command} on the box to see the npm output`, INSTALL_TIMEOUT_MS);
 }
 
 const VERSION_PATTERN = /\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/;
@@ -216,7 +261,10 @@ export function createPaseo(options: PaseoOptions = {}): BoxIntegration & Operat
         if (status?.localDaemon === "running") return status.daemonVersion ?? "unknown version";
         last = `localDaemon is ${status?.localDaemon ?? "not in the status output"}`;
       } else {
-        last = result.error.message;
+        // A failed status command can print daemon output, so Ferry shows a fixed text for it.
+        last = result.error.code === "command-failed"
+          ? `${UNIT} is not active, or paseo daemon status failed`
+          : result.error.message;
       }
       if (waited >= startTimeoutMs) {
         throw new PaseoError(
@@ -230,7 +278,7 @@ export function createPaseo(options: PaseoOptions = {}): BoxIntegration & Operat
 
   const install = async (link: IntegrationLink, progress: Progress, version: string | null) => {
     await step(progress, `Installing Paseo ${version ?? "latest"} on the box`, () =>
-      boxRun(link, installCommand(version), "The Paseo install failed", INSTALL_TIMEOUT_MS),
+      boxNpm(link, installCommand(version), "The Paseo install failed"),
     );
   };
 
@@ -348,12 +396,12 @@ export function createPaseo(options: PaseoOptions = {}): BoxIntegration & Operat
       }
 
       const unit = unitFile(linkPathDirs(link), config?.paseo_relay === true);
-      const previous = await boxRun(link, readCommand(UNIT_PATH), `Ferry could not read ~/${UNIT_PATH}`);
-      await step(progress, `Writing ${UNIT}`, () =>
-        boxRun(link, writeCommand(UNIT_PATH, unit), `Ferry could not write ~/${UNIT_PATH}`),
+      // The box compares the new unit with its file. The new unit replaces the whole file.
+      const written = await step(progress, `Writing ${UNIT}`, async () =>
+        (await boxRun(link, UNIT_WRITE_COMMAND, `Ferry could not write ~/${UNIT_PATH}`, undefined, new TextEncoder().encode(unit))).trim(),
       );
       await step(progress, `Starting ${UNIT}`, () => boxRun(link, START_COMMAND, `Ferry could not start ${UNIT}`));
-      if (previous.startsWith("F") && previous.slice(1) !== unit) {
+      if (written === "changed") {
         await step(progress, `Restarting ${UNIT}`, () => boxRun(link, RESTART_COMMAND, `Ferry could not restart ${UNIT}`));
         lines.push("The service config changed, so Ferry restarted the Paseo daemon. The restart stopped its agents.");
       }
@@ -387,7 +435,7 @@ export function createPaseo(options: PaseoOptions = {}): BoxIntegration & Operat
       const lines = [`Stopped ${UNIT} and removed ~/${UNIT_PATH}. Linger stays on.`];
       if (options.purge) {
         await step(progress, "Removing the Paseo CLI", () =>
-          boxRun(link, UNINSTALL_COMMAND, "The Paseo uninstall failed", INSTALL_TIMEOUT_MS),
+          boxNpm(link, UNINSTALL_COMMAND, "The Paseo uninstall failed"),
         );
         lines.push(`Removed ${PACKAGE} from ~/.local.`);
       }
@@ -417,9 +465,28 @@ export function createPaseo(options: PaseoOptions = {}): BoxIntegration & Operat
       return parseHealth(result.stdout, local.version, config?.paseo_relay === true);
     },
     async onProjectMoved(link: IntegrationLink, path: string, sessions: readonly MovedSession[]): Promise<void> {
-      const run = async (words: readonly string[]) => {
-        const result = await link.run(`paseo ${words.join(" ")} >/dev/null`, { timeoutMs: BOX_TIMEOUT_MS });
-        return result.ok ? null : result.error.message;
+      // The paseo output can hold box content, so the box matches it and prints one status word.
+      const run = async (words: readonly string[]): Promise<PaseoFailure | null> => {
+        const command = `paseo ${words.join(" ")}`;
+        const script = [
+          `out=$(${command} 2>&1) && { echo ok; exit 0; }`,
+          "case $out in",
+          `  *${quoteShell(ALREADY_IMPORTED)}*) echo duplicate ;;`,
+          `  *${DIRECTORY_NOT_FOUND}*) echo no-directory ;;`,
+          "  *) echo failed ;;",
+          "esac",
+        ].join("\n");
+        const result = await link.run(script, { timeoutMs: BOX_TIMEOUT_MS });
+        if (!result.ok) return { duplicate: false, message: `${result.error.origin}/${result.error.code}` };
+        const status = result.stdout.trim();
+        if (status === "ok") return null;
+        if (status === "duplicate") return { duplicate: true, message: ALREADY_IMPORTED };
+        return {
+          duplicate: false,
+          message: status === "no-directory"
+            ? `Paseo did not find the directory on the box (${DIRECTORY_NOT_FOUND})`
+            : `Paseo printed an error. Run ${command} on the box to see it`,
+        };
       };
       await registerProject(run, quoteShell, boxPath(path), sessions);
     },
@@ -440,10 +507,13 @@ export function createPaseo(options: PaseoOptions = {}): BoxIntegration & Operat
     async onProjectMoved(path: string, sessions: readonly MovedSession[]): Promise<void> {
       const cli = which("paseo") ?? (appCli !== null && existsSync(appCli) ? appCli : null);
       if (cli === null) throw new PaseoError("Ferry found no paseo command on this machine");
-      const run = async (words: readonly string[]) => {
+      // This paseo runs on this machine, so its message stays here.
+      const run = async (words: readonly string[]): Promise<PaseoFailure | null> => {
         const result = await host.run({ argv: [cli, ...words], timeoutMs: LOCAL_TIMEOUT_MS });
-        if (result.timedOut) return "the command timed out";
-        return result.exitCode === 0 ? null : result.stderr.trim() || result.stdout.trim() || `exit code ${result.exitCode}`;
+        if (result.timedOut) return { duplicate: false, message: "the command timed out" };
+        if (result.exitCode === 0) return null;
+        const message = result.stderr.trim() || result.stdout.trim() || `exit code ${result.exitCode}`;
+        return { duplicate: message.includes(ALREADY_IMPORTED), message };
       };
       await registerProject(run, (value) => value, path, sessions);
     },
@@ -453,36 +523,39 @@ export function createPaseo(options: PaseoOptions = {}): BoxIntegration & Operat
 
 export const paseo = createPaseo();
 
+/** A failed `paseo` command. `duplicate` is true for a session that an agent on the daemon already has. */
+type PaseoFailure = { readonly duplicate: boolean; readonly message: string };
+
 /**
  * Register the project at `path` in Paseo, then import each session as an
  * agent of that project. The box part and the operator part share it. `run`
  * runs `paseo` with `words` on the box or on this machine, and returns null or
- * the message of a failed command. `word` makes one word from a value: a shell
+ * the failure of the command. `word` makes one word from a value: a shell
  * quote for the box, the value itself for a local argv. `path` is a word.
  */
 async function registerProject(
-  run: (words: readonly string[]) => Promise<string | null>,
+  run: (words: readonly string[]) => Promise<PaseoFailure | null>,
   word: (value: string) => string,
   path: string,
   sessions: readonly MovedSession[],
 ): Promise<void> {
   // `project create` is idempotent. It returns the existing project for a known directory.
   const created = await run(["project", "create", path]);
-  if (created !== null) throw new Error(`paseo project create failed: ${created}`);
+  if (created !== null) throw new Error(`paseo project create failed: ${created.message}`);
   // One failed import does not stop the other imports. The error names each failed session.
   const failed: string[] = [];
   for (const session of sessions) {
     const imported = await run(["import", word(session.id), "--provider", word(session.provider), "--cwd", path]);
-    if (imported !== null && !ALREADY_IMPORTED.test(imported)) {
-      failed.push(`${session.provider} session ${session.id} (${imported})`);
+    if (imported !== null && !imported.duplicate) {
+      failed.push(`${session.provider} session ${session.id} (${imported.message})`);
     }
   }
   if (failed.length > 0) throw new Error(`paseo import failed for ${failed.join(", ")}`);
 }
 
 /** Run one box command. Returns its stdout, or throws a PaseoError with `what` and the Link message. */
-async function boxRun(link: IntegrationLink, command: string, what: string, timeoutMs?: number): Promise<string> {
-  const result = await link.run(command, timeoutMs === undefined ? {} : { timeoutMs });
+async function boxRun(link: IntegrationLink, command: string, what: string, timeoutMs?: number, input?: Uint8Array): Promise<string> {
+  const result = await link.run(command, { ...(timeoutMs === undefined ? {} : { timeoutMs }), ...(input === undefined ? {} : { input }) });
   if (!result.ok) throw new PaseoError(`${what}: ${result.error.message}`);
   return result.stdout;
 }
@@ -513,22 +586,32 @@ async function runVersion(host: HostAdapter, argv: readonly string[]): Promise<s
 }
 
 /**
- * Write the unit again when its PATH is not `pathDirs`, then reload systemd
+ * Set the PATH line of the unit to `pathDirs` on the box, then reload systemd
  * and restart the daemon. The restart stops the agents that run on the box, so
  * it happens only when the PATH changed. Returns true after a restart.
+ * The unit can hold an `Environment=` line with a credential, so the box
+ * compares and edits the PATH line itself and keeps each other line. It prints
+ * `missing`, `unchanged`, `updated`, or `failed`. Ferry never reads the unit.
  */
 export async function refreshUnitPath(link: IntegrationLink, pathDirs: readonly string[]): Promise<boolean> {
-  const current = await boxRun(link, readCommand(UNIT_PATH), `Ferry could not read ~/${UNIT_PATH} on the box`);
-  if (!current.startsWith("F")) {
-    throw new PaseoError(`~/${UNIT_PATH} is not on the box. Run ferry integrations enable paseo`);
-  }
-  if (current.slice(1).split("\n").includes(unitPathLine(pathDirs))) return false;
-  const text = current.slice(1);
-  const updated = /^Environment=PATH=.*$/m.test(text)
-    ? text.replace(/^Environment=PATH=.*$/m, unitPathLine(pathDirs))
-    : text.replace("[Service]", `[Service]\n${unitPathLine(pathDirs)}`);
-  await boxRun(link, writeCommand(UNIT_PATH, updated), `Ferry could not write ~/${UNIT_PATH}`);
-  await boxRun(link, `systemctl --user daemon-reload && ${RESTART_COMMAND}`, `Ferry could not restart ${UNIT}`);
+  const script = [
+    `f=${quoteShell(UNIT_PATH)}`,
+    `want=${quoteShell(unitPathLine(pathDirs))}`,
+    '[ -f "$f" ] || { echo missing; exit 0; }',
+    'grep -qxF -e "$want" "$f" 2>/dev/null && { echo unchanged; exit 0; }',
+    `replace=0; grep -q '^Environment=PATH=' "$f" 2>/dev/null && replace=1`,
+    "umask 077",
+    `if FERRY_PATH_LINE="$want" FERRY_REPLACE="$replace" awk ${quoteShell(PATH_LINE_AWK)} "$f" > "$f.ferry-tmp" 2>/dev/null && mv "$f.ferry-tmp" "$f" 2>/dev/null; then`,
+    `  systemctl --user daemon-reload >/dev/null && ${RESTART_COMMAND} >/dev/null || exit 1`,
+    "  echo updated",
+    "else",
+    '  rm -f "$f.ferry-tmp"; echo failed',
+    "fi",
+  ].join("\n");
+  const status = (await boxRun(link, script, `Ferry could not restart ${UNIT}`)).trim();
+  if (status === "missing") throw new PaseoError(`~/${UNIT_PATH} is not on the box. Run ferry integrations enable paseo`);
+  if (status === "unchanged") return false;
+  if (status !== "updated") throw new PaseoError(`Ferry could not write the PATH line of ~/${UNIT_PATH} on the box`);
   return true;
 }
 

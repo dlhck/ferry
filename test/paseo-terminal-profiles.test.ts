@@ -178,7 +178,7 @@ describe("Paseo terminal profile carry", () => {
       lazygit,
     ]);
     expect(Object.keys(config.daemon.terminalProfiles[1])).toEqual(["id", "env", "name", "command", "args", "extra"]);
-    expect(b.commands.at(-1)).toBe("paseo daemon reload");
+    expect(b.commands.at(-1)).toBe("paseo daemon reload >/dev/null 2>&1");
   });
 
   jqTest("keeps box fields named like Object.prototype keys on a same-ID profile, and stays idempotent", async () => {

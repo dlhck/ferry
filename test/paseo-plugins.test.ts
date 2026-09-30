@@ -105,13 +105,13 @@ describe("Paseo Git plugin reconciliation", () => {
     const b = box([], config); await carry(b.link);
     expect(b.commands.slice(0, 3)).toEqual([list, `paseo plugin install 'git:${remote}:plugins/review' --id 'review' --ref '${revision}' --json >/dev/null 2>&1`, setSwitch]);
     expect(b.written()).toEqual({ ...config, pluginsEnabled: true });
-    expect(b.commands.at(-1)).toBe("paseo daemon reload");
+    expect(b.commands.at(-1)).toBe("paseo daemon reload >/dev/null 2>&1");
   });
   jqTest("enables a false global switch for a current plugin", async () => {
     const b = box([installed()], { pluginsEnabled: false });
     expect(await carry(b.link)).toEqual([]);
     expect(b.written()).toEqual({ pluginsEnabled: true });
-    expect(b.commands.at(-1)).toBe("paseo daemon reload");
+    expect(b.commands.at(-1)).toBe("paseo daemon reload >/dev/null 2>&1");
   });
   jqTest("does nothing to current or box-only plugins or an enabled global switch", async () => {
     const b = box([installed(), { id: "box-only", enabled: true }]);
@@ -237,7 +237,7 @@ test("sync carries plugins before the unit check and reports failures without bl
     expect(result.boxes[0]?.failure).toBeUndefined();
     expect(commands.some((command) => command.includes(`--ref '${f.commit}'`))).toBe(true);
     const install = commands.findIndex((command) => command.includes("paseo plugin install"));
-    const unit = commands.findIndex((command) => command.includes("if [ -e '.config/systemd"));
+    const unit = commands.findIndex((command) => command.includes("ferry-paseo.service"));
     expect(install).toBeLessThan(unit);
     expect(warnings.some((line) => line.includes("could not carry the Paseo plugins"))).toBe(fail);
   }
