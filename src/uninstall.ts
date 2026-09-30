@@ -25,7 +25,8 @@ const STATE_RELATIVE_PATH = ".ferry/uninstall.json";
 const STORE_RELATIVE_PATH = ".ferry/store";
 
 type OriginalPath =
-  | { readonly kind: "missing" }
+  /** `initBackup` is the backup of a path that init itself wrote before Apply, such as the Ferry skill. */
+  | { readonly kind: "missing"; readonly initBackup?: string }
   | { readonly kind: "symlink"; readonly link: string }
   | { readonly kind: "empty-directory" }
   | { readonly kind: "backup"; readonly path: string };
@@ -131,6 +132,10 @@ export function writeInitState(home: string, pending: PendingState | null, plan:
   const state: UninstallState = {
     ...pending,
     paths: pending.paths.map((entry): ManagedPath => {
+      if (entry.original.kind === "missing") {
+        const initBackup = backups.get(entry.path);
+        return initBackup ? { ...entry, original: { kind: "missing", initBackup } } : (entry as ManagedPath);
+      }
       if (entry.original.kind !== "other") return entry as ManagedPath;
       const backup = backups.get(entry.path);
       if (!backup) {
@@ -174,6 +179,11 @@ export function runUninstall(input: UninstallInput): UninstallResult {
     }
     switch (entry.original.kind) {
       case "missing":
+        if (entry.original.initBackup !== undefined) {
+          const backup = fromRelative(home, entry.original.initBackup);
+          rmSync(backup, { recursive: true, force: true });
+          pruneBackupDirectories(home, backup);
+        }
         break;
       case "symlink":
         mkdirSync(dirname(path), { recursive: true });
@@ -203,6 +213,7 @@ export function runUninstall(input: UninstallInput): UninstallResult {
   restoreConfig(home, state.config);
   rmSync(join(home, ".ferry", "watch-state.json"), { force: true });
   rmSync(join(home, ".ferry", "update-state.json"), { force: true });
+  rmSync(join(home, ".ferry", "skill.json"), { force: true });
   rmSync(statePath(home), { force: true });
 
   for (const directory of state.absentDirectories) removeEmpty(fromRelative(home, directory));
@@ -442,7 +453,7 @@ function isManagedPath(value: unknown): value is ManagedPath {
 
 function isOriginalPath(value: unknown): value is OriginalPath {
   const original = value as Partial<OriginalPath> | null;
-  return original?.kind === "missing" ||
+  return (original?.kind === "missing" && (original.initBackup === undefined || typeof original.initBackup === "string")) ||
     original?.kind === "empty-directory" ||
     (original?.kind === "symlink" && typeof original.link === "string") ||
     (original?.kind === "backup" && typeof original.path === "string");

@@ -10,6 +10,7 @@ import {
 } from "./auth-start.ts";
 import { boxFerryStatus } from "./box-ferry.ts";
 import { checkBoxMcp } from "./box-mcp.ts";
+import { BOX_RESOURCES_COMMAND, DEFAULT_RESOURCE_LIMITS, parseBoxResources, type BoxResources } from "./box-resources.ts";
 import { BOX_SNAPSHOT_KEY, resolveBoxes, type ResolvedBox } from "./boxes.ts";
 import { readConfig, resolveLinkOptions, type OperatorHostConfig, type PartialOperatorConfig } from "./config.ts";
 import { uncarriedHookPaths } from "./hook-paths.ts";
@@ -147,6 +148,7 @@ function boxDependencies(
 ): BoxStatusDependencies {
   const link = resolved.createLink(resolveLinkOptions(box.host));
   let boxHome: string | null = null;
+  let resources: BoxResources | null = null;
   const off = offHarnesses(registry, box.tools);
   // An off tool gets no login check, and its harness gets only the clean-up of Ferry's links.
   const tools = registry.tools.filter((tool) => effectivePolicy(tool, box.tools) !== "off");
@@ -155,9 +157,14 @@ function boxDependencies(
     host: destination(box.host),
     gitAuth: box.gitAuth,
     link: {
+      // One SSH command reads the home and the resources.
       async probe() {
-        const result = await link.run(`printf '%s\\n' "$HOME"`);
-        if (result.ok) boxHome = validBoxHome(result.stdout);
+        const result = await link.run(`printf '%s\\n' "$HOME"; ${BOX_RESOURCES_COMMAND}`);
+        if (result.ok) {
+          const [home = "", ...rest] = result.stdout.split(/\r?\n/);
+          boxHome = validBoxHome(home);
+          resources = parseBoxResources(rest.join("\n"));
+        }
         return result;
       },
       async readBoxTip() {
@@ -209,6 +216,10 @@ function boxDependencies(
       ],
     },
     boxSkills: { list: () => listBoxSkills(link, registry.harnesses) },
+    resources: {
+      read: () => resources,
+      limits: { ...DEFAULT_RESOURCE_LIMITS, ...config.status },
+    },
     hookPaths: () => uncarriedHookPaths(resolved.home(), registry.harnesses.filter((harness) => !off.includes(harness))),
     integrations: resolved.integrations
       .filter(hasBoxPart)

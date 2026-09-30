@@ -122,7 +122,7 @@ Each entry of `boxes` has these fields:
 
 Each section also has an `error` field. A `null` value with an error means Ferry could not read it. It does not mean false.
 
-`ferry status --brief --json` checks only the link, the logins, the MCP logins, the carried stdio MCP servers, the tools, and the hooks that run a home file Ferry does not carry. Its `result` is `{ schemaVersion: 1, checkedAt, boxes }`. Each box has `name`, `host`, `online`, `error` (why the box is offline), and `issues`. Each issue has `kind` (`login`, `mcp-login`, `mcp-server`, `tool`, `hook`, or `check-failed`), `name`, `state`, `message`, and `command`, the Ferry command that fixes it, or `null` when a person must act on the box. `ferry watch` writes the same report to `~/.ferry/status.json` at the start, every 5 minutes, and after each sync. Read that file when it is recent, and run the command when it is old or missing.
+`ferry status --brief --json` checks only the link, the free disk, memory, and load, the logins, the MCP logins, the carried stdio MCP servers, the tools, and the hooks that run a home file Ferry does not carry. Its `result` is `{ schemaVersion: 1, checkedAt, boxes }`. Each box has `name`, `host`, `online`, `error` (why the box is offline), `issues`, and `resources`. `resources` is `null` for an offline box, else `{ disk: { totalKiB, freeKiB }, memory: { totalKiB, availableKiB }, load: { one, five, fifteen, cpus } }`, and each part is `null` when the box does not report it. Each issue has `kind` (`login`, `mcp-login`, `mcp-server`, `tool`, `hook`, `resource`, or `check-failed`), `name`, `state`, `message`, and `command`, the Ferry command that fixes it, or `null` when a person must act on the box. `ferry watch` writes the same report to `~/.ferry/status.json` at the start, every 5 minutes, and after each sync. Read that file when it is recent, and run the command when it is old or missing. A `resource` issue has the name `disk` or `memory` and the state `low`: the free disk of the box home file system is below both 10% and 5 GiB, or the available memory is below 10%. `[status]` in `~/.ferry/config.toml` sets other limits with `disk_free_percent`, `disk_free_gib`, and `memory_available_percent`. A limit of 0 turns its part of the check off. When one disk limit is 0, the other decides. The load has no limit.
 
 ## Sync
 
@@ -177,10 +177,10 @@ Do not run these commands yourself. When `auth.loginRequired` or `mcpLogins.logi
 
 Run `ferry skills add <source> [args...]` on the operator machine. It runs `npx skills add` and adds `-g` and `--copy`, so the skill lands in a global harness root, and the next sync links it into the store. Add `--project` to install into the current project instead. Put arguments after `--` to pass them through without Ferry reading them. Then run `ferry sync --dry-run` and `ferry sync`, or let `ferry watch` publish it.
 
-For example, this installs this skill:
+For example:
 
 ```sh
-ferry skills add dlhck/ferry --skill ferry
+ferry skills add owner/repo --skill some-skill
 ```
 
 A skill that you write on a box stays on that box, and the next sync can refuse or shadow it. `ferry status` lists it under `Box-only skills`. Tell the operator to run `ferry adopt --from-box <box> <skill>` on the operator machine. Do not run it yourself.
@@ -190,6 +190,10 @@ A skill that you write on a box stays on that box, and the next sync can refuse 
 - Ferry skips the files that a skip rule covers, such as `node_modules`, and keeps the executable bit.
 - After the confirmation, Ferry writes the skill to the same skill root on the operator machine and moves the box copy to `~/.ferry/backups/<time>/adopt` on the box.
 - `ferry adopt` does not sync. The operator runs `ferry sync`, which publishes the skill and links it on all boxes.
+
+## The Ferry skill
+
+`ferry init` writes this skill to `~/.agents/skills/ferry` from the Ferry binary, and `ferry self-update` writes the skill of the new version. Ferry does not change the folder when it has local changes or another tool wrote it. `ferry init --no-skill` turns the install off. Do not edit this skill on the box.
 
 ## Integrations
 
@@ -317,7 +321,7 @@ With `--json`, Ferry never asks:
 
 | Command | `result` |
 | --- | --- |
-| `init` | `{ dryRun: false, leftovers, published }`. With `--dry-run`: `{ dryRun: true, leftovers, plan: { operator, box, gitRemote, localCheckout, configPath, skills, instructions, links } }`. |
+| `init` | `{ dryRun: false, leftovers, published, skill: { action, path, message } }`. `skill.action` is `installed`, `updated`, `unchanged`, `kept`, or `off`. With `--dry-run`: `{ dryRun: true, leftovers, plan: { operator, box, gitRemote, localCheckout, configPath, skills, instructions, links } }`. |
 | `box list` | `{ boxes: [{ name, transport, destination, default }] }` |
 | `box add` | `{ name, transport, destination, gitAuth, migrated }` |
 | `box remove` | `{ name, defaultBoxRemoved }` |
@@ -341,7 +345,7 @@ With `--json`, Ferry never asks:
 | `menubar install` | `{ app, path, version, ferryPath }`. `path` is the launchd agent. `version` is the release of the app, or `null` with `--app`. |
 | `menubar uninstall` | `{ app, path, removed }`. `removed` is `false` when neither the app nor the agent was there. |
 | `uninstall` | `{ removed, restored }` |
-| `self-update` | `{ current, latest, updated, services: [{ service, action, message }] }`. An action is `restarted`, `updated`, `skipped`, or `failed`. A failed service action is also in `warnings` and does not fail the binary update. `updated` is `false` when `current` is the latest release. The output of the installer goes to stderr. |
+| `self-update` | `{ current, latest, updated, services: [{ service, action, message }], skill }`. `skill` is the message of the skill update, or `null` when Ferry did not update. An action is `restarted`, `updated`, `skipped`, or `failed`. A failed service action is also in `warnings` and does not fail the binary update. `updated` is `false` when `current` is the latest release. The output of the installer goes to stderr. |
 
 ## Other commands
 

@@ -15,6 +15,7 @@ import {
 
 const DAY = 24 * 60 * 60 * 1_000;
 const SCRIPT_BINARY = "/home/op/.local/bin/ferry";
+const SKILL_LINE = "Updated the Ferry skill in ~/.agents/skills/ferry.";
 const NPM_BINARY = "/usr/lib/node_modules/@dlhck/ferry-linux-x64/bin/ferry";
 
 let home: string;
@@ -34,6 +35,7 @@ function fakes(options: { latest?: string | null; choice?: UpdateChoice; exitCod
     questions: [] as string[],
     runs: [] as (readonly string[])[],
     serviceRuns: [] as (readonly string[])[],
+    skillRuns: [] as (readonly string[])[],
     lines: [] as string[],
     warnings: [] as string[],
   };
@@ -59,6 +61,10 @@ function fakes(options: { latest?: string | null; choice?: UpdateChoice; exitCod
       record.serviceRuns.push(argv);
       return { exitCode: 0, stdout: "", stderr: "" };
     },
+    runSkillUpdate: async (argv) => {
+      record.skillRuns.push(argv);
+      return { exitCode: 0, stdout: `${SKILL_LINE}\n`, stderr: "" };
+    },
     writeLine: (line) => record.lines.push(line),
     warn: (line) => record.warnings.push(line),
   };
@@ -79,6 +85,7 @@ describe("offerSelfUpdate", () => {
     expect(record.runs).toEqual([updateCommand("0.5.0", SCRIPT_BINARY)]);
     expect(record.lines).toEqual([
       "Updated Ferry to 0.5.0. Run the command again.",
+      SKILL_LINE,
       "Run ferry update to put Ferry 0.5.0 on the boxes.",
     ]);
   });
@@ -151,16 +158,40 @@ describe("offerSelfUpdate", () => {
 describe("runSelfUpdate", () => {
   test("installs a newer release without a question", async () => {
     const { record, dependencies } = fakes();
-    expect(await runSelfUpdate(dependencies)).toEqual({ current: "0.4.0", latest: "0.5.0", updated: true, services: [] });
+    expect(await runSelfUpdate(dependencies)).toEqual({ current: "0.4.0", latest: "0.5.0", updated: true, services: [], skill: SKILL_LINE });
     expect(record.questions).toEqual([]);
     expect(record.runs).toEqual([updateCommand("0.5.0", SCRIPT_BINARY)]);
+  });
+
+  test("runs install-skill of the new Ferry, because only it has the new skill", async () => {
+    const { record, dependencies } = fakes();
+    expect((await runSelfUpdate(dependencies)).skill).toBe(SKILL_LINE);
+    expect(record.skillRuns).toEqual([[SCRIPT_BINARY, "install-skill"]]);
+    expect(record.lines).toContain(SKILL_LINE);
+  });
+
+  test("a failed skill update is a warning and does not fail the update", async () => {
+    const { record, dependencies } = fakes();
+    const result = await runSelfUpdate({
+      ...dependencies,
+      runSkillUpdate: async () => ({ exitCode: 1, stdout: "", stderr: "disk full\n" }),
+    });
+    expect(result.updated).toBe(true);
+    expect(result.skill).toBe("Warning: Could not update the Ferry skill: disk full");
+    expect(record.warnings).toEqual(["Warning: Could not update the Ferry skill: disk full"]);
+  });
+
+  test("does not run install-skill when this is the latest release", async () => {
+    const { record, dependencies } = fakes({ latest: "0.4.0" });
+    await runSelfUpdate(dependencies);
+    expect(record.skillRuns).toEqual([]);
   });
 
   test("prints nothing about services when none are installed", async () => {
     const update = serviceFakes("linux", {});
     expect((await runSelfUpdate(update.dependencies)).services).toEqual([]);
     expect(update.record.serviceRuns).toEqual([]);
-    expect(update.record.lines).toEqual(["Updated Ferry to 0.5.0. Run ferry update to put it on the boxes."]);
+    expect(update.record.lines).toEqual(["Updated Ferry to 0.5.0. Run ferry update to put it on the boxes.", SKILL_LINE]);
   });
 
   for (const platform of ["darwin", "linux"] as const) {
@@ -286,7 +317,7 @@ describe("runSelfUpdate", () => {
   test("reads the latest release also within a day, and does nothing when this is the latest", async () => {
     const { record, dependencies } = fakes({ latest: "0.4.0" });
     await runSelfUpdate(dependencies);
-    expect(await runSelfUpdate(dependencies)).toEqual({ current: "0.4.0", latest: "0.4.0", updated: false, services: [] });
+    expect(await runSelfUpdate(dependencies)).toEqual({ current: "0.4.0", latest: "0.4.0", updated: false, services: [], skill: null });
     expect(record.fetches).toBe(2);
     expect(record.runs).toEqual([]);
     expect(record.lines.at(-1)).toBe("Ferry 0.4.0 is the latest version.");
@@ -381,7 +412,7 @@ describe("ferry CLI", () => {
       ...quiet,
       isInteractive: () => true,
       offerSelfUpdate: offer,
-      runSelfUpdate: async () => ({ current: "0.4.0", latest: "0.4.0", updated: false, services: [] }),
+      runSelfUpdate: async () => ({ current: "0.4.0", latest: "0.4.0", updated: false, services: [], skill: null }),
     });
     expect(offers).toEqual([]);
   });
@@ -389,7 +420,7 @@ describe("ferry CLI", () => {
   test("self-update --json prints the result", async () => {
     const out: string[] = [];
     await runCli(["self-update", "--json"], {
-      runSelfUpdate: async () => ({ current: "0.4.0", latest: "0.5.0", updated: true, services: [] }),
+      runSelfUpdate: async () => ({ current: "0.4.0", latest: "0.5.0", updated: true, services: [], skill: null }),
       writeLine: (line) => out.push(line),
     });
     expect(JSON.parse(out[0] ?? "")).toMatchObject({
@@ -413,6 +444,7 @@ describe("ferry CLI", () => {
             action: "failed",
             message: "Warning: Could not restart the watch service: unit failed",
           }],
+          skill: null,
         };
       },
       writeLine: (line) => out.push(line),

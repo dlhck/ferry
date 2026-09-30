@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -376,6 +377,47 @@ describe("ferry init", () => {
     expect(result).toMatchObject({ dryRun: false, published: true });
   });
 
+  test("installs the bundled Ferry skill and publishes it with the seed", async () => {
+    const home = makeHome();
+    const { deps } = dependencies(home);
+    let published: Seed | undefined;
+    const result = await runInit(
+      { home, harnesses: BUILTIN_HARNESSES, sshDestination: "user@box.example", snapshotUrl: "snapshot.git" },
+      {
+        ...deps,
+        async openStore(_remote, _seed) {
+          const path = join(home, ".ferry", "store");
+          return {
+            path,
+            async publish(value) {
+              published = value;
+              writeStore(path, value);
+              return { published: true, tip: "seed-tip" };
+            },
+          };
+        },
+      },
+    );
+
+    const bundled = readFileSync(join(import.meta.dir, "../skills/ferry/SKILL.md"), "utf8");
+    expect(result.skill.action).toBe("installed");
+    expect(readFileSync(join(home, ".agents/skills/ferry/SKILL.md"), "utf8")).toBe(bundled);
+    expect(realpathSync(join(home, ".agents/skills/ferry"))).toBe(join(home, ".ferry/store/skills/ferry"));
+    expect(published?.skills.map((skill) => skill.name)).toContain("ferry");
+  });
+
+  test("--no-skill does not install the skill", async () => {
+    const home = makeHome();
+    const { deps } = dependencies(home);
+    const result = await runInit(
+      { home, harnesses: BUILTIN_HARNESSES, sshDestination: "user@box.example", snapshotUrl: "snapshot.git", skill: false },
+      deps,
+    );
+
+    expect(result.skill.action).toBe("off");
+    expect(existsSync(join(home, ".agents/skills/ferry"))).toBe(false);
+  });
+
   test("an SSH snapshot refuses when the forwarded identity cannot read the repository", async () => {
     const home = makeHome();
     const { calls, deps } = dependencies(home);
@@ -607,6 +649,28 @@ describe("ferry init", () => {
     await runInit({ home, harnesses: BUILTIN_HARNESSES }, deps);
 
     expect(readConfig(home)?.update).toEqual({ watch: true });
+  });
+
+  test("a second run keeps the [status] limits", async () => {
+    const home = makeHome();
+    write(join(home, ".ferry/config.toml"), [
+      "version = 1",
+      'publisher = "first-operator"',
+      'snapshot_url = "snapshot.git"',
+      "",
+      "[host]",
+      'tailscale = "box"',
+      'ssh_user = "david"',
+      "",
+      "[status]",
+      "disk_free_gib = 20",
+      "",
+    ].join("\n"));
+    const { deps } = dependencies(home);
+
+    await runInit({ home, harnesses: BUILTIN_HARNESSES }, deps);
+
+    expect(readConfig(home)?.status).toEqual({ diskFreeGiB: 20 });
   });
 
   test("a second run keeps the [tools] table", async () => {

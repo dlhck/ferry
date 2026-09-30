@@ -7,13 +7,14 @@
     "type": "git",
     "url": "git+https://github.com/dlhck/ferry.git"
   },
-  "homepage": "https://github.com/dlhck/ferry#readme",
+  "homepage": "https://dlhck.github.io/ferry/",
   "bugs": "https://github.com/dlhck/ferry/issues",
   "bin": {
     "ferry": "bin/ferry.js"
   },
   "files": [
-    "bin/ferry.js"
+    "bin/ferry.js",
+    "skills/ferry/SKILL.md"
   ],
   "optionalDependencies": {
     "@dlhck/ferry-darwin-arm64": "0.0.0",

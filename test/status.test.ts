@@ -4,6 +4,7 @@ import type { AuthStatusReport } from "../src/auth-start.ts";
 import type { LinkResult } from "../src/link.ts";
 import type { DenyRuleDescription } from "../src/manifest.ts";
 import type { TipReport } from "../src/store.ts";
+import { DEFAULT_RESOURCE_LIMITS } from "../src/box-resources.ts";
 import { composeBriefStatus, composeStatus, type BoxStatusDependencies, type StatusDependencies } from "../src/status.ts";
 import type { ToolStatus } from "../src/tools/check.ts";
 import { recordProgress } from "./fake-progress.ts";
@@ -711,6 +712,7 @@ describe("brief status", () => {
           host: "ferry@build-box",
           online: true,
           error: null,
+          resources: null,
           issues: [
             { kind: "login", name: "codex", state: "login-required", message: "codex needs a login.", command: "ferry auth codex --box a" },
             {
@@ -871,6 +873,79 @@ describe("brief status", () => {
     ]);
   });
 
+  test("reports low disk and memory with the value and the limit, and puts the values in the report", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const GIB = 1024 * 1024;
+    const resources = {
+      disk: { totalKiB: 100 * GIB, freeKiB: 4 * GIB },
+      memory: { totalKiB: 16 * GIB, availableKiB: 0.8 * GIB },
+      load: { one: 9.5, five: 8, fifteen: 6.2, cpus: 4 },
+    };
+    const report = await composeBriefStatus(
+      [
+        box(calls, {
+          auth: { status: async () => ({ providers: [] }), mcpStatus: async () => [] },
+          resources: { read: () => resources, limits: DEFAULT_RESOURCE_LIMITS },
+        }),
+      ],
+      checkedAt,
+    );
+
+    expect(report.boxes[0]!.resources).toEqual(resources);
+    expect(report.boxes[0]!.issues).toEqual([
+      {
+        kind: "resource",
+        name: "disk",
+        state: "low",
+        message: "The home file system has 4 GiB free (4%). The limit is 5 GiB and 10%. Free disk space on the box.",
+        command: null,
+      },
+      {
+        kind: "resource",
+        name: "memory",
+        state: "low",
+        message: "The box has 0.8 GiB memory available (5%). The limit is 10%. Stop processes on the box.",
+        command: null,
+      },
+    ]);
+  });
+
+  test("reports the disk only when both limits are crossed, and a limit of 0 turns its part off", async () => {
+    const GIB = 1024 * 1024;
+    const DISK_ONLY = { ...DEFAULT_RESOURCE_LIMITS, memoryAvailablePercent: 0 };
+    const disk = async (totalGiB: number, freeGiB: number, limits = DISK_ONLY) => {
+      const calls: Calls = { reads: [], mutations: [] };
+      const report = await composeBriefStatus(
+        [
+          box(calls, {
+            auth: { status: async () => ({ providers: [] }), mcpStatus: async () => [] },
+            resources: {
+              read: () => ({ disk: { totalKiB: totalGiB * GIB, freeKiB: freeGiB * GIB }, memory: { totalKiB: 16 * GIB, availableKiB: 0 }, load: null }),
+              limits,
+            },
+          }),
+        ],
+        checkedAt,
+      );
+      return report.boxes[0]!.issues.map((issue) => issue.message);
+    };
+
+    // 80 GiB free is 8% of 1000 GiB: below the percent limit, not below the GiB limit.
+    expect(await disk(1000, 80)).toEqual([]);
+    // 4 GiB free is 40% of 10 GiB: below the GiB limit, not below the percent limit.
+    expect(await disk(10, 4)).toEqual([]);
+    expect(await disk(50, 2)).toEqual([
+      "The home file system has 2 GiB free (4%). The limit is 5 GiB and 10%. Free disk space on the box.",
+    ]);
+    expect(await disk(1000, 80, { ...DISK_ONLY, diskFreeGiB: 0 })).toEqual([
+      "The home file system has 80 GiB free (8%). The limit is 10%. Free disk space on the box.",
+    ]);
+    expect(await disk(10, 4, { ...DISK_ONLY, diskFreePercent: 0 })).toEqual([
+      "The home file system has 4 GiB free (40%). The limit is 5 GiB. Free disk space on the box.",
+    ]);
+    expect(await disk(100, 1, { diskFreePercent: 0, diskFreeGiB: 0, memoryAvailablePercent: 0 })).toEqual([]);
+  });
+
   test("reads only the link, the logins, the MCP logins, and the tools", async () => {
     const calls: Calls = { reads: [], mutations: [] };
     await composeBriefStatus([box(calls)], checkedAt);
@@ -907,7 +982,7 @@ describe("brief status", () => {
     );
 
     expect(report.boxes).toEqual([
-      { name: "default", host: "ferry@build-box", online: false, error: "Tailscale host box is offline", issues: [] },
+      { name: "default", host: "ferry@build-box", online: false, error: "Tailscale host box is offline", issues: [], resources: null },
     ]);
     expect(calls.reads).toEqual(["link.probe"]);
   });

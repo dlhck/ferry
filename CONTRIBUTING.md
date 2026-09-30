@@ -24,6 +24,8 @@ bun run build
 
 The Swift menu bar app in `macos/` builds only on macOS. Run `macos/build.sh` on a Mac after you change it. CI builds it on `macos-latest`.
 
+Some box MCP tests run box scripts with a real `jq`. They skip when `jq` is not on the PATH. CI runs them on Ubuntu.
+
 The tests do not connect to a real box. They use fake SSH hosts, temporary home directories, and local git remotes. Do not add a test that needs network access, a Tailscale peer, or a vendor login.
 
 Use example values in tests and docs: `user@box.example`, `/home/user`, `operator@example.com`, and `git@github.com:you/ferry-snapshot.git`. Do not use a real host name, IP address, user name, or home path.
