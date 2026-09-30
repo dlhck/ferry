@@ -23,6 +23,7 @@ import { BunHostAdapter, Link, type HostAdapter, type LinkError, type LinkOption
 import { FerryError, linkFailure } from "./errors.ts";
 import { errorInfo, type ErrorInfo } from "./output.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
+import { boxLocker } from "./sync.ts";
 import { loadRegistry } from "./registry/load.ts";
 import type { ToolDescriptor } from "./registry/types.ts";
 import { outputLines } from "./install.ts";
@@ -67,6 +68,12 @@ export type UpdateCommandDependencies = {
   readonly progress: Progress;
   /** The Ferry version to keep on each box: the version of this Ferry. */
   readonly ferryVersion: string;
+  /**
+   * The home of the operator machine, which has the box locks. With it, the
+   * update takes the lock of each box that it changes, and skips a box that
+   * does not give the lock. Without it, the update takes no lock.
+   */
+  readonly home?: string;
 };
 
 /** The plan of each box and of the operator machine, and the updates that ran. */
@@ -80,6 +87,8 @@ export type UpdateCommandResult = {
     readonly error?: ErrorInfo;
     /** The Link error message when the box did not answer, else null. */
     readonly offline: string | null;
+    /** Why Ferry did not change the box: a sync or another command held its lock, or the box left the config or changed in it during the update. It is not a failure. */
+    readonly skipped?: string;
     readonly plan: readonly ToolStep[];
     /** The plan lines of each enabled integration. */
     readonly integrations: readonly { readonly id: string; readonly plan: readonly string[] }[];
@@ -136,6 +145,8 @@ export async function planOperator(
 /** One selected box: its link, its enabled integrations, and its plan or why Ferry could not reach it. */
 type BoxUpdate = {
   readonly name: string;
+  /** The box as the update read it at its start. */
+  readonly box: ResolvedBox;
   /** `[<name>] ` in front of each box line when more than one box is selected, else empty. */
   readonly prefix: string;
   readonly link: Pick<Link, "run">;
@@ -150,10 +161,28 @@ type BoxUpdate = {
  * once. The box gets the tools whose box version differs from the version
  * of its policy. A box that does not answer fails alone. The other boxes and
  * the operator machine still update, and the command fails at the end.
+ *
+ * With `home`, the update holds the lock of each box that it changes, from
+ * after the confirmation to its end. A box that does not give its lock is
+ * skipped and is not a failure.
  */
 export async function runUpdateCommand(
   input: UpdateCommandInput,
   dependencies: Partial<UpdateCommandDependencies> = {},
+): Promise<UpdateCommandResult | null> {
+  const locks: (() => void)[] = [];
+  try {
+    return await updateBoxes(input, dependencies, locks);
+  } finally {
+    for (const release of locks) release();
+  }
+}
+
+/** `runUpdateCommand`. It adds each box lock that it takes to `locks`, and the caller releases them. */
+async function updateBoxes(
+  input: UpdateCommandInput,
+  dependencies: Partial<UpdateCommandDependencies>,
+  locks: (() => void)[],
 ): Promise<UpdateCommandResult | null> {
   const resolved = { ...defaultDependencies, ...dependencies };
   const { config, boxes: selected } = loadBoxes(resolved.readConfig, input.boxes ?? []);
@@ -183,6 +212,7 @@ export async function runUpdateCommand(
           const offline = probe.ok ? null : probe.error;
           boxes.push({
             name: box.name,
+            box,
             prefix: several ? `[${box.name}] ` : "",
             link,
             integrations: input.includeIntegrations === true
@@ -235,6 +265,8 @@ export async function runUpdateCommand(
   const failed: string[] = [];
   /** The failed updates of each box, as in `failed`. */
   const failedOnBoxes = new Map(boxes.map((box) => [box.name, [] as string[]]));
+  /** The reason of each box that did not give its lock. */
+  const skipped = new Map<string, string>();
   const boxError = (box: BoxUpdate): ErrorInfo | undefined => {
     if (box.offline !== null) return errorInfo(linkFailure(box.offline));
     const names = failedOnBoxes.get(box.name) ?? [];
@@ -250,6 +282,7 @@ export async function runUpdateCommand(
         ok: error === undefined,
         ...(error !== undefined ? { error } : {}),
         offline: box.offline?.message ?? null,
+        ...(skipped.has(box.name) ? { skipped: skipped.get(box.name) } : {}),
         plan: box.plan,
         integrations: integrationPlans.get(box.name) ?? [],
       };
@@ -267,6 +300,19 @@ export async function runUpdateCommand(
     }
   }
 
+  // The plan and the confirmation can take a long time, so the box can leave the config before this point.
+  const lockBox = resolved.home === undefined ? null : boxLocker(resolved.home, resolved.readConfig, "update");
+  for (const box of reached) {
+    if (lockBox === null) break;
+    if (box.integrations.length === 0 && !steps.some((step) => step.box === box)) continue;
+    const lock = lockBox(box.box);
+    if (typeof lock === "function") {
+      locks.push(lock);
+    } else {
+      skipped.set(box.name, lock.reason);
+      resolved.writeLine(`${box.prefix}Skipped box ${box.name}: ${lock.reason}.`);
+    }
+  }
   for (const box of boxes) if (box.offline !== null) failed.push(`${box.prefix}box offline`);
   const failedOnBox = new Map(boxes.map((box) => [box.name, new Set<string>()]));
   const fail = (name: string, box: BoxUpdate | undefined) => {
@@ -275,6 +321,10 @@ export async function runUpdateCommand(
   };
   for (const [index, step] of steps.entries()) {
     const name = `${step.box?.prefix ?? ""}${step.box === undefined ? "operator" : "box"} ${step.tool}`;
+    if (step.box !== undefined && skipped.has(step.box.name)) {
+      resolved.progress.skip(`Updating ${name} (${index + 1}/${steps.length})`, "box skipped");
+      continue;
+    }
     const failedTools = step.box === undefined ? undefined : failedOnBox.get(step.box.name);
     const failedDependency = step.dependsOn.find((dependency) => failedTools?.has(dependency));
     if (failedDependency !== undefined) {
@@ -303,6 +353,7 @@ export async function runUpdateCommand(
     }
   }
   for (const box of reached) {
+    if (skipped.has(box.name)) continue;
     for (const integration of box.integrations) {
       try {
         for (const line of await integration.box.update(box.link, resolved.progress)) resolved.writeLine(`${box.prefix}${line}`);
@@ -319,7 +370,9 @@ export async function runUpdateCommand(
       resolved.writeLine(
         box.offline !== null
           ? `Box ${box.name}: failed, the box is offline.`
-          : count > 0
+          : skipped.has(box.name)
+            ? `Box ${box.name}: skipped.`
+            : count > 0
             ? `Box ${box.name}: failed, ${plural(count, "update")} failed.`
             : `Box ${box.name}: done.`,
       );

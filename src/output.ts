@@ -50,7 +50,7 @@ const HINTS: Record<ErrorCode, string | null> = {
   "missing-values": "Give the missing values as options.",
   "deny-rule-match": "Remove the file that the deny rule refuses, or move it out of the portable set.",
   refused: null,
-  "sync-busy": "Wait for the other sync to end, then run the command again.",
+  "sync-busy": "Wait for the other Ferry command to end, then run the command again.",
   "sync-failed": null,
   "update-failed": null,
   "login-failed": null,

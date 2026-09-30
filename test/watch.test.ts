@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -406,6 +406,27 @@ describe("multi-box watch", () => {
     expect(record.lines).not.toContain("[b] Synced Manifest two.");
   });
 
+  test("a sync that finds a box busy is tried again, because an update or a box removal holds the lock for a time", async () => {
+    let busy = true;
+    const record = await watchBoxes({
+      script: (poll) => (poll > 30 ? null : { identity: poll === 0 ? "one" : "two", boxes: ["a", "b"] }),
+      sync: async () => {
+        if (!busy) return;
+        busy = false;
+        throw new SyncError("concurrent-sync", "operator", "another sync is active for box a (ssh:dev@box-a.example)");
+      },
+    });
+
+    expect(record.requests.map(({ boxes, publish }) => ({ boxes, publish }))).toEqual([
+      { boxes: ["a", "b"], publish: true },
+      { boxes: ["a", "b"], publish: true },
+    ]);
+    expect(record.lines).toContain(
+      "Watch sync failed; retrying in 1000 ms: operator: another sync is active for box a (ssh:dev@box-a.example)",
+    );
+    expect(record.states.at(-1)).toEqual({ published: "two", boxes: { a: "two", b: "two" } });
+  });
+
   test("the backoff of one box does not block the observe loop or a new change", async () => {
     const record = await watchBoxes({
       // The Manifest changes to "three" 500 ms after the first failure of b. Box b is still in its backoff then.
@@ -730,6 +751,10 @@ describe("multi-box watch", () => {
 });
 
 describe("watch daily update", () => {
+  /** The home of the box locks that the default update takes. */
+  const lockHome = mkdtempSync(join(tmpdir(), "ferry-watch-update-"));
+  afterAll(() => rmSync(lockHome, { recursive: true, force: true }));
+
   const DAY_MS = 24 * 60 * 60 * 1_000;
 
   function watchWithUpdate(options: {
@@ -855,7 +880,7 @@ describe("watch daily update", () => {
     };
 
     await runWatch(
-      { signal: controller.signal, pollMs: 1, debounceMs: 1, dailyUpdate: true },
+      { home: lockHome, signal: controller.signal, pollMs: 1, debounceMs: 1, dailyUpdate: true },
       {
         observe: () => {
           scans += 1;
@@ -872,6 +897,8 @@ describe("watch daily update", () => {
         writeUpdateState: () => {},
         runUpdate: (input, dependencies) => {
           inputs.push(input);
+          // The update takes the box locks in the home of the watch.
+          expect(dependencies?.home).toBe(lockHome);
           return runUpdateCommand(input, {
             ...dependencies,
             tools: [],
@@ -903,7 +930,7 @@ describe("watch daily update", () => {
     });
 
     await runWatch(
-      { signal: controller.signal, pollMs: 1, debounceMs: 1, dailyUpdate: true },
+      { home: lockHome, signal: controller.signal, pollMs: 1, debounceMs: 1, dailyUpdate: true },
       {
         observe: () => {
           scans += 1;
@@ -959,7 +986,7 @@ describe("watch daily update", () => {
     let lastRun: number | null = null;
 
     await runWatch(
-      { signal: controller.signal, pollMs: 1, debounceMs: 1, dailyUpdate: true },
+      { home: lockHome, signal: controller.signal, pollMs: 1, debounceMs: 1, dailyUpdate: true },
       {
         observe: () => {
           scans += 1;

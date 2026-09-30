@@ -156,10 +156,11 @@ export async function runWatch(
   // The daily update never includes the integrations. A Paseo restart stops the agents on the box.
   // It updates only the tools whose policy is `latest`. Other versions change only with `ferry update`.
   // It updates all boxes. It skips an offline box and logs it, and that box waits for the next day.
+  // It holds the lock of each box that it changes, and it skips a box whose lock a sync holds.
   const update = dependencies.update ??
     (() => (dependencies.runUpdate ?? runUpdateCommand)(
       { yes: true, dryRun: false, includeIntegrations: false, latestOnly: true },
-      { writeLine, progress },
+      { writeLine, progress, home },
     ));
   const now = dependencies.now ?? Date.now;
   const readUpdateState = dependencies.readUpdateState ?? readUpdateTime;
@@ -171,8 +172,9 @@ export async function runWatch(
   /** The time of the next status check. A sync sets it to 0, so the next cycle checks. */
   let statusDue = 0;
 
-  // The update runs next to the sync loop, so a slow update never delays a
-  // sync. The start time is recorded first, so a restart does not run it again.
+  // The update runs next to the sync loop, so a slow update does not stop the
+  // loop. A sync of a box that the update changes finds the box busy and is
+  // tried again. The start time is recorded first, so a restart does not run it again.
   const startDueUpdate = () => {
     if (input.dailyUpdate !== true || updating) return;
     const time = now();
@@ -440,7 +442,8 @@ export function isRetryableWatchError(error: unknown): boolean {
     return !(error.cause instanceof AdoptionRefusal) &&
       !(error.cause instanceof ApplyError && error.cause.code === "refused");
   }
-  return ["link-failure", "remote-update-failure"].includes(error.code);
+  // A daily update or `ferry box remove --uninstall` holds the box lock for a time.
+  return ["link-failure", "remote-update-failure", "concurrent-sync"].includes(error.code);
 }
 
 function isManifestReadFailure(error: unknown): boolean {

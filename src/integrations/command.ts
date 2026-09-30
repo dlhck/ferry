@@ -12,6 +12,7 @@ import {
 } from "../config.ts";
 import { Link, type LinkOptions } from "../link.ts";
 import { noProgress, type Progress } from "../progress.ts";
+import { boxLockError, type BoxLockRefusal } from "../sync.ts";
 import { INTEGRATIONS } from "./index.ts";
 import type { Integration, IntegrationId, IntegrationLink } from "./types.ts";
 
@@ -30,6 +31,11 @@ export type IntegrationCommandDependencies = {
   readonly confirm: (message: string) => Promise<boolean | symbol | undefined>;
   readonly writeLine: (line: string) => void;
   readonly progress: Progress;
+  /**
+   * Takes the box lock of the box, from `boxLocker`. The command stops when
+   * the box does not give the lock. Without it, the command takes no lock.
+   */
+  readonly lockBox?: () => (() => void) | BoxLockRefusal;
 };
 
 /** What `integrations enable|disable` did. `enabled` is the new config value, or null for a dry run. */
@@ -53,9 +59,29 @@ export class IntegrationCommandError extends Error {
   }
 }
 
+/**
+ * With `lockBox`, a command with a box part holds the box lock from after the
+ * confirmation until the config has the new flag. It fails before it changes
+ * the box when a sync or another command holds the lock, or when the box left
+ * the config or changed in it.
+ */
 export async function runIntegrationCommand(
   input: IntegrationCommandInput,
   dependencies: Partial<IntegrationCommandDependencies> = {},
+): Promise<IntegrationCommandResult | null> {
+  const locks: (() => void)[] = [];
+  try {
+    return await changeIntegration(input, dependencies, locks);
+  } finally {
+    for (const release of locks) release();
+  }
+}
+
+/** `runIntegrationCommand`. It adds the box lock that it takes to `locks`, and the caller releases it. */
+async function changeIntegration(
+  input: IntegrationCommandInput,
+  dependencies: Partial<IntegrationCommandDependencies>,
+  locks: (() => void)[],
 ): Promise<IntegrationCommandResult | null> {
   const resolved = { ...defaultDependencies, ...dependencies };
   const integration = resolved.integrations.find((candidate) => candidate.id === input.name);
@@ -97,6 +123,10 @@ export async function runIntegrationCommand(
 
   let lines: readonly string[] = [];
   if (box) {
+    // The confirmation can take a long time, so the box can leave the config before this point.
+    const lock = resolved.lockBox?.();
+    if (typeof lock === "function") locks.push(lock);
+    else if (lock !== undefined) throw boxLockError(lock);
     const link = resolved.createLink(target);
     lines = enable
       ? await box.enable(link, resolved.progress, config?.integrations)

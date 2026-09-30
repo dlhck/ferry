@@ -49,7 +49,7 @@ import {
   readPaseoTerminalProfiles,
   type PaseoTerminalProfiles,
 } from "./integrations/paseo-terminal-profiles.ts";
-import { denyRuleCause, linkFailure } from "./errors.ts";
+import { denyRuleCause, FerryError, linkFailure } from "./errors.ts";
 import { groupProgress, noProgress, plural, step, type Progress } from "./progress.ts";
 import { boxPathDirs, profileBlockCommand } from "./tools/path.ts";
 
@@ -417,7 +417,7 @@ export async function runSync(
       const release = takeLock(dependencies, home, targetKey(box.host));
       try {
         // `ferry box remove --uninstall` can remove the box while this sync waits in the publish. The config read is in the lock, so the box cannot leave after it.
-        const skipped = staleBox(home, dependencies, box);
+        const skipped = staleBox(loadConfig(home, dependencies.readConfig ?? readOperatorConfig).source, box, "sync");
         if (skipped !== null) {
           progress.skip(`Connecting to ${targetLabel(box.host)}`, skipped);
           warn(`Warning: ${skipped}. Ferry did not connect to it.`);
@@ -1170,23 +1170,23 @@ async function takeStoreLock(dependencies: SyncDependencies, home: string): Prom
 }
 
 /**
- * Read the config again, and compare the box with the box that the sync read at its start. Return
- * the reason to skip the box, or null when the config has the box with the same target and git auth.
+ * Compare the box that a command read at its start with the box in `config`, which the command
+ * read again in the box lock. Return the reason to skip the box, or null when the config has the
+ * box with the same target and git auth. `command` names the command, such as `sync`.
  */
-function staleBox(home: string, dependencies: SyncDependencies, box: ResolvedBox): string | null {
-  const { source } = loadConfig(home, dependencies.readConfig ?? readOperatorConfig);
-  const current = hasNoBox(source) ? undefined : resolveBoxes(source).find((entry) => entry.name === box.name);
-  if (current === undefined) return `box ${box.name} left the config during the sync`;
+function staleBox(config: PartialOperatorConfig, box: Pick<ResolvedBox, "name" | "host" | "gitAuth">, command: string): string | null {
+  const current = hasNoBox(config) ? undefined : resolveBoxes(config).find((entry) => entry.name === box.name);
+  if (current === undefined) return `box ${box.name} left the config during the ${command}`;
   if (targetKey(current.host) !== targetKey(box.host) || current.gitAuth !== box.gitAuth) {
-    return `box ${box.name} changed in the config during the sync`;
+    return `box ${box.name} changed in the config during the ${command}`;
   }
   return null;
 }
 
-/** Fail before the publish when a live sync holds the box lock of this target. `label` names the box in the error. */
+/** Fail before the publish when a live sync or another command holds the box lock of this target. `label` names the box in the error. */
 function refuseActiveSync(home: string, host: string, label = host): void {
   if (!staleLock(boxLockPath(home, host))) {
-    throw new SyncError("concurrent-sync", "operator", `another sync is active for ${label}`);
+    throw new SyncError("concurrent-sync", "operator", `another sync or Ferry command is active for ${label}`);
   }
 }
 
@@ -1198,7 +1198,7 @@ function boxLockPath(home: string, host: string): string {
 
 function acquireSyncLock(home: string, host: string): () => void {
   const release = tryLock(boxLockPath(home, host));
-  if (!release) throw new SyncError("concurrent-sync", "operator", `another sync is active for ${host}`);
+  if (!release) throw new SyncError("concurrent-sync", "operator", `another sync or Ferry command is active for ${host}`);
   return release;
 }
 
@@ -1209,8 +1209,48 @@ function acquireSyncLock(home: string, host: string): () => void {
  */
 export function acquireBoxLock(home: string, box: Pick<ResolvedBox, "name" | "host">): () => void {
   const release = tryLock(boxLockPath(home, targetKey(box.host)));
-  if (!release) throw new SyncError("concurrent-sync", "operator", `a sync is active for box ${box.name}`);
+  if (!release) throw new SyncError("concurrent-sync", "operator", `a sync or another Ferry command is active for box ${box.name}`);
   return release;
+}
+
+/** Why a command did not get the lock of a box. `busy` is true when a sync or another command holds the lock. */
+export type BoxLockRefusal = { readonly busy: boolean; readonly reason: string };
+
+/** Takes the lock of a box. Returns the function that releases the lock, or why the command must not change the box. */
+export type BoxLocker = (box: Pick<ResolvedBox, "name" | "host" | "gitAuth">) => (() => void) | BoxLockRefusal;
+
+/**
+ * The box lock for a command that changes a box and is not a sync, such as
+ * `ferry update`. The command reads the box, and then waits for the box or
+ * for the operator. So the locker reads the config again in the lock. It
+ * refuses a box that left the config or that has a new target or git auth.
+ * `command` names the command in the reason, such as `update`.
+ *
+ * While the command holds the lock, a sync for the box fails with
+ * `concurrent-sync`, and `ferry box remove --uninstall` does not start.
+ */
+export function boxLocker(home: string, readConfig: () => PartialOperatorConfig | null, command: string): BoxLocker {
+  return (box) => {
+    const release = tryLock(boxLockPath(home, targetKey(box.host)));
+    if (!release) return { busy: true, reason: `box ${box.name} is busy: a sync or another Ferry command is active for it` };
+    let reason: string | null;
+    try {
+      reason = staleBox(readConfig() ?? {}, box, command);
+    } catch (error) {
+      release();
+      throw error;
+    }
+    if (reason === null) return release;
+    release();
+    return { busy: false, reason };
+  };
+}
+
+/** The error of a command for one box that did not get the lock of the box. */
+export function boxLockError(refusal: BoxLockRefusal): Error {
+  return refusal.busy
+    ? new SyncError("concurrent-sync", "operator", refusal.reason)
+    : new FerryError("refused", `${refusal.reason}. Ferry did not change the box.`);
 }
 
 /** Wait while another sync publishes. Only the publish holds this lock, so the wait is short. */
