@@ -140,6 +140,7 @@ import {
   type UpdateCommandResult,
 } from "./update.ts";
 import { isReleaseVersion, VERSION } from "./version.ts";
+import { redactTokens } from "./manifest.ts";
 import { parseScanRequest, runScan } from "./scan.ts";
 import { offerSelfUpdate, offersSelfUpdate, runSelfUpdate, type SelfUpdateDependencies } from "./self-update.ts";
 
@@ -191,8 +192,10 @@ type CliDependencies = {
   /** Asks to update Ferry. True when the update ran and the command must stop. The default is `offerSelfUpdate`. */
   readonly offerSelfUpdate?: () => Promise<boolean>;
   readonly runSelfUpdate?: typeof runSelfUpdate;
-  /** The text on stdin, for `ferry scan`. The default reads stdin. */
+  /** The text on stdin, for `ferry scan` and `ferry redact`. The default reads stdin. */
   readonly readStdin?: () => Promise<string>;
+  /** Writes the text of `ferry redact` to stdout, with no line end. */
+  readonly writeText?: (text: string) => void;
   /** Sets the exit code of `ferry expose`. */
   readonly setExitCode?: (code: number) => void;
   readonly runStatus?: (
@@ -242,8 +245,8 @@ type CliDependencies = {
 /** The commands that stay running and print one event for each line with --json. */
 const STREAM_COMMANDS = new Set(["watch", "tunnel", "expose"]);
 
-/** The commands that a box install runs. `scan` is hidden: the operator machine runs it over Link. */
-const BOX_INSTALL_COMMANDS = new Set(["expose", "whoami", "scan"]);
+/** The commands that a box install runs. `scan` and `redact` are hidden: the operator machine runs them over Link. */
+const BOX_INSTALL_COMMANDS = new Set(["expose", "whoami", "scan", "redact"]);
 
 const JSON_HELP = `JSON output (--json):
   stdout has only JSON. Progress and the text lines go to stderr. Ferry
@@ -1480,6 +1483,15 @@ on the box. This command runs on the operator machine and on a box install.`)
     .action(async () => {
       const request = parseScanRequest(await (dependencies.readStdin ?? (() => Bun.stdin.text()))());
       report(runScan(request, (dependencies.home ?? homedir)()), (result) => writeLine(JSON.stringify(result)));
+    });
+
+  // move --from-box sends the output of each box command through this filter, so that a name with a token stays on the box.
+  program
+    .command("redact", { hidden: true })
+    .description("Copy stdin to stdout with [token] in the place of each text that has the form of a token")
+    .action(async () => {
+      const text = redactTokens(await (dependencies.readStdin ?? (() => Bun.stdin.text()))());
+      (dependencies.writeText ?? ((value: string) => void process.stdout.write(value)))(text);
     });
 
   // self-update runs this command of the new Ferry, because only the new binary has the new skill.

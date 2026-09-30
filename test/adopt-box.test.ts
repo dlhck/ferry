@@ -271,6 +271,24 @@ describe("ferry adopt --from-box", () => {
     expect(existsSync(join(local, "data.sqlite"))).toBe(false);
   });
 
+  test("a skill directory or a file with a token in its name stays on the box, and the name does not reach this machine", async () => {
+    const token = "gh" + "p_" + "b".repeat(36);
+    const w = world();
+    write(join(w.box, ".claude", "skills", `notes-${token}`, "SKILL.md"), "# Named\n");
+    write(join(w.box, ".claude", "skills", "draft", "SKILL.md"), "# Draft\n");
+    write(join(w.box, ".claude", "skills", "draft", "keys", `${token}.md`), "notes\n");
+
+    expect(await listBoxSkills(w.link, HARNESSES)).toEqual([{ name: "draft", paths: ["~/.claude/skills/draft"] }]);
+    const { error } = await adopt(w, { name: "draft" });
+
+    expect(errorInfo(error).code).toBe("deny-rule-match");
+    expect((error as Error).message).toBe(
+      "Ferry refused draft from box a, and copied nothing to this machine: token-name a file or directory in keys has a token in its name: keys",
+    );
+    expect(crossed(w, token)).toBe(false);
+    expect(w.received.some((output) => output.includes(Buffer.from(token).toString("hex")))).toBe(false);
+  });
+
   test("refuses a file that changes on the box after the check", async () => {
     const w = world();
     const skill = join(w.box, ".claude", "skills", "draft");

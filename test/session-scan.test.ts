@@ -213,6 +213,13 @@ describe("sessionContentHits", () => {
     for (const text of passes) expect([text, reasons(jsonl(toolResult(text)))]).toEqual([text, []]);
   });
 
+  test("a vendor token after an underscore in a session is a content hit", () => {
+    const token = "gh" + "p_" + "c".repeat(36);
+    const bytes = jsonl(toolResult(`export MY_${token}=1`));
+
+    expect(carriedContentHits("session.jsonl", bytes).map((hit) => hit.code)).toEqual(["github-token"]);
+  });
+
   test("a vendor token fires in any form, because the token patterns do not change", () => {
     const token = "gh" + "p_" + "c".repeat(36);
     const bytes = jsonl(toolResult(`token = get_token("${token}")`));
