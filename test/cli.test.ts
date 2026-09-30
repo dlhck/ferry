@@ -1868,6 +1868,27 @@ describe("--json", () => {
       expect(result.json[0]).toMatchObject({ command: "box add", ok: false, error: refused });
     });
 
+    test("box remove --uninstall fails at the box name question, and --dry-run needs --uninstall", async () => {
+      const inputs: unknown[] = [];
+      const runBoxUninstall = async (input: unknown, dependencies: { confirmName: (message: string) => Promise<unknown> }) => {
+        inputs.push(input);
+        await dependencies.confirmName("Type b to remove Ferry from the box.");
+        return null;
+      };
+      const confirmName = async () => "b";
+
+      const result = await run(["box", "remove", "b", "--uninstall"], { runBoxUninstall, confirmName });
+      const dryRun = await run(["box", "remove", "b", "--dry-run"], { runBoxUninstall, confirmName });
+
+      expect(inputs).toEqual([{ name: "b", yes: false, dryRun: false }]);
+      expect(result.json[0]).toMatchObject({
+        command: "box remove",
+        ok: false,
+        error: { ...refused, message: "Type b to remove Ferry from the box. Ferry does not ask with --json." },
+      });
+      expect(dryRun.json[0]).toMatchObject({ command: "box remove", ok: false, error: { code: "usage", message: "--dry-run needs --uninstall." } });
+    });
+
     test("init gets no prompt", async () => {
       let received: InitDependencies | undefined;
       await run(["init"], {
