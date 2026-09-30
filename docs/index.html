@@ -701,7 +701,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
     </div>
     <div>
       <h3>See the plan first</h3>
-      <p><code>--dry-run</code> on <code>init</code>, <code>sync</code>, <code>update</code> and <code>move</code> shows what Ferry will do. <code>--json</code> on any command gives output for scripts and agents.</p>
+      <p><code>--dry-run</code> on <code>init</code>, <code>sync</code>, <code>update</code>, <code>move</code>, <code>revert</code> and <code>box remove</code> shows what Ferry will do. <code>--json</code> on any command gives output for scripts and agents.</p>
     </div>
   </div>
 </section>
@@ -711,7 +711,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
     <div>
       <h2 id="agents-title">Four agents, ready on every box</h2>
     </div>
-    <p>For each agent, Ferry installs and updates the CLI on the box and starts its login there. Codex, Pi and Cursor Agent read the shared skills in <code>~/.agents/skills</code>, and Claude Code reads its own in <code>~/.claude/skills</code>. The instruction files of Claude Code, Codex and Pi link to your <code>~/AGENTS.md</code>.</p>
+    <p>For each agent, Ferry installs and updates the CLI on the box and starts its login there. Codex, Pi and Cursor Agent read the shared skills in <code>~/.agents/skills</code>, and Claude Code reads its own in <code>~/.claude/skills</code>. The instruction files of Claude Code, Codex and Pi link to your <code>~/AGENTS.md</code>. On a box, a header that names the box and your instructions for that box come first.</p>
   </div>
 
   <ul class="register">
@@ -721,7 +721,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
         <dt>Carries</dt>
         <dd>Skills in <code>~/.claude/skills</code>, <code>~/.claude/CLAUDE.md</code>, subagents, custom commands, hook scripts in <code>~/.claude/hooks</code>, and the remote and stdio MCP servers in <code>~/.claude.json</code>.</dd>
         <dt>Settings</dt>
-        <dd><code>enabledPlugins</code>, <code>extraKnownMarketplaces</code>, <code>permissions</code>, <code>hooks</code>, <code>attribution</code>, <code>model</code>, <code>alwaysThinkingEnabled</code>. The box installs the plugins. <code>env</code> and <code>apiKeyHelper</code> stay on your machine.</dd>
+        <dd><code>enabledPlugins</code>, <code>extraKnownMarketplaces</code>, <code>permissions</code>, <code>hooks</code>, <code>attribution</code>, <code>includeCoAuthoredBy</code>, <code>model</code>, <code>alwaysThinkingEnabled</code>. The box installs the plugins. <code>env</code> and <code>apiKeyHelper</code> stay on your machine.</dd>
         <dt>Login</dt>
         <dd><code>ferry auth claude</code>, finished in a browser here. MCP logins with <code>ferry auth claude --mcp &lt;server&gt;</code>.</dd>
       </dl>
@@ -745,7 +745,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
         <dt>Settings</dt>
         <dd><code>defaultProvider</code>, <code>defaultModel</code>, <code>defaultThinkingLevel</code>, <code>enabledModels</code>, <code>thinkingBudgets</code>, <code>enableSkillCommands</code> in <code>~/.pi/agent/settings.json</code>. Packages, resource paths, the shell path, and the npm and shell commands stay on your machine.</dd>
         <dt>Install</dt>
-        <dd>Ferry installs and updates Pi. It installs Node first if the box has none.</dd>
+        <dd>Ferry installs and updates Pi. It installs Node and npm first if the box has none, or a Node that is too old.</dd>
         <dt>Login</dt>
         <dd><span class="manual">By hand.</span> Ferry cannot drive the Pi login. SSH to the box, run <code>pi</code>, then use <code>/login</code>.</dd>
       </dl>
@@ -768,7 +768,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
   <div class="also">
     <div>
       <h3>GitHub CLI and jq</h3>
-      <p>Ferry installs <code>gh</code> and <code>jq</code> on every box. <code>ferry auth gh</code> logs <code>gh</code> in on the box and sets up the box SSH key for GitHub. The box uses <code>jq</code> to merge its MCP entries.</p>
+      <p>Ferry installs <code>gh</code> and <code>jq</code> on every box. <code>ferry auth gh</code> logs <code>gh</code> in on the box and sets up the box SSH key for GitHub. The box uses <code>jq</code> to merge the carried settings keys and MCP servers into its own files. It sends back only a status, never the file.</p>
     </div>
     <div>
       <h3>Your own tools</h3>
@@ -781,8 +781,8 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
     <div class="entry integ">
       <div class="entry-head"><h3>Paseo</h3><code>ferry integrations enable paseo</code></div>
       <p>Runs the Paseo daemon on a box. Ferry carries your agent profiles, managed Git plugins at their installed commit, npm plugins at their installed version, the portable fields of provider definitions, metadata model preferences, shared system instructions, and portable terminal profiles. These go to the box directly, not through the snapshot.</p>
-      <p>With <code>paseo_auto_archive = true</code>, Ferry also carries the auto-archive-after-merge switch. When <code>ferry move</code> puts a project on a box with Paseo, Ferry registers the project and imports each carried session as a Paseo agent.</p>
-      <p>Plugin settings, provider env blocks and commands, terminal env blocks and paths, and credentials stay on each host. Set <code>paseo_relay = true</code> for relay pairing.</p>
+      <p>With <code>paseo_auto_archive = true</code>, Ferry also carries the auto-archive-after-merge switch. When <code>ferry move</code> puts a project on a box with Paseo, Ferry registers the project and imports each carried session as a Paseo agent. A move back does the same in the Paseo on your machine.</p>
+      <p>Plugin settings, provider env blocks and commands, terminal env blocks and paths, and credentials stay on each host. When one agent process runs out of memory, the daemon and the other agents keep running. Set <code>paseo_relay = true</code> for relay pairing.</p>
     </div>
     <div class="entry integ">
       <div class="entry-head"><h3>Sherlock</h3><code>ferry integrations enable sherlock</code></div>
@@ -861,15 +861,15 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
       <li id="cmd-watch"><span class="cmd">ferry watch install</span><p>Syncs each change after one second. It runs as a launchd or systemd user service.</p></li>
       <li><span class="cmd">ferry status --brief</span><p>Shows only what needs action: offline boxes, low disk or memory on a box, logins, MCP logins, stdio MCP servers that lack something on the box, tool drift, and hooks that run a home file Ferry does not carry. Plain <code>ferry status</code> checks the link, the snapshot, the logins and the tools.</p></li>
       <li><span class="cmd">ferry doctor</span><p>Checks the SSH agent, push access to the snapshot, SSH and Tailscale to each box, the box deploy key, linger and the installed services. It changes nothing and prints a fix for each failed check.</p></li>
-      <li><span class="cmd">ferry history</span><p>Lists the last 20 snapshot commits and the paths each one changed.</p></li>
-      <li><span class="cmd">ferry revert <span class="arg">&lt;commit&gt;</span></span><p>Undoes one snapshot commit on your machine, including the carried settings keys, then syncs all boxes. <code>--no-sync</code> skips the sync. <code>--dry-run</code> shows the plan.</p></li>
+      <li><span class="cmd">ferry revert <span class="arg">&lt;commit&gt;</span></span><p>Undoes one snapshot commit on your machine, including the carried settings keys, then syncs all boxes. <code>ferry history</code> lists the last 20 commits and the paths each one changed. <code>--no-sync</code> skips the sync.</p></li>
       <li><span class="cmd">ferry box add <span class="arg">&lt;name&gt;</span></span><p>Adds another box. <code>sync</code>, <code>status</code> and <code>update</code> act on all boxes, or on one with <code>--box</code>.</p></li>
-      <li id="cmd-tunnel"><span class="cmd">ferry tunnel <span class="arg">3000</span></span><p>Opens a box port on 127.0.0.1 on your machine. <code>ferry tunnel db.example:5432:15432</code> opens port 5432 of a host that the box can reach on local port 15432. Run <code>ferry expose</code> on the box and <code>ferry tunnel --follow</code> here, and each dev server port opens on its own.</p></li>
-      <li id="cmd-move"><span class="cmd">ferry move <span class="arg">&lt;path&gt;</span> --to-box <span class="arg">&lt;name&gt;</span></span><p>Carries a git project to a box, untracked files included. It also carries the Claude and Codex sessions of the project and the Claude project memory, so <code>claude --resume</code> and <code>codex resume</code> find them there. <code>--from-box</code> brings the project back, and <code>--no-sessions</code> leaves the sessions out. A session that fails the deny rules stays on the source.</p></li>
+      <li><span class="cmd">~/.ferry/boxes/<span class="arg">&lt;name&gt;</span>/AGENTS.md</span><p>Instructions for one box, for example "this box runs the staging database". On a box, each instruction file is a Ferry header that names the box, then this file, then your <code>~/AGENTS.md</code>. Agents run <code>ferry whoami</code> to check where they are. The file never goes into the snapshot. <code>ferry box add</code> creates it empty. For your first box, create it by hand.</p></li>
+      <li><span class="cmd">ferry box remove <span class="arg">&lt;name&gt;</span> --uninstall</span><p>Removes Ferry from a box, then the box from your config. Ferry prints the plan and asks you to type the box name. Its services, links, checkout and binary go. Logins, SSH keys, projects and installed tools stay on the box.</p></li>
+      <li id="cmd-tunnel"><span class="cmd">ferry tunnel <span class="arg">3000</span></span><p>Opens a box port on 127.0.0.1 on your machine. <code>ferry tunnel db.example:5432:15432</code> opens port 5432 of a host that the box can reach, such as a database that only accepts connections from the box network, on local port 15432. Ferry checks first that the box can connect to it. Run <code>ferry expose</code> on the box and <code>ferry tunnel --follow</code> here, and each dev server port opens on its own.</p></li>
+      <li id="cmd-move"><span class="cmd">ferry move <span class="arg">&lt;path&gt;</span> --to-box <span class="arg">&lt;name&gt;</span></span><p>Carries a git project to a box, untracked files included, with the Claude and Codex sessions of the project and the Claude project memory, so <code>claude --resume</code> and <code>codex resume</code> find them there. <code>--from-box</code> brings the project back. A session that fails the deny rules stays on the source. The scan cannot find a password that you typed in free prose, so use <code>--no-sessions</code> when a session can hold one.</p></li>
+      <li><span class="cmd">ferry adopt --from-box <span class="arg">&lt;name&gt; &lt;skill&gt;</span></span><p>Copies a skill that an agent wrote on a box to your machine. The Ferry on the box runs the deny rules first, and you see the diff or the file list before Ferry asks. Then <code>ferry sync</code> publishes it to every box. <code>ferry status</code> lists the box-only skills.</p></li>
       <li><span class="cmd">ferry skills add</span><p>Installs skills with <code>npx skills add</code> as a global copy, so Ferry carries them.</p></li>
       <li><span class="cmd">~/.agents/skills/ferry</span><p>The Ferry skill. It tells your agents how to work with Ferry on both machines, for example not to edit a Ferry-managed file on the box. <code>ferry init</code> writes it here and the snapshot carries it to the boxes. <code>ferry self-update</code> refreshes it. <code>ferry init --no-skill</code> leaves it out.</p></li>
-      <li><span class="cmd">ferry integrations enable paseo</span><p>Runs the Paseo daemon on a box and carries your Paseo agent profiles, plugins, provider definitions, metadata model preferences, shared system instructions and terminal profiles.</p></li>
-      <li><span class="cmd">ferry sherlock add <span class="arg">&lt;name&gt;</span></span><p>With the Sherlock integration on, registers a Sherlock connection to a database through a box.</p></li>
       <li><span class="cmd">[tools.<span class="arg">&lt;id&gt;</span>]</span><p>Each tool in the config has a version policy: <code>"operator"</code>, <code>"latest"</code> or an exact version. The menu bar and <code>ferry status</code> report drift.</p></li>
     </ol>
   </div>
@@ -888,7 +888,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
       <h3><svg viewBox="0 0 26 26" aria-hidden="true"><rect x="3" y="8" width="20" height="14" rx="2" fill="#C8902F" stroke="#13233A" stroke-width="1.8"/><path d="M3 13h20M9 8V4h8v4" fill="none" stroke="#13233A" stroke-width="1.8"/></svg>Boards the ferry</h3>
       <ul>
         <li style="--c:#C8902F"><span>Skills</span></li>
-        <li style="--c:#E4D5B0"><span>Agent instructions in <code>~/AGENTS.md</code></span></li>
+        <li style="--c:#E4D5B0"><span>Agent instructions in <code>~/AGENTS.md</code>, and your instructions for one box</span></li>
         <li style="--c:#8AA573"><span>Subagents</span></li>
         <li style="--c:#C9775A"><span>Custom commands</span></li>
         <li style="--c:#B89A6A"><span>Hook scripts</span></li>
@@ -905,6 +905,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
         <li><span>Tokens and API keys</span></li>
         <li><span><code>.env</code> files</span></li>
         <li><span>Env values of MCP servers</span></li>
+        <li><span>A credential in the origin URL of a project</span></li>
         <li><span>Whole settings files</span></li>
       </ul>
       <p class="ashore-note">These never leave the machine that has them.</p>
@@ -918,7 +919,11 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
     </div>
     <div>
       <h3>Stdio MCP servers carry no values</h3>
-      <p>Ferry carries the command, the arguments and the names of the env keys. You set the values on the box, and Ferry keeps them. An argument that looks like a token or secret stops the sync. Ferry skips a server whose command or arguments refer to a path in your home, and it never installs a command.</p>
+      <p>Ferry carries the command, the arguments and the names of the env keys. You set the values on the box, and Ferry keeps them. A token, a secret flag with a value, or a URL with a credential in the command or the arguments stops the sync. Ferry skips a server that runs an inline script, such as <code>sh -c</code> or <code>node -e</code>, because it cannot check the script, and a server that refers to a path in your home. It never installs a command.</p>
+    </div>
+    <div>
+      <h3>What leaves a box is checked on that box</h3>
+      <p>For <code>ferry move --from-box</code> and <code>ferry adopt --from-box</code>, the Ferry on the box runs the deny rules. It reads each file once and sends exactly the bytes that pass. A refused file sends no content and no hash, and a name that looks like a token arrives as <code>[token]</code>. Your machine then applies its own rules to the bytes that arrive.</p>
     </div>
     <div>
       <h3>Boxes do not trust each other</h3>
@@ -926,7 +931,11 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
     </div>
     <div>
       <h3>No new doors</h3>
-      <p>Ferry opens no public port and never turns off SSH host-key checks. It forwards your SSH agent only for snapshot checks, updates and Claude plugin installs.</p>
+      <p>Ferry opens no public port and never turns off SSH host-key checks. It forwards your SSH agent only for snapshot checks, updates and Claude plugin installs. A box with <code>git_auth = "box"</code> gets no agent and reads the snapshot with its own read-only deploy key.</p>
+    </div>
+    <div>
+      <h3>The rule needs an honest box</h3>
+      <p>No credential leaves the machine that has it. That holds for a box that runs an unchanged Ferry. The check on the box protects against mistakes and against files that change. It does not protect against a box account that an attacker controls, because that Ferry can give any answer and any bytes. Ferry runs commands as your SSH user, so use a box and a user that you trust with the agents that run there.</p>
     </div>
   </div>
 
@@ -1316,7 +1325,7 @@ button.mi[aria-disabled=true]{color:rgba(0,0,0,.4);background:none}
   /* ---------- cargo manifest ---------- */
   const NOTES = {
     skills: '<strong>Skills.</strong> Each box clones the snapshot and links its harness directories to it, so the box sees the same skills.',
-    agents: '<strong>~/AGENTS.md.</strong> The instructions file in your home directory goes to every box.',
+    agents: '<strong>~/AGENTS.md.</strong> The instructions file in your home directory goes to every box. On a box, it follows a header that names the box and the instructions you wrote for that box.',
     subagents: '<strong>Claude subagents.</strong> Carried with the snapshot and linked on each box.',
     commands: '<strong>Claude commands and hook scripts.</strong> Carried with the snapshot and linked on each box. Hook scripts keep their executable bit.',
     settings: '<strong>Some Claude, Codex, Pi and Cursor Agent settings.</strong> Ferry carries selected keys. Keys that can hold secrets, and whole settings files, stay on your machine.',
