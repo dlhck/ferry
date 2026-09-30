@@ -147,6 +147,19 @@ A user service on the box stops without linger. Run `ferry doctor`. It prints th
 
 `boxCheckout.dirty: true` in `ferry status --json` means that the box checkout has local changes. The next sync discards them. Copy what you want to keep first.
 
+## A release is not ready for download
+
+A GitHub release is visible before its build attaches the binaries and `SHA256SUMS`, and before the npm packages are there. In that time:
+
+- `ferry self-update` prints `Ferry <version> is not ready for download. The release is still in its build. Try again in some minutes.` It changes nothing and ends with exit code 0. With `--json`, `state` is `not-ready`.
+- The update prompt does not ask for that release. It reads the latest release again one day later.
+- `install.sh` and `ferry menubar install` stop with the same message before they change the installed Ferry or app.
+- The Ferry step of `ferry install` and `ferry update` runs `install.sh` on the box, so that step fails with the same message.
+
+Run the command again some minutes later. Do not set `FERRY_SKIP_CHECKSUM=1`. If the message stays for more than an hour, the release build did not complete. See the **Release** workflow in the [Actions tab](https://github.com/dlhck/ferry/actions/workflows/release.yml).
+
+An npm install waits for `@dlhck/ferry` of that version on npm. A release installer waits for the binary of its platform and for `SHA256SUMS`.
+
 ## Services after an update
 
 `ferry self-update` restarts installed watch and tunnel services that point at the updated Ferry. It leaves a service that uses another Ferry unchanged. After you move Ferry, run `ferry watch install`, `ferry tunnel install`, and on macOS `ferry menubar install` again.

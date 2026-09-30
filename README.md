@@ -27,7 +27,7 @@ Or with npm. Do not use `--omit=optional`, because the executable comes from an 
 npm i -g @dlhck/ferry
 ```
 
-To update Ferry, run `ferry self-update`. It restarts installed watch and tunnel services that use the updated Ferry. On macOS, it also updates an installed release menu bar app. It leaves a service that uses another Ferry unchanged. On a terminal, Ferry also asks to update when a newer release is there. It checks at most once a day, and never with `--json`, with `CI` set, or with `FERRY_NO_UPDATE_CHECK=1`. `install.sh` lists its environment variables, such as `FERRY_VERSION`, at the top of the file.
+To update Ferry, run `ferry self-update`. It restarts installed watch and tunnel services that use the updated Ferry. On macOS, it also updates an installed release menu bar app. It leaves a service that uses another Ferry unchanged. On a terminal, Ferry also asks to update when a newer release is there. It checks at most once a day, and never with `--json`, with `CI` set, or with `FERRY_NO_UPDATE_CHECK=1`. A release is visible before its build attaches the files. For such a release, `ferry self-update` says that the release is not ready and changes nothing, the update prompt does not ask, and `install.sh` stops before it downloads a binary. Try again some minutes later. `install.sh` lists its environment variables, such as `FERRY_VERSION`, at the top of the file.
 
 You also need:
 

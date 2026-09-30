@@ -84,7 +84,7 @@ At the start, every 5 minutes, and after each sync, the watch writes the report 
 - The app sends a macOS notification when a box goes offline, a login or MCP login needs a login, or a tool has drift. Turn off Notifications in the menu to stop them.
 - Sync now runs `ferry sync`.
 
-Ferry downloads the app of the release of this Ferry, verifies it against `SHA256SUMS` of the release, and unpacks it to `~/Applications/Ferry Menu Bar.app`. The app starts at login. Run the command again after you move Ferry or update it. `ferry menubar uninstall` removes the app.
+Ferry downloads the app of the release of this Ferry, verifies it against `SHA256SUMS` of the release, and unpacks it to `~/Applications/Ferry Menu Bar.app`. When the release does not have these files yet, Ferry stops and the installed app stays. The app starts at login. Run the command again after you move Ferry or update it. `ferry menubar uninstall` removes the app.
 
 ## Linux
 
