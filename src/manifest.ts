@@ -229,8 +229,8 @@ const HOME_VARIABLE = /\$\{?HOME\b/;
 const ARGUMENT_SEPARATORS = /[\s;|()<>]+/;
 /** A URL inside an argument. Group 1 is the scheme, group 2 the authority, group 3 the path, query, and fragment. */
 const ARGUMENT_URL = /([a-z][a-z0-9+.-]*):\/\/([^\s/?#]*)(\S*)/gi;
-/** URL schemes where a user without a password is a login name, such as `git`, and not a token. */
-const LOGIN_NAME_SCHEMES = new Set(["ssh", "git+ssh", "git"]);
+/** The HTTP schemes, also as `git+https`. A user without a password there is often a token. */
+const HTTP_SCHEME = /^(?:.+\+)?https?$/i;
 /** A `key=value` parameter in the query or the fragment of a URL. */
 const URL_PARAMETER = /[?&#]([^=&#]+)=([^&#]*)/g;
 /** Shells and interpreters run a script argument that Ferry cannot check. */
@@ -962,10 +962,10 @@ function argumentRules(path: string, words: readonly string[], parts: readonly s
 
 /**
  * True when a word holds a URL with a credential: a password before the host,
- * a user without a password, or a secret key with a value in the query or the
- * fragment. A user without a password can be a token, as in
- * `https://<token>@host`. Only the schemes of `LOGIN_NAME_SCHEMES` pass it. A
- * placeholder value passes.
+ * a user without a password in an HTTP URL, or a secret key with a value in
+ * the query or the fragment. A user without a password can be a token there,
+ * as in `https://<token>@host`. In another scheme it is a login name, as in
+ * `ssh://git@host` or `postgresql://alice@host`. A placeholder value passes.
  */
 function hasUrlCredential(word: string): boolean {
   return [...word.matchAll(ARGUMENT_URL)].some(([, scheme = "", authority = "", rest = ""]) => {
@@ -974,7 +974,7 @@ function hasUrlCredential(word: string): boolean {
     const password = more.join(":");
     return (
       (password === ""
-        ? isSecretValue(user) && !LOGIN_NAME_SCHEMES.has(scheme.toLowerCase())
+        ? isSecretValue(user) && HTTP_SCHEME.test(scheme)
         : isSecretValue(password)) ||
       [...rest.matchAll(URL_PARAMETER)].some(
         ([, key = "", value = ""]) => (isSecretKey(key) || SECRET_PARAMETER.test(key)) && isSecretValue(value),
