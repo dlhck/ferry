@@ -7,12 +7,13 @@ import { join } from "node:path";
 const launcherSource = join(import.meta.dir, "..", "npm", "ferry", "bin", "ferry.js");
 
 // The stub prints its arguments, copies stdin to stdout, writes to stderr, and exits with STUB_EXIT.
-// With STUB_WAIT set, it waits for SIGTERM and exits 7.
+// With STUB_WAIT set, it waits for SIGTERM and exits 7. Without a signal, it exits 9 after 10 s, so a failed test leaves no process.
 const stubBinary = `#!/bin/sh
 if [ -n "$STUB_WAIT" ]; then
   trap 'echo got-term; exit 7' TERM
   echo ready
-  while :; do sleep 0.05; done
+  i=0; while [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+  exit 9
 fi
 for arg in "$@"; do echo "arg:$arg"; done
 cat
@@ -24,6 +25,7 @@ let root: string;
 let launcher: string;
 let emptyLauncher: string;
 let fakeWin32: string;
+let signalAfterSpawn: string;
 
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "ferry-launcher-"));
@@ -45,6 +47,19 @@ beforeAll(async () => {
 
   fakeWin32 = join(root, "win32.cjs");
   await writeFile(fakeWin32, 'Object.defineProperty(process, "platform", { value: "win32" });\n');
+
+  // Send SIGTERM to the launcher at the moment when spawn returns, before its next statement.
+  signalAfterSpawn = join(root, "signal-after-spawn.cjs");
+  await writeFile(signalAfterSpawn, [
+    'const childProcess = require("node:child_process");',
+    "const spawn = childProcess.spawn;",
+    "childProcess.spawn = (...args) => {",
+    "  const child = spawn(...args);",
+    '  process.kill(process.pid, "SIGTERM");',
+    "  return child;",
+    "};",
+    "",
+  ].join("\n"));
 });
 
 afterAll(async () => {
@@ -106,6 +121,26 @@ describe("npm launcher", () => {
 
     expect(stdout).toBe("ready\ngot-term\n");
     expect(await child.exited).toBe(7);
+  });
+
+  test("forwards a SIGTERM that arrives immediately after the binary starts", async () => {
+    const child = Bun.spawn(["node", "--require", signalAfterSpawn, launcher], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, STUB_WAIT: "1" },
+    });
+
+    // The output ends only when the launcher and the binary have both stopped.
+    const stdout = await new Response(child.stdout).text();
+    await child.exited;
+
+    // The signal can arrive before the binary sets its trap. Then the signal stops the binary, and the launcher ends with the same signal.
+    if (child.signalCode === "SIGTERM") {
+      expect(stdout).toBe("");
+    } else {
+      expect(stdout).toEndWith("got-term\n");
+      expect(child.exitCode).toBe(7);
+    }
   });
 
   test("names the supported platforms on an unsupported platform", async () => {

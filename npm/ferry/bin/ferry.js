@@ -25,11 +25,14 @@ try {
   process.exit(1);
 }
 
-const child = spawn(binary, process.argv.slice(2), { stdio: "inherit" });
-
+// The handlers must exist before the binary starts. Else a signal that arrives
+// immediately after the start stops this process, and the binary continues to run.
+// Node calls a handler only after this script has run, so `child` is set then.
 const signals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"];
 const forward = (signal) => child.kill(signal);
 for (const signal of signals) process.on(signal, forward);
+
+const child = spawn(binary, process.argv.slice(2), { stdio: "inherit" });
 
 child.on("error", (error) => {
   console.error(`Ferry cannot start ${binary}: ${error.message}`);
