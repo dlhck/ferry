@@ -224,12 +224,23 @@ export class Link {
 
   /**
    * Open one TCP connection from the box to `host:port` and close it, with
-   * `ssh -W`. A connection that stays open until the timeout is a success.
-   * A failure from the box has origin `box`.
+   * `ssh -W`. A failure from the box has origin `box`.
+   *
+   * A connection that stays open until the timeout is a success: the box did
+   * not refuse the connection in that time. A stalled SSH connection to the
+   * box also runs to the timeout, so a command on the box confirms the SSH
+   * connection first. A target that drops the packets of the box also runs to
+   * the timeout, and Ferry cannot tell it from an open connection.
    */
   async reach(target: { readonly host: string; readonly port: number }): Promise<LinkResult> {
-    const invalid = this.validateConfig();
-    if (invalid) return invalid;
+    const connectTimeoutMs = this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+    const probe = await this.run("true", { timeoutMs: connectTimeoutMs + DEFAULT_PROBE_TIMEOUT_MS });
+    if (!probe.ok) {
+      // A failure of the probe command is not a failure of the target, so it does not have the origin `box`.
+      return probe.error.origin === "box"
+        ? failure("ssh-failed", "network", `the SSH check of the box failed: ${probe.error.message}`)
+        : probe;
+    }
 
     const resolved = await this.resolve();
     if (!resolved.ok) return resolved;
@@ -238,7 +249,7 @@ export class Link {
     try {
       execution = await this.adapter.run({
         argv: ["ssh", ...this.sshOptions(), "-W", `${bracketHost(target.host)}:${target.port}`, resolved.destination],
-        timeoutMs: this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
+        timeoutMs: connectTimeoutMs,
       });
     } catch (error) {
       return failure("ssh-start-failed", "operator", messageOf(error, "could not start OpenSSH"));

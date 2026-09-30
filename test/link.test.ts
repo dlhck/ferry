@@ -355,8 +355,8 @@ describe("Link", () => {
     ]);
   });
 
-  test("reach opens one connection from the box with ssh -W", async () => {
-    const host = new FakeHost([result(), result({ timedOut: true, exitCode: null })]);
+  test("reach confirms the SSH connection, then opens one connection from the box with ssh -W", async () => {
+    const host = new FakeHost([result(), result(), result(), result({ timedOut: true, exitCode: null })]);
     const link = new Link({ destination: "user@box.example" }, host);
 
     expect(await link.reach({ host: "db.example", port: 5432 })).toEqual({
@@ -365,16 +365,36 @@ describe("Link", () => {
       stdout: "",
       stderr: "",
     });
-    // A server that keeps the connection open until the timeout accepted it.
+    // The box did not refuse a connection that stays open until the timeout.
     expect((await link.reach({ host: "fd00::1", port: 5432 })).ok).toBe(true);
+    const probe = [["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "user@box.example", `${BOX_PATH}true`], 15_000, undefined];
     expect(host.commands.map((command) => [command.argv, command.timeoutMs, command.input])).toEqual([
+      probe,
       [["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-W", "db.example:5432", "user@box.example"], 10_000, undefined],
+      probe,
       [["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-W", "[fd00::1]:5432", "user@box.example"], 10_000, undefined],
     ]);
   });
 
+  test("reach does not report a target as reached when the SSH connection to the box stalls", async () => {
+    // Without the probe, a stalled SSH handshake runs `ssh -W` to the timeout, the same as an open connection.
+    const host = new FakeHost([result({ timedOut: true, exitCode: null }), result({ exitCode: 1, stderr: "sh: broken profile\n" })]);
+    const link = new Link({ destination: "user@box.example" }, host);
+
+    expect(await link.reach({ host: "db.example", port: 5432 })).toEqual({
+      ok: false,
+      error: { code: "ssh-failed", origin: "network", message: "the SSH check of the box failed: the command on the box timed out" },
+    });
+    expect(await link.reach({ host: "db.example", port: 5432 })).toEqual({
+      ok: false,
+      error: { code: "ssh-failed", origin: "network", message: "the SSH check of the box failed: sh: broken profile" },
+    });
+    expect(host.commands.map((command) => command.argv.includes("-W"))).toEqual([false, false]);
+  });
+
   test("reach tells a host that the box cannot open from a box that OpenSSH cannot reach", async () => {
     const host = new FakeHost([
+      result(),
       result({
         exitCode: 255,
         stderr: "channel 0: open failed: connect failed: Name or service not known\nstdio forwarding failed\n",
