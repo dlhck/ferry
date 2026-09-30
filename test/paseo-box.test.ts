@@ -7,7 +7,7 @@ import {
   carryPaseoPreferences,
   createPaseo,
   readAgentProfiles,
-  refreshUnitPath,
+  refreshUnit,
   unitFile,
 } from "../src/integrations/paseo.ts";
 import type { HostAdapter, LinkResult, RunOptions } from "../src/link.ts";
@@ -503,7 +503,7 @@ describe("Paseo unit PATH", () => {
     const box = fakeBox();
     touch(join(box.home, UNIT_PATH), unitFile(BUILTIN_BOX_PATH_DIRS));
 
-    expect(await refreshUnitPath(box, dirs)).toMatchObject({ detail: "restarted" });
+    expect(await refreshUnit(box, dirs)).toMatchObject({ detail: "restarted" });
 
     expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(unitFile(dirs));
     expect(box.log()).toEqual(["systemctl daemon-reload", "systemctl restart ferry-paseo.service"]);
@@ -513,7 +513,7 @@ describe("Paseo unit PATH", () => {
     const box = fakeBox();
     touch(join(box.home, UNIT_PATH), unitFile(dirs));
 
-    expect(await refreshUnitPath(box, dirs)).toEqual({ detail: "no changes", note: null });
+    expect(await refreshUnit(box, dirs)).toEqual({ detail: "no changes", note: null });
 
     expect(box.log()).toEqual([]);
     expect(box.commands).toHaveLength(1);
@@ -522,7 +522,7 @@ describe("Paseo unit PATH", () => {
   test("refuses when the unit is not on the box", async () => {
     const box = fakeBox();
 
-    await expect(refreshUnitPath(box, dirs)).rejects.toThrow("Run ferry integrations enable paseo");
+    await expect(refreshUnit(box, dirs)).rejects.toThrow("Run ferry integrations enable paseo");
     expect(box.log()).toEqual([]);
   });
 });
@@ -541,7 +541,7 @@ describe("Paseo box output", () => {
     const box = fakeBox();
     touch(join(box.home, UNIT_PATH), withSecret(unitFile(dirs)));
 
-    expect(await refreshUnitPath(box, dirs)).toEqual({ detail: "no changes", note: null });
+    expect(await refreshUnit(box, dirs)).toEqual({ detail: "no changes", note: null });
 
     expect(box.outputs).toEqual(["unchanged\n", ""]);
     expect(crossed(box)).not.toContain(SECRET);
@@ -553,7 +553,7 @@ describe("Paseo box output", () => {
     const box = fakeBox();
     touch(join(box.home, UNIT_PATH), withSecret(unitFile(BUILTIN_BOX_PATH_DIRS, true)));
 
-    expect(await refreshUnitPath(box, dirs)).toMatchObject({ detail: "restarted" });
+    expect(await refreshUnit(box, dirs)).toMatchObject({ detail: "restarted" });
 
     expect(box.outputs).toEqual(["updated\n", ""]);
     expect(crossed(box)).not.toContain(SECRET);
@@ -568,7 +568,7 @@ describe("Paseo box output", () => {
     const path = unit.split("\n").find((line) => line.startsWith("Environment=PATH="));
     touch(join(box.home, UNIT_PATH), unit.replace(`${path}\n`, ""));
 
-    expect(await refreshUnitPath(box, dirs)).toMatchObject({ detail: "restarted" });
+    expect(await refreshUnit(box, dirs)).toMatchObject({ detail: "restarted" });
 
     expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(unit.replace(`${path}\n`, "").replace("[Service]\n", `[Service]\n${path}\n`));
     expect(crossed(box)).not.toContain(SECRET);
@@ -579,7 +579,7 @@ describe("Paseo box output", () => {
     const unit = `[Unit]\nEnvironment=DATABASE_PASSWORD=${SECRET}\n`;
     touch(join(box.home, UNIT_PATH), unit);
 
-    await expect(refreshUnitPath(box, dirs)).rejects.toThrow("Ferry could not write the PATH line");
+    await expect(refreshUnit(box, dirs)).rejects.toThrow("Ferry could not write the PATH line");
 
     expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(unit);
     expect(existsSync(join(box.home, `${UNIT_PATH}.ferry-tmp`))).toBe(false);
@@ -621,7 +621,7 @@ describe("Paseo box output", () => {
     const box = fakeBox();
     touch(join(box.home, UNIT_PATH), withoutPolicy(withSecret(unitFile(dirs, true))));
 
-    expect(await refreshUnitPath(box, dirs)).toEqual({
+    expect(await refreshUnit(box, dirs)).toEqual({
       detail: "OOMPolicy=continue added, no restart",
       note: `Ferry added OOMPolicy=continue to ferry-paseo.service on the box. ${ADDED}`,
     });
@@ -633,7 +633,7 @@ describe("Paseo box output", () => {
     expect(existsSync(join(box.home, `${UNIT_PATH}.ferry-tmp`))).toBe(false);
     expect(box.log()).toEqual(["systemctl daemon-reload"]);
 
-    expect(await refreshUnitPath(box, dirs)).toEqual({ detail: "no changes", note: null });
+    expect(await refreshUnit(box, dirs)).toEqual({ detail: "no changes", note: null });
     expect(box.log()).toEqual(["systemctl daemon-reload"]);
   });
 
@@ -641,7 +641,7 @@ describe("Paseo box output", () => {
     const box = fakeBox();
     touch(join(box.home, UNIT_PATH), withoutPolicy(withSecret(unitFile(BUILTIN_BOX_PATH_DIRS))));
 
-    expect(await refreshUnitPath(box, dirs)).toMatchObject({ detail: "restarted" });
+    expect(await refreshUnit(box, dirs)).toMatchObject({ detail: "restarted" });
 
     expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(withSecret(unitFile(dirs)));
     expect(box.log()).toEqual(["systemctl daemon-reload", "systemctl restart ferry-paseo.service"]);
@@ -653,7 +653,7 @@ describe("Paseo box output", () => {
       const unit = withSecret(unitFile(dirs)).replace("OOMPolicy=continue", own);
       touch(join(box.home, UNIT_PATH), unit);
 
-      expect(await refreshUnitPath(box, dirs)).toEqual({ detail: "no changes", note: null });
+      expect(await refreshUnit(box, dirs)).toEqual({ detail: "no changes", note: null });
 
       expect(readFileSync(join(box.home, UNIT_PATH), "utf8")).toBe(unit);
       expect(box.log()).toEqual([]);
@@ -664,7 +664,7 @@ describe("Paseo box output", () => {
     touch(dropIn, "[Service]\nOOMPolicy=stop\n");
     touch(join(box.home, UNIT_PATH), withoutPolicy(unitFile(dirs)));
 
-    await refreshUnitPath(box, dirs);
+    await refreshUnit(box, dirs);
 
     expect(readFileSync(dropIn, "utf8")).toBe("[Service]\nOOMPolicy=stop\n");
     expect(box.log()).toEqual(["systemctl daemon-reload"]);
@@ -697,7 +697,7 @@ describe("Paseo box output", () => {
     const box = fakeBox();
     touch(join(box.home, UNIT_PATH), withoutPolicy(unitFile(BUILTIN_BOX_PATH_DIRS)));
 
-    await refreshUnitPath(box, BUILTIN_BOX_PATH_DIRS);
+    await refreshUnit(box, BUILTIN_BOX_PATH_DIRS);
     await paseoWith("0.9.2").box.enable(box, noProgress);
 
     expect(box.outputs).toContain("unchanged\n");

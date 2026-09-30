@@ -6,7 +6,7 @@ import { BUILTIN_BOX_PATH_DIRS } from "../src/tools/path.ts";
 import { resolveBoxes } from "../src/boxes.ts";
 import { configPath, readConfig, setIntegration } from "../src/config.ts";
 import { runIntegrationCommand } from "../src/integrations/command.ts";
-import { createPaseo, refreshUnitPath, unitFile } from "../src/integrations/paseo.ts";
+import { createPaseo, refreshUnit, unitFile } from "../src/integrations/paseo.ts";
 import type { IntegrationLink } from "../src/integrations/types.ts";
 import { noProgress } from "../src/progress.ts";
 import { shellBox } from "./paseo-shell-box.ts";
@@ -87,7 +87,7 @@ test("enable uses config in the plan and service, and restarts a changed unit", 
 
 test("PATH refresh preserves an enabled relay", async () => {
   const remote = box(unitFile([".local/bin"], true));
-  await refreshUnitPath(remote.link, [".local/bin", ".bun/bin"]);
+  await refreshUnit(remote.link, [".local/bin", ".bun/bin"]);
   expect(remote.unit()).toBe(unitFile([".local/bin", ".bun/bin"], true));
 });
 

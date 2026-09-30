@@ -38,7 +38,7 @@ import {
   profileName,
   readAgentProfiles,
   readPaseoPreferences,
-  refreshUnitPath,
+  refreshUnit,
   UNIT_PLAN,
   type AgentProfile,
   type MetadataProvider,
@@ -759,13 +759,13 @@ async function applyOnBox(context: {
     // The restart also applies the profiles, so it runs after the carry.
     try {
       const refresh = await boxStep(
-        "Updating the Paseo unit PATH",
-        () => refreshUnitPath(link, pathDirs),
+        "Updating the Paseo unit",
+        () => refreshUnit(link, pathDirs),
         (refresh) => refresh.detail,
       );
       if (refresh.note !== null) warn(refresh.note);
     } catch (cause) {
-      warn(`Warning: Ferry could not update the PATH of ferry-paseo.service: ${messageOf(cause)}. The sync is complete.`);
+      warn(`Warning: Ferry could not update ferry-paseo.service: ${messageOf(cause)}. The sync is complete.`);
     }
   }
   return { applyPlan, discarded };

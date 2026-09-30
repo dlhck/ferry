@@ -1435,7 +1435,7 @@ describe("sync with the Paseo integration", () => {
       "done:updated ~/.profile",
       "start:Carrying Paseo agent profiles",
       "done:1 profile, 1 skipped",
-      "start:Updating the Paseo unit PATH",
+      "start:Updating the Paseo unit",
       "done:no changes",
     ]);
     expect(sync.lines).toContain(
@@ -1480,7 +1480,7 @@ describe("sync with the Paseo integration", () => {
     expect(write).toContain(":%h/.bun/bin:/usr/local/sbin");
     expect(write).toContain(restart);
     expect(sync.commands.at(-1)).toBe(write);
-    expect(sync.events.slice(-4, -2)).toEqual(["start:Updating the Paseo unit PATH", "done:restarted"]);
+    expect(sync.events.slice(-4, -2)).toEqual(["start:Updating the Paseo unit", "done:restarted"]);
     expect(sync.lines).toContain(
       "The box PATH changed, so Ferry updated ferry-paseo.service and restarted the Paseo daemon. The restart stopped the agents that ran on the box.",
     );
@@ -1491,7 +1491,7 @@ describe("sync with the Paseo integration", () => {
     const sync = run(paseoHome(null), { config: bunConfig, unit: unitFile(dirs) });
     await sync.result;
 
-    expect(sync.events.slice(-4, -2)).toEqual(["start:Updating the Paseo unit PATH", "done:no changes"]);
+    expect(sync.events.slice(-4, -2)).toEqual(["start:Updating the Paseo unit", "done:no changes"]);
     expect(sync.lines.some((line) => line.includes("restart"))).toBe(false);
   });
 
@@ -1500,7 +1500,7 @@ describe("sync with the Paseo integration", () => {
     const sync = run(paseoHome(null), { config: bunConfig, unit: unitFile(dirs).replace("OOMPolicy=continue\n", "") });
     await sync.result;
 
-    expect(sync.events.slice(-4, -2)).toEqual(["start:Updating the Paseo unit PATH", "done:OOMPolicy=continue added, no restart"]);
+    expect(sync.events.slice(-4, -2)).toEqual(["start:Updating the Paseo unit", "done:OOMPolicy=continue added, no restart"]);
     expect(sync.lines).toContain(
       "Ferry added OOMPolicy=continue to ferry-paseo.service on the box. systemd applied the line without a restart of the Paseo daemon. " +
         "When a process of an agent runs out of memory, the daemon and the other agents continue.",
@@ -1512,9 +1512,9 @@ describe("sync with the Paseo integration", () => {
     const sync = run(paseoHome(null), { config: bunConfig, unit: null });
     await sync.result;
 
-    expect(sync.events.slice(-4, -2)).toEqual(["start:Updating the Paseo unit PATH", "fail"]);
+    expect(sync.events.slice(-4, -2)).toEqual(["start:Updating the Paseo unit", "fail"]);
     expect(sync.lines.at(-1)).toBe(
-      "Warning: Ferry could not update the PATH of ferry-paseo.service: ~/.config/systemd/user/ferry-paseo.service is not on the box. Run ferry integrations enable paseo. The sync is complete.",
+      "Warning: Ferry could not update ferry-paseo.service: ~/.config/systemd/user/ferry-paseo.service is not on the box. Run ferry integrations enable paseo. The sync is complete.",
     );
   });
 
@@ -2220,7 +2220,7 @@ describe("sync with more than one box", () => {
 
     expect(sync.steps.filter((step) => step.includes("Paseo"))).toEqual([
       "[a] Carrying Paseo agent profiles",
-      "[a] Updating the Paseo unit PATH",
+      "[a] Updating the Paseo unit",
     ]);
   });
 

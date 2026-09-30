@@ -629,7 +629,7 @@ export const UNIT_PLAN =
  * `missing`, `unchanged`, `policy`, `updated`, or `failed`. Ferry never reads
  * the unit.
  */
-export async function refreshUnitPath(link: IntegrationLink, pathDirs: readonly string[]): Promise<UnitRefresh> {
+export async function refreshUnit(link: IntegrationLink, pathDirs: readonly string[]): Promise<UnitRefresh> {
   const script = [
     `f=${quoteShell(UNIT_PATH)}`,
     `want=${quoteShell(unitPathLine(pathDirs))}`,
