@@ -869,7 +869,7 @@ describe("ferry move with integrations", () => {
     expect(existsSync(join(w.box, "Developer/app/README.md"))).toBe(true);
     expect(result.events.slice(-2)).toEqual(["start:Registering the project in Paseo", "fail"]);
     expect(result.lines).toContain(
-      "WARNING: Ferry could not register ~/Developer/app in Paseo: paseo project create failed: directory_not_found. The move is complete.",
+      "WARNING: Ferry could not register ~/Developer/app in Paseo: paseo project create failed: Paseo did not find the directory on the box (directory_not_found). The move is complete.",
     );
   });
 

@@ -74,14 +74,14 @@ export function shellBox(options: {
   const commands: string[] = [];
   const outputs: string[] = [];
   const link: IntegrationLink = {
-    run: async (command) => {
+    run: async (command, runOptions = {}) => {
       commands.push(command);
       const answer = options.answer?.(command);
       if (answer !== undefined) return { ok: true, address: "box", stdout: answer, stderr: "" };
       const process = Bun.spawn(["/bin/sh", "-c", command], {
         cwd: home,
         env: { ...Bun.env, HOME: home, PATH: options.jq === false ? bin : `${bin}:${Bun.env.PATH}` },
-        stdin: "ignore",
+        stdin: runOptions.input ?? "ignore",
         stdout: "pipe",
         stderr: "pipe",
       });

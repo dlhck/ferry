@@ -1155,6 +1155,10 @@ For relay pairing, set paseo_relay = true in [integrations] of
 Run ferry integrations enable paseo --box <name> again to apply a change.
 A changed service config restarts the daemon and stops its agents.
 
+Enable writes the whole ferry-paseo.service again, so a line that you added
+to it by hand is gone. Put such a line in a drop-in file on the box, for
+example ~/.config/systemd/user/ferry-paseo.service.d/local.conf.
+
 To carry daemon.autoArchiveAfterMerge, set paseo_auto_archive = true in
 [integrations] of ~/.ferry/config.toml. A [box.<name>.integrations] table can
 override it. Sync applies it with paseo daemon reload, without a restart.

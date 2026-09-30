@@ -483,22 +483,6 @@ export async function installBoxPlugins(input: {
   return warnings;
 }
 
-export function readCommand(path: string): string {
-  const quoted = quoteShell(path);
-  return `if [ -e ${quoted} ]; then printf 'F' && cat ${quoted}; else printf 'M'; fi`;
-}
-
-/** Write through a temporary file, so Claude never reads a half-written file. */
-export function writeCommand(path: string, text: string): string {
-  const temporary = quoteShell(`${path}.ferry-tmp`);
-  return [
-    "umask 077 &&",
-    `mkdir -p ${quoteShell(posix.dirname(path))} &&`,
-    `printf '%s' ${quoteShell(text)} > ${temporary} &&`,
-    `mv ${temporary} ${quoteShell(path)}`,
-  ].join(" ");
-}
-
 export async function checked(
   link: BoxSettingsLink,
   command: string,
