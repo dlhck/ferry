@@ -476,7 +476,8 @@ function collectOccurrences(
 
 type Scan = { files: SeedFile[]; leftovers: Leftover[]; forbidden: ForbiddenHit[] };
 
-function scanSkill(skillDir: string): Scan {
+/** The carried files of one skill directory, and the hits of the deny rules in it. The hit paths are absolute. */
+export function scanSkill(skillDir: string): Scan {
   const scan: Scan = { files: [], leftovers: [], forbidden: [] };
   walk(skillDir, skillDir, realpathSync(skillDir), new Set(), scan);
   scan.files.sort((a, b) => compare(a.path, b.path));

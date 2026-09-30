@@ -1,7 +1,8 @@
 /**
  * Sessions finds the agent sessions of a project in the session stores that
  * the harness descriptors name, and stages them for the destination home.
- * `ferry move` applies the deny rules to the staged files and carries them.
+ * `ferry move` lists the files, applies the deny rules to them on the source
+ * machine, and then copies and stages only the sessions that it carries.
  *
  * A store has one of two layouts. Claude keeps one directory for each project
  * path under `~/.claude/projects`. Codex keeps all sessions under
@@ -14,15 +15,21 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { quoteShell } from "./box-settings.ts";
 import type { HarnessDescriptor, SessionStore } from "./registry/types.ts";
+import { changedFiles } from "./scan.ts";
 
 /** A file of a session. Both paths are relative to the home. */
 export type SessionFile = { readonly source: string; readonly target: string };
 
-/** A session, or one project memory file with a null `id`. `harness` is the harness id. */
-export type Session = { readonly harness: string; readonly id: string | null; readonly files: readonly SessionFile[] };
+/** A session, or one project memory file with a null `id`. `harness` is the harness id, `layout` the layout of its store. */
+export type Session = {
+  readonly harness: string;
+  readonly id: string | null;
+  readonly layout: SessionStore["layout"];
+  readonly files: readonly SessionFile[];
+};
 
-/** The sessions of a project, and the local directory that holds their files at the target paths, or null without sessions. */
-export type StagedSessions = { readonly sessions: readonly Session[]; readonly stage: string | null };
+/** The staged sessions, the sessions whose files changed after the scan, and the local directory with the staged files at the target paths. */
+export type StagedSessions = { readonly sessions: readonly Session[]; readonly changed: readonly Session[]; readonly stage: string };
 
 /** Claude shortens a longer directory name and adds a hash of the path. */
 const MAX_NAME_LENGTH = 200;
@@ -36,48 +43,86 @@ export function projectDirectoryName(path: string): string {
   return `${name.slice(0, MAX_NAME_LENGTH)}-${Math.abs(hash).toString(36)}`;
 }
 
+/** The candidate session files of one store. The paths are relative to the home. */
+export type SessionCandidates = { readonly harness: string; readonly store: SessionStore; readonly paths: readonly string[] };
+
 /**
- * Find the sessions of `sourceProject` and stage them for `targetProject`.
- * Both are absolute paths. `run` runs a command in the source home and returns
- * its stdout. `fetch` copies home-relative paths from the source home to a new
- * local directory and returns that directory. The caller removes `stage`.
+ * List the candidate session files of the project `sourceProject`, an
+ * absolute path, in each store. `run` runs a command in the source home and
+ * returns its stdout. No file content leaves the source.
  */
-export async function stageSessions(options: {
+export async function listSessionFiles(options: {
   readonly harnesses: readonly HarnessDescriptor[];
   readonly sourceProject: string;
-  readonly targetProject: string;
   readonly run: (command: string) => Promise<string>;
-  readonly fetch: (paths: readonly string[]) => Promise<string>;
-}): Promise<StagedSessions> {
-  const listed: { harness: string; store: SessionStore; paths: string[] }[] = [];
+}): Promise<SessionCandidates[]> {
+  const listed: SessionCandidates[] = [];
   for (const harness of options.harnesses) {
     if (!harness.sessions) continue;
     const output = await options.run(listCommand(harness.sessions, options.sourceProject));
     const paths = output.split("\0").filter((path) => path !== "");
     if (paths.length > 0) listed.push({ harness: harness.id, store: harness.sessions, paths });
   }
-  if (listed.length === 0) return { sessions: [], stage: null };
+  return listed;
+}
+
+/**
+ * The sessions in the candidate files. `ids` has the session id of each file
+ * whose first line records the source project, from the scan on the source.
+ */
+export function groupSessions(
+  listed: readonly SessionCandidates[],
+  ids: ReadonlyMap<string, string | null>,
+  sourceProject: string,
+  targetProject: string,
+): Session[] {
+  return listed.flatMap(({ harness, store, paths }) =>
+    store.layout === "project-directory"
+      ? projectSessions(harness, store, paths, sourceProject, targetProject)
+      : paths.flatMap((path) => {
+          const id = ids.get(path);
+          return id ? [{ harness, id, layout: store.layout, files: [{ source: path, target: path }] }] : [];
+        }),
+  );
+}
+
+/**
+ * Copy the files of `sessions` from the source home and stage them for the
+ * project `targetProject`. `fetch` copies home-relative paths from the source
+ * home to a new local directory and returns that directory. `sha256` has the
+ * hash of each source file from the scan. A session with a file that is not
+ * the scanned bytes is not staged, and `changed` names it. The caller removes
+ * `stage`.
+ */
+export async function stageSessions(options: {
+  readonly sessions: readonly Session[];
+  readonly sha256: ReadonlyMap<string, string>;
+  readonly targetProject: string;
+  readonly fetch: (paths: readonly string[]) => Promise<string>;
+}): Promise<StagedSessions> {
   const stage = mkdtempSync(join(tmpdir(), "ferry-sessions-"));
   let fetched: string | null = null;
   try {
-    fetched = await options.fetch(listed.flatMap((entry) => entry.paths));
-    const sessions: Session[] = [];
-    for (const { harness, store, paths } of listed) {
-      const found =
-        store.layout === "project-directory"
-          ? projectSessions(harness, store, paths, options.sourceProject, options.targetProject)
-          : cwdSessions(harness, paths, fetched, options.sourceProject);
-      for (const file of found.flatMap((session) => session.files)) {
+    fetched = await options.fetch(options.sessions.flatMap((session) => session.files.map((file) => file.source)));
+    const staged: Session[] = [];
+    const changed: Session[] = [];
+    for (const session of options.sessions) {
+      const scanned = session.files.map((file) => ({ path: file.source, sha256: options.sha256.get(file.source) ?? "" }));
+      if (changedFiles(fetched, scanned).length > 0) {
+        changed.push(session);
+        continue;
+      }
+      for (const file of session.files) {
         const from = join(fetched, file.source);
         const to = join(stage, file.target);
         const bytes = readFileSync(from);
         mkdirSync(dirname(to), { recursive: true });
-        writeFileSync(to, store.layout === "first-line-cwd" ? retarget(bytes, options.targetProject) : bytes);
+        writeFileSync(to, session.layout === "first-line-cwd" ? retarget(bytes, options.targetProject) : bytes);
         chmodSync(to, statSync(from).mode & 0o777);
       }
-      sessions.push(...found);
+      staged.push(session);
     }
-    return { sessions, stage };
+    return { sessions: staged, changed, stage };
   } catch (error) {
     rmSync(stage, { recursive: true, force: true });
     throw error;
@@ -92,7 +137,7 @@ function listCommand(store: SessionStore, project: string): string {
     const directory = quoteShell(`${store.root}/${projectDirectoryName(project)}`);
     return `if [ -d ${directory} ]; then find ${directory} -type f -print0; fi`;
   }
-  // A quick text match on the first line. `cwdSessions` parses the line.
+  // A quick text match on the first line. The scan on the source parses the line.
   const needle = quoteShell(`"cwd":${JSON.stringify(project)}`);
   const root = quoteShell(store.root);
   return `if [ -d ${root} ]; then find ${root} -type f -name ${quoteShell(store.files)} -exec sh -c 'n=$1; shift; for f; do head -n 1 "$f" | grep -qF -- "$n" && printf "%s\\0" "$f"; done; true' sh ${needle} {} +; fi`;
@@ -121,31 +166,10 @@ function projectSessions(
   for (const rest of rests) {
     const [first = ""] = rest.split("/");
     if (!rest.includes("/")) continue;
-    if (first === store.memory) memory.push({ harness, id: null, files: [file(rest)] });
+    if (first === store.memory) memory.push({ harness, id: null, layout: store.layout, files: [file(rest)] });
     else sessions.get(first)?.push(file(rest));
   }
-  return [...[...sessions].map(([id, files]) => ({ harness, id, files })), ...memory];
-}
-
-/** The sessions whose first line records `project` as `payload.cwd`. */
-function cwdSessions(harness: string, paths: readonly string[], fetched: string, project: string): Session[] {
-  return paths.flatMap((path) => {
-    const meta = firstLine(join(fetched, path));
-    if (meta?.payload?.cwd !== project || typeof meta.payload.id !== "string") return [];
-    return [{ harness, id: meta.payload.id, files: [{ source: path, target: path }] }];
-  });
-}
-
-type FirstLine = { payload?: { cwd?: unknown; id?: unknown } };
-
-function firstLine(path: string): FirstLine | null {
-  const text = readFileSync(path, "utf8");
-  const end = text.indexOf("\n");
-  try {
-    return JSON.parse(end === -1 ? text : text.slice(0, end)) as FirstLine;
-  } catch {
-    return null;
-  }
+  return [...[...sessions].map(([id, files]) => ({ harness, id, layout: store.layout, files })), ...memory];
 }
 
 /** Record `project` as `payload.cwd` in the first line. The other lines stay as they are. */

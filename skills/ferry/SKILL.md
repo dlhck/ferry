@@ -23,7 +23,7 @@ Ferry copies the agent setup of the operator machine to a remote Linux box. The 
 ## Find out where you are
 
 - The operator machine has `~/.ferry/config.toml` and the `ferry` command.
-- The box has `~/.ferry/store` and `~/.ferry/box.json`, but no `~/.ferry/config.toml`. On the box, `ferry` is a box install: only `ferry expose`, `ferry whoami`, `ferry --version`, and the help run. A development build of Ferry ignores `~/.ferry/box.json`.
+- The box has `~/.ferry/store` and `~/.ferry/box.json`, but no `~/.ferry/config.toml`. On the box, `ferry` is a box install: only `ferry expose`, `ferry whoami`, `ferry --version`, and the help run. The operator machine also runs the hidden `ferry scan` there. Do not run it yourself. A development build of Ferry ignores `~/.ferry/box.json`.
 - On the box, the instruction files start with a header that names the box. On the operator machine, they have no header.
 - When you are not sure, run `ferry whoami --json`. It prints `role` (`operator` or `box`), `box`, the box name, `instructions`, and `managedPaths`. On a box, `instructions.sources` lists the merged parts of the instruction file in order.
 
@@ -180,6 +180,9 @@ Do not run these commands yourself. When `auth.loginRequired` or `mcpLogins.logi
 1. Run `ferry move <path> --dry-run` first. It prints `Carry:`, `Refuse:`, `Skip:`, `Note:`, and `Problem:` lines and changes nothing.
 2. Fix each `Problem:` line before the real move. Ferry refuses a move with unpushed commits, uncommitted changes to tracked files, or an existing destination path. Push or commit only if the operator agrees.
 3. A `Refuse:` file stays on the source machine. Do not copy it yourself. The operator decides what to do with it.
+   - The deny rules run on the source machine. With `--from-box`, the Ferry on the box runs them, and Ferry copies only the files that pass. `--dry-run` copies no file.
+   - `Ferry is not installed on <box>` or `The Ferry on <box> is too old to check the files there` means that the box has no release of Ferry with `ferry scan`. Tell the operator to run `ferry install` or `ferry update`. A development build of Ferry puts no Ferry on a box. Do not copy the files in another way.
+   - `<file> changed on <box> after the check` means that a file changed between the check and the copy. Run the move again. A `WARNING: Ferry skips the session of <file> (a file changed after the check)` line names a session that stays on the source for the same reason, for example a session that is still in use.
 4. Add `--include-env` only when the operator asks. It carries a `.env` file only if the file has no token and no secret key with a value.
 5. Never pass `--allow-secrets` or `--yes` unless the operator asks for it in this conversation. With `--include-env --allow-secrets`, Ferry also carries a `.env` or `.env.*` file that has a token or a secret key. It still refuses a `.env` file with a private key or an executable, and all other files keep every deny rule.
    - First run `ferry move <path> --include-env --allow-secrets --dry-run`. Each such file shows on a `Carry with secrets: <path> (<kinds>)` line. The line names the kinds of secret, never the values.
@@ -205,8 +208,9 @@ ferry skills add owner/repo --skill some-skill
 
 A skill that you write on a box stays on that box, and the next sync can refuse or shadow it. `ferry status` lists it under `Box-only skills`. Tell the operator to run `ferry adopt --from-box <box> <skill>` on the operator machine. Do not run it yourself.
 
-- Ferry copies the skill, runs the deny rules, and shows the file list of a new skill or the diff against the copy on the operator machine. Then it asks.
-- A skill that fails a deny rule stays on the box, and nothing reaches the operator machine. The error has the code `deny-rule-match`.
+- The Ferry on the box runs the deny rules on the skill. Ferry then copies the files that pass, and shows the file list of a new skill or the diff against the copy on the operator machine. Then it asks.
+- A skill that fails a deny rule stays on the box, and Ferry copies no file of it to the operator machine. The error has the code `deny-rule-match`.
+- The box needs a release of Ferry from `ferry install` or `ferry update`. Without it, the adopt fails with the code `refused` and names the command to run.
 - Ferry skips the files that a skip rule covers, such as `node_modules`, and keeps the executable bit.
 - After the confirmation, Ferry writes the skill to the same skill root on the operator machine and moves the box copy to `~/.ferry/backups/<time>/adopt` on the box.
 - `ferry adopt` does not sync. The operator runs `ferry sync`, which publishes the skill and links it on all boxes.

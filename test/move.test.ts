@@ -20,6 +20,7 @@ import type { Integration, MovedSession } from "../src/integrations/types.ts";
 import { runMove, type MoveDependencies, type MoveInput, type MoveResult } from "../src/move.ts";
 import { projectDirectoryName } from "../src/sessions.ts";
 import { errorInfo } from "../src/output.ts";
+import { installBoxFerry } from "./box-ferry-shim.ts";
 import { recordProgress } from "./fake-progress.ts";
 
 const roots: string[] = [];
@@ -69,13 +70,23 @@ function world() {
   git(seed, "commit", "-q", "-m", "init");
   git(seed, "push", "-q", "origin", "HEAD:main");
 
+  installBoxFerry(box);
   const commands: { command: string; options: RunOptions }[] = [];
-  const link = boxLink(box, bin, commands);
-  return { root, operator, box, origin, bin, link, commands };
+  const received: string[] = [];
+  const link = boxLink(box, bin, commands, received);
+  return { root, operator, box, origin, bin, link, commands, received };
 }
 
-/** Runs each box command in `sh` with the box home, as OpenSSH would on the box. */
-function boxLink(home: string, bin: string, commands: { command: string; options: RunOptions }[]): Pick<Link, "run"> {
+/**
+ * Runs each box command in `sh` with the box home, as OpenSSH would on the box.
+ * `received` gets the stdout and the stderr of each command: all that this machine gets from the box.
+ */
+function boxLink(
+  home: string,
+  bin: string,
+  commands: { command: string; options: RunOptions }[],
+  received: string[] = [],
+): Pick<Link, "run"> {
   return {
     async run(command, options = {}) {
       commands.push({ command, options });
@@ -85,6 +96,7 @@ function boxLink(home: string, bin: string, commands: { command: string; options
       });
       const stdout = child.stdout.toString();
       const stderr = child.stderr.toString();
+      received.push(stdout, stderr);
       const result: LinkResult =
         child.exitCode === 0
           ? { ok: true, address: "user@box.example", stdout, stderr }
@@ -95,6 +107,11 @@ function boxLink(home: string, bin: string, commands: { command: string; options
 }
 
 type World = ReturnType<typeof world>;
+
+/** True when `text` reached this machine from the box, as plain text or in a base64 archive. */
+function crossed(w: World, text: string): boolean {
+  return w.received.some((output) => output.includes(text) || Buffer.from(output, "base64").includes(text));
+}
 
 function project(w: World, home: string): string {
   const path = join(home, "Developer", "app");
@@ -805,6 +822,208 @@ describe("ferry move --from-box", () => {
 
     expect(result.lines.find((line) => line.startsWith("Problem: Branch main has commit"))).toContain('"Box work"');
     expect(existsSync(join(w.operator, "Developer/app"))).toBe(false);
+  });
+});
+
+describe("ferry move --from-box checks the files on the box", () => {
+  // Fake tokens, built at runtime so that no secret scanner flags this file.
+  const FILE_TOKEN = "gh" + "p_" + "d".repeat(36);
+  const SESSION_TOKEN = "gh" + "p_" + "e".repeat(36);
+  const copies = (w: World) => w.commands.filter(({ command }) => command.includes("tar --null -cf"));
+
+  /** A box project with a clean file and a file with a token, and a clean session and a session with a token. */
+  function leakyBox(w: World): { boxApp: string; sessions: string } {
+    const boxApp = project(w, w.box);
+    write(join(boxApp, "AGENTS.md"), "# Agents\n");
+    write(join(boxApp, "notes.md"), `token ${FILE_TOKEN}\n`);
+    const sessions = join(w.box, ".claude/projects", projectDirectoryName(boxApp));
+    write(join(sessions, "clean.jsonl"), `${JSON.stringify({ type: "user", message: "hello" })}\n`);
+    write(join(sessions, "leaky.jsonl"), `${JSON.stringify({ type: "user", message: `use ${SESSION_TOKEN}` })}\n`);
+    return { boxApp, sessions };
+  }
+
+  test("a file and a session with a token stay on the box, and no byte of them reaches this machine", async () => {
+    const w = world();
+    leakyBox(w);
+
+    const result = await move(w, { path: "Developer/app", fromBox: "default" });
+
+    expect(result.error).toBeNull();
+    expect(result.lines).toContain("Refuse: notes.md (GitHub token in file content)");
+    expect(result.value?.sessions.refused.map((hit) => hit.code)).toEqual(["github-token"]);
+    expect(crossed(w, FILE_TOKEN)).toBe(false);
+    expect(crossed(w, SESSION_TOKEN)).toBe(false);
+    const localApp = join(w.operator, "Developer/app");
+    expect(readFileSync(join(localApp, "AGENTS.md"), "utf8")).toBe("# Agents\n");
+    expect(existsSync(join(localApp, "notes.md"))).toBe(false);
+    const local = join(w.operator, ".claude/projects", projectDirectoryName(localApp));
+    expect(existsSync(join(local, "clean.jsonl"))).toBe(true);
+    expect(existsSync(join(local, "leaky.jsonl"))).toBe(false);
+    expect(result.events).toContain("start:Reading 1 file on the box");
+    expect(copies(w).map(({ options }) => Buffer.from(options.input ?? []).toString().split("\0").filter(Boolean))).toEqual([
+      ["AGENTS.md"],
+      [join(".claude/projects", projectDirectoryName(join(w.box, "Developer/app")), "clean.jsonl")],
+    ]);
+  });
+
+  test("--dry-run names the refused file and session, and copies no file from the box", async () => {
+    const w = world();
+    leakyBox(w);
+
+    const result = await move(w, { path: "Developer/app", fromBox: "default", dryRun: true });
+
+    expect(result.error).toBeNull();
+    expect(result.lines).toContain("Carry: AGENTS.md");
+    expect(result.lines).toContain("Refuse: notes.md (GitHub token in file content)");
+    expect(result.lines).toContain("Carry sessions: claude 1");
+    expect(result.value?.sessions.refused.map((hit) => hit.code)).toEqual(["github-token"]);
+    expect(result.value?.carry.map((file) => file.sha256)).toEqual([new Bun.CryptoHasher("sha256").update("# Agents\n").digest("hex")]);
+    expect(w.commands.some(({ command }) => command.includes("tar "))).toBe(false);
+    expect(crossed(w, FILE_TOKEN)).toBe(false);
+    expect(crossed(w, SESSION_TOKEN)).toBe(false);
+    expect(crossed(w, "# Agents")).toBe(false);
+    expect(listTree(w.operator)).toEqual([]);
+  });
+
+  test("--allow-secrets --dry-run names the session with secrets and copies no file, and the move then carries it", async () => {
+    const w = world();
+    leakyBox(w);
+
+    const planned = await move(w, { path: "Developer/app", fromBox: "default", allowSecrets: true, dryRun: true });
+
+    expect(planned.error).toBeNull();
+    expect(planned.lines.some((line) => line.startsWith("Carry session with secrets: ") && line.endsWith("leaky.jsonl (GitHub token in file content)"))).toBe(true);
+    expect(planned.lines).toContain("Refuse: notes.md (GitHub token in file content)");
+    expect(w.commands.some(({ command }) => command.includes("tar "))).toBe(false);
+    expect(crossed(w, SESSION_TOKEN)).toBe(false);
+
+    const result = await move(w, { path: "Developer/app", fromBox: "default", allowSecrets: true, yes: true });
+
+    expect(result.error).toBeNull();
+    const local = join(w.operator, ".claude/projects", projectDirectoryName(join(w.operator, "Developer/app")));
+    expect(readFileSync(join(local, "leaky.jsonl"), "utf8")).toContain(SESSION_TOKEN);
+    expect(statSync(join(local, "leaky.jsonl")).mode & 0o777).toBe(0o600);
+    expect(crossed(w, FILE_TOKEN)).toBe(false);
+  });
+
+  test("without a confirmation, the files with secrets stay on the box", async () => {
+    const w = world();
+    leakyBox(w);
+
+    const result = await move(w, { path: "Developer/app", fromBox: "default", allowSecrets: true });
+
+    expect(errorInfo(result.error).code).toBe("confirmation-required");
+    expect(w.commands.some(({ command }) => command.includes("tar "))).toBe(false);
+    expect(crossed(w, SESSION_TOKEN)).toBe(false);
+  });
+
+  test("refuses when the box has no Ferry, and when its Ferry has no scan command, before it copies a file", async () => {
+    const cases: [string | null, string, string][] = [
+      [null, "Ferry is not installed on the box.", "Run ferry install."],
+      [`echo "error: unknown command 'scan'" >&2; exit 1`, "The Ferry on the box is too old to check the files there.", "Run ferry update."],
+    ];
+    for (const [script, message, hint] of cases) {
+      for (const dryRun of [true, false]) {
+        const w = world();
+        leakyBox(w);
+        if (script === null) rmSync(join(w.box, ".ferry/box.json"));
+        else installBoxFerry(w.box, script);
+
+        const result = await move(w, { path: "Developer/app", fromBox: "default", dryRun });
+
+        expect(errorInfo(result.error).code).toBe("refused");
+        expect(result.error?.message).toStartWith(message);
+        expect(errorInfo(result.error).hint).toStartWith(hint);
+        expect(w.commands.some(({ command }) => command.includes("tar "))).toBe(false);
+        expect(crossed(w, "# Agents")).toBe(false);
+        expect(crossed(w, FILE_TOKEN)).toBe(false);
+        expect(listTree(w.operator)).toEqual([]);
+      }
+    }
+  });
+
+  test("a box without Ferry still moves a project that has no file to check", async () => {
+    const w = world();
+    project(w, w.box);
+    rmSync(join(w.box, ".local"), { recursive: true });
+
+    const result = await move(w, { path: "Developer/app", fromBox: "default" });
+
+    expect(result.error).toBeNull();
+    expect(existsSync(join(w.operator, "Developer/app/README.md"))).toBe(true);
+  });
+
+  test("refuses the move when a project file changes on the box after the check, before any change on this machine", async () => {
+    const w = world();
+    const { boxApp } = leakyBox(w);
+    const racing: Pick<Link, "run"> = {
+      run: (command, options) => {
+        if (command.includes("tar --null -cf")) writeFileSync(join(boxApp, "AGENTS.md"), `token ${FILE_TOKEN}\n`);
+        return w.link.run(command, options);
+      },
+    };
+
+    const result = await move(w, { path: "Developer/app", fromBox: "default", sessions: false }, { createLink: () => racing });
+
+    expect(result.error?.message).toBe("AGENTS.md changed on the box after the check. Run the move again.");
+    expect(listTree(w.operator)).toEqual([]);
+    expect(existsSync(boxApp)).toBe(true);
+  });
+
+  test("skips a session whose file changes on the box after the check, and carries the other sessions", async () => {
+    const w = world();
+    const boxApp = project(w, w.box);
+    const sessions = join(w.box, ".claude/projects", projectDirectoryName(boxApp));
+    write(join(sessions, "clean.jsonl"), `${JSON.stringify({ type: "user", message: "hello" })}\n`);
+    write(join(sessions, "active.jsonl"), `${JSON.stringify({ type: "user", message: "hello" })}\n`);
+    const racing: Pick<Link, "run"> = {
+      run: (command, options) => {
+        if (command.includes("tar --null -cf")) writeFileSync(join(sessions, "active.jsonl"), `use ${SESSION_TOKEN}\n`);
+        return w.link.run(command, options);
+      },
+    };
+    const warnings: string[] = [];
+
+    const result = await move(w, { path: "Developer/app", fromBox: "default" }, { createLink: () => racing, warn: (line) => warnings.push(line) });
+
+    expect(result.error).toBeNull();
+    const local = join(w.operator, ".claude/projects", projectDirectoryName(join(w.operator, "Developer/app")));
+    expect(existsSync(join(local, "clean.jsonl"))).toBe(true);
+    expect(existsSync(join(local, "active.jsonl"))).toBe(false);
+    const active = `~/${join(sessions, "active.jsonl").slice(w.box.length + 1)}`;
+    expect(warnings).toEqual([`WARNING: Ferry skips the session of ${active} (a file changed after the check). Run the move again to carry it.`]);
+    expect(result.lines.at(-2)).toBe("Carried 1 session. Resume them in ~/Developer/app on this machine.");
+  });
+
+  test("a move between boxes checks the files on the source box, and no byte of a refused file reaches this machine or the other box", async () => {
+    const w = world();
+    leakyBox(w);
+    const boxB = join(w.root, "box-b");
+    mkdirSync(boxB);
+    const commandsB: { command: string; options: RunOptions }[] = [];
+    const linkB = boxLink(boxB, w.bin, commandsB);
+    const boxes = () => ({
+      boxes: [
+        { name: "a", host: { transport: "ssh" as const, destination: "user@a.example" } },
+        { name: "b", host: { transport: "ssh" as const, destination: "user@b.example" } },
+      ],
+    });
+
+    const result = await move(
+      w,
+      { path: "Developer/app", fromBox: "a", toBox: "b" },
+      { readConfig: boxes, createLink: ((options: { destination?: string }) => (options.destination === "user@a.example" ? w.link : linkB)) as MoveDependencies["createLink"] },
+    );
+
+    expect(result.error).toBeNull();
+    expect(readFileSync(join(boxB, "Developer/app/AGENTS.md"), "utf8")).toBe("# Agents\n");
+    expect(existsSync(join(boxB, ".claude/projects", projectDirectoryName(join(boxB, "Developer/app")), "clean.jsonl"))).toBe(true);
+    expect(crossed(w, FILE_TOKEN)).toBe(false);
+    expect(crossed(w, SESSION_TOKEN)).toBe(false);
+    const sent = Buffer.concat(commandsB.map(({ options }) => Buffer.from(options.input ?? [])));
+    expect(sent.includes(FILE_TOKEN) || sent.includes(SESSION_TOKEN)).toBe(false);
+    // Box b has no Ferry. Only the source box checks the files.
+    expect(existsSync(join(boxB, ".local"))).toBe(false);
   });
 });
 

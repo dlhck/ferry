@@ -139,6 +139,7 @@ import {
   type UpdateCommandResult,
 } from "./update.ts";
 import { isReleaseVersion, VERSION } from "./version.ts";
+import { parseScanRequest, runScan } from "./scan.ts";
 import { offerSelfUpdate, offersSelfUpdate, runSelfUpdate, type SelfUpdateDependencies } from "./self-update.ts";
 
 const DESCRIPTION = `Ferry keeps a remote Linux agent box in the same shape as this machine.
@@ -189,6 +190,8 @@ type CliDependencies = {
   /** Asks to update Ferry. True when the update ran and the command must stop. The default is `offerSelfUpdate`. */
   readonly offerSelfUpdate?: () => Promise<boolean>;
   readonly runSelfUpdate?: typeof runSelfUpdate;
+  /** The text on stdin, for `ferry scan`. The default reads stdin. */
+  readonly readStdin?: () => Promise<string>;
   /** Sets the exit code of `ferry expose`. */
   readonly setExitCode?: (code: number) => void;
   readonly runStatus?: (
@@ -238,8 +241,8 @@ type CliDependencies = {
 /** The commands that stay running and print one event for each line with --json. */
 const STREAM_COMMANDS = new Set(["watch", "tunnel", "expose"]);
 
-/** The commands that a box install runs. */
-const BOX_INSTALL_COMMANDS = new Set(["expose", "whoami"]);
+/** The commands that a box install runs. `scan` is hidden: the operator machine runs it over Link. */
+const BOX_INSTALL_COMMANDS = new Set(["expose", "whoami", "scan"]);
 
 const JSON_HELP = `JSON output (--json):
   stdout has only JSON. Progress and the text lines go to stderr. Ferry
@@ -826,7 +829,11 @@ Ferry also carries the Claude and Codex sessions of the project and the Claude
 project memory, so claude --resume and codex resume find them on the
 destination. A session file there stays, unless the source has the same file.
 Ferry skips a session that fails the deny rules and names the file and the
-rule. The source keeps its sessions.`)
+rule. The source keeps its sessions.
+
+The deny rules run on the source machine. With --from-box, the Ferry on the
+box runs them, and Ferry copies only the files that pass. So the box needs a
+release of Ferry from ferry install or ferry update. --dry-run copies no file.`)
     .argument("<path>", "project folder inside the home directory")
     .option("--from-box <name>", "move the project from this box. Without --to-box, the destination is this machine")
     .option("--to-box <name>", "move the project to this box. Without it and --from-box, Ferry uses default_box or the only box")
@@ -886,10 +893,12 @@ rule. The source keeps its sessions.`)
     .description(`Copy a skill that an agent wrote on a box to this machine.
 
 ferry status lists the box-only skills of each box: skills in a harness skill
-root or in the box checkout that the snapshot does not have. Ferry copies the
-skill from the box, runs the deny rules, and shows the file list of a new skill
-or the diff against the copy on this machine. A skill that fails a deny rule
-does not reach this machine. After the confirmation, Ferry writes the skill to
+root or in the box checkout that the snapshot does not have. The Ferry on the
+box runs the deny rules on the skill. A skill that fails a deny rule does not
+reach this machine: Ferry copies no file of it. Else Ferry copies the files
+that pass and shows the file list of a new skill or the diff against the copy
+on this machine. The box needs a release of Ferry from ferry install or ferry
+update. After the confirmation, Ferry writes the skill to
 the same skill root on this machine and moves the box copy to
 ~/.ferry/backups on the box. Then run ferry sync. It publishes the skill,
 links it on this machine, and links it on all boxes.`)
@@ -1437,6 +1446,15 @@ on the box. This command runs on the operator machine and on a box install.`)
         harnesses: registry().harnesses,
       });
       report(result, (result) => whoamiLines(result).forEach((line) => writeLine(line)));
+    });
+
+  // adopt --from-box and move --from-box run this command of the Ferry on the box, so that the box checks a file before it leaves the box.
+  program
+    .command("scan", { hidden: true })
+    .description("Apply the deny rules to files of this machine. Reads one JSON request on stdin. Prints paths, rule hits, and hashes, never file content")
+    .action(async () => {
+      const request = parseScanRequest(await (dependencies.readStdin ?? (() => Bun.stdin.text()))());
+      report(runScan(request, (dependencies.home ?? homedir)()), (result) => writeLine(JSON.stringify(result)));
     });
 
   // self-update runs this command of the new Ferry, because only the new binary has the new skill.

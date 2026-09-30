@@ -11,6 +11,11 @@
  * the destination. With `remove`, the source copy goes to a trash directory.
  * Ferry never deletes it.
  *
+ * The deny rules run on the source machine. For a source box, the Ferry on the
+ * box runs them with `ferry scan`, and the preflight copies no file. After the
+ * plan and the confirmation, Ferry copies only the files that it carries, and
+ * compares each one with the SHA-256 of the scan.
+ *
  * With `sessions`, Ferry also carries the agent sessions of the project from
  * the session stores of the harness descriptors, with the same deny rules.
  * A session file on the destination stays, unless the source has the same
@@ -22,7 +27,7 @@
 
 import * as prompts from "@clack/prompts";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, posix, relative, resolve } from "node:path";
 import { BoxRequiredError, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
@@ -31,13 +36,13 @@ import { hasBoxPart, INTEGRATIONS, operatorIntegrations, type Integration } from
 import { paseoSourceHint } from "./integrations/paseo.ts";
 import type { IntegrationId, MovedSession } from "./integrations/types.ts";
 import { Link, type LinkOptions } from "./link.ts";
-import { carriedContentHits, carriedNameHit } from "./manifest.ts";
+import { carriedNameHit } from "./manifest.ts";
 import { FerryError } from "./errors.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
 import { BUILTIN_HARNESSES } from "./registry/builtin.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
-import { sessionContentHits } from "./session-scan.ts";
-import { stageSessions } from "./sessions.ts";
+import { changedFiles, runScan, scanOnBox, type ScanOf, type ScanRequest } from "./scan.ts";
+import { groupSessions, listSessionFiles, stageSessions, type Session } from "./sessions.ts";
 
 export type MoveInput = {
   /** The project path on the operator machine, or the same path for the source box with `fromBox`. */
@@ -168,6 +173,8 @@ type Side = {
   readonly home: string;
   readonly trash: string;
   run(command: string, options?: { readonly input?: Uint8Array; readonly timeoutMs?: number }): Promise<SideResult>;
+  /** Apply the deny rules to files of this machine, on this machine. */
+  scan<Request extends ScanRequest>(request: Request): Promise<ScanOf<Request>>;
 };
 
 type GitSource = {
@@ -176,13 +183,8 @@ type GitSource = {
   readonly branch: string | null;
 };
 
-/** A session or memory file to carry. The file paths are relative to the destination home. */
-type CarriedSession = {
-  readonly harness: string;
-  readonly id: string | null;
-  readonly files: readonly Carried[];
-  readonly secrets: readonly string[];
-};
+/** A session or memory file to carry. `secrets` holds the kinds of secret in its files, never the values. */
+type CarriedSession = Session & { readonly secrets: readonly string[] };
 
 type SessionPlan = {
   readonly carry: readonly CarriedSession[];
@@ -190,8 +192,10 @@ type SessionPlan = {
   readonly refused: readonly Hit[];
   /** One line for each refused file. */
   readonly warnings: readonly string[];
-  /** The local directory that holds the session files at their destination paths, or null without sessions. */
-  readonly stage: string | null;
+  /** The SHA-256 of each source file from the scan, by its path relative to the source home. */
+  readonly sha256: ReadonlyMap<string, string>;
+  /** The absolute project path on the destination. */
+  readonly targetProject: string;
 };
 
 type Plan = {
@@ -201,8 +205,6 @@ type Plan = {
   readonly skipped: readonly Hit[];
   readonly notes: readonly string[];
   readonly problems: readonly string[];
-  /** The local directory that holds the checked bytes of the carried files. */
-  readonly stage: string;
 };
 
 const PROBE_TIMEOUT_MS = 30_000;
@@ -210,8 +212,6 @@ const NETWORK_TIMEOUT_MS = 120_000;
 const GH_TIMEOUT_MS = 15_000;
 const TRANSFER_TIMEOUT_MS = 15 * 60_000;
 const SECTION = "ferry-section";
-/** Content rules that refuse an environment file also with `allowSecrets`. */
-const ALWAYS_REFUSED = new Set(["private-key", "executable"]);
 
 /** Returns null when the operator does not confirm. */
 export async function runMove(input: MoveInput, overrides: Partial<MoveDependencies> = {}): Promise<MoveResult | null> {
@@ -253,21 +253,16 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
   const writeLine = dependencies.writeLine;
   const progress = dependencies.progress;
 
-  progress.plan(input.dryRun ? 1 : (input.remove ? 5 : 4) + (input.sessions ? 1 : 0) + registered.length);
+  progress.plan(input.dryRun ? 1 : (input.remove ? 5 : 4) + (fromBox ? 1 : 0) + (input.sessions ? 1 : 0) + registered.length);
   const plan = await step(
     progress,
     "Preflight",
     async () => {
-      const plan = await preflight(input, rel, source, sourcePath, destination, destinationPath, fromBox ? null : join(home, rel));
-      try {
-        const sessions = input.sessions
-          ? await sessionPreflight(input, rel, source, destination, dependencies.harnesses)
-          : { carry: [], refused: [], warnings: [], stage: null };
-        return { ...plan, sessions };
-      } catch (error) {
-        if (fromBox) rmSync(plan.stage, { recursive: true, force: true });
-        throw error;
-      }
+      const plan = await preflight(input, rel, source, sourcePath, destination, destinationPath);
+      const sessions = input.sessions
+        ? await sessionPreflight(input, rel, source, destination, dependencies.harnesses)
+        : NO_SESSIONS;
+      return { ...plan, sessions };
     },
     undefined,
     (plan) =>
@@ -282,6 +277,9 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
         .join(", "),
   );
   const warnings: string[] = [];
+  // The local directory with the carried files: the project on this machine, or a copy of the files of a source box.
+  let stage: string | null = fromBox ? null : join(home, rel);
+  let sessionStage: string | null = null;
   try {
     writeLine(input.dryRun ? "Move plan (no changes will be made):" : "Move plan:");
     writeLine(`Source: ${source.label} ~/${rel}`);
@@ -308,7 +306,7 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
     if (counts.size > 0) writeLine(`Carry sessions: ${[...counts].map(([key, count]) => `${key} ${count}`).join(", ")}`);
     for (const session of plan.sessions.carry) {
       if (session.secrets.length > 0) {
-        writeLine(`Carry session with secrets: ~/${session.files[0]!.path} (${session.secrets.join("; ")})`);
+        writeLine(`Carry session with secrets: ~/${session.files[0]!.target} (${session.secrets.join("; ")})`);
       }
     }
     for (const warning of plan.sessions.warnings) {
@@ -334,7 +332,7 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
         carry: plan.sessions.carry.map((session) => ({
           harness: session.harness,
           id: session.id,
-          files: session.files.map((file) => `~/${file.path}`),
+          files: session.files.map((file) => `~/${file.target}`),
           secrets: session.secrets,
         })),
         refused: plan.sessions.refused,
@@ -361,6 +359,17 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       }
     }
 
+    if (fromBox && plan.carry.length === 0) progress.skip("Reading the files", "no files to carry");
+    else if (fromBox) {
+      await step(progress, `Reading ${plural(plan.carry.length, "file")} on ${source.label}`, async () => {
+        stage = await fetchFiles(source, sourcePath, plan.carry.map((file) => file.path));
+        const changed = changedFiles(stage, plan.carry);
+        if (changed.length > 0) {
+          throw new MoveError(`${changed.join(", ")} changed on ${source.label} after the check. Run the move again.`);
+        }
+      });
+    }
+
     const incomplete = `The copy at ~/${rel} on ${destination.label} is incomplete. Move it away before you try again.`;
     await step(progress, `Cloning on ${destination.label}`, async () => {
       const parent = posix.dirname(rel) === "." ? destination.home : `${destination.home}/${quoteShell(posix.dirname(rel))}`;
@@ -375,7 +384,7 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       progress.skip("Verifying", "no files to carry");
     } else {
       await step(progress, `Carrying ${plan.carry.length} ${plan.carry.length === 1 ? "file" : "files"}`, async () => {
-        const archive = await createArchive(plan.stage, plan.carry.map((file) => file.path));
+        const archive = await createArchive(stage!, plan.carry.map((file) => file.path));
         // tar keeps the source mode, so the files with secrets get mode 600 after the extraction.
         // `carrySessions` sets the mode of the session files, whose paths are relative to the home.
         const chmod =
@@ -403,9 +412,23 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       const carry = plan.sessions.carry;
       progress.start(`Carrying ${plural(carry.flatMap((session) => session.files).length, "session file")}`);
       try {
-        await carrySessions(destination, plan.sessions.stage!, carry);
+        const staged = await stageSessions({
+          sessions: carry,
+          sha256: plan.sessions.sha256,
+          targetProject: plan.sessions.targetProject,
+          fetch: (paths) => fetchFiles(source, source.home, paths),
+        });
+        sessionStage = staged.stage;
+        for (const session of staged.changed) {
+          const what = session.id === null ? "the memory file" : "the session of";
+          warnings.push(
+            `WARNING: Ferry skips ${what} ~/${session.files[0]!.source} (a file changed after the check). Run the move again to carry it.`,
+          );
+        }
+        const secret = new Set(carry.filter((session) => session.secrets.length > 0).map((session) => session.files[0]!.source));
+        await carrySessions(destination, staged.stage, staged.sessions, secret);
         progress.done();
-        moved = carry.flatMap((session) => (session.id === null ? [] : [{ provider: session.harness, id: session.id }]));
+        moved = staged.sessions.flatMap((session) => (session.id === null ? [] : [{ provider: session.harness, id: session.id }]));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         progress.fail(message);
@@ -464,8 +487,8 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
     }
     return { ...result, trash };
   } finally {
-    if (fromBox) rmSync(plan.stage, { recursive: true, force: true });
-    if (plan.sessions.stage) rmSync(plan.sessions.stage, { recursive: true, force: true });
+    if (fromBox && stage) rmSync(stage, { recursive: true, force: true });
+    if (sessionStage) rmSync(sessionStage, { recursive: true, force: true });
   }
 }
 
@@ -490,7 +513,6 @@ async function preflight(
   sourcePath: string,
   destination: Side,
   destinationPath: string,
-  localSource: string | null,
 ): Promise<Plan> {
   const problems: string[] = [];
   const notes: string[] = [];
@@ -540,51 +562,30 @@ async function preflight(
     else wanted.push(path);
   }
 
-  const stage = localSource ?? (await fetchFiles(source, sourcePath, wanted));
-  const carry: Carried[] = [];
-  for (const path of wanted) {
-    const full = join(stage, path);
-    let stat;
-    try {
-      stat = lstatSync(full);
-    } catch {
-      refused.push({ path, code: "missing", reason: "file changed during the preflight" });
-      continue;
-    }
-    if (stat.isSymbolicLink()) {
-      refused.push({ path, code: "symlink", reason: "symbolic link" });
-      continue;
-    }
-    if (!stat.isFile()) {
-      refused.push({ path, code: "not-a-file", reason: "not a regular file" });
-      continue;
-    }
-    const bytes = readFileSync(full);
-    const sha256 = createHash("sha256").update(bytes).digest("hex");
-    const hits = carriedContentHits(path, bytes);
-    if (hits.length === 0) carry.push({ path, sha256, secrets: [] });
-    else if (!input.allowSecrets || carriedNameHit(path)?.code !== "dotenv") refused.push(...hits);
-    else {
-      const all = [...hits, ...envLineHits(path, bytes)];
-      const kept = all.find((hit) => ALWAYS_REFUSED.has(hit.code));
-      if (kept) refused.push(kept);
-      else carry.push({ path, sha256, secrets: [...new Set(all.map((hit) => hit.reason))] });
-    }
-  }
+  // The source machine reads the files. A source box returns the hits and the hashes, never the content.
+  const scanned =
+    wanted.length > 0
+      ? await source.scan({ kind: "files", root: rel, paths: wanted, allowSecrets: input.allowSecrets })
+      : { carry: [], refused: [] };
+  const carry = scanned.carry.filter((file) => wanted.includes(file.path));
+  refused.push(...scanned.refused);
 
   if (input.remove && refused.length > 0) {
     problems.push(
       `--remove needs every local-only file carried, and Ferry refuses ${refused.length}. Move them by hand or leave out --remove.`,
     );
   }
-  return { git, carry, refused, skipped, notes, problems, stage };
+  return { git, carry, refused, skipped, notes, problems };
 }
 
+const NO_SESSIONS: SessionPlan = { carry: [], refused: [], warnings: [], sha256: new Map(), targetProject: "" };
+
 /**
- * Stage the sessions of the project and apply the deny rules to each file. A
- * transcript also gets the session scan, which reads each record. A hit
- * refuses the whole session. With `allowSecrets`, a session whose files fail
- * only the token or secret-field rules is carried.
+ * List the sessions of the project and apply the deny rules to each file on
+ * the source machine. A transcript also gets the session scan, which reads
+ * each record. A hit refuses the whole session. With `allowSecrets`, a session
+ * whose files fail only the token or secret-field rules is carried. The
+ * preflight copies no session file.
  */
 async function sessionPreflight(
   input: MoveInput,
@@ -595,33 +596,30 @@ async function sessionPreflight(
 ): Promise<SessionPlan> {
   const homeOf = async (side: Side) =>
     must(side.run(`printf '%s' ${side.home}`, { timeoutMs: PROBE_TIMEOUT_MS }), `Ferry could not read the home on ${side.label}`);
-  const staged = await stageSessions({
+  const sourceProject = `${await homeOf(source)}/${rel}`;
+  const targetProject = `${await homeOf(destination)}/${rel}`;
+  const listed = await listSessionFiles({
     harnesses,
-    sourceProject: `${await homeOf(source)}/${rel}`,
-    targetProject: `${await homeOf(destination)}/${rel}`,
+    sourceProject,
     run: (command) =>
       must(source.run(`cd ${source.home} && ${command}`, { timeoutMs: PROBE_TIMEOUT_MS }), `Ferry could not list the sessions on ${source.label}`),
-    fetch: (paths) => fetchFiles(source, source.home, paths),
   });
+  const paths = listed.flatMap((entry) => entry.paths);
+  if (paths.length === 0) return NO_SESSIONS;
+  const scanned = new Map((await source.scan({ kind: "sessions", paths, project: sourceProject })).files.map((file) => [file.path, file]));
+  const unscanned = paths.filter((path) => !scanned.has(path));
+  if (unscanned.length > 0) throw new MoveError(`The check on ${source.label} gave no result for ~/${unscanned.join(", ~/")}.`);
+  const ids = new Map([...scanned].map(([path, file]) => [path, file.id]));
   const carry: CarriedSession[] = [];
   const refused: Hit[] = [];
   const warnings: string[] = [];
-  for (const session of staged.sessions) {
-    const files: Carried[] = [];
-    const hits: Hit[] = [];
+  for (const session of groupSessions(listed, ids, sourceProject, targetProject)) {
+    const files = session.files.map((file) => scanned.get(file.source)!);
+    const hits = files.flatMap((file) => file.hits.map((hit) => ({ ...hit, path: `~/${file.path}` })));
     // A name rule, a private key, or an executable refuses the session also with allowSecrets.
-    let blocked = false;
-    for (const file of session.files) {
-      const bytes = readFileSync(join(staged.stage!, file.target));
-      const path = `~/${file.source}`;
-      const nameHit = carriedNameHit(file.source);
-      const found = nameHit ? [nameHit] : [...carriedContentHits(file.source, bytes), ...sessionContentHits(file.source, bytes)];
-      if (nameHit || found.some((hit) => ALWAYS_REFUSED.has(hit.code))) blocked = true;
-      hits.push(...found.map((hit) => ({ ...hit, path })));
-      files.push({ path: file.target, sha256: createHash("sha256").update(bytes).digest("hex"), secrets: [] });
-    }
+    const blocked = files.some((file) => file.blocked);
     if (hits.length === 0 || (input.allowSecrets && !blocked)) {
-      carry.push({ harness: session.harness, id: session.id, files, secrets: [...new Set(hits.map((hit) => hit.reason))] });
+      carry.push({ ...session, secrets: [...new Set(hits.map((hit) => hit.reason))] });
       continue;
     }
     refused.push(...hits);
@@ -629,16 +627,34 @@ async function sessionPreflight(
     const what = session.id === null ? "the memory file" : "the session of";
     for (const hit of hits) warnings.push(`WARNING: Ferry skips ${what} ${hit.path} (${hit.reason}).${hint}`);
   }
-  return { carry, refused, warnings, stage: staged.stage };
+  const sha256 = new Map([...scanned].map(([path, file]) => [path, file.sha256]));
+  return { carry, refused, warnings, sha256, targetProject };
 }
 
-/** Write the session files into the destination home and verify each one. A file there with the same path gets the source bytes. */
-async function carrySessions(destination: Side, stage: string, carry: readonly CarriedSession[]): Promise<void> {
-  const files = carry.flatMap((session) => session.files);
-  const secret = carry.filter((session) => session.secrets.length > 0).flatMap((session) => session.files);
+/**
+ * Write the staged session files into the destination home and verify each
+ * one. A file there with the same path gets the source bytes. `secret` names
+ * each session with secrets by the source path of its first file. Its files
+ * get mode 600.
+ */
+async function carrySessions(
+  destination: Side,
+  stage: string,
+  sessions: readonly Session[],
+  secret: ReadonlySet<string>,
+): Promise<void> {
+  const files: Carried[] = sessions.flatMap((session) =>
+    session.files.map((file) => ({
+      path: file.target,
+      sha256: createHash("sha256").update(readFileSync(join(stage, file.target))).digest("hex"),
+      secrets: [],
+    })),
+  );
+  if (files.length === 0) return;
+  const modes = sessions.filter((session) => secret.has(session.files[0]!.source)).flatMap((session) => session.files);
   const archive = await createArchive(stage, files.map((file) => file.path));
   const chmod =
-    secret.length > 0 ? ` && cd ${destination.home} && chmod 600 ${secret.map((file) => quoteShell(`./${file.path}`)).join(" ")}` : "";
+    modes.length > 0 ? ` && cd ${destination.home} && chmod 600 ${modes.map((file) => quoteShell(`./${file.target}`)).join(" ")}` : "";
   await must(
     destination.run(`tar -xf - -C ${destination.home}${chmod}`, { input: archive, timeoutMs: TRANSFER_TIMEOUT_MS }),
     `Ferry could not write the session files on ${destination.label}`,
@@ -828,18 +844,6 @@ const GIT_LIST = `git ls-files -z --others ${X_SKIPPED} && printf '\\0${SECTION}
 const FIND_LIST = `find . ${FIND_SKIPPED} -prune -o ! -type d -print0 && printf '\\0${SECTION}\\0' && find . -mindepth 1 ${FIND_SKIPPED} -prune -print0`;
 
 /**
- * The content hits of each line of an environment file. `carriedContentHits`
- * reports only the first content rule that finds a secret in the file, so
- * Ferry checks each line alone to name all kinds of secret.
- */
-function envLineHits(path: string, bytes: Uint8Array): Hit[] {
-  return Buffer.from(bytes)
-    .toString("utf8")
-    .split("\n")
-    .flatMap((line) => carriedContentHits(path, Buffer.from(line)));
-}
-
-/**
  * True when `path` matches an entry of `SKIPPED_NAMES`. For a skipped file name
  * such as `*.tsbuildinfo`, `git ls-files --directory` also lists its parent
  * directories.
@@ -850,7 +854,7 @@ function isSkipped(path: string): boolean {
   );
 }
 
-/** Copy `paths` from the box into a local temporary directory for the deny checks. */
+/** Copy `paths` under `path` on the source into a new local temporary directory. The source scan names the paths. */
 async function fetchFiles(source: Side, path: string, paths: readonly string[]): Promise<string> {
   const stage = mkdtempSync(join(tmpdir(), "ferry-move-"));
   if (paths.length === 0) return stage;
@@ -907,6 +911,7 @@ function boxSide(link: Pick<Link, "run">, label: string): Side {
       const result = await link.run(command, options);
       return result.ok ? { ok: true, stdout: result.stdout } : { ok: false, message: result.error.message };
     },
+    scan: (request) => scanOnBox(link, label, request),
   };
 }
 
@@ -923,6 +928,7 @@ function localSide(home: string, platform: NodeJS.Platform): Side {
       if (result.exitCode === 0) return { ok: true, stdout };
       return { ok: false, message: result.stderr.trim() || stdout.trim() || `the command exited with ${result.exitCode}` };
     },
+    scan: async (request) => runScan(request, home),
   };
 }
 

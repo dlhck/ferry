@@ -6,9 +6,12 @@
  * directory, or a link to a directory outside the checkout, in a harness skill
  * root, or an untracked directory in the skills of the box checkout.
  *
- * Adopt copies the skill with tar over Link, runs the Manifest deny rules on
- * the copy, and writes the files that pass to a local harness skill root as a
- * real directory. The next `ferry sync` publishes it and links it into the
+ * The Ferry on the box runs the Manifest deny rules on the skill with `ferry
+ * scan`. A skill with a file that a rule refuses stays on the box, and Adopt
+ * copies no file of it. Else Adopt copies the files that pass with tar over
+ * Link, compares each one with the SHA-256 of the scan, and writes them to a
+ * local harness skill root as a real directory. The next `ferry sync`
+ * publishes it and links it into the
  * store, as it does for each new local skill. Ferry then moves the box copy to
  * `~/.ferry/backups` on the box, so that the sync can link the published skill
  * there.
@@ -37,6 +40,7 @@ import { CODEX_SYSTEM_SKILLS, readSeed } from "./manifest.ts";
 import { noProgress, step, type Progress } from "./progress.ts";
 import { BUILTIN_HARNESSES } from "./registry/builtin.ts";
 import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
+import { changedFiles, isInside, scanOnBox } from "./scan.ts";
 
 /** The skills of the snapshot checkout, relative to the home. */
 const STORE_SKILLS = ".ferry/store/skills";
@@ -192,10 +196,27 @@ export async function runAdoptFromBox(
   const storeCopy = join(home, STORE_SKILLS, name);
   const replaces = exists(storeCopy);
 
+  // The box applies the same rules as a publish, before a file of the skill leaves it.
+  const scan = await step(progress, `Checking ${name} on box ${box.name}`, () =>
+    scanOnBox(link, `box ${box.name}`, { kind: "skill", root: source.slice(2) }),
+  );
+  if (scan.forbidden.length > 0) {
+    const hits = scan.forbidden.map((hit) => `${hit.code} ${hit.reason}: ${hit.path}`);
+    throw new FerryError(
+      "deny-rule-match",
+      `Ferry refused ${name} from box ${box.name}, and copied nothing to this machine: ${hits.join("; ")}`,
+    );
+  }
+  const checked = scan.files.filter((file) => isInside(file.path));
+  if (checked.length === 0) throw new FerryError("refused", `${source} on box ${box.name} has no file that Ferry carries.`);
+  const skipped = scan.skipped.map((entry) => ({ path: entry.path, code: entry.code, reason: entry.reason }));
+
   const stage = mkdtempSync(join(tmpdir(), "ferry-adopt-"));
   try {
     await step(progress, `Copying ${name} from box ${box.name}`, async () => {
-      const encoded = await link.run(`cd "$HOME"/${quoteShell(source.slice(2))} && tar -cf - . | base64`, {
+      // -h copies the file behind a link in the skill, which is the file that the scan read.
+      const encoded = await link.run(`cd "$HOME"/${quoteShell(source.slice(2))} && tar -h --null -cf - -T - | base64`, {
+        input: new TextEncoder().encode(checked.map((file) => `${file.path}\0`).join("")),
         timeoutMs: TRANSFER_TIMEOUT_MS,
       });
       if (!encoded.ok) throw new FerryError("box-command-failed", `Ferry could not read ${source} on box ${box.name}: ${encoded.error.message}`);
@@ -204,21 +225,25 @@ export async function runAdoptFromBox(
         stdin: Buffer.from(encoded.stdout, "base64"),
       });
       if (extracted.exitCode !== 0) throw new Error(`Ferry could not unpack the box skill: ${extracted.stderr.toString().trim()}`);
+      const changed = changedFiles(join(stage, "box", name), checked);
+      if (changed.length > 0) {
+        throw new FerryError("refused", `${changed.join(", ")} of ${name} changed on box ${box.name} after the check. Run the command again.`);
+      }
     });
 
-    // The same rules as a publish. The staged copy is the only skill root of the staged home.
+    // The rules of this machine run again on the copy. They find a hit only when the Ferry on the box has other rules.
     const seed = readSeed(join(stage, "box"), [{ id: "box", name: "box", skillRoot: "." }]);
     const inSkill = (path: string) => relative(join(stage, "box", name), path);
     if (!seed.ok) {
       const hits = seed.forbidden.map((hit) => `${hit.code} ${hit.reason}: ${inSkill(hit.path)}`);
       throw new FerryError(
         "deny-rule-match",
-        `Ferry refused ${name} from box ${box.name}, and copied nothing to this machine: ${hits.join("; ")}`,
+        `Ferry refused ${name} from box ${box.name} after the copy, and removed the copy from this machine: ${hits.join("; ")}`,
+        { hint: `Run ferry update, so that the Ferry on box ${box.name} has the rules of this machine.` },
       );
     }
     const files = seed.skills.find((entry) => entry.name === name)?.files ?? [];
     if (files.length === 0) throw new FerryError("refused", `${source} on box ${box.name} has no file that Ferry carries.`);
-    const skipped = seed.leftovers.map((leftover) => ({ path: inSkill(leftover.path), code: leftover.code, reason: leftover.reason }));
 
     const staged = join(stage, "new");
     writeSkill(staged, files);

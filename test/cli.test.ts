@@ -1528,6 +1528,34 @@ describe("box mode", () => {
     }
   });
 
+  test("a box install runs the hidden ferry scan, which prints the result envelope with --json", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ferry-box-scan-"));
+    try {
+      await mkdir(join(home, ".claude/skills/demo"), { recursive: true });
+      await writeFile(join(home, ".claude/skills/demo/SKILL.md"), "# Demo\n");
+      await writeFile(join(home, ".claude/skills/demo/.env"), "PASSWORD=box-only-password\n");
+      const output: string[] = [];
+
+      await runCli(["--json", "scan"], {
+        isBoxMode: () => true,
+        home: () => home,
+        readStdin: async () => '{"kind":"skill","root":".claude/skills/demo"}',
+        writeLine: (line) => output.push(line),
+      });
+
+      expect(output).toHaveLength(1);
+      const envelope = JSON.parse(output[0]!);
+      expect(envelope.ok).toBe(true);
+      expect(envelope.command).toBe("scan");
+      expect(envelope.result.files.map((file: { path: string }) => file.path)).toEqual(["SKILL.md"]);
+      expect(envelope.result.forbidden).toEqual([{ path: ".env", code: "dotenv", reason: "environment file" }]);
+      expect(output[0]).not.toContain("box-only-password");
+      expect(buildProgram().helpInformation()).not.toContain("scan");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("a box install still prints the version and the help", async () => {
     const out: string[] = [];
     const program = buildProgram({ isBoxMode: () => true }).exitOverride();
