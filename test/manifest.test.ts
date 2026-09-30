@@ -386,6 +386,11 @@ describe("the deny set", () => {
         description: "stdio MCP server that runs an inline shell or interpreter script, which Ferry cannot check",
         behavior: "skip",
       },
+      {
+        code: "mcp-app-bundle",
+        description: "stdio MCP server whose command or arguments refer to a path in a macOS app bundle",
+        behavior: "skip",
+      },
     ]);
   });
 
@@ -1912,6 +1917,126 @@ describe("carried MCP server declarations", () => {
     expect(readMcpSources(home, BUILTIN_HARNESSES)).toEqual([
       { harness: "claude", servers: mcpOf(seed, "claude") as never, nonPortable: skipped.map((name) => ({ name, reason: "home-path" })) },
     ]);
+  });
+
+  const NODE_REPL = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl";
+  const APP_BUNDLE_REASON = (name: string) => `MCP server ${name} runs from a macOS app bundle, which the box does not have`;
+
+  test("skips the node_repl server of the ChatGPT app in the Claude, Codex, and Cursor Agent files", () => {
+    const home = makeHome();
+    const json = JSON.stringify({
+      mcpServers: {
+        node_repl: { command: NODE_REPL, env: { BROWSER_USE_AVAILABLE_BACKENDS: "chrome", NODE_REPL_NODE_PATH: "/usr/bin/node" } },
+        time: { command: "time-mcp" },
+      },
+    });
+    write(home, ".claude.json", json);
+    write(home, ".cursor/mcp.json", json);
+    write(
+      home,
+      ".codex/config.toml",
+      [
+        "[mcp_servers.node_repl]",
+        `command = "${NODE_REPL}"`,
+        "",
+        "[mcp_servers.node_repl.env]",
+        'BROWSER_USE_AVAILABLE_BACKENDS = "chrome"',
+        'NODE_REPL_NODE_PATH = "/usr/bin/node"',
+        "",
+      ].join("\n"),
+    );
+
+    const seed = seedOf(home);
+
+    const time = { name: "time", type: "stdio", command: "time-mcp", args: [], env: [] };
+    expect(seed.mcp).toEqual([
+      { harness: "claude", servers: [time], appBundle: ["node_repl"] },
+      { harness: "codex", servers: [], appBundle: ["node_repl"] },
+      { harness: "cursor", servers: [time], appBundle: ["node_repl"] },
+    ] as never);
+    expect(seed.leftovers.filter((leftover) => leftover.code === "mcp-app-bundle")).toEqual(
+      [".claude.json", ".codex/config.toml", ".cursor/mcp.json"].map((file) => ({
+        path: join(home, file),
+        code: "mcp-app-bundle",
+        reason: APP_BUNDLE_REASON("node_repl"),
+      })),
+    );
+    const skipped = [{ name: "node_repl", reason: "app-bundle" }];
+    expect(readMcpSources(home, BUILTIN_HARNESSES)).toEqual([
+      { harness: "claude", servers: [time], nonPortable: skipped },
+      { harness: "codex", servers: [], nonPortable: skipped },
+      { harness: "cursor", servers: [time], nonPortable: skipped },
+    ] as never);
+  });
+
+  test("skips a stdio server with an app bundle path at any place, also in the home and in an argument", () => {
+    const home = makeHome();
+    write(
+      home,
+      ".claude.json",
+      JSON.stringify({
+        mcpServers: {
+          argument: { command: "node", args: ["/Applications/Tool.app/Contents/Resources/server.js"] },
+          flag: { command: "tool-mcp", args: ["--helper=/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"] },
+          home: { command: join(home, "Applications", "X.app", "Contents", "MacOS", "x") },
+          lower: { command: "/applications/x.app/contents/macos/x" },
+          nested: { command: "/Applications/Outer.app/Contents/Frameworks/Inner.app/Contents/MacOS/inner" },
+          shell: { command: "sh", args: ["-c", "exec '/Applications/My Tool.app/Contents/MacOS/tool' serve"] },
+          tilde: { command: "~/Applications/X.app/Contents/MacOS/x" },
+        },
+      }),
+    );
+
+    const seed = seedOf(home);
+
+    const skipped = ["argument", "flag", "home", "lower", "nested", "shell", "tilde"];
+    expect(seed.mcp).toEqual([{ harness: "claude", servers: [], appBundle: skipped }]);
+    expect(seed.leftovers.map((leftover) => [leftover.code, leftover.reason])).toEqual(
+      skipped.map((name) => ["mcp-app-bundle", APP_BUNDLE_REASON(name)]),
+    );
+    expect(readMcpSources(home, BUILTIN_HARNESSES)).toEqual([
+      { harness: "claude", servers: [], nonPortable: skipped.map((name) => ({ name, reason: "app-bundle" })) },
+    ]);
+  });
+
+  test("carries a stdio server whose path only looks like an app bundle path", () => {
+    const home = makeHome();
+    const servers = {
+      contents: { command: "/srv/Contents/bin/x" },
+      data: { command: "/srv/myapp.app-data/bin/x" },
+      directory: { command: "/opt/foo.app" },
+      file: { command: "node", args: ["/srv/web.app/server.js"] },
+      other: { command: "/opt/foo.app/ContentsOld/x" },
+      suffix: { command: "/opt/foo.application/Contents/x" },
+    };
+    write(home, ".cursor/mcp.json", JSON.stringify({ mcpServers: servers }));
+
+    const seed = seedOf(home);
+
+    expect(seed.mcp).toEqual([
+      {
+        harness: "cursor",
+        servers: Object.entries(servers).map(([name, server]) => ({ name, type: "stdio", args: [], env: [], ...server })),
+      },
+    ] as never);
+    expect(seed.leftovers).toEqual([]);
+  });
+
+  test("a credential in the arguments of an app bundle server still refuses the seed", () => {
+    const home = makeHome();
+    write(home, ".cursor/mcp.json", JSON.stringify({ mcpServers: { node_repl: { command: NODE_REPL, args: ["--api-key=abc123"] } } }));
+
+    expect(refusalOf(home).forbidden.map((hit) => [hit.code, hit.reason])).toEqual([
+      ["mcp-argument", "MCP server node_repl has a command or argument that matches the secret-field rule"],
+    ]);
+  });
+
+  test("the identity does not change when only a skipped app bundle server is there", () => {
+    const home = makeHome();
+    const before = seedOf(home).identity;
+
+    write(home, ".cursor/mcp.json", JSON.stringify({ mcpServers: { node_repl: { command: NODE_REPL } } }));
+    expect(seedOf(home).identity).toBe(before);
   });
 
   test("the identity follows the carried MCP servers", () => {

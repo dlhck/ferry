@@ -1242,6 +1242,40 @@ describe("ferry status --brief", () => {
     }
   });
 
+  test("shows no item for a stdio MCP server that runs from a macOS app bundle", async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "ferry-brief-mcp-")));
+    try {
+      const command = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl";
+      mkdirSync(join(home, ".codex"), { recursive: true });
+      writeFileSync(
+        join(home, ".codex", "config.toml"),
+        `[mcp_servers.node_repl]\ncommand = "${command}"\n\n[mcp_servers.node_repl.env]\nBROWSER_USE_AVAILABLE_BACKENDS = "chrome"\n`,
+      );
+      const stack = fakeStack();
+      const link = stack.dependencies.createLink!({} as never);
+
+      const report = await runBriefStatusCommand({}, {
+        ...stack.dependencies,
+        home: () => home,
+        loadRegistry: () => ({ ok: true as const, harnesses: BUILTIN_HARNESSES, tools: BUILTIN_TOOLS }),
+        createAuthStart: () => ({ status: async () => ({ providers: [] }), mcpStatus: async () => [] }),
+        // A box that has neither the command nor the env value of the server.
+        createLink: () => ({
+          ...link,
+          async run(text: string) {
+            if (!text.includes("node_repl")) return link.run(text);
+            return { ok: true as const, address: "100.64.0.8", stdout: `${command}\nnode_repl\tBROWSER_USE_AVAILABLE_BACKENDS\n`, stderr: "" };
+          },
+        }),
+        now,
+      });
+
+      expect(report.boxes[0]!.issues.filter((issue) => issue.kind === "mcp-server")).toEqual([]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("checks the carried stdio MCP servers of the operator home on the box", async () => {
     const stack = fakeStack();
     const mcp = {

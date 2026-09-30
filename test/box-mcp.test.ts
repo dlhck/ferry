@@ -453,6 +453,129 @@ describe("registerBoxMcp with stdio servers", () => {
   });
 });
 
+describe("registerBoxMcp with a skipped app bundle server", () => {
+  const NODE_REPL = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl";
+  const SECRET = `ghp_${"s".repeat(36)}`;
+  /** The entry that Ferry v0.10.0 put on the box, with a value that the box owner set. */
+  const stale = { command: NODE_REPL, args: [], env: { NODE_REPL_KEY: SECRET } };
+  const removed = (harness: string, name = "node_repl") =>
+    `Ferry removed ${harness} MCP server ${name} from the box, because it runs from a macOS app bundle, which the box does not have.`;
+
+  jqTest("removes the entry of an earlier sync from the Claude, Codex, and Cursor Agent box config, and keeps the other servers", async () => {
+    const box = shellBox();
+    const claudeCalls = stubClaude(box.home);
+    const codexCalls = stubCodex(box.home, { node_repl: { type: "stdio", ...stale }, boxonly: { type: "stdio", command: "box-mcp", args: [] } });
+    box.put(".claude.json", JSON.stringify({ mcpServers: { node_repl: { type: "stdio", ...stale }, boxonly: { command: "box-mcp" } } }));
+    box.put(".cursor/mcp.json", JSON.stringify({ mcpServers: { node_repl: stale, boxonly: { command: "box-mcp" } }, other: 1 }));
+    const progress = recordProgress();
+
+    const warnings = await registerBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      mcp: [
+        { harness: "claude", servers: [], appBundle: ["node_repl"] },
+        { harness: "codex", servers: [], appBundle: ["node_repl"] },
+        { harness: "cursor", servers: [stdio("time")], appBundle: ["node_repl"] },
+      ],
+      link: box.link,
+      progress,
+    });
+
+    expect(warnings).toEqual([removed("claude"), removed("codex"), removed("cursor")]);
+    expect(claudeCalls()).toEqual([["mcp", "remove", "--scope", "user", "node_repl"]]);
+    expect(codexCalls().filter((call) => call[1] !== "get")).toEqual([["mcp", "remove", "node_repl"]]);
+    expect(JSON.parse(box.read(".cursor/mcp.json"))).toEqual({
+      mcpServers: { boxonly: { command: "box-mcp" }, time: { command: "time-mcp", args: [] } },
+      other: 1,
+    });
+    // The box compares and removes the entry itself, so its env value never reaches Ferry.
+    expect(JSON.stringify({ runs: box.link.runs, outputs: box.outputs, warnings })).not.toContain(SECRET);
+    expect(progress.events).toEqual(["count:1/1"]);
+  });
+
+  jqTest("keeps a box entry with the same name that does not run from an app bundle", async () => {
+    const box = shellBox();
+    const claudeCalls = stubClaude(box.home);
+    const codexCalls = stubCodex(box.home, { node_repl: { type: "stdio", command: "node-repl-mcp", args: [] } });
+    const claudeJson = JSON.stringify({ mcpServers: { node_repl: { type: "stdio", command: "node-repl-mcp", args: ["/opt/foo.app"] } } });
+    const cursorJson = JSON.stringify({ mcpServers: { node_repl: { command: "/srv/myapp.app-data/bin/node_repl" } } });
+    box.put(".claude.json", claudeJson);
+    box.put(".cursor/mcp.json", cursorJson);
+
+    const warnings = await registerBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      mcp: ["claude", "codex", "cursor"].map((harness) => ({ harness, servers: [], appBundle: ["node_repl"] })),
+      link: box.link,
+    });
+
+    expect(warnings).toEqual([]);
+    expect(claudeCalls()).toEqual([]);
+    expect(codexCalls().some((call) => call[1] === "remove")).toBe(false);
+    expect(box.read(".claude.json")).toBe(claudeJson);
+    expect(box.read(".cursor/mcp.json")).toBe(cursorJson);
+  });
+
+  jqTest("keeps a box app bundle entry whose name is not a skipped server, and removes one with an app bundle argument", async () => {
+    const box = shellBox();
+    box.put(
+      ".cursor/mcp.json",
+      JSON.stringify({
+        mcpServers: {
+          boxonly: { command: NODE_REPL },
+          helper: { command: "node", args: ["/Applications/Tool.app/Contents/Resources/server.js"] },
+        },
+      }),
+    );
+
+    const warnings = await registerBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      mcp: [{ harness: "cursor", servers: [], appBundle: ["helper", "absent"] }],
+      link: box.link,
+    });
+
+    expect(warnings).toEqual([removed("cursor", "helper")]);
+    expect(JSON.parse(box.read(".cursor/mcp.json"))).toEqual({ mcpServers: { boxonly: { command: NODE_REPL } } });
+  });
+
+  test("runs no box command for the removal when the box has no MCP file and no harness CLI", async () => {
+    const box = shellBox();
+
+    const warnings = await registerBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      mcp: ["claude", "codex", "cursor"].map((harness) => ({ harness, servers: [], appBundle: ["node_repl"] })),
+      link: box.link,
+    });
+
+    expect(warnings).toEqual([]);
+    expect(box.outputs.join("")).toBe("");
+    expect(existsSync(join(box.home, ".cursor/mcp.json"))).toBe(false);
+  });
+
+  test("without jq, leaves the box entry as it is and warns", async () => {
+    const box = shellBox({ jq: false });
+    const text = JSON.stringify({ mcpServers: { node_repl: stale } });
+    box.put(".cursor/mcp.json", text);
+
+    const warnings = await registerBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      mcp: [{ harness: "cursor", servers: [], appBundle: ["node_repl", "absent"] }],
+      link: box.link,
+    });
+
+    expect(warnings).toEqual(["jq is not on the box, so Ferry did not check cursor MCP server node_repl. Run ferry update to install jq."]);
+    expect(box.read(".cursor/mcp.json")).toBe(text);
+  });
+});
+
 describe("box env values", () => {
   const SECRET = `ghp_${"s".repeat(36)}`;
 
@@ -620,7 +743,8 @@ describe("checkBoxMcp", () => {
             stdio("agent", { command: "claude" }),
             { name: "linear", type: "http", url: "https://mcp.linear.app/mcp" },
           ],
-          nonPortable: [{ name: "local", reason: "home-path" }, { name: "wrapped", reason: "inline-script" }],
+          // A server from a macOS app bundle gives no issue: the operator has nothing to do.
+          nonPortable: [{ name: "local", reason: "home-path" }, { name: "node_repl", reason: "app-bundle" }, { name: "wrapped", reason: "inline-script" }],
         },
         { harness: "codex", servers: [stdio("docs", { command: "sh", env: ["DOCS_KEY"] })], nonPortable: [] },
       ],
