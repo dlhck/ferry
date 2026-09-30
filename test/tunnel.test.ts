@@ -755,10 +755,11 @@ describe("FOLLOW_COMMAND", () => {
 });
 
 describe("ferry tunnel as a child process", () => {
-  /** A fake `ssh` that logs its arguments, fails `-W` for unreachable.example, and else waits for SIGTERM. */
+  /** A fake `ssh` that logs its arguments, runs the SSH check of reach, fails `-W` for unreachable.example, and else waits for SIGTERM. */
   const FAKE_SSH = `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_SSH_LOG"
 case "$*" in
+  *"; true") exit 0 ;;
   *"-W unreachable.example:"*) echo "channel 0: open failed: connect failed: Name or service not known" >&2; echo "stdio forwarding failed" >&2; exit 255 ;;
   *"-W "*) exit 0 ;;
 esac
@@ -823,7 +824,8 @@ while :; do sleep 0.05; done
       expect(exitCode).toBe(0);
       expect(stdout).toContain(`http://localhost:${port} -> lab:db.example:5432`);
       expect(stdout.trim().split("\n").at(-1)).toBe("Tunnel closed.");
-      const [check, tunnel, ...rest] = readFileSync(env.log, "utf8").trim().split("\n");
+      const [probe, check, tunnel, ...rest] = readFileSync(env.log, "utf8").trim().split("\n");
+      expect(probe).toMatch(/^-o BatchMode=yes -o ConnectTimeout=10 user@box\.example .*; true$/);
       expect(check).toContain("-o BatchMode=yes");
       expect(check).toContain("-W db.example:5432 user@box.example");
       expect(tunnel).toContain("-o BatchMode=yes");
