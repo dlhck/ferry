@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { writeBoxFilesCommand } from "../src/box-identity.ts";
+import { boxInstructionsHeader, writeBoxFilesCommand } from "../src/box-identity.ts";
 import { errorInfo } from "../src/output.ts";
 import {
   existsSync,
@@ -26,6 +26,7 @@ import type { LinkResult } from "../src/link.ts";
 import type { HarnessDescriptor } from "../src/registry/types.ts";
 import {
   remoteUpdateCommand,
+  BoxesSyncError,
   runSync,
   SyncError,
   type SyncDependencies,
@@ -2219,5 +2220,159 @@ describe("sync with more than one box", () => {
       "[a] SSH agent forwarding: only for the box snapshot update and the Claude plugin installs",
       "[b] SSH agent forwarding: none (git_auth = box)",
     ]);
+  });
+});
+
+describe("sync with per-box instructions", () => {
+  const homes: string[] = [];
+  afterEach(() => {
+    for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+  });
+
+  const fleetConfig = {
+    version: 1 as const,
+    publisher: "operator-machine",
+    snapshotUrl: "git@example.test:operator/ferry-store.git",
+    boxes: ["a", "b"].map((name) => ({ name, host: { transport: "ssh" as const, destination: `dev@box-${name}.example` } })),
+  };
+  // Build the token at run time so this file holds no string a secret scanner flags.
+  const token = "gh" + "p_" + "a1B2".repeat(9);
+
+  /**
+   * Two boxes whose homes are directories of the temporary root. Each box has
+   * the shared instructions in its checkout. The fake link runs the command
+   * that writes the box files with `sh`, and records the other commands.
+   */
+  function fleet(perBox: Readonly<Record<string, string>>, shared: string | null = "shared\n") {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "ferry-sync-box-instructions-")));
+    homes.push(root);
+    const home = join(root, "operator");
+    for (const [name, text] of Object.entries(perBox)) {
+      mkdirSync(join(home, ".ferry", "boxes", name), { recursive: true });
+      writeFileSync(join(home, ".ferry", "boxes", name, "AGENTS.md"), text);
+    }
+    const boxHome = (name: string) => join(root, `box-${name}`);
+    for (const { name } of fleetConfig.boxes) {
+      mkdirSync(join(boxHome(name), ".ferry", "store"), { recursive: true });
+      if (shared !== null) writeFileSync(join(boxHome(name), ".ferry", "store", "AGENTS.md"), shared);
+    }
+    const commands: string[] = [];
+    const events: string[] = [];
+    const lines: string[] = [];
+    const dependencies: SyncDependencies = {
+      readConfig: () => fleetConfig,
+      publisher: () => "operator-machine",
+      readSeed: () => ({ ...seed, instructions: shared === null ? null : { bytes: new TextEncoder().encode(shared) } }),
+      createLink: (target) => {
+        const name = /box-([a-z]+)\./.exec((target as { destination: string }).destination)![1]!;
+        return {
+          run: async (command, options) => {
+            commands.push(command);
+            if (command.startsWith("printf")) return { ok: true, address: name, stdout: `${boxHome(name)}\n`, stderr: "" };
+            if (command.includes("ferry_dir=")) {
+              const child = Bun.spawn(["sh", "-c", command], { stdin: options?.input ?? "ignore", stdout: "pipe", stderr: "pipe" });
+              expect(await child.exited).toBe(0);
+            }
+            return { ok: true, address: name, stdout: "", stderr: "" };
+          },
+        };
+      },
+      openStore: async () => ({
+        path: join(home, ".ferry", "store"),
+        publish: async () => {
+          events.push("publish");
+          return { published: true, tip: "abc123" };
+        },
+      }),
+      apply: async (input) => {
+        events.push(`${posix.basename(input.targetHome)}:apply`);
+        return { checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [] };
+      },
+      adopt: () => {},
+      writePlan: () => {},
+      writeLine: (line) => lines.push(line),
+    };
+    const generated = (name: string) => readFileSync(join(boxHome(name), ".ferry", "box", "AGENTS.md"), "utf8");
+    return { home, commands, events, lines, dependencies, generated };
+  }
+
+  test("puts the per-box file between the header and the shared instructions on its box, and on no other box", async () => {
+    const { home, commands, dependencies, generated } = fleet({ a: "Use the GPU here.\n" });
+
+    const result = await runSync({ home }, dependencies);
+
+    expect(generated("a")).toBe(`${boxInstructionsHeader("a")}\n\nUse the GPU here.\n\nshared\n`);
+    expect(generated("b")).toBe(`${boxInstructionsHeader("b")}\n\nshared\n`);
+    // The text goes on the standard input, so no box command holds it.
+    expect(commands.join("\n")).not.toContain("GPU");
+    expect(result.boxes.map((box) => box.plan.boxInstructions)).toEqual([join(home, ".ferry/boxes/a/AGENTS.md"), undefined]);
+  });
+
+  test("an empty per-box file adds nothing", async () => {
+    const { home, dependencies, generated } = fleet({ a: "", b: "\n \n" });
+
+    await runSync({ home }, dependencies);
+
+    expect(generated("a")).toBe(`${boxInstructionsHeader("a")}\n\nshared\n`);
+    expect(generated("b")).toBe(`${boxInstructionsHeader("b")}\n\nshared\n`);
+  });
+
+  test("a per-box file with a secret stops the sync of that box only, with the file name and never the value", async () => {
+    const { home, commands, events, dependencies, generated } = fleet({ a: `Log in with ${token}.\n`, b: "Do not run Docker here.\n" });
+
+    const error = await runSync({ home }, dependencies).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(BoxesSyncError);
+    const { results, message } = error as BoxesSyncError;
+    expect(results.map((result) => [result.name, result.failure?.step])).toEqual([["a", "Reading the box instructions"], ["b", undefined]]);
+    expect(results[0]!.failure!.error).toMatchObject({ code: "box-instructions-refusal", origin: "operator" });
+    expect(errorInfo(results[0]!.failure!.error).code).toBe("deny-rule-match");
+    expect(message).toContain(`GitHub token in file content: ${join(home, ".ferry/boxes/a/AGENTS.md")}`);
+    expect(message).not.toContain(token);
+    expect(commands.join("\n")).not.toContain(token);
+    // Ferry does not connect to the refused box.
+    expect(events).toEqual(["publish", "box-b:apply"]);
+    expect(existsSync(join(home, "..", "box-a", ".ferry", "box"))).toBe(false);
+    expect(generated("b")).toBe(`${boxInstructionsHeader("b")}\n\nDo not run Docker here.\n\nshared\n`);
+  });
+
+  test("a secret in the per-box file of a box that is not selected does not stop the sync", async () => {
+    const { home, dependencies, generated } = fleet({ a: `Log in with ${token}.\n` });
+
+    await runSync({ home, boxes: ["b"] }, dependencies);
+
+    expect(generated("b")).toBe(`${boxInstructionsHeader("b")}\n\nshared\n`);
+  });
+
+  test("the dry run names the per-box file of its box and refuses a secret", async () => {
+    const plans: string[] = [];
+    const clean = fleet({ a: "Use the GPU here.\n" });
+    const { writePlan: _writePlan, ...printed } = clean.dependencies;
+    await runSync({ home: clean.home, dryRun: true }, { ...printed, writeLine: (line) => plans.push(line) });
+
+    const file = join(clean.home, ".ferry/boxes/a/AGENTS.md");
+    expect(plans.filter((line) => line.includes("Box instructions:"))).toHaveLength(1);
+    expect(plans.find((line) => line.startsWith("[a] Sync plan:"))).toContain(
+      `[a] Box instructions: ${file} -> $HOME/.ferry/box/AGENTS.md, between the Ferry header and the shared AGENTS.md`,
+    );
+    expect(plans.join("\n")).not.toContain("GPU");
+
+    const secret = fleet({ a: `Log in with ${token}.\n` });
+    const error = await runSync({ home: secret.home, dryRun: true }, secret.dependencies).catch((cause: unknown) => cause);
+    expect(error).toMatchObject({ code: "box-instructions-refusal" });
+    expect((error as Error).message).toContain(join(secret.home, ".ferry/boxes/a/AGENTS.md"));
+    expect((error as Error).message).not.toContain(token);
+  });
+
+  test("warns when the operator machine has no shared instructions, because the box then has no instruction file", async () => {
+    const { home, lines, dependencies } = fleet({ a: "Use the GPU here.\n" }, null);
+
+    await runSync({ home }, dependencies);
+
+    expect(lines).toContain(
+      `[a] Warning: Ferry did not apply ${join(home, ".ferry/boxes/a/AGENTS.md")}, because this machine has no ~/AGENTS.md. The box gets no instruction file.`,
+    );
+    expect(existsSync(join(home, "..", "box-a", ".ferry", "box", "AGENTS.md"))).toBe(false);
+    expect(JSON.parse(readFileSync(join(home, "..", "box-a", ".ferry", "box", "identity.json"), "utf8"))).toEqual({ name: "a", boxInstructions: false });
   });
 });

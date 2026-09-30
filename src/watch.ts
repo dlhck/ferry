@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { BoxesSyncError, inspectSyncSource, runSync, SyncError } from "./sync.ts";
 import { resolveBoxes } from "./boxes.ts";
+import { readBoxInstructions } from "./box-identity.ts";
 import { readConfig } from "./config.ts";
 import { AdoptionRefusal } from "./adopt.ts";
 import { ApplyError } from "./apply.ts";
@@ -39,11 +40,22 @@ export type WatchInput = {
 };
 
 export type WatchObservation =
-  | { readonly ok: true; readonly identity: string }
+  | {
+      readonly ok: true;
+      readonly identity: string;
+      /**
+       * The identity of each box with per-box instructions. A box without an
+       * entry has `identity`. A change here syncs only that box, without a publish.
+       */
+      readonly boxes?: Readonly<Record<string, string>>;
+    }
   | { readonly ok: false; readonly signature: string; readonly message: string; readonly error?: unknown };
+
+type AcceptedObservation = Extract<WatchObservation, { ok: true }>;
 
 /** One sync run of the watch. */
 export type WatchSyncRequest = {
+  /** The identity of the snapshot. */
   readonly identity: string;
   readonly home: string;
   /** The boxes to sync, in config order. */
@@ -247,20 +259,25 @@ export async function runWatch(
     }
     refusal = "";
     if (!loadBoxes()) continue;
-    let identity = changed.identity;
-    if (names.every((name) => accepted[name] === identity)) continue;
-    if (identity !== published && identity !== settled) {
-      const desired = await settle(identity, home, pollMs, debounceMs, observe, sleep, input.signal);
-      if (!desired) continue;
-      identity = settled = desired;
+    let desired = changed;
+    /** The identity that the box has after a sync: the snapshot identity, with its per-box instructions when it has them. */
+    const want = (name: string) => desired.boxes?.[name] ?? desired.identity;
+    if (names.every((name) => accepted[name] === want(name))) continue;
+    const boxChange = names.some((name) => desired.boxes?.[name] !== undefined && accepted[name] !== desired.boxes[name]);
+    if ((desired.identity !== published || boxChange) && observationKey(desired) !== settled) {
+      const stable = await settle(desired, home, pollMs, debounceMs, observe, sleep, input.signal);
+      if (!stable) continue;
+      desired = stable;
+      settled = observationKey(desired);
     }
+    const identity = desired.identity;
 
     // Each box has its own backoff. The loop never sleeps for a backoff, so it observes and syncs the other boxes.
     const time = now();
     if (retry?.identity === identity && time < retry.at) continue;
     const ready = names.filter((name) => {
       const boxRetry = retries.get(name);
-      return accepted[name] !== identity && (boxRetry?.identity !== identity || boxRetry.at <= time);
+      return accepted[name] !== want(name) && (boxRetry?.identity !== want(name) || boxRetry.at <= time);
     });
     if (ready.length === 0) continue;
     const publish = identity !== published;
@@ -283,7 +300,7 @@ export async function runWatch(
           retry = null;
           note(`Watch sync refused: ${messageOf(error)}`, errorEvent("sync-refused", error, { box: null }));
           if (!isManifestReadFailure(error)) {
-            for (const name of ready) accepted[name] = identity;
+            for (const name of ready) accepted[name] = want(name);
             save();
           }
         }
@@ -298,20 +315,20 @@ export async function runWatch(
     for (const name of ready) {
       const error = failures.get(name);
       if (error === undefined) {
-        accepted[name] = identity;
+        accepted[name] = want(name);
         retries.delete(name);
         statusDue = 0;
         note(`${prefix(name)}Synced Manifest ${identity.slice(0, 12)}.`, { type: "synced", box: name, manifest: identity });
       } else if (retryable(error)) {
         const previous = retries.get(name);
-        const backoff = previous?.identity === identity ? Math.min(previous.backoff * 2, maxBackoffMs) : 1_000;
-        retries.set(name, { identity, backoff, at: now() + backoff });
+        const backoff = previous?.identity === want(name) ? Math.min(previous.backoff * 2, maxBackoffMs) : 1_000;
+        retries.set(name, { identity: want(name), backoff, at: now() + backoff });
         note(
           `${prefix(name)}Watch sync failed; retrying in ${backoff} ms: ${messageOf(error)}`,
           errorEvent("sync-failed", error, { box: name, retryInMs: backoff }),
         );
       } else {
-        accepted[name] = identity;
+        accepted[name] = want(name);
         retries.delete(name);
         note(`${prefix(name)}Watch sync refused: ${messageOf(error)}`, errorEvent("sync-refused", error, { box: name }));
       }
@@ -325,14 +342,16 @@ export async function runWatch(
 
 /**
  * The error of each failed box, or null when the sync failed before the box
- * steps. With one box, sync throws the error of the box, and a box step error
- * has the origin `box`.
+ * steps. With one box, sync throws the error of the box. A box step error has
+ * the origin `box`, and refused per-box instructions have their own code.
  */
 function boxFailures(error: unknown, boxes: readonly string[]): Map<string, unknown> | null {
   if (error instanceof BoxesSyncError) {
     return new Map(error.results.flatMap((result) => (result.failure ? [[result.name, result.failure.error]] : [])));
   }
-  if (boxes.length === 1 && error instanceof SyncError && error.origin === "box") return new Map([[boxes[0]!, error]]);
+  if (boxes.length === 1 && error instanceof SyncError && (error.origin === "box" || error.code === "box-instructions-refusal")) {
+    return new Map([[boxes[0]!, error]]);
+  }
   return null;
 }
 
@@ -340,24 +359,29 @@ function configuredBoxNames(home: string): readonly string[] {
   return resolveBoxes(readConfig(home) ?? {}).map((box) => box.name);
 }
 
+/** The snapshot identity and the identity of each box with per-box instructions, as one string. */
+function observationKey(observation: AcceptedObservation): string {
+  return JSON.stringify([observation.identity, observation.boxes ?? {}]);
+}
+
 async function settle(
-  first: string,
+  first: AcceptedObservation,
   home: string,
   pollMs: number,
   debounceMs: number,
   observe: (home: string) => WatchObservation | Promise<WatchObservation>,
   sleep: (milliseconds: number, signal?: AbortSignal) => Promise<void>,
   signal?: AbortSignal,
-): Promise<string | null> {
+): Promise<AcceptedObservation | null> {
   let desired = first;
   let stableFor = 0;
   while (stableFor < debounceMs && !signal?.aborted) {
     await sleep(Math.min(pollMs, debounceMs - stableFor), signal);
     const current = await observe(home);
     if (!current.ok) return null;
-    if (current.identity === desired) stableFor += pollMs;
+    if (observationKey(current) === observationKey(desired)) stableFor += pollMs;
     else {
-      desired = current.identity;
+      desired = current;
       stableFor = 0;
     }
   }
@@ -367,22 +391,35 @@ async function settle(
 async function observeSource(home: string): Promise<WatchObservation> {
   try {
     const source = inspectSyncSource(home);
-    if (!source.boxes.some((box) => box.integrations.paseo === true)) return { ok: true, identity: source.seed.identity };
-    const hash = createHash("sha256").update(source.seed.identity).update(JSON.stringify(readPaseoPlugins(home)));
-    // Only set providers change the identity, so an existing identity stays the same without them.
-    const providers = readPaseoProviders(home);
-    if (providers.providers.length > 0 || providers.warnings.length > 0) hash.update(JSON.stringify(providers));
-    // Only set preferences change the identity, so an existing identity stays the same without them.
-    const preferences = readPaseoPreferences(home);
-    if (Object.keys(preferences).length > 0) hash.update(JSON.stringify(preferences));
-    // Only a set terminal profile list changes the identity.
-    const terminals = readPaseoTerminalProfiles(home);
-    if (terminals !== null) hash.update(JSON.stringify(terminals));
-    return { ok: true, identity: hash.digest("hex") };
+    const identity = source.boxes.some((box) => box.integrations.paseo === true)
+      ? paseoIdentity(home, source.seed.identity)
+      : source.seed.identity;
+    // Only a box with per-box instructions has its own identity, so an existing identity stays the same without them.
+    const boxes: Record<string, string> = {};
+    for (const box of source.boxes) {
+      const instructions = readBoxInstructions(home, box.name);
+      if (instructions) boxes[box.name] = createHash("sha256").update(identity).update(instructions.bytes).digest("hex");
+    }
+    return { ok: true, identity, boxes };
   } catch (error) {
     const message = messageOf(error);
     return { ok: false, signature: message, message, error };
   }
+}
+
+/** The identity of the portable set with the Paseo values that Ferry carries. */
+function paseoIdentity(home: string, identity: string): string {
+  const hash = createHash("sha256").update(identity).update(JSON.stringify(readPaseoPlugins(home)));
+  // Only set providers change the identity, so an existing identity stays the same without them.
+  const providers = readPaseoProviders(home);
+  if (providers.providers.length > 0 || providers.warnings.length > 0) hash.update(JSON.stringify(providers));
+  // Only set preferences change the identity, so an existing identity stays the same without them.
+  const preferences = readPaseoPreferences(home);
+  if (Object.keys(preferences).length > 0) hash.update(JSON.stringify(preferences));
+  // Only a set terminal profile list changes the identity.
+  const terminals = readPaseoTerminalProfiles(home);
+  if (terminals !== null) hash.update(JSON.stringify(terminals));
+  return hash.digest("hex");
 }
 
 export function isRetryableWatchError(error: unknown): boolean {

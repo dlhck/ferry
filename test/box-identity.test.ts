@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { boxInstructionsHeader, writeBoxFilesCommand } from "../src/box-identity.ts";
+import { boxInstructionsHeader, boxInstructionsInput, readBoxInstructions, writeBoxFilesCommand } from "../src/box-identity.ts";
 import { runCli } from "../src/cli.ts";
 import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
 import { runUninstall } from "../src/uninstall.ts";
@@ -27,8 +27,8 @@ function write(path: string, body: string | Uint8Array): void {
   writeFileSync(path, body);
 }
 
-async function runOnBox(command: string): Promise<void> {
-  const child = Bun.spawn(["sh", "-c", command], { stdout: "pipe", stderr: "pipe" });
+async function runOnBox(command: string, input?: Uint8Array): Promise<void> {
+  const child = Bun.spawn(["sh", "-c", command], { stdin: input ?? "ignore", stdout: "pipe", stderr: "pipe" });
   expect(await child.exited).toBe(0);
 }
 
@@ -45,7 +45,40 @@ describe("the generated box instructions", () => {
     const generated = new Uint8Array(readFileSync(join(home, ".ferry", "box", "AGENTS.md")));
     expect(generated.slice(0, header.length)).toEqual(header);
     expect(generated.slice(header.length)).toEqual(shared);
-    expect(JSON.parse(readFileSync(join(home, ".ferry", "box", "identity.json"), "utf8"))).toEqual({ name: "fsn1" });
+    expect(JSON.parse(readFileSync(join(home, ".ferry", "box", "identity.json"), "utf8"))).toEqual({ name: "fsn1", boxInstructions: false });
+  });
+
+  test("hold the per-box instructions between the header and the shared instructions, with one blank line between the parts", async () => {
+    const home = makeHome();
+    const checkout = join(home, ".ferry", "store");
+    const shared = new Uint8Array([...new TextEncoder().encode("# Rules\n"), 0xff, 0x0a]);
+    write(join(checkout, "AGENTS.md"), shared);
+    // The blank lines at the start and the end of the per-box file do not add blank lines.
+    const perBox = "\n\nUse the GPU here.\n\n`$HOME` 'quoted' \\n\n\n\n";
+
+    await runOnBox(writeBoxFilesCommand(home, checkout, "fsn1", true), boxInstructionsInput(new TextEncoder().encode(perBox)));
+
+    const start = new TextEncoder().encode(`${boxInstructionsHeader("fsn1")}\n\nUse the GPU here.\n\n\`$HOME\` 'quoted' \\n\n\n`);
+    const generated = new Uint8Array(readFileSync(join(home, ".ferry", "box", "AGENTS.md")));
+    expect(generated.slice(0, start.length)).toEqual(start);
+    expect(generated.slice(start.length)).toEqual(shared);
+    expect(JSON.parse(readFileSync(join(home, ".ferry", "box", "identity.json"), "utf8"))).toEqual({ name: "fsn1", boxInstructions: true });
+  });
+
+  test("lose the per-box part when a later sync has none", async () => {
+    const home = makeHome();
+    const checkout = join(home, ".ferry", "store");
+    write(join(checkout, "AGENTS.md"), "shared\n");
+    await runOnBox(writeBoxFilesCommand(home, checkout, "fsn1", true), boxInstructionsInput(new TextEncoder().encode("box\n")));
+    await runOnBox(writeBoxFilesCommand(home, checkout, "fsn1"));
+
+    expect(readFileSync(join(home, ".ferry", "box", "AGENTS.md"), "utf8")).toBe(`${boxInstructionsHeader("fsn1")}\n\nshared\n`);
+    expect(JSON.parse(readFileSync(join(home, ".ferry", "box", "identity.json"), "utf8"))).toEqual({ name: "fsn1", boxInstructions: false });
+  });
+
+  test("keep the per-box text out of the box command", () => {
+    expect(writeBoxFilesCommand("/home/user", "/home/user/.ferry/store", "fsn1", true)).not.toContain("GPU");
+    expect(writeBoxFilesCommand("/home/user", "/home/user/.ferry/store", "fsn1", true)).toContain(" cat; cat '/home/user/.ferry/store/AGENTS.md'; }");
   });
 
   test("follow a change of the shared instructions and of the box name", async () => {
@@ -57,7 +90,7 @@ describe("the generated box instructions", () => {
     await runOnBox(writeBoxFilesCommand(home, checkout, "lab"));
 
     expect(readFileSync(join(home, ".ferry", "box", "AGENTS.md"), "utf8")).toBe(`${boxInstructionsHeader("lab")}\n\nnew\n`);
-    expect(JSON.parse(readFileSync(join(home, ".ferry", "box", "identity.json"), "utf8"))).toEqual({ name: "lab" });
+    expect(JSON.parse(readFileSync(join(home, ".ferry", "box", "identity.json"), "utf8"))).toEqual({ name: "lab", boxInstructions: false });
   });
 
   test("go away when the snapshot has no instructions", async () => {
@@ -66,14 +99,37 @@ describe("the generated box instructions", () => {
     write(join(checkout, "AGENTS.md"), "shared\n");
     await runOnBox(writeBoxFilesCommand(home, checkout, "fsn1"));
     rmSync(join(checkout, "AGENTS.md"));
-    await runOnBox(writeBoxFilesCommand(home, checkout, "fsn1"));
+    await runOnBox(writeBoxFilesCommand(home, checkout, "fsn1", true), boxInstructionsInput(new TextEncoder().encode("box\n")));
 
     expect(existsSync(join(home, ".ferry", "box", "AGENTS.md"))).toBe(false);
-    expect(existsSync(join(home, ".ferry", "box", "identity.json"))).toBe(true);
+    // Without the shared instructions, the box has no instruction file, so the per-box part is not applied.
+    expect(JSON.parse(readFileSync(join(home, ".ferry", "box", "identity.json"), "utf8"))).toEqual({ name: "fsn1", boxInstructions: false });
   });
 
   test("the header is short", () => {
     expect(boxInstructionsHeader("fsn1").length).toBeLessThan(300);
+  });
+});
+
+describe("the per-box instruction file on the operator machine", () => {
+  test("is ~/.ferry/boxes/<name>/AGENTS.md", () => {
+    const home = makeHome();
+    write(join(home, ".ferry", "boxes", "fsn1", "AGENTS.md"), "Use the GPU here.\n");
+
+    const instructions = readBoxInstructions(home, "fsn1");
+
+    expect(instructions?.path).toBe(join(home, ".ferry/boxes/fsn1/AGENTS.md"));
+    expect(Buffer.from(instructions!.bytes).toString()).toBe("Use the GPU here.\n");
+  });
+
+  test("adds nothing when it is missing, empty, or blank", () => {
+    const home = makeHome();
+    write(join(home, ".ferry", "boxes", "empty", "AGENTS.md"), "");
+    write(join(home, ".ferry", "boxes", "blank", "AGENTS.md"), " \n\t\r\n");
+
+    expect(readBoxInstructions(home, "missing")).toBeNull();
+    expect(readBoxInstructions(home, "empty")).toBeNull();
+    expect(readBoxInstructions(home, "blank")).toBeNull();
   });
 });
 
@@ -95,7 +151,7 @@ describe("ferry whoami", () => {
     const home = makeHome();
     const out = await whoami(home, false, ["--json"]);
     const envelope = JSON.parse(out[0] ?? "");
-    expect(envelope).toMatchObject({ command: "whoami", ok: true, result: { role: "operator", box: null } });
+    expect(envelope).toMatchObject({ command: "whoami", ok: true, result: { role: "operator", box: null, instructions: null } });
     expect(envelope.result.managedPaths.instructionFiles).toEqual(["~/AGENTS.md", "~/.claude/CLAUDE.md", "~/.codex/AGENTS.md", "~/.pi/agent/AGENTS.md"]);
     expect(envelope.result.managedPaths.skillRoots).toContain("~/.agents/skills");
     expect(envelope.result.managedPaths.roots).toContain("~/.claude/agents");
@@ -113,7 +169,41 @@ describe("ferry whoami", () => {
 
   test("a box before its first sync has no name", async () => {
     const home = makeHome();
-    expect(JSON.parse((await whoami(home, true, ["--json"]))[0] ?? "").result).toMatchObject({ role: "box", box: null });
+    expect(JSON.parse((await whoami(home, true, ["--json"]))[0] ?? "").result).toMatchObject({ role: "box", box: null, instructions: null });
+  });
+
+  test("lists the per-box file as a merged part of the generated instructions", async () => {
+    const home = makeHome();
+    const checkout = join(home, ".ferry", "store");
+    write(join(checkout, "AGENTS.md"), "shared\n");
+    await runOnBox(writeBoxFilesCommand(home, checkout, "fsn1", true), boxInstructionsInput(new TextEncoder().encode("box\n")));
+
+    const out = await whoami(home, true);
+    const at = out.indexOf("Ferry writes ~/.ferry/box/AGENTS.md on each sync. Do not edit it. It has these parts, in this order:");
+    expect(out.slice(at + 1, at + 4)).toEqual([
+      "  The Ferry header",
+      "  ~/.ferry/boxes/fsn1/AGENTS.md on the operator machine",
+      "  ~/AGENTS.md on the operator machine",
+    ]);
+    expect(JSON.parse((await whoami(home, true, ["--json"]))[0] ?? "").result.instructions).toEqual({
+      file: "~/.ferry/box/AGENTS.md",
+      sources: [
+        { part: "header", path: null },
+        { part: "box", path: "~/.ferry/boxes/fsn1/AGENTS.md" },
+        { part: "shared", path: "~/AGENTS.md" },
+      ],
+    });
+  });
+
+  test("lists only the header and the shared instructions on a box without per-box instructions", async () => {
+    const home = makeHome();
+    const checkout = join(home, ".ferry", "store");
+    write(join(checkout, "AGENTS.md"), "shared\n");
+    await runOnBox(writeBoxFilesCommand(home, checkout, "fsn1"));
+
+    const result = JSON.parse((await whoami(home, true, ["--json"]))[0] ?? "").result;
+    expect(result.instructions.sources.map((source: { part: string }) => source.part)).toEqual(["header", "shared"]);
+    expect((await whoami(home, true)).join("\n")).not.toContain(".ferry/boxes/");
   });
 });
 

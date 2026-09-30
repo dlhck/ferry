@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   isRetryableWatchError,
@@ -267,11 +267,16 @@ describe("multi-box watch", () => {
 
   /**
    * Run the watch on a fake clock. Each poll advances the clock by `pollMs`.
-   * `script` gives the identity and the box names of each poll, and ends the watch when it returns null.
+   * `script` gives the identity, the box names, and the identity of each box with per-box instructions
+   * of each poll, and ends the watch when it returns null.
    */
   async function watchBoxes(options: {
     readonly state?: WatchState | null;
-    readonly script: (poll: number) => { readonly identity: string; readonly boxes: readonly string[] } | null;
+    readonly script: (poll: number) => {
+      readonly identity: string;
+      readonly boxes: readonly string[];
+      readonly instructions?: Readonly<Record<string, string>>;
+    } | null;
     readonly sync?: (request: WatchSyncRequest, time: number) => Promise<void>;
     readonly pollMs?: number;
   }) {
@@ -292,7 +297,7 @@ describe("multi-box watch", () => {
       {
         observe: () => {
           record.observes.push(time);
-          return accepted(current.identity);
+          return { ok: true, identity: current.identity, boxes: current.instructions };
         },
         readBoxes: () => current.boxes,
         sync: async (request) => {
@@ -376,6 +381,110 @@ describe("multi-box watch", () => {
     expect(third!.time - second!.time).toBeGreaterThanOrEqual(2_000);
     expect(record.lines).toContain("[b] Watch sync failed; retrying in 2000 ms: box: box-b.example is offline");
     expect(record.states.at(-1)).toEqual({ published: "two", boxes: { a: "two", b: "two" } });
+  });
+
+  test("a change to the per-box instructions of one box syncs that box only, without a publish", async () => {
+    const record = await watchBoxes({
+      script: (poll) => (poll > 8 ? null : { identity: "one", boxes: ["a", "b"], ...(poll > 1 ? { instructions: { b: poll < 6 ? "one+gpu" : "one+docker" } } : {}) }),
+    });
+
+    expect(record.requests.map(({ identity, boxes, publish }) => ({ identity, boxes, publish }))).toEqual([
+      { identity: "one", boxes: ["b"], publish: false },
+      { identity: "one", boxes: ["b"], publish: false },
+    ]);
+    expect(record.states.at(-1)).toEqual({ published: "one", boxes: { a: "one", b: "one+docker" } });
+    expect(record.lines.filter((line) => line.includes("Synced"))).toEqual(["[b] Synced Manifest one.", "[b] Synced Manifest one."]);
+  });
+
+  test("a snapshot change syncs each box, and a box with per-box instructions keeps its own identity", async () => {
+    const record = await watchBoxes({
+      state: { published: "one", boxes: { a: "one", b: "one+gpu" } },
+      script: (poll) => (poll > 5 ? null : { identity: poll === 0 ? "one" : "two", boxes: ["a", "b"], instructions: { b: poll === 0 ? "one+gpu" : "two+gpu" } }),
+    });
+
+    expect(record.requests.map(({ identity, boxes, publish }) => ({ identity, boxes, publish }))).toEqual([
+      { identity: "two", boxes: ["a", "b"], publish: true },
+    ]);
+    expect(record.states.at(-1)).toEqual({ published: "two", boxes: { a: "two", b: "two+gpu" } });
+  });
+
+  test("removed per-box instructions sync that box back to the snapshot identity", async () => {
+    const record = await watchBoxes({
+      state: { published: "one", boxes: { a: "one", b: "one+gpu" } },
+      script: (poll) => (poll > 4 ? null : { identity: "one", boxes: ["a", "b"], ...(poll === 0 ? { instructions: { b: "one+gpu" } } : {}) }),
+    });
+
+    expect(record.requests.map(({ boxes, publish }) => ({ boxes, publish }))).toEqual([{ boxes: ["b"], publish: false }]);
+    expect(record.states.at(-1)).toEqual({ published: "one", boxes: { a: "one", b: "one" } });
+  });
+
+  test("refused per-box instructions of the only box are reported once, and the watch waits for a change", async () => {
+    const refusal = () => new SyncError("box-instructions-refusal", "operator", "Manifest refused the instructions of box a: GitHub token in file content: /home/user/.ferry/boxes/a/AGENTS.md");
+    const record = await watchBoxes({
+      state: { published: "one", boxes: { a: "one" } },
+      script: (poll) => (poll > 10 ? null : { identity: "one", boxes: ["a"], ...(poll > 1 ? { instructions: { a: "one+secret" } } : {}) }),
+      sync: async () => {
+        throw refusal();
+      },
+    });
+
+    expect(record.requests).toHaveLength(1);
+    expect(record.lines.filter((line) => line.includes("refused"))).toEqual([
+      "Watch sync refused: operator: Manifest refused the instructions of box a: GitHub token in file content: /home/user/.ferry/boxes/a/AGENTS.md",
+    ]);
+    expect(record.states.at(-1)).toEqual({ published: "one", boxes: { a: "one+secret" } });
+  });
+
+  test("the default observe gives a box with a per-box instruction file its own identity", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-watch-box-instructions-"));
+    try {
+      mkdirSync(join(home, ".ferry", "boxes", "b"), { recursive: true });
+      writeFileSync(
+        join(home, ".ferry", "config.toml"),
+        [
+          "version = 1",
+          `publisher = ${JSON.stringify(hostname())}`,
+          'snapshot_url = "snapshot.git"',
+          "",
+          "[box.a]",
+          'transport = "ssh"',
+          'destination = "dev@box-a.example"',
+          "",
+          "[box.b]",
+          'transport = "ssh"',
+          'destination = "dev@box-b.example"',
+          "",
+        ].join("\n"),
+      );
+      // An empty file, as ferry box add creates it, changes nothing.
+      writeFileSync(join(home, ".ferry", "boxes", "b", "AGENTS.md"), "");
+      const controller = new AbortController();
+      const requests: { boxes: readonly string[] | undefined; publish: boolean | undefined }[] = [];
+      let polls = 0;
+      await runWatch(
+        { home, signal: controller.signal, pollMs: 1, debounceMs: 1 },
+        {
+          sleep: async () => {
+            polls += 1;
+            if (polls === 3) writeFileSync(join(home, ".ferry", "boxes", "b", "AGENTS.md"), "Use the GPU here.\n");
+            if (polls === 8) writeFileSync(join(home, ".ferry", "boxes", "b", "AGENTS.md"), "Do not run Docker here.\n");
+            if (polls > 12) controller.abort();
+          },
+          writeLine: () => {},
+          runSync: async (input) => {
+            requests.push({ boxes: input.boxes, publish: input.publish });
+            return { dryRun: false, published: false, plan: {} as SyncPlan, boxes: [] };
+          },
+        },
+      );
+
+      expect(requests).toEqual([{ boxes: ["b"], publish: false }, { boxes: ["b"], publish: false }]);
+      const state = JSON.parse(readFileSync(join(home, ".ferry", "watch-state.json"), "utf8"));
+      expect(state.boxes.a).toBe(state.published);
+      expect(state.boxes.b).not.toBe(state.published);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("the default sync publishes once, and a box retry applies the published tip to the retried box only", async () => {
