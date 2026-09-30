@@ -298,6 +298,48 @@ describe("ferry adopt --from-box", () => {
     expect(w.received.some((output) => output.includes(Buffer.from(token).toString("hex")))).toBe(false);
   });
 
+  test.skipIf(process.getuid?.() === 0)("a file of mode 000 with a token in its name does not reach this machine in an error text", async () => {
+    const token = "gh" + "p_" + "b".repeat(36);
+    const w = world();
+    write(join(w.box, ".claude", "skills", "draft", "SKILL.md"), "# Draft\n");
+    write(join(w.box, ".claude", "skills", "draft", `${token}.txt`), "notes\n", 0o000);
+    write(join(w.box, ".claude", "skills", "locked", "SKILL.md"), "# Locked\n");
+    write(join(w.box, ".claude", "skills", "locked", "notes.md"), "notes\n", 0o000);
+
+    const named = await adopt(w, { name: "draft" });
+    const locked = await adopt(w, { name: "locked" });
+
+    expect(errorInfo(named.error).code).toBe("deny-rule-match");
+    expect((named.error as Error).message).toBe(
+      "Ferry refused draft from box a, and copied nothing to this machine: token-name a file or directory in . has a token in its name: .",
+    );
+    expect((locked.error as Error).message).toBe(
+      "Ferry refused locked from box a, and copied nothing to this machine: unreadable Ferry cannot read the file: notes.md",
+    );
+    expect(crossed(w, token)).toBe(false);
+    expect(w.received.join("\n")).not.toContain("EACCES");
+    expect(existsSync(join(w.operator, ".claude"))).toBe(false);
+  });
+
+  test.skipIf(process.getuid?.() === 0)("the list of the box-only skills sends no error text of the box", async () => {
+    const w = world();
+    write(join(w.box, ".agents", "skills", "draft", "SKILL.md"), "# Draft\n");
+    chmodSync(join(w.box, ".agents", "skills"), 0o000);
+    try {
+      let error: unknown = null;
+      try {
+        await listBoxSkills(w.link, HARNESSES);
+      } catch (caught) {
+        error = caught;
+      }
+
+      expect((error as Error).message).toBe("box/command-failed: the box could not list its skill roots");
+      expect(w.received.join("")).not.toContain("Permission denied");
+    } finally {
+      chmodSync(join(w.box, ".agents", "skills"), 0o755);
+    }
+  });
+
   test("leaves out a file of more than 128 MiB and tells the operator to copy it by hand", async () => {
     const w = world();
     write(join(w.box, ".claude", "skills", "draft", "SKILL.md"), "# Draft\n");

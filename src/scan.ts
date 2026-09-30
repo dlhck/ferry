@@ -18,6 +18,11 @@
  * path that the operator agreed to carry. The pack is a list of files with
  * their bytes. It has no links and no other kind of entry.
  *
+ * A scan and a pack check the name of a file before they open it, and a file
+ * that they cannot read is a hit with its path, not an error. No text of an
+ * error of the system is in a result. Each line that is not file data also
+ * goes through the token filter before `ferry scan` prints it.
+ *
  * A scan and a pack hold one file in memory. They do not read a file of more
  * than `MAX_FILE_BYTES`: it stays on its machine, and the operator copies it
  * by hand.
@@ -38,7 +43,17 @@ import { dirname, isAbsolute, join, relative } from "node:path";
 import { BOX_MARKER } from "./box-ferry.ts";
 import { FerryError } from "./errors.ts";
 import type { Link } from "./link.ts";
-import { carriedContentHits, carriedNameHit, DENY_RULES_VERSION, holdsToken, readLimited, scanSkill, TOKEN_MARK } from "./manifest.ts";
+import {
+  carriedContentHits,
+  carriedNameHit,
+  DENY_RULES_VERSION,
+  holdsToken,
+  readLimited,
+  redactTokens,
+  redactUrlCredentials,
+  scanSkill,
+  TOKEN_MARK,
+} from "./manifest.ts";
 import { sessionContentHits } from "./session-scan.ts";
 
 export type ScanHit = { readonly path: string; readonly code: string; readonly reason: string };
@@ -125,6 +140,9 @@ export const MAX_FILE_BYTES = 128 * 1024 * 1024;
 const TOO_LARGE = { code: "too-large", reason: "too large for Ferry to check" };
 /** A file that has more bytes in the read than its size said. The read stops at the limit, and the file is not sent. */
 const CHANGED = { code: "changed", reason: "file changed during the check" };
+/** A file or a directory that gives an error when Ferry reads it, such as a file without the read permission. */
+const UNREADABLE = { code: "unreadable", reason: "Ferry cannot read the file" };
+const MISSING = { code: "missing", reason: "file changed during the preflight" };
 /** Content rules that refuse a file also with `allowSecrets`. */
 const ALWAYS_REFUSED = new Set(["private-key", "executable"]);
 /** A session id that the scan returns: a UUID, as Codex writes it. Other text in its place is not an id. */
@@ -137,7 +155,7 @@ const SCAN_TIMEOUT_MS = 15 * 60_000;
 /** The bytes of a file in one data line of a pack. A multiple of 3, so the base64 text of the lines joins. */
 const DATA_CHUNK = 3 * 1024 * 1024;
 /** Prints `MISSING` when the box has no box install of Ferry. The exit code of Ferry does not fail the command. */
-const BOX_SCAN_COMMAND = `if [ -f "$HOME/${BOX_MARKER}" ] && [ -x "$HOME/.local/bin/ferry" ]; then "$HOME/.local/bin/ferry" --json scan; else echo MISSING; fi; true`;
+const BOX_SCAN_COMMAND = `if [ -f "$HOME/${BOX_MARKER}" ] && [ -x "$HOME/.local/bin/ferry" ]; then "$HOME/.local/bin/ferry" --json scan 2>/dev/null; else echo MISSING; fi; true`;
 const WHY = "Ferry checks the files with the Ferry on the box before it copies them, so that a file with a secret stays on the box.";
 const BUILD = "A development build of Ferry puts no Ferry on a box. Use a release of Ferry.";
 
@@ -193,17 +211,26 @@ export function* packLines(request: PackRequest, home: string): Generator<string
   let count = 0;
   for (const entry of packEntries(request, home, MAX_FILE_BYTES)) {
     if (!("file" in entry)) {
-      yield JSON.stringify(entry);
+      yield redactPackLine(JSON.stringify(entry));
       continue;
     }
     const { bytes, ...file } = entry.file;
-    yield JSON.stringify({ file: { ...file, size: bytes.length } });
+    yield redactPackLine(JSON.stringify({ file: { ...file, size: bytes.length } }));
     for (let start = 0; start < bytes.length; start += DATA_CHUNK) {
       yield JSON.stringify({ data: Buffer.from(bytes.subarray(start, start + DATA_CHUNK)).toString("base64") });
     }
     count++;
   }
   yield JSON.stringify({ end: count });
+}
+
+/**
+ * A line of a pack with a mark in the place of each token and of each
+ * credential in a URL. A line with file data stays as it is: its bytes passed
+ * the rules, and base64 text can have the form of a token by chance.
+ */
+export function redactPackLine(line: string): string {
+  return line.startsWith('{"data":') ? line : redactUrlCredentials(redactTokens(line));
 }
 
 /** The scan request or the pack request in the JSON text `text`. A pack request has `pack: true`. */
@@ -396,7 +423,13 @@ function* packEntries(request: PackRequest, home: string, maxBytes: number): Gen
 
 /** The files of a skill directory that pass the rules of a publish, with their bytes, and the hits. */
 function checkSkill(directory: string, maxBytes: number): { files: PackedFile[]; forbidden: ScanHit[]; skipped: ScanHit[] } {
-  const scan = scanSkill(directory, maxBytes);
+  let scan;
+  try {
+    scan = scanSkill(directory, maxBytes);
+  } catch {
+    // Ferry cannot list the directory. The error of the system has its path, so it does not go in the result.
+    return { files: [], forbidden: [{ path: ".", ...UNREADABLE }], skipped: [] };
+  }
   const named = new Map<string, ScanHit>();
   /** The path relative to the skill, or null after a hit for a name with a token. */
   const shown = (path: string): string | null => {
@@ -432,13 +465,18 @@ function checkFile(root: string, path: string, allowSecrets: boolean, maxBytes: 
   let stat;
   try {
     stat = lstatSync(full);
-  } catch {
-    return { refused: [{ path, code: "missing", reason: "file changed during the preflight" }] };
+  } catch (error) {
+    return { refused: [{ path, ...readFailure(error) }] };
   }
   if (stat.isSymbolicLink()) return { refused: [{ path, code: "symlink", reason: "symbolic link" }] };
   if (!stat.isFile()) return { refused: [{ path, code: "not-a-file", reason: "not a regular file" }] };
   if (stat.size > maxBytes) return { refused: [{ path, ...TOO_LARGE }] };
-  const bytes = readLimited(full, maxBytes);
+  let bytes;
+  try {
+    bytes = readLimited(full, maxBytes);
+  } catch (error) {
+    return { refused: [{ path, ...readFailure(error) }] };
+  }
   if (bytes === null) return { refused: [{ path, ...CHANGED }] };
   const file = { path, sha256: sha256(bytes), mode: stat.mode & 0o777, bytes, id: null };
   const hits = carriedContentHits(path, bytes);
@@ -483,8 +521,8 @@ function checkSession(
     if (stat.size > maxBytes) return kept(TOO_LARGE);
     bytes = readLimited(join(home, path), maxBytes);
     mode = stat.mode & 0o777;
-  } catch {
-    return kept({ code: "missing", reason: "file changed during the preflight" });
+  } catch (error) {
+    return kept(readFailure(error));
   }
   if (bytes === null) return kept(CHANGED);
   const nameHit = carriedNameHit(path);
@@ -496,6 +534,11 @@ function checkSession(
   // A name rule, a private key, or an executable refuses the file also with allowSecrets.
   const blocked = nameHit !== null || hits.some((hit) => ALWAYS_REFUSED.has(hit.code));
   return { file: { path, sha256: sha256(bytes), mode, bytes, secrets: [], id }, session: id !== null, hits, blocked };
+}
+
+/** The hit for a file that gave an error on a read: `missing` for a file that is not there, else `unreadable`. It has no text of the error. */
+function readFailure(error: unknown): { code: string; reason: string } {
+  return (error as { code?: unknown } | null)?.code === "ENOENT" ? MISSING : UNREADABLE;
 }
 
 /** The `payload.id` of the first line, when the line records `project` as `payload.cwd`. */

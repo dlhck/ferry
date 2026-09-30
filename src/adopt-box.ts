@@ -91,8 +91,12 @@ done
  */
 export async function listBoxSkills(link: BoxLink, harnesses: readonly HarnessDescriptor[]): Promise<BoxSkill[]> {
   const roots = [...new Set(harnesses.flatMap((harness) => (harness.skillRoot ? [harness.skillRoot] : []))), STORE_SKILLS];
-  const result = await link.run(shellCommand(LIST_SCRIPT, [LIST_WORKER, TOKEN_ERE, ...roots]));
-  if (!result.ok) throw new Error(`${result.error.origin}/${result.error.code}: ${result.error.message}`);
+  // The error text of find can name a file of the box, so it stays on the box.
+  const result = await link.run(`${shellCommand(LIST_SCRIPT, [LIST_WORKER, TOKEN_ERE, ...roots])} 2>/dev/null`);
+  if (!result.ok) {
+    const message = result.error.origin === "box" ? "the box could not list its skill roots" : result.error.message;
+    throw new Error(`${result.error.origin}/${result.error.code}: ${message}`);
+  }
 
   let home: string | null = null;
   let tracked = new Set<string>();

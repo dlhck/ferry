@@ -1631,6 +1631,49 @@ describe("box mode", () => {
     expect(buildProgram().helpInformation()).not.toContain("redact");
   });
 
+  test("the error of ferry scan and of ferry redact has a mark in the place of a token, also for an error that Ferry does not expect", async () => {
+    const token = "gh" + "p_" + "a".repeat(36);
+    const output: string[] = [];
+    const failing = () => {
+      throw new Error(`EACCES: permission denied, open '/home/user/skill/${token}.txt'`);
+    };
+
+    await runCli(["--json", "scan"], { isBoxMode: () => true, readStdin: async () => '{"kind":"skill","root":"skill"}', home: failing, writeLine: (line) => output.push(line) }, { setExitCode: () => {} });
+    await runCli(["--json", "redact"], { isBoxMode: () => true, readStdin: async () => failing(), writeLine: (line) => output.push(line) }, { setExitCode: () => {} });
+
+    expect(output).toHaveLength(2);
+    for (const line of output) {
+      const envelope = JSON.parse(line);
+      expect(envelope.ok).toBe(false);
+      expect(envelope.error.message).toBe("EACCES: permission denied, open '/home/user/skill/[token].txt'");
+      expect(line).not.toContain(token);
+    }
+  });
+
+  test("the result of ferry scan has a mark in the place of a token that a rule did not take out", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ferry-box-scan-"));
+    const token = "gh" + "p_" + "a".repeat(36);
+    try {
+      await mkdir(join(home, "skill"), { recursive: true });
+      await writeFile(join(home, "skill/SKILL.md"), "# Demo\n");
+      const output: string[] = [];
+
+      // The root of the request is from the operator machine. A root with a token must not come back in a text.
+      await runCli(["--json", "scan"], {
+        isBoxMode: () => true,
+        home: () => home,
+        readStdin: async () => JSON.stringify({ kind: "skill", root: `missing-${token}` }),
+        writeLine: (line) => output.push(line),
+      });
+
+      expect(output).toHaveLength(1);
+      expect(output[0]).not.toContain(token);
+      expect(JSON.parse(output[0]!).result.forbidden).toEqual([{ path: ".", code: "unreadable", reason: "Ferry cannot read the file" }]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("a box install still prints the version and the help", async () => {
     const out: string[] = [];
     const program = buildProgram({ isBoxMode: () => true }).exitOverride();

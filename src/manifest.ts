@@ -39,7 +39,7 @@ export type DenyRuleDescription = {
  * a box whose number is lower than this one, because older rules can pass a
  * file that this machine refuses.
  */
-export const DENY_RULES_VERSION = 7;
+export const DENY_RULES_VERSION = 8;
 
 const DENY_RULES = {
   dotenv: { code: "dotenv", reason: "environment file", verdict: "refuse" },
@@ -142,6 +142,8 @@ const NOTES = {
   "invalid-settings": { code: "invalid-settings", reason: "settings file that is not a JSON object" },
   "too-large": { code: "too-large", reason: "too large for Ferry to check" },
   changed: { code: "changed", reason: "file changed during the check" },
+  unreadable: { code: "unreadable", reason: "Ferry cannot read the file" },
+  "token-name": { code: "token-name", reason: "file or directory name with a token" },
 } as const satisfies Record<string, Note>;
 
 /** The bytes of one read of `readLimited`. */
@@ -656,6 +658,10 @@ type Scan = { files: SeedFile[]; leftovers: Leftover[]; forbidden: ForbiddenHit[
  * The carried files of one skill directory, and the hits of the deny rules in
  * it. The hit paths are absolute. With `maxBytes`, a larger file is not read
  * and is a leftover, and so is a file that grows past it during the read.
+ *
+ * `maxBytes` is for a scan whose result leaves the machine. Such a scan also
+ * refuses an entry with a token in its name before it opens the entry, and
+ * an entry that it cannot read, so that no error of the system names a file.
  */
 export function scanSkill(skillDir: string, maxBytes?: number): Scan {
   const scan: Scan = { files: [], leftovers: [], forbidden: [] };
@@ -688,62 +694,79 @@ export function readLimited(path: string, maxBytes: number): Buffer | null {
 function walk(root: string, dir: string, rootReal: string, seen: Set<string>, scan: Scan, maxBytes?: number): void {
   for (const entry of readdirSync(dir, { withFileTypes: true }).sort(byName)) {
     const path = join(dir, entry.name);
-
-    if (entry.isSymbolicLink()) {
-      let target: string;
-      try {
-        target = realpathSync(path);
-      } catch {
-        scan.leftovers.push(note(path, NOTES["broken-link"]));
-        continue;
-      }
-      if (target !== rootReal && !target.startsWith(rootReal + sep)) {
-        scan.forbidden.push(note(path, DENY_RULES["symlink-escape"]));
-        continue;
-      }
-    }
-
-    const stat = statSync(path);
-    const rule = denyRuleFor(entry.name, stat.isDirectory());
-    if (rule) {
-      if (rule.verdict === "refuse") scan.forbidden.push(note(path, rule));
-      else scan.leftovers.push(note(path, rule));
+    if (maxBytes === undefined) {
+      visit(root, entry, path, rootReal, seen, scan, maxBytes);
       continue;
     }
-
-    if (stat.isDirectory()) {
-      const real = realpathSync(path);
-      if (seen.has(real)) continue;
-      seen.add(real);
-      walk(root, path, rootReal, seen, scan, maxBytes);
+    // The name comes first: Ferry does not open an entry with a token in its name, so no error can print the name.
+    if (holdsToken(entry.name)) {
+      scan.forbidden.push(note(path, NOTES["token-name"]));
       continue;
     }
-    if (!stat.isFile()) {
-      scan.leftovers.push(note(path, NOTES["not-a-file"]));
-      continue;
+    try {
+      visit(root, entry, path, rootReal, seen, scan, maxBytes);
+    } catch {
+      scan.forbidden.push(note(path, NOTES.unreadable));
     }
-
-    if (maxBytes !== undefined && stat.size > maxBytes) {
-      scan.leftovers.push(note(path, NOTES["too-large"]));
-      continue;
-    }
-    const bytes = maxBytes === undefined ? readFileSync(path) : readLimited(path, maxBytes);
-    if (bytes === null) {
-      scan.leftovers.push(note(path, NOTES.changed));
-      continue;
-    }
-    // A key renamed to notes.md is still a key. Read the header, not the name.
-    if (PRIVATE_KEY_HEADER.test(bytes.subarray(0, 4096).toString("latin1"))) {
-      scan.forbidden.push(note(path, DENY_RULES["private-key"]));
-      continue;
-    }
-    const hits = contentHits(path, bytes);
-    if (hits.length > 0) {
-      scan.forbidden.push(...hits);
-      continue;
-    }
-    scan.files.push({ path: relative(root, path), bytes, executable: (stat.mode & 0o100) !== 0 });
   }
+}
+
+/** Apply the rules to one entry of a skill directory. */
+function visit(root: string, entry: Dirent, path: string, rootReal: string, seen: Set<string>, scan: Scan, maxBytes?: number): void {
+  if (entry.isSymbolicLink()) {
+    let target: string;
+    try {
+      target = realpathSync(path);
+    } catch {
+      scan.leftovers.push(note(path, NOTES["broken-link"]));
+      return;
+    }
+    if (target !== rootReal && !target.startsWith(rootReal + sep)) {
+      scan.forbidden.push(note(path, DENY_RULES["symlink-escape"]));
+      return;
+    }
+  }
+
+  const stat = statSync(path);
+  const rule = denyRuleFor(entry.name, stat.isDirectory());
+  if (rule) {
+    if (rule.verdict === "refuse") scan.forbidden.push(note(path, rule));
+    else scan.leftovers.push(note(path, rule));
+    return;
+  }
+
+  if (stat.isDirectory()) {
+    const real = realpathSync(path);
+    if (seen.has(real)) return;
+    seen.add(real);
+    walk(root, path, rootReal, seen, scan, maxBytes);
+    return;
+  }
+  if (!stat.isFile()) {
+    scan.leftovers.push(note(path, NOTES["not-a-file"]));
+    return;
+  }
+
+  if (maxBytes !== undefined && stat.size > maxBytes) {
+    scan.leftovers.push(note(path, NOTES["too-large"]));
+    return;
+  }
+  const bytes = maxBytes === undefined ? readFileSync(path) : readLimited(path, maxBytes);
+  if (bytes === null) {
+    scan.leftovers.push(note(path, NOTES.changed));
+    return;
+  }
+  // A key renamed to notes.md is still a key. Read the header, not the name.
+  if (PRIVATE_KEY_HEADER.test(bytes.subarray(0, 4096).toString("latin1"))) {
+    scan.forbidden.push(note(path, DENY_RULES["private-key"]));
+    return;
+  }
+  const hits = contentHits(path, bytes);
+  if (hits.length > 0) {
+    scan.forbidden.push(...hits);
+    return;
+  }
+  scan.files.push({ path: relative(root, path), bytes, executable: (stat.mode & 0o100) !== 0 });
 }
 
 /** The forbidden hits of one file in a managed root, found from its bytes. */
