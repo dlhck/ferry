@@ -1,26 +1,31 @@
 name: Release
 
-# The owner publishes a GitHub release from a tag vX.Y.Z. This workflow builds the
-# binaries, attaches them to the release, and publishes the npm packages.
-# See RELEASING.md.
+# The owner creates a draft GitHub release for vX.Y.Z, then pushes the tag. This workflow
+# builds the binaries, attaches them to the draft, publishes the npm packages, and publishes
+# the release as its last step. Nobody sees a draft, so the release is never visible without
+# its files. See RELEASING.md.
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event.release.tag_name }}
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   version:
     name: Read version from tag
-    # A release event never comes from a pull request. This condition also stops forks.
+    # A tag push never comes from a pull request. This condition also stops forks.
     if: github.repository == 'dlhck/ferry'
     runs-on: ubuntu-latest
+    # Only a token with write access can read a draft release.
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.version.outputs.version }}
       dist-tag: ${{ steps.version.outputs.dist-tag }}
@@ -29,7 +34,7 @@ jobs:
       - name: Check tag
         id: version
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.ref_name }}
         run: |
           semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
           if [[ ! "$TAG" =~ $semver ]]; then
@@ -41,6 +46,21 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "dist-tag=$dist_tag" >> "$GITHUB_OUTPUT"
           echo "Version $version, npm dist-tag $dist_tag"
+
+      # Stop before the builds when the owner pushed the tag without a release for the notes.
+      - name: Check release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! draft=$(gh release view "$TAG" --json isDraft --jq .isDraft); then
+            echo "::error::There is no release for $TAG. Create the draft release, then run the failed jobs again. See RELEASING.md."
+            exit 1
+          fi
+          if [ "$draft" != true ]; then
+            echo "::warning::The release for $TAG is not a draft. A published release is visible before its files are attached. See RELEASING.md."
+          fi
 
   build:
     name: Build ${{ matrix.asset }}
@@ -130,7 +150,7 @@ jobs:
           if-no-files-found: error
 
   attach:
-    name: Attach binaries to release
+    name: Attach binaries to draft release
     needs: [build, menubar]
     runs-on: ubuntu-latest
     permissions:
@@ -153,12 +173,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.ref_name }}
         run: gh release upload "$TAG" dist/* --clobber
 
+  # npm cannot take a version back. So this job runs after the files are on the draft release,
+  # and only the release job comes after it.
   publish:
     name: Publish to npm
-    needs: [version, build]
+    needs: [version, build, attach]
     runs-on: ubuntu-latest
     environment: npm
     permissions:
@@ -198,13 +220,87 @@ jobs:
             echo "::error::npm $npm_version cannot use trusted publishing. It needs npm 11.5.1 or later."
             exit 1
           fi
-          # Platform packages first, so the main package never points at a missing version.
-          for dir in ./out/ferry-darwin-arm64 ./out/ferry-darwin-x64 ./out/ferry-linux-arm64 ./out/ferry-linux-x64 ./out/ferry; do
-            name=$(node -p "require('$dir/package.json').name")
+          on_npm() {
+            [ "$(npm view "$1@$VERSION" version 2>/dev/null)" = "$VERSION" ]
+          }
+          publish() {
+            name=$(node -p "require('$1/package.json').name")
             # A second run of a failed release skips the packages that are already on npm.
-            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+            if on_npm "$name"; then
               echo "$name@$VERSION is already on npm."
-              continue
+              return
             fi
-            npm publish "$dir" --provenance --access public --tag "$DIST_TAG"
+            npm publish "$1" --provenance --access public --tag "$DIST_TAG"
+          }
+          # Platform packages first, so the main package never points at a missing version.
+          platforms="ferry-darwin-arm64 ferry-darwin-x64 ferry-linux-arm64 ferry-linux-x64"
+          for platform in $platforms; do
+            publish "./out/$platform"
           done
+          # npm shows a new version some time after the publish, and not in the publish order.
+          # Wait for the platform packages, at most 15 minutes, then publish the main package.
+          for platform in $platforms; do
+            tries=0
+            until on_npm "@dlhck/$platform"; do
+              tries=$((tries + 1))
+              if [ "$tries" -gt 60 ]; then
+                echo "::error::npm does not show @dlhck/$platform@$VERSION. Run the failed jobs again later."
+                exit 1
+              fi
+              sleep 15
+            done
+            echo "npm shows @dlhck/$platform@$VERSION."
+          done
+          publish ./out/ferry
+
+  # The last job. It makes the release visible when the files are attached and npm shows all
+  # five packages. The GitHub release comes after npm, because a failed npm publish then
+  # leaves a draft, and the clients read the new version from the GitHub release.
+  release:
+    name: Publish release
+    needs: [version, attach, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.version.outputs.version }}
+      DIST_TAG: ${{ needs.version.outputs.dist-tag }}
+
+    steps:
+      - name: Wait for npm packages
+        run: |
+          # At most 15 minutes for each package.
+          for name in ferry-darwin-arm64 ferry-darwin-x64 ferry-linux-arm64 ferry-linux-x64 ferry; do
+            tries=0
+            until [ "$(npm view "@dlhck/$name@$VERSION" version 2>/dev/null)" = "$VERSION" ]; do
+              tries=$((tries + 1))
+              if [ "$tries" -gt 60 ]; then
+                echo "::error::npm does not show @dlhck/$name@$VERSION. The release stays a draft. Run the failed jobs again later."
+                exit 1
+              fi
+              sleep 15
+            done
+            echo "npm shows @dlhck/$name@$VERSION."
+          done
+
+      - name: Check release assets
+        run: |
+          assets=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          for name in ferry-darwin-arm64 ferry-darwin-x64 ferry-linux-arm64 ferry-linux-x64 ferry-menubar-macos.zip SHA256SUMS; do
+            if ! printf '%s\n' "$assets" | grep -qx "$name"; then
+              echo "::error::The release for $TAG does not have $name. The release stays a draft."
+              exit 1
+            fi
+          done
+
+      # A version with a pre-release part is a GitHub pre-release, so it is never the latest release.
+      - name: Publish release
+        run: |
+          if [ "$DIST_TAG" = next ]; then
+            gh release edit "$TAG" --draft=false --prerelease
+          else
+            gh release edit "$TAG" --draft=false
+          fi
