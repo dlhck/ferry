@@ -19,7 +19,9 @@
  *
  * The output of each command on a source box goes through `ferry redact` on
  * the box, so a file name, a branch name, or a commit subject with the form of
- * a token reaches this machine as `[token]`.
+ * a token reaches this machine as `[token]`, and a credential in a URL as
+ * `[credential]`. The destination clones from the origin URL without its
+ * credential, so a credential in the origin URL stays on the source.
  *
  * With `sessions`, Ferry also carries the agent sessions of the project from
  * the session stores of the harness descriptors, with the same deny rules.
@@ -41,7 +43,7 @@ import { hasBoxPart, INTEGRATIONS, operatorIntegrations, type Integration } from
 import { paseoSourceHint } from "./integrations/paseo.ts";
 import type { IntegrationId, MovedSession } from "./integrations/types.ts";
 import { Link, type LinkOptions } from "./link.ts";
-import { carriedNameHit, TOKEN_MARK } from "./manifest.ts";
+import { carriedNameHit, CREDENTIAL_MARK, holdsToken, redactTokens, redactUrlCredentials, TOKEN_MARK } from "./manifest.ts";
 import { FerryError } from "./errors.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
 import { BUILTIN_HARNESSES } from "./registry/builtin.ts";
@@ -725,14 +727,25 @@ async function gitPreflight(source: Side, path: string, problems: string[], note
     problems.push("The repository has no origin remote.");
     return null;
   }
-  const url = origin.stdout.trim();
+  // A source box puts the marks in its output. For this machine, the same functions run here, before the URL goes to a box.
+  const marked = redactUrlCredentials(redactTokens(origin.stdout.trim()));
+  const url = marked
+    .replace(`${CREDENTIAL_MARK}@`, "")
+    .replace(/([?&#])[^=&#?]+=\[credential\](&?)/g, (_parameter, separator: string, next: string) => (next ? separator : ""));
+  if (url.includes(CREDENTIAL_MARK) || url.includes(TOKEN_MARK)) {
+    problems.push("The origin URL has a credential that Ferry cannot take out. Set an origin URL without a credential.");
+    return null;
+  }
+  if (url !== marked) {
+    notes.push("The origin URL has a credential. Ferry carries the URL without it, so the destination needs its own login for the clone.");
+  }
 
   const remote = await source.run(
     `cd ${path} && git ls-remote --symref origin HEAD && git ls-remote --heads --tags origin`,
     { timeoutMs: NETWORK_TIMEOUT_MS },
   );
   if (!remote.ok) {
-    problems.push(`Ferry could not read origin: ${remote.message}`);
+    problems.push(`Ferry could not read origin: ${redactUrlCredentials(remote.message)}`);
     return null;
   }
   const remoteShas = new Set<string>();
@@ -821,6 +834,11 @@ async function gitPreflight(source: Side, path: string, problems: string[], note
   if (ghUnused) notes.push("gh is missing or cannot read origin, so Ferry did not look for merged pull requests.");
 
   const branch = head.trim();
+  // A branch name with a token does not go to the destination. A source box sends it with the mark.
+  if (holdsToken(branch) || branch.includes(TOKEN_MARK)) {
+    notes.push("The name of the branch has the form of a token. The clone uses the default branch.");
+    return { url, branch: null };
+  }
   if (branch && remoteBranches.has(branch)) return { url, branch };
   notes.push(
     branch
@@ -968,7 +986,7 @@ function redacted(command: string): string {
     'ferry_out=$(mktemp) && ferry_err=$(mktemp) || exit 1',
     `( ${command}\n) >"$ferry_out" 2>"$ferry_err"`,
     "ferry_rc=$?",
-    '"$HOME/.local/bin/ferry" redact <"$ferry_out" || ferry_rc=1',
+    '[ ! -s "$ferry_out" ] || "$HOME/.local/bin/ferry" redact <"$ferry_out" || ferry_rc=1',
     '[ ! -s "$ferry_err" ] || "$HOME/.local/bin/ferry" redact <"$ferry_err" >&2',
     'rm -f "$ferry_out" "$ferry_err"',
     'exit "$ferry_rc"',

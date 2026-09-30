@@ -10,6 +10,7 @@ import {
   readMcpSources,
   readSeed,
   redactTokens,
+  redactUrlCredentials,
   TOKEN_ERE,
 } from "../src/manifest.ts";
 import type { Refusal, Seed } from "../src/manifest.ts";
@@ -1921,6 +1922,27 @@ describe("carried project files", () => {
       "a key holds a password or secret",
       "key password holds a password or secret",
     ]);
+  });
+
+  test("the printed form of a URL has a mark in the place of each credential, and a login name stays", () => {
+    const secret = "box-only" + "-password";
+    const cases: [string, string][] = [
+      [`https://alice:${secret}@example.invalid/app.git`, "https://[credential]@example.invalid/app.git"],
+      [`https://${secret}@example.invalid/app.git`, "https://[credential]@example.invalid/app.git"],
+      [`ssh://git:${secret}@example.invalid/app.git`, "ssh://[credential]@example.invalid/app.git"],
+      [`https://example.invalid/app.git?access_token=${secret}`, "https://example.invalid/app.git?access_token=[credential]"],
+      [`https://example.invalid/app.git?a=1&pa%73sword=${secret}&b=2`, "https://example.invalid/app.git?a=1&pa%73sword=[credential]&b=2"],
+      [`https://alice:pa%40ss${secret}@example.invalid/app.git`, "https://[credential]@example.invalid/app.git"],
+      [`fatal: unable to access 'https://alice:${secret}@example.invalid/app.git/': Could not resolve host`, "fatal: unable to access 'https://[credential]@example.invalid/app.git/': Could not resolve host"],
+      // A login name is not a credential.
+      ["ssh://git@example.invalid/app.git", "ssh://git@example.invalid/app.git"],
+      ["git@example.invalid:you/app.git", "git@example.invalid:you/app.git"],
+      ["https://example.invalid/app.git?ref=main", "https://example.invalid/app.git?ref=main"],
+      ["/home/user/origin.git", "/home/user/origin.git"],
+    ];
+
+    for (const [text, printed] of cases) expect([text.replaceAll(secret, "<secret>"), redactUrlCredentials(text)]).toEqual([text.replaceAll(secret, "<secret>"), printed]);
+    expect(cases.map(([text]) => redactUrlCredentials(text)).join("\n")).not.toContain(secret);
   });
 
   test("the printed form of a text has a mark in the place of each token, also without a word boundary before it", () => {

@@ -39,7 +39,7 @@ export type DenyRuleDescription = {
  * a box whose number is lower than this one, because older rules can pass a
  * file that this machine refuses.
  */
-export const DENY_RULES_VERSION = 5;
+export const DENY_RULES_VERSION = 6;
 
 const DENY_RULES = {
   dotenv: { code: "dotenv", reason: "environment file", verdict: "refuse" },
@@ -1162,6 +1162,31 @@ function hasUrlCredential(word: string): boolean {
         ),
       ),
   );
+}
+
+/** The text that `redactUrlCredentials` puts in the place of a credential in a URL. */
+export const CREDENTIAL_MARK = "[credential]";
+
+/**
+ * `text` with `CREDENTIAL_MARK` in the place of each credential in a URL, by
+ * the rules of `hasUrlCredential`: the user and the password before the host,
+ * and the value of a secret parameter. A login name stays, as in
+ * `ssh://git@host` and `git@host:path`. Ferry applies this to a text before
+ * it leaves its machine, such as the origin URL of a project.
+ */
+export function redactUrlCredentials(text: string): string {
+  return text.replace(ARGUMENT_URL, (_url, scheme: string, authority: string, rest: string) => {
+    const at = authority.lastIndexOf("@");
+    // Without `@` in the text, only a decoded reading has the credential. Ferry cannot take it out of the host.
+    if (hasUrlCredential(`${scheme}://${authority}`)) return at < 0 ? CREDENTIAL_MARK : `${scheme}://${CREDENTIAL_MARK}${authority.slice(at)}${parameters(rest)}`;
+    return `${scheme}://${authority}${parameters(rest)}`;
+
+    function parameters(part: string): string {
+      return part.replace(URL_PARAMETER, (parameter, key: string) =>
+        hasUrlCredential(`${scheme}://host/${parameter}`) ? `${parameter[0]}${key}=${CREDENTIAL_MARK}` : parameter,
+      );
+    }
+  });
 }
 
 /** True when a word of a stdio command is `~`, `$HOME`, `${HOME}`, or the operator home, or a path in it. */

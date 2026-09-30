@@ -140,7 +140,7 @@ import {
   type UpdateCommandResult,
 } from "./update.ts";
 import { isReleaseVersion, VERSION } from "./version.ts";
-import { redactTokens } from "./manifest.ts";
+import { redactTokens, redactUrlCredentials } from "./manifest.ts";
 import { parseScanRequest, runScan } from "./scan.ts";
 import { offerSelfUpdate, offersSelfUpdate, runSelfUpdate, type SelfUpdateDependencies } from "./self-update.ts";
 
@@ -1488,9 +1488,9 @@ on the box. This command runs on the operator machine and on a box install.`)
   // move --from-box sends the output of each box command through this filter, so that a name with a token stays on the box.
   program
     .command("redact", { hidden: true })
-    .description("Copy stdin to stdout with [token] in the place of each text that has the form of a token")
+    .description("Copy stdin to stdout with [token] in the place of each token and [credential] in the place of each credential in a URL")
     .action(async () => {
-      const text = redactTokens(await (dependencies.readStdin ?? (() => Bun.stdin.text()))());
+      const text = redactUrlCredentials(redactTokens(await (dependencies.readStdin ?? (() => Bun.stdin.text()))()));
       (dependencies.writeText ?? ((value: string) => void process.stdout.write(value)))(text);
     });
 

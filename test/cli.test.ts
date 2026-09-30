@@ -1620,6 +1620,14 @@ describe("box mode", () => {
     });
 
     expect(output).toEqual(["notes/[token].md\0AGENTS.md\0"]);
+
+    await runCli(["redact"], {
+      isBoxMode: () => true,
+      readStdin: async () => "https://alice:box-only-password@example.invalid/app.git?token=box-only-password\n",
+      writeText: (text) => output.push(text),
+    });
+
+    expect(output[1]).toBe("https://[credential]@example.invalid/app.git?token=[credential]\n");
     expect(buildProgram().helpInformation()).not.toContain("redact");
   });
 
