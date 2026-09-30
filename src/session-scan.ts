@@ -49,8 +49,16 @@ const REFERENCE = /\$\{[^{}]*\}|\$\w+/g;
  * other text next to a reference, such as `abc${SUFFIX}`, is a literal.
  */
 const ONLY_REFERENCES = /^(?:\$\w+|\$\{[^{}]*\}|\$?\{\{[^{}]*\}\}|\{[^{}]*\}|\$\([^()]*\)|`[^`]*`)+$/;
-/** The start of a quoted string, also with a prefix letter such as `b"` or `f'`. Group 1 is the quote. */
-const QUOTE = /^[A-Za-z]{0,2}(["'])/;
+/**
+ * The start of a quoted string, also with a prefix letter such as `b"` or
+ * `f'`. Group 1 is the quote: one quote character, or three for a string of
+ * Python or TOML that can have line ends.
+ */
+const QUOTE = /^[A-Za-z]{0,2}("""|'''|["'])/;
+/** A word directly after a closing quote, which a shell joins to the string, as in `""hunter2`. It does not start with a sign. */
+const JOINED_WORD = /^[A-Za-z0-9_$][\w+/=.~@%:!#^*${}-]*/;
+/** The `|` or `>` of a YAML block scalar, with its chomping sign, its indentation digit, and a comment. */
+const BLOCK_SCALAR = /^[|>][+-]?\d?\s*(?:#.*)?$/;
 
 /**
  * The hits of the session transcript `path`: the token hits in its decoded
@@ -90,13 +98,15 @@ function valueKeys(value: unknown, nesting: number): string[] {
 function textKeys(text: string, nesting: number): string[] {
   const whole = parseJson(text, nesting);
   if (whole !== undefined) return valueKeys(whole, nesting + 1);
-  const lines = text.split("\n");
-  return lines.flatMap((numbered) => {
-    const line = numbered.replace(LINE_NUMBER, "");
+  const lines = text.split("\n").map((line) => line.replace(LINE_NUMBER, ""));
+  return lines.flatMap((line, index) => {
     const record = line === text ? undefined : parseJson(line, nesting);
     if (record !== undefined) return valueKeys(record, nesting + 1);
+    // A value can go on in the lines after its key: a string with line ends, or a YAML value.
+    const after = lines.slice(index + 1);
     const config = line.match(CONFIG_LINE);
-    return [...(config && isSecretKey(config[1]!) && isLiteral(config[2]!) ? [config[1]!] : []), ...commandKeys(line)];
+    const found = config && isSecretKey(config[1]!) && (isLiteral(config[2]!, false, after) || isNextLineValue(config[2]!, line, after));
+    return [...(found ? [config[1]!] : []), ...commandKeys(line, after)];
   });
 }
 
@@ -114,20 +124,21 @@ function parseJson(text: string, nesting: number): object | undefined {
 /**
  * The secret keys with a literal value in the words of a command line, as
  * `--key=value`, `key=value`, or `--key value`. The value is the text after
- * the key to the end of the line, so a quoted value can have spaces.
+ * the key to the end of the line, so a quoted value can have spaces. `after`
+ * has the lines after `line`, for a string that goes on there.
  */
-function commandKeys(line: string): string[] {
+function commandKeys(line: string, after: readonly string[]): string[] {
   return [...line.matchAll(/\S+/g)].flatMap((match) => {
     const word = match[0];
     const pair = word.match(/^(-{0,2}([\w-]+)=)/);
     if (pair) {
       const value = line.slice(match.index + pair[1]!.length);
       // A space after `=` ends the value, so the value is empty.
-      return isSecretKey(pair[2]!) && !/^\s/.test(value) && isLiteral(value, ENV_KEY.test(pair[2]!)) ? [pair[2]!] : [];
+      return isSecretKey(pair[2]!) && !/^\s/.test(value) && isLiteral(value, ENV_KEY.test(pair[2]!), after) ? [pair[2]!] : [];
     }
     const flag = word.match(/^--?([\w-]+)$/);
     const next = line.slice(match.index + word.length).trimStart();
-    return flag && isSecretKey(flag[1]!) && !next.startsWith("-") && isLiteral(next) ? [flag[1]!] : [];
+    return flag && isSecretKey(flag[1]!) && !next.startsWith("-") && isLiteral(next, false, after) ? [flag[1]!] : [];
   });
 }
 
@@ -145,12 +156,14 @@ function commandKeys(line: string): string[] {
  * With `env`, the key is in the env form, where a value is not code. A bare
  * word of only letters is then a literal too, but not a word of `ENV_KEYWORDS`.
  */
-function isLiteral(text: string, env = false): boolean {
+function isLiteral(text: string, env = false, after: readonly string[] = []): boolean {
   const value = text.trim();
-  const quote = value.match(QUOTE);
-  if (quote) {
-    const body = quotedBody(value.slice(quote[0].length), quote[1]!);
-    return isSecretValue(body) && !ONLY_REFERENCES.test(body.trim());
+  // In code, strings in parentheses are one value, also on the lines after the parenthesis.
+  const open = [value, ...after].join("\n").match(/^\(\s*/);
+  const strings = open ? [value, ...after].join("\n").slice(open[0].length) : value;
+  if (QUOTE.test(strings)) {
+    const body = (open ? quotedValue(strings, [], true) : quotedValue(value, after, false)).trim();
+    return isSecretValue(body) && !ONLY_REFERENCES.test(body);
   }
   // The references go out of a bare word. The text that stays decides.
   const word = value.split(/\s/, 1)[0]!.replace(/[,;]+$/, "").replace(REFERENCE, "");
@@ -158,11 +171,53 @@ function isLiteral(text: string, env = false): boolean {
   return BARE_WORD.test(word) && !identifier && !NUMBER.test(word) && isSecretValue(word);
 }
 
-/** The text of a quoted string up to its closing `quote`. A backslash keeps the next character in the string. */
-function quotedBody(text: string, quote: string): string {
-  for (let index = 0; index < text.length; index++) {
-    if (text[index] === "\\") index++;
-    else if (text[index] === quote) return text.slice(0, index);
+/**
+ * True when the value of a YAML key is in the lines after the key, and is a
+ * literal. `value` is the text after the key in `line`. After `|` or `>`, the
+ * lines with more indentation than the key are a block scalar, which is a
+ * string. After no value, the next line with more indentation is the value,
+ * or the first item of a list, when it is not a key of its own.
+ */
+function isNextLineValue(value: string, line: string, after: readonly string[]): boolean {
+  const indent = (text: string) => text.length - text.trimStart().length;
+  const block = BLOCK_SCALAR.test(value.trim());
+  if (!block && value.trim() !== "") return false;
+  const end = after.findIndex((next) => next.trim() !== "" && indent(next) <= indent(line));
+  const inner = (end === -1 ? after : after.slice(0, end)).filter((next) => next.trim() !== "");
+  if (inner.length === 0) return false;
+  if (block) {
+    const body = inner.map((next) => next.trim()).join("\n");
+    return isSecretValue(body) && !ONLY_REFERENCES.test(body);
   }
-  return text;
+  const item = inner[0]!.trim().replace(/^-\s+/, "");
+  return !CONFIG_LINE.test(item) && isLiteral(item, false, inner.slice(1));
+}
+
+/**
+ * The text of the quoted strings at the start of `value`, as one value.
+ * Strings next to each other are one value: `"hun" "ter2"` and `"" + "x"` in
+ * code, and `""hunter2` in a shell, where a word directly after the closing
+ * quote is a part of the value. So an empty first string does not hide the
+ * rest. A string goes on in the lines of `after` until its closing quote. A
+ * backslash keeps the next character in a string. With `lines`, the next
+ * string can be on the next line, as in parentheses.
+ */
+function quotedValue(value: string, after: readonly string[], lines: boolean): string {
+  let rest = [value, ...after].join("\n");
+  let body = "";
+  for (let quote = rest.match(QUOTE); quote; quote = rest.match(QUOTE)) {
+    rest = rest.slice(quote[0].length);
+    let end = 0;
+    while (end < rest.length && !rest.startsWith(quote[1]!, end)) end += rest[end] === "\\" ? 2 : 1;
+    body += rest.slice(0, end);
+    rest = rest.slice(end + quote[1]!.length);
+    const joined = rest.match(JOINED_WORD);
+    if (joined) {
+      body += joined[0].replace(REFERENCE, "");
+      rest = rest.slice(joined[0].length);
+    }
+    // Only a string can follow after a space or a plus sign. Other text ends the value. With `lines`, a line end is a space.
+    rest = rest.replace(lines ? /^\s*(?:\+\s*)?/ : /^[ \t]*(?:\+[ \t]*)?/, "");
+  }
+  return body;
 }
