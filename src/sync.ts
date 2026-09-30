@@ -1,7 +1,8 @@
 /** Publish the operator snapshot and apply it to the selected boxes. */
 
+import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname, homedir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -1185,7 +1186,8 @@ function staleBox(config: PartialOperatorConfig, box: Pick<ResolvedBox, "name" |
 
 /** Fail before the publish when a live sync or another command holds the box lock of this target. `label` names the box in the error. */
 function refuseActiveSync(home: string, host: string, label = host): void {
-  if (!staleLock(boxLockPath(home, host))) {
+  const lock = readLock(boxLockPath(home, host));
+  if (lock !== null && !staleLock(lock)) {
     throw new SyncError("concurrent-sync", "operator", `another sync or Ferry command is active for ${label}`);
   }
 }
@@ -1263,12 +1265,31 @@ export async function acquireStoreLock(home: string): Promise<() => void> {
   }
 }
 
-/** Take the lock at `path`, and remove a stale lock first. Return `null` when a live process holds it. */
+/** The start of this process, or `""` when it is not known. Ferry reads it for the first lock. */
+let ownStart: string | undefined;
+
+/**
+ * Take the lock at `path`. Return `null` when a live process holds it, or when another process
+ * replaces a stale lock at this time.
+ *
+ * The lock file has the pid and the start of its process, and a token. A stale lock is the lock of
+ * a process that stopped, or a file that is not a lock. A process makes a new lock with a hard
+ * link, which fails when the lock exists. It replaces a stale lock in three steps:
+ *
+ * 1. It takes the claim of the stale lock. The claim is a lock, and its path has a digest of the
+ *    content of the stale lock. Thus only one process at a time can replace that lock.
+ * 2. It reads the lock again. If a different process replaced the lock, the content is different.
+ * 3. It renames its file to `path`. The rename is atomic, so no process sees `path` without a lock.
+ *
+ * No step removes the lock file. Thus a process that read a stale lock cannot remove the live lock
+ * that replaced it.
+ */
 function tryLock(path: string): (() => void) | null {
   const token = randomUUID();
   const temporary = `${path}.${process.pid}.${token}`;
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(temporary, JSON.stringify({ pid: process.pid, token }), { mode: 0o600 });
+  ownStart ??= processStart(process.pid) ?? "";
+  writeFileSync(temporary, JSON.stringify({ pid: process.pid, ...(ownStart ? { start: ownStart } : {}), token }), { mode: 0o600 });
   try {
     for (;;) {
       try {
@@ -1276,40 +1297,90 @@ function tryLock(path: string): (() => void) | null {
         break;
       } catch (cause) {
         if (!isCode(cause, "EEXIST")) throw cause;
-        if (!staleLock(path)) return null;
-        try {
-          unlinkSync(path);
-        } catch (unlinkError) {
-          if (!isCode(unlinkError, "ENOENT")) throw unlinkError;
-        }
+      }
+      const lock = readLock(path);
+      // The owner released the lock after the link failed.
+      if (lock === null) continue;
+      if (!staleLock(lock)) return null;
+      const digest = createHash("sha256").update(lock).digest("hex").slice(0, 16);
+      const releaseClaim = tryLock(`${path}.${digest}.claim`);
+      if (!releaseClaim) return null;
+      try {
+        if (readLock(path) !== lock) continue;
+        renameSync(temporary, path);
+        break;
+      } finally {
+        releaseClaim();
       }
     }
   } finally {
-    unlinkSync(temporary);
+    rmSync(temporary, { force: true });
   }
+  // Only the owner removes a live lock, and no process replaces the lock of a live owner. Thus the
+  // lock cannot change between the read and the unlink.
   return () => {
-    try {
-      const value: unknown = JSON.parse(readFileSync(path, "utf8"));
-      if ((value as { token?: unknown }).token === token) unlinkSync(path);
-    } catch (error) {
-      if (!isCode(error, "ENOENT")) throw error;
-    }
+    const lock = readLock(path);
+    if (lock !== null && lockOwner(lock)?.token === token) unlinkSync(path);
   };
 }
 
-function staleLock(path: string): boolean {
+/** The content of the lock file at `path`, or `null` when there is no file. */
+function readLock(path: string): string | null {
   try {
-    const value: unknown = JSON.parse(readFileSync(path, "utf8"));
-    const pid = (value as { pid?: unknown }).pid;
-    if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return true;
-    try {
-      process.kill(pid, 0);
-      return false;
-    } catch (error) {
-      return isCode(error, "ESRCH");
-    }
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    if (isCode(error, "ENOENT")) return null;
+    throw error;
+  }
+}
+
+function lockOwner(lock: string): { readonly pid?: unknown; readonly start?: unknown; readonly token?: unknown } | null {
+  try {
+    const value: unknown = JSON.parse(lock);
+    return typeof value === "object" ? value : null;
   } catch {
-    return true;
+    return null;
+  }
+}
+
+/**
+ * True when no live process owns the lock with this content. A file that is empty or that is not
+ * a lock has no owner: a process writes the full content before it makes the lock file.
+ */
+function staleLock(lock: string): boolean {
+  const owner = lockOwner(lock);
+  const pid = owner?.pid;
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    return isCode(error, "ESRCH");
+  }
+  // A process has the pid. It is the owner only if it started when the owner started. A lock of
+  // an earlier Ferry version has no start, and Ferry keeps it while a process has the pid.
+  if (typeof owner?.start !== "string") return false;
+  const start = processStart(pid);
+  return start !== null && start !== owner.start;
+}
+
+/**
+ * The start of the process `pid`, as a string that a later process with the same pid does not
+ * have. `null` when the start is not known. Then the caller must not decide that the process stopped.
+ */
+function processStart(pid: number): string | null {
+  try {
+    if (process.platform === "linux") {
+      // Field 22 of the stat file is the start in clock ticks after the boot. The boot id makes it
+      // different after a restart of the machine. The command name in field 2 can have spaces.
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const ticks = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+      return ticks ? `${readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim()}:${ticks}` : null;
+    }
+    // macOS has no /proc. A fixed locale and time zone give the same text in each process.
+    const ps = spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { LC_ALL: "C", TZ: "UTC" } });
+    return ps.status === 0 && ps.stdout.trim() ? ps.stdout.trim() : null;
+  } catch {
+    return null;
   }
 }
 
