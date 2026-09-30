@@ -5,7 +5,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { jqReadScript, quoteShell } from "../box-settings.ts";
-import { carriedContentHits } from "../manifest.ts";
+import { carriedContentHits, SCRIPT_RUNNERS } from "../manifest.ts";
 import { CONFIG_FILE, editBoxConfig, jqObjects, noJqWarning, PaseoError } from "./paseo.ts";
 import type { IntegrationLink } from "./types.ts";
 
@@ -16,11 +16,6 @@ const BUILTIN_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"];
 const ID_PATTERN = /^[a-z][a-z0-9-]*$/;
 /** A command name that the box resolves through its PATH. */
 const BARE_EXECUTABLE = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
-/** Shells and interpreters run a script argument that Ferry cannot check. */
-const SCRIPT_RUNNERS = new Set([
-  "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "env", "node", "deno", "bun",
-  "python", "python3", "perl", "ruby", "php", "lua", "pwsh", "powershell", "cmd", "osascript",
-]);
 /** A file name with a config, key, script, or text extension. */
 const FILE_ARGUMENT = /\.(?:json5?|jsonc|ya?ml|toml|env|ini|conf|cfg|pem|key|sh|[cm]?js|ts|py|rb|txt)$/i;
 /** A scoped npm package, such as `@scope/name@1.2.3`. It is the one argument with a slash that is not a path. */

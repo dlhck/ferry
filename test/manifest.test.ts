@@ -329,7 +329,7 @@ describe("the deny set", () => {
       },
       {
         code: "mcp-argument",
-        description: "stdio MCP server command or argument with a token or secret",
+        description: "stdio MCP server command or argument with a token, a secret, a URL credential, or an inline script",
         behavior: "refuse",
       },
       {
@@ -1561,6 +1561,69 @@ describe("carried MCP server declarations", () => {
     });
   }
 
+  const credentialCommands: readonly (readonly [string, string, readonly string[], string])[] = [
+    ["a URL with a user and a password", "npx", ["server-postgres", "postgresql://alice:example-pass@db.example/app"], "url-credential"],
+    ["a URL with a password in a --key=value flag", "tool-mcp", ["--url=postgresql://alice:example-pass@db.example/app"], "url-credential"],
+    ["a URL with a password after a flag", "tool-mcp", ["--dsn", "postgresql://alice:example-pass@db.example/app"], "url-credential"],
+    ["a URL with only a user", "tool-mcp", ["https://example-pass@db.example/app"], "url-credential"],
+    ["a URL with a password query parameter", "tool-mcp", ["https://db.example/app?sslmode=require&password=example-pass"], "url-credential"],
+    ["a URL with a token query parameter", "tool-mcp", ["--url=https://db.example/app?token=example-pass"], "url-credential"],
+    ["a URL with an API key query parameter", "tool-mcp", ["https://db.example/app?team=a&api_key=example-pass"], "url-credential"],
+    ["a URL with a password inside a longer argument", "tool-mcp", ["connect to 'postgresql://alice:example-pass@db.example/app' now"], "url-credential"],
+    ["a secret flag in a shell script", "sh", ["-c", "exec tool --password example-pass"], "secret-field"],
+    ["a quoted secret flag in a shell script", "bash", ["-c", 'exec tool --api-key="example-pass"'], "secret-field"],
+    ["an inline sh script", "sh", ["-c", "exec tool serve"], "inline-script"],
+    ["an inline script for a shell path", "/bin/sh", ["-c", "exec tool serve"], "inline-script"],
+    ["an inline bash login script", "bash", ["-lc", "exec tool serve"], "inline-script"],
+    ["an inline bash script after a shell option", "bash", ["-o", "pipefail", "-c", "exec tool serve"], "inline-script"],
+    ["an inline zsh script", "zsh", ["-c", "exec tool serve"], "inline-script"],
+    ["an inline node script", "node", ["-e", "require('tool').serve()"], "inline-script"],
+    ["an inline node script with --eval", "node", ["--input-type=module", "--eval", "serve()"], "inline-script"],
+    ["an inline python script", "python3", ["-c", "import tool; tool.serve()"], "inline-script"],
+    ["an inline script for a python version", "python3.12", ["-c", "import tool; tool.serve()"], "inline-script"],
+    ["an inline deno script", "deno", ["eval", "serve()"], "inline-script"],
+    ["an inline script behind env", "env", ["bash", "-c", "exec tool serve"], "inline-script"],
+    ["an inline script in a container", "docker", ["run", "-i", "example/tool", "sh", "-c", "exec tool serve"], "inline-script"],
+  ];
+  for (const [what, command, args, rule] of credentialCommands) {
+    test(`refuses a stdio server with ${what}, and names the server and the rule`, () => {
+      const home = makeHome();
+      write(home, ".cursor/mcp.json", JSON.stringify({ mcpServers: { tool: { command, args } } }));
+
+      const hits = refusalOf(home).forbidden;
+
+      expect(hits).toEqual([
+        {
+          path: join(home, ".cursor", "mcp.json"),
+          code: "mcp-argument",
+          reason: `MCP server tool has a command or argument that matches the ${rule} rule`,
+        },
+      ]);
+      expect(JSON.stringify(hits)).not.toContain("example-pass");
+    });
+  }
+
+  const portableCommands: readonly (readonly [string, string, readonly string[]])[] = [
+    ["a URL without a user", "npx", ["server-postgres", "postgresql://db.example:5432/app?sslmode=require"]],
+    ["a package", "npx", ["-y", "some-server"]],
+    ["a port", "tool-mcp", ["--port", "5432"]],
+    ["a placeholder password in a URL", "tool-mcp", ["postgresql://alice:xxxx@db.example/app"]],
+    ["a placeholder token query parameter", "tool-mcp", ["https://db.example/app?token=xxxx"]],
+    ["a package at a git ref", "uvx", ["--from", "git+https://git.example/team/server@v1", "server"]],
+    ["a script file with its own options", "node", ["/srv/server.js", "-c", "/etc/server.json", "-e", "prod"]],
+    ["a python module", "python3", ["-E", "-m", "some_server"]],
+    ["a command with a working directory", "env", ["-C", "/srv/tool", "tool-mcp"]],
+    ["a shell script file", "bash", ["/srv/run.sh"]],
+  ];
+  for (const [what, command, args] of portableCommands) {
+    test(`carries a stdio server with ${what}`, () => {
+      const home = makeHome();
+      write(home, ".cursor/mcp.json", JSON.stringify({ mcpServers: { tool: { command, args } } }));
+
+      expect(mcpOf(seedOf(home), "cursor")).toEqual([{ name: "tool", type: "stdio", command, args, env: [] }]);
+    });
+  }
+
   test("passes a placeholder or a flag without a value in the arguments", () => {
     const home = makeHome();
     const args = ["--token", "--api-key=", "--verbose", `ghp_${"x".repeat(36)}`];
@@ -1594,6 +1657,38 @@ describe("carried MCP server declarations", () => {
     ]);
     expect(readMcpSources(home, BUILTIN_HARNESSES)).toEqual([
       { harness: "claude", servers: mcpOf(seed, "claude") as never, nonPortable: ["data", "local"] },
+    ]);
+  });
+
+  test("skips a stdio server that refers to the home as ~, $HOME, or ${HOME}", () => {
+    const home = makeHome();
+    write(
+      home,
+      ".claude.json",
+      JSON.stringify({
+        mcpServers: {
+          brace: { command: "data-mcp", args: ["--dir=${HOME}/data"] },
+          command: { command: "~/bin/local-mcp" },
+          inside: { command: "data-mcp", args: ["--mount", "type=bind,src=$HOME/data,dst=/data"] },
+          other: { command: "data-mcp", args: ["$HOMEBREW_PREFIX/share/data"] },
+          shell: { command: "sh", args: ["-c", 'exec node "$HOME/private/server.js"'] },
+          tilde: { command: "node", args: ["~/private/server.js"] },
+          variable: { command: "node", args: ["$HOME/private/server.js"] },
+        },
+      }),
+    );
+
+    const seed = seedOf(home);
+
+    expect(mcpOf(seed, "claude")).toEqual([
+      { name: "other", type: "stdio", command: "data-mcp", args: ["$HOMEBREW_PREFIX/share/data"], env: [] },
+    ]);
+    const skipped = ["brace", "command", "inside", "shell", "tilde", "variable"];
+    expect(seed.leftovers.filter((leftover) => leftover.code === "mcp-path").map((leftover) => leftover.reason)).toEqual(
+      skipped.map((name) => `MCP server ${name} refers to a path in the home, which the box does not have`),
+    );
+    expect(readMcpSources(home, BUILTIN_HARNESSES)).toEqual([
+      { harness: "claude", servers: mcpOf(seed, "claude") as never, nonPortable: skipped },
     ]);
   });
 

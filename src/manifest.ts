@@ -67,7 +67,7 @@ const DENY_RULES = {
   },
   "mcp-argument": {
     code: "mcp-argument",
-    reason: "stdio MCP server command or argument with a token or secret",
+    reason: "stdio MCP server command or argument with a token, a secret, a URL credential, or an inline script",
     verdict: "refuse",
   },
   "mcp-name": {
@@ -214,6 +214,28 @@ const SECRET_PARAMETER = /token|secret|credential|password|api.?key/i;
 const HOME_REFERENCE = /^(?:~|\$HOME|\$\{HOME\})\/(.*)$/;
 /** Shell quotes, operators, and `=` separate the words of a hook command. */
 const COMMAND_SEPARATORS = /[\s"'`;|&()<>=]+/;
+/** The home as a shell variable, `$HOME` or `${HOME}`, at any place in an argument. */
+const HOME_VARIABLE = /\$\{?HOME\b/;
+/**
+ * Whitespace and shell operators separate the words inside one MCP argument.
+ * `&` and `=` stay, because they join the parameters of a URL and the parts of
+ * a `key=value` word.
+ */
+const ARGUMENT_SEPARATORS = /[\s;|()<>]+/;
+/** A URL inside an argument. Group 1 is the authority, group 2 the path, query, and fragment. */
+const ARGUMENT_URL = /[a-z][a-z0-9+.-]*:\/\/([^\s/?#]*)(\S*)/gi;
+/** A `key=value` parameter in the query or the fragment of a URL. */
+const URL_PARAMETER = /[?&#]([^=&#]+)=([^&#]*)/g;
+/** Shells and interpreters run a script argument that Ferry cannot check. */
+export const SCRIPT_RUNNERS = new Set([
+  "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "env", "node", "deno", "bun",
+  "python", "python3", "perl", "ruby", "php", "lua", "pwsh", "powershell", "cmd", "osascript",
+]);
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"]);
+/** A shell option that takes the script as an argument: `-c`, alone or in a group such as `-lc`. */
+const SHELL_SCRIPT_OPTION = /^(?:-[A-Za-z]*c|--command)$/;
+/** An interpreter option that takes the script as an argument, such as `-e`, `-c`, `-pe`, or `--eval`. */
+const INTERPRETER_SCRIPT_OPTION = /^(?:-[A-Za-z]*[ce]|-p|--eval|--print|-[Cc]ommand|-[Ee]ncoded[Cc]ommand)$/;
 
 /**
  * A file whose path relative to its skill directory is `path`. `executable` is
@@ -771,8 +793,8 @@ export function readMcpSources(home: string, harnesses: readonly HarnessDescript
  * names of its environment keys, never their values. Another server, and a
  * stdio server that refers to a path in the home, is noted in `leftovers`. A
  * remote server with headers, environment values, arguments, or a credential,
- * and a stdio server with a token or secret in its command or arguments,
- * refuse the seed.
+ * and a stdio server with a token, a secret, a URL credential, or an inline
+ * script in its command or arguments, refuse the seed.
  */
 function readMcp(
   home: string,
@@ -823,7 +845,11 @@ function readMcp(
     }
     if (stdio) {
       const words = [stdio.command, ...stdio.args];
-      const rules = argumentRules(path, words);
+      const parts = argumentParts(words);
+      const rules = argumentRules(path, words, parts);
+      const homePath = refersToHome(words, home);
+      // A server with a home path is not carried, so its script needs no check.
+      if (rules.length === 0 && !homePath && runsInlineScript(parts)) rules.push("inline-script");
       if (rules.length > 0) {
         forbidden.push({
           path,
@@ -832,7 +858,7 @@ function readMcp(
         });
         continue;
       }
-      if (words.some((word) => word.split(COMMAND_SEPARATORS).some((part) => part === home || part.startsWith(`${home}/`)))) {
+      if (homePath) {
         nonPortable.push(name);
         leftovers.push({
           path,
@@ -879,16 +905,30 @@ function stdioServer(declaration: Record<string, unknown>): Omit<StdioMcpServer,
 }
 
 /**
- * The codes of the secret rules that the words of a stdio command match: a
- * token pattern, or a secret key with a value as `--key=value`, `key=value`,
- * or `--key value`. The codes never hold the value.
+ * The words inside each argument of a stdio command, without shell quotes. An
+ * argument can hold more words, such as the script of `sh -c`.
  */
-function argumentRules(path: string, words: readonly string[]): string[] {
+function argumentParts(words: readonly string[]): string[] {
+  return words.flatMap((word) => {
+    const parts = word.replace(/["'`]/g, "").split(ARGUMENT_SEPARATORS).filter((part) => part !== "");
+    return parts.length > 0 ? parts : [word];
+  });
+}
+
+/**
+ * The names of the secret rules that the words of a stdio command match: a
+ * token pattern, `url-credential` for a URL with a user, a password, or a
+ * secret parameter, or a secret key with a value as `--key=value`,
+ * `key=value`, or `--key value`. `parts` are the words inside the arguments.
+ * The names never hold the value.
+ */
+function argumentRules(path: string, words: readonly string[], parts: readonly string[]): string[] {
   const rules = new Set(tokenHits(path, Buffer.from(words.join("\n"))).map((hit) => hit.code));
-  words.forEach((word, index) => {
+  if (parts.some(hasUrlCredential)) rules.add("url-credential");
+  parts.forEach((word, index) => {
     const pair = word.match(/^-{0,2}([\w-]+)=(.*)$/);
     const flag = word.match(/^--?([\w-]+)$/);
-    const next = words[index + 1];
+    const next = parts[index + 1];
     if (
       (pair && isSecretKey(pair[1]!) && isSecretValue(pair[2]!)) ||
       (flag && isSecretKey(flag[1]!) && next !== undefined && !next.startsWith("-") && isSecretValue(next))
@@ -897,6 +937,56 @@ function argumentRules(path: string, words: readonly string[]): string[] {
     }
   });
   return [...rules];
+}
+
+/**
+ * True when a word holds a URL with a credential: a user or a password before
+ * the host, or a secret key with a value in the query or the fragment. A
+ * placeholder value passes.
+ */
+function hasUrlCredential(word: string): boolean {
+  return [...word.matchAll(ARGUMENT_URL)].some(([, authority = "", rest = ""]) => {
+    const at = authority.lastIndexOf("@");
+    const userinfo = at < 0 ? "" : authority.slice(0, at);
+    const credential = userinfo.includes(":") ? userinfo.slice(userinfo.indexOf(":") + 1) : userinfo;
+    return (
+      isSecretValue(credential) ||
+      [...rest.matchAll(URL_PARAMETER)].some(
+        ([, key = "", value = ""]) => (isSecretKey(key) || SECRET_PARAMETER.test(key)) && isSecretValue(value),
+      )
+    );
+  });
+}
+
+/** True when a word of a stdio command is `~`, `$HOME`, `${HOME}`, or the operator home, or a path in it. */
+function refersToHome(words: readonly string[], home: string): boolean {
+  return words.some(
+    (word) =>
+      HOME_VARIABLE.test(word) ||
+      word
+        .split(COMMAND_SEPARATORS)
+        .some((part) => part === home || part.startsWith(`${home}/`) || part === "~" || part.startsWith("~/")),
+  );
+}
+
+/**
+ * True when the words start a shell or an interpreter with an inline script,
+ * such as `sh -c`, `node -e`, `python -c`, or `deno eval`. The runner can be
+ * the command or a later word, as in `env bash -c`. A shell takes its script
+ * option at any place. An interpreter takes it before its first other
+ * argument, so the options of a script file pass.
+ */
+function runsInlineScript(parts: readonly string[]): boolean {
+  return parts.some((part, index) => {
+    // `python3.12` is `python`.
+    const runner = posix.basename(part).toLowerCase().replace(/[\d.]+$/, "");
+    if (!SCRIPT_RUNNERS.has(runner)) return false;
+    const rest = parts.slice(index + 1);
+    if (SHELLS.has(runner)) return rest.some((word) => SHELL_SCRIPT_OPTION.test(word));
+    const first = rest.findIndex((word) => !word.startsWith("-"));
+    const options = first < 0 ? rest : rest.slice(0, first);
+    return rest[first] === "eval" || options.some((word) => INTERPRETER_SCRIPT_OPTION.test(word));
+  });
 }
 
 /** The type and URL of a declaration with an HTTPS URL and an HTTP or SSE transport, else `null`. */
