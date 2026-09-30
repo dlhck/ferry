@@ -25,7 +25,7 @@ const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const FETCH_TIMEOUT_MS = 2_000;
 const LATEST_RELEASE_URL = "https://api.github.com/repos/dlhck/ferry/releases/latest";
 const INSTALLER_URL = "https://raw.githubusercontent.com/dlhck/ferry";
-const NPM_PACKAGE_URL = "https://registry.npmjs.org/@dlhck%2fferry";
+const NPM_REGISTRY_URL = "https://registry.npmjs.org";
 
 /** The last check and the release that the operator skipped. */
 type CheckState = {
@@ -80,8 +80,8 @@ export type SelfUpdateDependencies = {
   readonly now: () => number;
   /** The latest release, or null when Ferry cannot read it. */
   readonly fetchLatest: () => Promise<LatestRelease | null>;
-  /** False when npm does not have `@dlhck/ferry` of the version. */
-  readonly npmHasVersion: (version: string) => Promise<boolean>;
+  /** False when npm does not have the version of the package. */
+  readonly npmHasVersion: (name: string, version: string) => Promise<boolean>;
   readonly choose: (current: string, latest: string) => Promise<UpdateChoice>;
   /** Runs the update command with the terminal of Ferry and returns its exit code. */
   readonly run: (argv: readonly string[]) => Promise<number>;
@@ -177,12 +177,17 @@ export async function runSelfUpdate(dependencies: Partial<SelfUpdateDependencies
 /**
  * True when the release has the files that the update of this Ferry downloads.
  * The release installer needs the binary of this platform and SHA256SUMS. An
- * npm install needs `@dlhck/ferry` on npm, which the workflow publishes after
- * the platform packages.
+ * npm install needs `@dlhck/ferry` and the package of this platform on npm.
+ * npm makes the packages available in any order, so the main package can be
+ * there before a platform package.
  */
 async function isComplete(release: LatestRelease, dependencies: SelfUpdateDependencies): Promise<boolean> {
-  if (isNpmInstall(dependencies.execPath)) return dependencies.npmHasVersion(release.version);
-  return [`ferry-${dependencies.platform}-${dependencies.arch}`, "SHA256SUMS"].every((name) => release.assets.includes(name));
+  const binary = `ferry-${dependencies.platform}-${dependencies.arch}`;
+  if (!isNpmInstall(dependencies.execPath)) return [binary, "SHA256SUMS"].every((name) => release.assets.includes(name));
+  const onNpm = await Promise.all(
+    ["@dlhck/ferry", `@dlhck/${binary}`].map((name) => dependencies.npmHasVersion(name, release.version)),
+  );
+  return onNpm.every(Boolean);
 }
 
 /**
@@ -492,9 +497,9 @@ export function latestRelease(body: unknown): LatestRelease | null {
 }
 
 /** Only HTTP 404 says that npm does not have the version. After another failure, npm gives its own error. */
-async function npmHasVersion(version: string): Promise<boolean> {
+async function npmHasVersion(name: string, version: string): Promise<boolean> {
   try {
-    const response = await fetch(`${NPM_PACKAGE_URL}/${version}`, {
+    const response = await fetch(`${NPM_REGISTRY_URL}/${name.replace("/", "%2f")}/${version}`, {
       headers: { "user-agent": `ferry/${VERSION}` },
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });

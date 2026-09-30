@@ -39,8 +39,8 @@ function fakes(
     latest?: string | null;
     /** The files of the latest release. The default is a complete release. */
     assets?: readonly string[];
-    /** False when npm does not have the latest release. */
-    onNpm?: boolean;
+    /** The packages of the latest release that npm does not have. */
+    notOnNpm?: readonly string[];
     choice?: UpdateChoice;
     exitCode?: number;
     now?: number;
@@ -69,9 +69,9 @@ function fakes(
       if (options.latest === null) return null;
       return { version: options.latest ?? "0.5.0", assets: options.assets ?? COMPLETE };
     },
-    npmHasVersion: async (version) => {
-      record.npmReads.push(version);
-      return options.onNpm ?? true;
+    npmHasVersion: async (name, version) => {
+      record.npmReads.push(`${name}@${version}`);
+      return !(options.notOnNpm ?? []).includes(name);
     },
     choose: async (current, latest) => {
       record.questions.push(`${current} -> ${latest}`);
@@ -187,10 +187,12 @@ describe("offerSelfUpdate", () => {
   });
 
   test("an npm install does not ask for a release that npm does not have", async () => {
-    const building = fakes({ onNpm: false });
-    await offerSelfUpdate({ ...building.dependencies, execPath: NPM_BINARY });
-    expect(building.record.npmReads).toEqual(["0.5.0"]);
-    expect(building.record.questions).toEqual([]);
+    for (const name of ["@dlhck/ferry", "@dlhck/ferry-linux-x64"]) {
+      await rm(join(home, ".ferry"), { recursive: true, force: true });
+      const building = fakes({ notOnNpm: [name] });
+      await offerSelfUpdate({ ...building.dependencies, execPath: NPM_BINARY });
+      expect(building.record.questions).toEqual([]);
+    }
   });
 
   test("does not ask for the same or an older release, or for a development build", async () => {
@@ -413,15 +415,18 @@ describe("runSelfUpdate", () => {
     });
   }
 
-  test("an npm install waits for the npm package, and does not need the release files", async () => {
-    const building = fakes({ assets: COMPLETE, onNpm: false });
+  // npm makes the packages of a release available in any order: the main package can be there before a platform package.
+  test.each(["@dlhck/ferry", "@dlhck/ferry-linux-x64"])("an npm install waits for %s on npm", async (name) => {
+    const building = fakes({ assets: COMPLETE, notOnNpm: [name] });
     expect((await runSelfUpdate({ ...building.dependencies, execPath: NPM_BINARY })).state).toBe("not-ready");
     expect(building.record.runs).toEqual([]);
     expect(building.record.lines).toEqual([NOT_READY]);
+  });
 
-    const published = fakes({ assets: [] });
+  test("an npm install needs the main package and the package of this platform, and not the release files", async () => {
+    const published = fakes({ assets: [], notOnNpm: ["@dlhck/ferry-darwin-arm64"] });
     expect((await runSelfUpdate({ ...published.dependencies, execPath: NPM_BINARY })).state).toBe("updated");
-    expect(published.record.npmReads).toEqual(["0.5.0"]);
+    expect(published.record.npmReads.sort()).toEqual(["@dlhck/ferry-linux-x64@0.5.0", "@dlhck/ferry@0.5.0"]);
     expect(published.record.runs).toEqual([updateCommand("0.5.0", NPM_BINARY)]);
   });
 
@@ -429,7 +434,7 @@ describe("runSelfUpdate", () => {
     const script = fakes();
     await runSelfUpdate(script.dependencies);
     expect(script.record.npmReads).toEqual([]);
-    const same = fakes({ latest: "0.4.0", assets: [], onNpm: false });
+    const same = fakes({ latest: "0.4.0", assets: [], notOnNpm: ["@dlhck/ferry"] });
     expect((await runSelfUpdate({ ...same.dependencies, execPath: NPM_BINARY })).state).toBe("up-to-date");
     expect(same.record.npmReads).toEqual([]);
   });

@@ -158,7 +158,7 @@ A GitHub release is visible before its build attaches the binaries and `SHA256SU
 
 Run the command again some minutes later. Do not set `FERRY_SKIP_CHECKSUM=1`. If the message stays for more than an hour, the release build did not complete. See the **Release** workflow in the [Actions tab](https://github.com/dlhck/ferry/actions/workflows/release.yml).
 
-An npm install waits for `@dlhck/ferry` of that version on npm. A release installer waits for the binary of its platform and for `SHA256SUMS`.
+An npm install waits for `@dlhck/ferry` and for the package of its platform, such as `@dlhck/ferry-darwin-arm64`, of that version on npm. A release installer waits for the binary of its platform and for `SHA256SUMS`.
 
 ## Services after an update
 
