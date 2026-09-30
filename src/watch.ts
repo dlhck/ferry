@@ -8,7 +8,7 @@ import { readPaseoPreferences } from "./integrations/paseo.ts";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { BoxesSyncError, inspectSyncSource, runSync, SyncError } from "./sync.ts";
+import { BoxesSyncError, inspectSyncSource, runSync, SyncError, type BoxSyncResult } from "./sync.ts";
 import { resolveBoxes } from "./boxes.ts";
 import { readBoxInstructions } from "./box-identity.ts";
 import { readConfig } from "./config.ts";
@@ -89,8 +89,9 @@ export type WatchDependencies = {
   /**
    * Sync the boxes of the request. A failure of some boxes throws a
    * `BoxesSyncError`. With one box, an error of a box step has the origin `box`.
+   * Returns the names of the boxes that the sync skipped, because the config changed for them during the sync.
    */
-  readonly sync?: (request: WatchSyncRequest) => Promise<void>;
+  readonly sync?: (request: WatchSyncRequest) => Promise<readonly string[] | void>;
   /** The sync command that the default sync runs. */
   readonly runSync?: typeof runSync;
   /** The names of the configured boxes. The watch reads them in each cycle. */
@@ -135,10 +136,11 @@ export async function runWatch(
   const progress = dependencies.progress ?? noProgress;
   const sync = dependencies.sync ??
     (async (request: WatchSyncRequest) => {
-      await (dependencies.runSync ?? runSync)(
+      const result = await (dependencies.runSync ?? runSync)(
         { home: request.home, boxes: request.boxes, publish: request.publish },
         { progress, writeLine },
       );
+      return skippedBoxes(result.boxes);
     });
   const readBoxes = dependencies.readBoxes ?? configuredBoxNames;
   const retryable = dependencies.isRetryable ?? isRetryableWatchError;
@@ -283,8 +285,9 @@ export async function runWatch(
     const publish = identity !== published;
 
     let failures: Map<string, unknown>;
+    let skipped: readonly string[];
     try {
-      await sync({ identity, home, boxes: ready, publish });
+      skipped = (await sync({ identity, home, boxes: ready, publish })) ?? [];
       failures = new Map();
     } catch (error) {
       const boxes = boxFailures(error, ready);
@@ -307,12 +310,15 @@ export async function runWatch(
         continue;
       }
       failures = boxes;
+      skipped = error instanceof BoxesSyncError ? skippedBoxes(error.results) : [];
     }
 
     // The publish succeeded, and each box has its own result.
     retry = null;
     published = identity;
     for (const name of ready) {
+      // The sync did not connect to a skipped box, so the box keeps its identity. The next cycle reads the config again.
+      if (skipped.includes(name)) continue;
       const error = failures.get(name);
       if (error === undefined) {
         accepted[name] = want(name);
@@ -338,6 +344,11 @@ export async function runWatch(
   await updating;
   await checking;
   dependencies.emit?.({ type: "watch-stopped" });
+}
+
+/** The names of the boxes that the sync skipped. */
+function skippedBoxes(results: readonly BoxSyncResult[]): string[] {
+  return results.filter((result) => result.skipped !== undefined).map((result) => result.name);
 }
 
 /**
