@@ -2,10 +2,13 @@
  * Ferry on the box. `ferry install` and `ferry update` put the Ferry version
  * of this machine on each box, with the release installer, and write the
  * box-mode marker `~/.ferry/box.json`. A Ferry binary that finds the marker
- * runs only the box commands (`ferry expose`, `ferry whoami`, `--version`, and help).
+ * runs only the box commands (`ferry expose`, `ferry whoami`, `--version`, and help),
+ * and the hidden `ferry scan` that the operator machine runs over Link.
  *
  * A development build has no release. Ferry then puts no Ferry on the box,
- * so the box never gets a version that differs from this machine.
+ * so the box never gets a version that differs from this machine. Then
+ * `ferry adopt --from-box` and `ferry move --from-box` refuse, because they
+ * need `ferry scan` on the box.
  */
 
 import type { Link } from "./link.ts";

@@ -237,6 +237,12 @@ describe("sessionContentHits", () => {
     expect(JSON.stringify(sessionContentHits("session.jsonl", bytes))).not.toContain(PASSWORD);
   });
 
+  test("does not print a key that is free text", () => {
+    const bytes = jsonl(toolUse("Write", { file_path: "a.json", content: JSON.stringify({ [`token of alice ${PASSWORD}`]: "hunt" + "er2" }) }));
+
+    expect(reasons(bytes)).toEqual(["a key holds a password or secret"]);
+  });
+
   test("reads only .jsonl files", () => {
     expect(sessionContentHits("memory/MEMORY.md", Buffer.from(`PASSWORD=${PASSWORD}\n`))).toEqual([]);
     expect(reasons(jsonl(toolResult(`PASSWORD=${PASSWORD}\n`)), "SESSION.JSONL")).toHaveLength(1);

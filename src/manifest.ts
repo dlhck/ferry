@@ -32,6 +32,15 @@ export type DenyRuleDescription = {
   readonly behavior: DenyVerdict;
 };
 
+/**
+ * The version of the deny rules and of the session scan. Raise it with each
+ * change to a deny rule, a name list, a token pattern, the secret-field rule,
+ * or the session scan. `ferry scan` prints it, and Ferry refuses the check of
+ * a box whose number is lower than this one, because older rules can pass a
+ * file that this machine refuses.
+ */
+export const DENY_RULES_VERSION = 1;
+
 const DENY_RULES = {
   dotenv: { code: "dotenv", reason: "environment file", verdict: "refuse" },
   credentials: { code: "credentials", reason: "vendor auth or credential file", verdict: "refuse" },
@@ -191,6 +200,8 @@ const PLACEHOLDER_BODY = /^(?:([xX0])\1*|[xX]+(?:[-_]+[xX]+)*)$/;
  */
 const SECRET_KEYS = new Set(["passwd"]);
 const SECRET_WORDS = ["secret", "privatekey", "apikey", "password", "token"];
+/** A key that a secret-field reason prints. */
+const PRINTED_KEY = /^[\w.-]{1,64}$/;
 const CONFIG_EXTS = { ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml" } as const;
 /**
  * A `key: value` or `key = value` line, for a config file that does not parse.
@@ -513,7 +524,8 @@ function collectOccurrences(
 
 type Scan = { files: SeedFile[]; leftovers: Leftover[]; forbidden: ForbiddenHit[] };
 
-function scanSkill(skillDir: string): Scan {
+/** The carried files of one skill directory, and the hits of the deny rules in it. The hit paths are absolute. */
+export function scanSkill(skillDir: string): Scan {
   const scan: Scan = { files: [], leftovers: [], forbidden: [] };
   walk(skillDir, skillDir, realpathSync(skillDir), new Set(), scan);
   scan.files.sort((a, b) => compare(a.path, b.path));
@@ -629,11 +641,13 @@ function secretLineKeys(text: string): string[] {
   });
 }
 
+/** A hit names its key only when the key matches `PRINTED_KEY`. A key of a JSON object is free text and can hold a value. */
 export function secretKeyHits(path: string, keys: readonly string[]): ForbiddenHit[] {
-  return [...new Set(keys)].map((key) => ({
+  const names = keys.map((key) => (PRINTED_KEY.test(key) ? `key ${key}` : "a key"));
+  return [...new Set(names)].map((name) => ({
     path,
     code: DENY_RULES["secret-field"].code,
-    reason: `key ${key} holds a password or secret`,
+    reason: `${name} holds a password or secret`,
   }));
 }
 

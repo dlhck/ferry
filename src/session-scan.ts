@@ -19,6 +19,8 @@
  * A secret in free prose, such as "the password is ...", passes. A bare value
  * of only letters, such as `password: swordfish`, also passes, unless the key
  * is in the env form, such as `PASSWORD=swordfish`.
+ *
+ * A change to this scan must raise `DENY_RULES_VERSION` in `manifest.ts`.
  */
 
 import { CONFIG_LINE, isSecretKey, isSecretValue, secretKeyHits, type ForbiddenHit } from "./manifest.ts";

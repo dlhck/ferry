@@ -42,5 +42,6 @@ The `commit-msg` hook runs `strip-clanker-attribution`. It removes AI tool attri
 - Add or change a test for each behaviour change.
 - Update `README.md` when a command, flag, or carried path changes.
 - A change to what Ferry carries, or to the deny rules, needs a clear reason in the pull request. Ferry must never carry a credential to the box.
+- A change to a deny rule or to the session scanner must raise `DENY_RULES_VERSION` in `src/manifest.ts`. Ferry refuses the check of a box with a lower number.
 
 Report a security problem privately. See [SECURITY.md](SECURITY.md).
