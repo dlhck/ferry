@@ -10,7 +10,7 @@ import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:f
 import { homedir, tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { FerryError } from "./errors.ts";
-import { isReleaseVersion, VERSION } from "./version.ts";
+import { isReleaseVersion, notReadyMessage, VERSION } from "./version.ts";
 import {
   checked,
   installUserService,
@@ -41,7 +41,8 @@ export type MenuBarInput = {
 };
 
 export type MenuBarDependencies = WatchServiceDependencies & {
-  readonly download?: (url: string) => Promise<Uint8Array>;
+  /** The bytes of the URL, or null when the release does not have the file (HTTP 404). */
+  readonly download?: (url: string) => Promise<Uint8Array | null>;
   /** Finds an executable on PATH, or returns null. */
   readonly which?: (name: string) => string | null;
 };
@@ -100,6 +101,8 @@ export async function installMenuBar(
 
   const applications = join(home, "Applications");
   const app = join(applications, APP);
+  // Download first, so that a release that is not ready leaves the installed app in its place.
+  const zip = source === null ? await downloadRelease(version, dependencies.download ?? download) : null;
   // Stop the running app before Ferry replaces it.
   await run(["launchctl", "bootout", `gui/${uid}/dev.ferry.menubar`], true);
   rmSync(app, { recursive: true, force: true });
@@ -107,8 +110,8 @@ export async function installMenuBar(
     await checked(run, ["ditto", source, app]);
   } else if (source !== null) {
     await checked(run, ["ditto", "-x", "-k", source, applications]);
-  } else {
-    await installRelease(version, applications, run, dependencies.download ?? download);
+  } else if (zip !== null) {
+    await unpackRelease(zip, applications, run);
   }
 
   const service = await installUserService(
@@ -166,14 +169,11 @@ function requireMacOS(platform: NodeJS.Platform | undefined, command: string): v
   }
 }
 
-async function installRelease(
-  version: string,
-  applications: string,
-  run: NonNullable<WatchServiceDependencies["run"]>,
-  fetchBytes: (url: string) => Promise<Uint8Array>,
-): Promise<void> {
+/** The verified zip of the release. The release workflow attaches the zip and SHA256SUMS after the release is visible. */
+async function downloadRelease(version: string, fetchBytes: (url: string) => Promise<Uint8Array | null>): Promise<Uint8Array> {
   const url = `${DOWNLOAD_BASE}/v${version}`;
   const [zip, sums] = await Promise.all([fetchBytes(`${url}/${MENUBAR_ASSET}`), fetchBytes(`${url}/SHA256SUMS`)]);
+  if (zip === null || sums === null) throw new FerryError("failed", notReadyMessage(version));
   // The same lookup as install.sh: the line of the asset, with or without the binary mark.
   const expected = new TextDecoder()
     .decode(sums)
@@ -185,6 +185,10 @@ async function installRelease(
   if (actual !== expected) {
     throw new FerryError("failed", `Checksum mismatch for ${MENUBAR_ASSET}. Expected ${expected}, got ${actual}.`);
   }
+  return zip;
+}
+
+async function unpackRelease(zip: Uint8Array, applications: string, run: NonNullable<WatchServiceDependencies["run"]>): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), "ferry-menubar-"));
   try {
     const file = join(directory, MENUBAR_ASSET);
@@ -195,8 +199,9 @@ async function installRelease(
   }
 }
 
-async function download(url: string): Promise<Uint8Array> {
+async function download(url: string): Promise<Uint8Array | null> {
   const response = await fetch(url, { headers: { "user-agent": `ferry/${VERSION}` } });
+  if (response.status === 404) return null;
   if (!response.ok) throw new FerryError("failed", `Cannot download ${url}: HTTP ${response.status}.`);
   return new Uint8Array(await response.arrayBuffer());
 }

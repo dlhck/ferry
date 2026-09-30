@@ -4,6 +4,10 @@
  * is there, Ferry asks to update. `ferry self-update` reads the latest
  * release each time and updates without a question. The update uses the
  * method that installed this Ferry: npm, or the release installer.
+ *
+ * A release is visible before the release workflow attaches its files and
+ * publishes the npm packages. Ferry does not offer or install a release that
+ * does not have the files of this install yet.
  */
 
 import * as prompts from "@clack/prompts";
@@ -13,7 +17,7 @@ import { basename, dirname, join } from "node:path";
 import { FerryError } from "./errors.ts";
 import { menuBarService } from "./menubar.ts";
 import { tunnelService } from "./tunnel-service.ts";
-import { isReleaseVersion, VERSION } from "./version.ts";
+import { isReleaseVersion, notReadyMessage, VERSION } from "./version.ts";
 import { launchdPath, systemdPath, WATCH_SERVICE, type UserService } from "./watch-service.ts";
 
 const STATE_RELATIVE_PATH = ".ferry/update-check.json";
@@ -21,6 +25,7 @@ const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const FETCH_TIMEOUT_MS = 2_000;
 const LATEST_RELEASE_URL = "https://api.github.com/repos/dlhck/ferry/releases/latest";
 const INSTALLER_URL = "https://raw.githubusercontent.com/dlhck/ferry";
+const NPM_REGISTRY_URL = "https://registry.npmjs.org";
 
 /** The last check and the release that the operator skipped. */
 type CheckState = {
@@ -31,11 +36,19 @@ type CheckState = {
 
 export type UpdateChoice = "update" | "skip" | "skip-version";
 
+/** A GitHub release: its version, and the names of the files that are uploaded. */
+export type LatestRelease = {
+  readonly version: string;
+  readonly assets: readonly string[];
+};
+
 /** The --json result of `ferry self-update`. */
 export type SelfUpdateResult = {
   readonly current: string;
   readonly latest: string;
   readonly updated: boolean;
+  /** `not-ready`: `latest` is newer, and its files are not there yet. Ferry did not start the update. */
+  readonly state: "updated" | "up-to-date" | "not-ready";
   readonly services: readonly SelfUpdateServiceResult[];
   /** The message of the skill update by the new Ferry, or null when Ferry did not update. */
   readonly skill: string | null;
@@ -57,6 +70,7 @@ export type SelfUpdateDependencies = {
   readonly version: string;
   readonly home: string;
   readonly platform: NodeJS.Platform;
+  readonly arch: string;
   readonly uid: number | undefined;
   /** The path of the running Ferry binary. It tells how Ferry was installed. */
   readonly execPath: string;
@@ -64,8 +78,10 @@ export type SelfUpdateDependencies = {
   readonly scriptPath: string | undefined;
   readonly json: boolean;
   readonly now: () => number;
-  /** The version of the latest release, or null when Ferry cannot read it. */
-  readonly fetchLatest: () => Promise<string | null>;
+  /** The latest release, or null when Ferry cannot read it. */
+  readonly fetchLatest: () => Promise<LatestRelease | null>;
+  /** False when npm does not have the version of the package. */
+  readonly npmHasVersion: (name: string, version: string) => Promise<boolean>;
   readonly choose: (current: string, latest: string) => Promise<UpdateChoice>;
   /** Runs the update command with the terminal of Ferry and returns its exit code. */
   readonly run: (argv: readonly string[]) => Promise<number>;
@@ -103,7 +119,10 @@ export async function offerSelfUpdate(dependencies: Partial<SelfUpdateDependenci
   const path = join(resolved.home, STATE_RELATIVE_PATH);
   let state = readState(path);
   if (state === null || resolved.now() - state.checkedAt >= CHECK_INTERVAL_MS) {
-    const latest = (await resolved.fetchLatest()) ?? state?.latest ?? null;
+    const release = await resolved.fetchLatest();
+    // A newer release without its files is not there yet. The check of the next day reads it again.
+    const usable = release !== null && (!isNewer(release.version, resolved.version) || (await isComplete(release, resolved)));
+    const latest = usable ? release.version : (state?.latest ?? null);
     state = { ...state, checkedAt: resolved.now(), latest };
     writeState(path, state);
   }
@@ -131,13 +150,20 @@ export async function runSelfUpdate(dependencies: Partial<SelfUpdateDependencies
   if (!isReleaseVersion(current)) {
     throw new FerryError("usage", `Ferry ${current} is a development build. It has no release to update from.`);
   }
-  const latest = await resolved.fetchLatest();
-  if (latest === null) throw new FerryError("failed", "Ferry cannot read the latest release from GitHub.");
+  const release = await resolved.fetchLatest();
+  if (release === null) throw new FerryError("failed", "Ferry cannot read the latest release from GitHub.");
+  const latest = release.version;
+  const newer = isNewer(latest, current);
+  // Not an error: there is nothing to install yet. The state keeps its release, so the update prompt does not offer this one.
+  if (newer && !(await isComplete(release, resolved))) {
+    resolved.writeLine(notReadyMessage(latest));
+    return { current, latest, updated: false, state: "not-ready", services: [], skill: null };
+  }
   const path = join(resolved.home, STATE_RELATIVE_PATH);
   writeState(path, { ...readState(path), checkedAt: resolved.now(), latest });
-  if (!isNewer(latest, current)) {
+  if (!newer) {
     resolved.writeLine(`Ferry ${current} is the latest version.`);
-    return { current, latest, updated: false, services: [], skill: null };
+    return { current, latest, updated: false, state: "up-to-date", services: [], skill: null };
   }
   if ((await resolved.run(updateCommand(latest, resolved.execPath))) !== 0) {
     throw new FerryError("update-failed", `The update to Ferry ${latest} failed.`);
@@ -145,7 +171,23 @@ export async function runSelfUpdate(dependencies: Partial<SelfUpdateDependencies
   resolved.writeLine(`Updated Ferry to ${latest}. Run ferry update to put it on the boxes.`);
   const services = await refreshInstalledServices(latest, resolved);
   const skill = await refreshSkill(resolved);
-  return { current, latest, updated: true, services, skill };
+  return { current, latest, updated: true, state: "updated", services, skill };
+}
+
+/**
+ * True when the release has the files that the update of this Ferry downloads.
+ * The release installer needs the binary of this platform and SHA256SUMS. An
+ * npm install needs `@dlhck/ferry` and the package of this platform on npm.
+ * npm makes the packages available in any order, so the main package can be
+ * there before a platform package.
+ */
+async function isComplete(release: LatestRelease, dependencies: SelfUpdateDependencies): Promise<boolean> {
+  const binary = `ferry-${dependencies.platform}-${dependencies.arch}`;
+  if (!isNpmInstall(dependencies.execPath)) return [binary, "SHA256SUMS"].every((name) => release.assets.includes(name));
+  const onNpm = await Promise.all(
+    ["@dlhck/ferry", `@dlhck/${binary}`].map((name) => dependencies.npmHasVersion(name, release.version)),
+  );
+  return onNpm.every(Boolean);
 }
 
 /**
@@ -394,7 +436,7 @@ function errorMessage(error: unknown): string {
  * release installer replaces the binary in its directory.
  */
 export function updateCommand(version: string, execPath: string): string[] {
-  if (execPath.includes("/node_modules/@dlhck/ferry-")) return ["npm", "install", "--global", `@dlhck/ferry@${version}`];
+  if (isNpmInstall(execPath)) return ["npm", "install", "--global", `@dlhck/ferry@${version}`];
   const tag = `v${version}`;
   const url = `${INSTALLER_URL}/${tag}/install.sh`;
   return [
@@ -413,6 +455,10 @@ export function updateCommand(version: string, execPath: string): string[] {
   ];
 }
 
+function isNpmInstall(execPath: string): boolean {
+  return execPath.includes("/node_modules/@dlhck/ferry-");
+}
+
 /** True when release `a` is newer than `b`. A version without a pre-release part is newer than its pre-release. */
 export function isNewer(a: string, b: string): boolean {
   const [coreA = "", preA] = a.split("-", 2);
@@ -426,18 +472,40 @@ export function isNewer(a: string, b: string): boolean {
   return preA === undefined && preB !== undefined;
 }
 
-async function fetchLatestRelease(): Promise<string | null> {
+async function fetchLatestRelease(): Promise<LatestRelease | null> {
   try {
     const response = await fetch(LATEST_RELEASE_URL, {
       headers: { accept: "application/vnd.github+json", "user-agent": `ferry/${VERSION}` },
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
-    if (!response.ok) return null;
-    const body = (await response.json()) as { tag_name?: unknown };
-    const version = typeof body.tag_name === "string" ? body.tag_name.replace(/^v/, "") : "";
-    return isReleaseVersion(version) ? version : null;
+    return response.ok ? latestRelease(await response.json()) : null;
   } catch {
     return null;
+  }
+}
+
+/** The release of a GitHub release body, or null when the body has no release version. A file counts when its upload is done. */
+export function latestRelease(body: unknown): LatestRelease | null {
+  const release = (body ?? {}) as { tag_name?: unknown; assets?: unknown };
+  const version = typeof release.tag_name === "string" ? release.tag_name.replace(/^v/, "") : "";
+  if (!isReleaseVersion(version)) return null;
+  const assets = Array.isArray(release.assets) ? (release.assets as { name?: unknown; state?: unknown }[]) : [];
+  return {
+    version,
+    assets: assets.flatMap((asset) => (typeof asset?.name === "string" && asset.state === "uploaded" ? [asset.name] : [])),
+  };
+}
+
+/** Only HTTP 404 says that npm does not have the version. After another failure, npm gives its own error. */
+async function npmHasVersion(name: string, version: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${NPM_REGISTRY_URL}/${name.replace("/", "%2f")}/${version}`, {
+      headers: { "user-agent": `ferry/${VERSION}` },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    return response.status !== 404;
+  } catch {
+    return true;
   }
 }
 
@@ -486,12 +554,14 @@ const defaultDependencies: SelfUpdateDependencies = {
   version: VERSION,
   home: homedir(),
   platform: process.platform,
+  arch: process.arch,
   uid: process.getuid?.(),
   execPath: process.execPath,
   scriptPath: process.argv[1],
   json: false,
   now: Date.now,
   fetchLatest: fetchLatestRelease,
+  npmHasVersion,
   choose: chooseUpdate,
   run: (argv) => Bun.spawn([...argv], { stdio: ["inherit", "inherit", "inherit"] }).exited,
   runService: runCaptured,

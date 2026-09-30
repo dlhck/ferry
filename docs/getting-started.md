@@ -68,7 +68,7 @@ Add `--dry-run` to `init`, `sync`, `update`, or `move` to see the plan first.
 
 ## Update Ferry
 
-Run `ferry self-update` on the operator machine. It restarts installed watch and tunnel services that use the updated Ferry. On macOS, it also updates an installed release menu bar app. Then run `ferry update` to put the new version on the boxes.
+Run `ferry self-update` on the operator machine. It restarts installed watch and tunnel services that use the updated Ferry. On macOS, it also updates an installed release menu bar app. Then run `ferry update` to put the new version on the boxes. When `ferry self-update` says that the release is not ready for download, see [Troubleshooting](troubleshooting.md#a-release-is-not-ready-for-download).
 
 On a terminal, Ferry also asks to update when a newer release is there. It checks at most once a day, and never with `--json`, with `CI` set, or with `FERRY_NO_UPDATE_CHECK=1`.
 

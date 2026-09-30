@@ -92,6 +92,33 @@ describe("menu bar app installer", () => {
     await expect(install).rejects.toThrow(`has no checksum for ${MENUBAR_ASSET}`);
   });
 
+  for (const [name, missing] of [
+    ["no files", [MENUBAR_ASSET, "SHA256SUMS"]],
+    ["some files and no SHA256SUMS", ["SHA256SUMS"]],
+    ["SHA256SUMS and no app", [MENUBAR_ASSET]],
+  ] as const) {
+    test(`a release with ${name} is not ready, and the installed app stays`, async () => {
+      const home = directory();
+      const app = join(home, "Applications", "Ferry Menu Bar.app");
+      mkdirSync(app, { recursive: true });
+      const commands: ServiceCommand[] = [];
+      const install = installMenuBar(
+        { ...RELEASE, home },
+        {
+          run: fakeRun(commands),
+          // A release does not have the file: HTTP 404.
+          download: async (url) => (missing.some((file) => url.endsWith(`/${file}`)) ? null : new TextEncoder().encode("bytes")),
+        },
+      );
+      await expect(install).rejects.toMatchObject({
+        code: "failed",
+        message: "Ferry 1.2.0 is not ready for download. The release is still in its build. Try again in some minutes.",
+      });
+      expect(commands).toEqual([]);
+      expect(existsSync(app)).toBe(true);
+    });
+  }
+
   test("a development build without --app names --app and macos/build.sh", async () => {
     const install = installMenuBar({ ...RELEASE, home: directory(), version: "0.0.0-dev" }, { run: fakeRun([]), download: async () => { throw new Error("downloaded"); } });
     await expect(install).rejects.toMatchObject({

@@ -5,6 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { runCli } from "../src/cli.ts";
 import {
   isNewer,
+  latestRelease,
   offerSelfUpdate,
   offersSelfUpdate,
   runSelfUpdate,
@@ -17,6 +18,10 @@ const DAY = 24 * 60 * 60 * 1_000;
 const SCRIPT_BINARY = "/home/op/.local/bin/ferry";
 const SKILL_LINE = "Updated the Ferry skill in ~/.agents/skills/ferry.";
 const NPM_BINARY = "/usr/lib/node_modules/@dlhck/ferry-linux-x64/bin/ferry";
+const BINARIES = ["ferry-darwin-arm64", "ferry-darwin-x64", "ferry-linux-arm64", "ferry-linux-x64"];
+/** The files of a complete release. The release workflow attaches them after the release is visible. */
+const COMPLETE = [...BINARIES, "ferry-menubar-macos.zip", "SHA256SUMS"];
+const NOT_READY = "Ferry 0.5.0 is not ready for download. The release is still in its build. Try again in some minutes.";
 
 let home: string;
 
@@ -29,9 +34,21 @@ afterEach(async () => {
 });
 
 /** Fakes that record each fetch, question, and command. */
-function fakes(options: { latest?: string | null; choice?: UpdateChoice; exitCode?: number; now?: number } = {}) {
+function fakes(
+  options: {
+    latest?: string | null;
+    /** The files of the latest release. The default is a complete release. */
+    assets?: readonly string[];
+    /** The packages of the latest release that npm does not have. */
+    notOnNpm?: readonly string[];
+    choice?: UpdateChoice;
+    exitCode?: number;
+    now?: number;
+  } = {},
+) {
   const record = {
     fetches: 0,
+    npmReads: [] as string[],
     questions: [] as string[],
     runs: [] as (readonly string[])[],
     serviceRuns: [] as (readonly string[])[],
@@ -43,11 +60,18 @@ function fakes(options: { latest?: string | null; choice?: UpdateChoice; exitCod
   const dependencies: Partial<SelfUpdateDependencies> = {
     version: "0.4.0",
     home,
+    platform: "linux",
+    arch: "x64",
     execPath: SCRIPT_BINARY,
     now: () => now,
     fetchLatest: async () => {
       record.fetches++;
-      return options.latest === undefined ? "0.5.0" : options.latest;
+      if (options.latest === null) return null;
+      return { version: options.latest ?? "0.5.0", assets: options.assets ?? COMPLETE };
+    },
+    npmHasVersion: async (name, version) => {
+      record.npmReads.push(`${name}@${version}`);
+      return !(options.notOnNpm ?? []).includes(name);
     },
     choose: async (current, latest) => {
       record.questions.push(`${current} -> ${latest}`);
@@ -142,6 +166,35 @@ describe("offerSelfUpdate", () => {
     expect(next.record.questions).toEqual(["0.4.0 -> 0.6.0"]);
   });
 
+  for (const [name, assets] of [["no files", []], ["some binaries and no SHA256SUMS", BINARIES]] as const) {
+    test(`does not ask for a release with ${name}, and asks at the next check when it is complete`, async () => {
+      const building = fakes({ assets });
+      expect(await offerSelfUpdate(building.dependencies)).toBe(false);
+      expect(building.record.questions).toEqual([]);
+      expect(JSON.parse(await readFile(join(home, ".ferry/update-check.json"), "utf8"))).toEqual({ checkedAt: 1_000, latest: null });
+
+      const complete = fakes({ now: 1_000 + DAY });
+      await offerSelfUpdate(complete.dependencies);
+      expect(complete.record.questions).toEqual(["0.4.0 -> 0.5.0"]);
+    });
+  }
+
+  test("offers the last complete release when the newest release is not ready", async () => {
+    await offerSelfUpdate(fakes().dependencies);
+    const building = fakes({ latest: "0.6.0", assets: [], now: 1_000 + DAY });
+    await offerSelfUpdate(building.dependencies);
+    expect(building.record.questions).toEqual(["0.4.0 -> 0.5.0"]);
+  });
+
+  test("an npm install does not ask for a release that npm does not have", async () => {
+    for (const name of ["@dlhck/ferry", "@dlhck/ferry-linux-x64"]) {
+      await rm(join(home, ".ferry"), { recursive: true, force: true });
+      const building = fakes({ notOnNpm: [name] });
+      await offerSelfUpdate({ ...building.dependencies, execPath: NPM_BINARY });
+      expect(building.record.questions).toEqual([]);
+    }
+  });
+
   test("does not ask for the same or an older release, or for a development build", async () => {
     for (const latest of ["0.4.0", "0.3.9"]) {
       await rm(join(home, ".ferry"), { recursive: true, force: true });
@@ -158,7 +211,14 @@ describe("offerSelfUpdate", () => {
 describe("runSelfUpdate", () => {
   test("installs a newer release without a question", async () => {
     const { record, dependencies } = fakes();
-    expect(await runSelfUpdate(dependencies)).toEqual({ current: "0.4.0", latest: "0.5.0", updated: true, services: [], skill: SKILL_LINE });
+    expect(await runSelfUpdate(dependencies)).toEqual({
+      current: "0.4.0",
+      latest: "0.5.0",
+      updated: true,
+      state: "updated",
+      services: [],
+      skill: SKILL_LINE,
+    });
     expect(record.questions).toEqual([]);
     expect(record.runs).toEqual([updateCommand("0.5.0", SCRIPT_BINARY)]);
   });
@@ -317,10 +377,66 @@ describe("runSelfUpdate", () => {
   test("reads the latest release also within a day, and does nothing when this is the latest", async () => {
     const { record, dependencies } = fakes({ latest: "0.4.0" });
     await runSelfUpdate(dependencies);
-    expect(await runSelfUpdate(dependencies)).toEqual({ current: "0.4.0", latest: "0.4.0", updated: false, services: [], skill: null });
+    expect(await runSelfUpdate(dependencies)).toEqual({
+      current: "0.4.0",
+      latest: "0.4.0",
+      updated: false,
+      state: "up-to-date",
+      services: [],
+      skill: null,
+    });
     expect(record.fetches).toBe(2);
     expect(record.runs).toEqual([]);
     expect(record.lines.at(-1)).toBe("Ferry 0.4.0 is the latest version.");
+  });
+
+  for (const [name, assets] of [
+    ["no files", []],
+    ["some binaries and no SHA256SUMS", BINARIES],
+    ["SHA256SUMS and no binary of this platform", ["ferry-darwin-arm64", "SHA256SUMS"]],
+  ] as const) {
+    test(`does not start the update of a release with ${name}`, async () => {
+      const { record, dependencies } = fakes({ assets });
+      expect(await runSelfUpdate(dependencies)).toEqual({
+        current: "0.4.0",
+        latest: "0.5.0",
+        updated: false,
+        state: "not-ready",
+        services: [],
+        skill: null,
+      });
+      expect(record.runs).toEqual([]);
+      expect(record.skillRuns).toEqual([]);
+      expect(record.lines).toEqual([NOT_READY]);
+      // The update prompt must not offer the release from the state of this run.
+      await offerSelfUpdate(dependencies);
+      expect(record.fetches).toBe(2);
+      expect(record.questions).toEqual([]);
+    });
+  }
+
+  // npm makes the packages of a release available in any order: the main package can be there before a platform package.
+  test.each(["@dlhck/ferry", "@dlhck/ferry-linux-x64"])("an npm install waits for %s on npm", async (name) => {
+    const building = fakes({ assets: COMPLETE, notOnNpm: [name] });
+    expect((await runSelfUpdate({ ...building.dependencies, execPath: NPM_BINARY })).state).toBe("not-ready");
+    expect(building.record.runs).toEqual([]);
+    expect(building.record.lines).toEqual([NOT_READY]);
+  });
+
+  test("an npm install needs the main package and the package of this platform, and not the release files", async () => {
+    const published = fakes({ assets: [], notOnNpm: ["@dlhck/ferry-darwin-arm64"] });
+    expect((await runSelfUpdate({ ...published.dependencies, execPath: NPM_BINARY })).state).toBe("updated");
+    expect(published.record.npmReads.sort()).toEqual(["@dlhck/ferry-linux-x64@0.5.0", "@dlhck/ferry@0.5.0"]);
+    expect(published.record.runs).toEqual([updateCommand("0.5.0", NPM_BINARY)]);
+  });
+
+  test("a release installer does not read npm, and does not read the files of a release that is not newer", async () => {
+    const script = fakes();
+    await runSelfUpdate(script.dependencies);
+    expect(script.record.npmReads).toEqual([]);
+    const same = fakes({ latest: "0.4.0", assets: [], notOnNpm: ["@dlhck/ferry"] });
+    expect((await runSelfUpdate({ ...same.dependencies, execPath: NPM_BINARY })).state).toBe("up-to-date");
+    expect(same.record.npmReads).toEqual([]);
   });
 
   test("fails with a code when the read or the install fails, and for a development build", async () => {
@@ -341,6 +457,35 @@ describe("updateCommand", () => {
     expect(argv[2]).toContain("https://raw.githubusercontent.com/dlhck/ferry/v0.5.0/install.sh");
     expect(argv[2]).toContain('FERRY_VERSION=v0.5.0 FERRY_INSTALL_DIR="$1"');
     expect(argv.slice(3)).toEqual(["ferry-update", "/home/op/.local/bin"]);
+  });
+});
+
+describe("latestRelease", () => {
+  const asset = (name: string, state = "uploaded") => ({ name, state });
+
+  test("reads the version and the uploaded files of a GitHub release", () => {
+    expect(latestRelease({ tag_name: "v0.5.0", assets: [] })).toEqual({ version: "0.5.0", assets: [] });
+    expect(latestRelease({ tag_name: "v0.5.0", assets: BINARIES.map((name) => asset(name)) })).toEqual({
+      version: "0.5.0",
+      assets: BINARIES,
+    });
+    expect(latestRelease({ tag_name: "v0.5.0", assets: COMPLETE.map((name) => asset(name)) })).toEqual({
+      version: "0.5.0",
+      assets: COMPLETE,
+    });
+  });
+
+  test("does not count a file whose upload is not done", () => {
+    expect(latestRelease({ tag_name: "v0.5.0", assets: [asset("ferry-linux-x64"), asset("SHA256SUMS", "open")] })).toEqual({
+      version: "0.5.0",
+      assets: ["ferry-linux-x64"],
+    });
+  });
+
+  test("gives null for a body without a release version", () => {
+    expect(latestRelease({ tag_name: "nightly", assets: [] })).toBeNull();
+    expect(latestRelease({ message: "Not Found" })).toBeNull();
+    expect(latestRelease(null)).toBeNull();
   });
 });
 
@@ -412,7 +557,7 @@ describe("ferry CLI", () => {
       ...quiet,
       isInteractive: () => true,
       offerSelfUpdate: offer,
-      runSelfUpdate: async () => ({ current: "0.4.0", latest: "0.4.0", updated: false, services: [], skill: null }),
+      runSelfUpdate: async () => ({ current: "0.4.0", latest: "0.4.0", updated: false, state: "up-to-date", services: [], skill: null }),
     });
     expect(offers).toEqual([]);
   });
@@ -420,14 +565,34 @@ describe("ferry CLI", () => {
   test("self-update --json prints the result", async () => {
     const out: string[] = [];
     await runCli(["self-update", "--json"], {
-      runSelfUpdate: async () => ({ current: "0.4.0", latest: "0.5.0", updated: true, services: [], skill: null }),
+      runSelfUpdate: async () => ({ current: "0.4.0", latest: "0.5.0", updated: true, state: "updated", services: [], skill: null }),
       writeLine: (line) => out.push(line),
     });
     expect(JSON.parse(out[0] ?? "")).toMatchObject({
       command: "self-update",
       ok: true,
-      result: { current: "0.4.0", latest: "0.5.0", updated: true, services: [] },
+      result: { current: "0.4.0", latest: "0.5.0", updated: true, state: "updated", services: [] },
     });
+  });
+
+  test("self-update of a release that is not ready is not an error, and --json has the state not-ready", async () => {
+    const out: string[] = [];
+    const codes: number[] = [];
+    await runCli(
+      ["self-update", "--json"],
+      {
+        runSelfUpdate: async () => ({ current: "0.4.0", latest: "0.5.0", updated: false, state: "not-ready", services: [], skill: null }),
+        writeLine: (line) => out.push(line),
+      },
+      { setExitCode: (code) => codes.push(code) },
+    );
+    expect(JSON.parse(out[0] ?? "")).toMatchObject({
+      command: "self-update",
+      ok: true,
+      result: { current: "0.4.0", latest: "0.5.0", updated: false, state: "not-ready" },
+      error: null,
+    });
+    expect(codes).toEqual([]);
   });
 
   test("self-update --json puts a failed service action in warnings", async () => {
@@ -439,6 +604,7 @@ describe("ferry CLI", () => {
           current: "0.4.0",
           latest: "0.5.0",
           updated: true,
+          state: "updated",
           services: [{
             service: "watch",
             action: "failed",
