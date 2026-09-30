@@ -67,7 +67,7 @@ const DENY_RULES = {
   },
   "mcp-argument": {
     code: "mcp-argument",
-    reason: "stdio MCP server command or argument with a token, a secret, a URL credential, or an inline script",
+    reason: "stdio MCP server command or argument with a token, a secret, or a URL credential",
     verdict: "refuse",
   },
   "mcp-name": {
@@ -106,6 +106,11 @@ const DENY_RULES = {
   "mcp-path": {
     code: "mcp-path",
     reason: "stdio MCP server whose command or arguments refer to a path in the operator home",
+    verdict: "skip",
+  },
+  "mcp-script": {
+    code: "mcp-script",
+    reason: "stdio MCP server that runs an inline shell or interpreter script, which Ferry cannot check",
     verdict: "skip",
   },
 } as const satisfies Record<string, DenyRule>;
@@ -274,10 +279,14 @@ export type McpServer = RemoteMcpServer | StdioMcpServer;
 export type SeedMcp = { readonly harness: string; readonly servers: readonly McpServer[] };
 
 /**
- * The carried MCP servers of one harness, and the names of its stdio servers
- * that Ferry does not carry because they refer to a path in the operator home.
+ * A stdio server that Ferry does not carry. `home-path`: it refers to a path
+ * in the operator home. `inline-script`: it runs an inline shell or
+ * interpreter script, which Ferry cannot check.
  */
-export type McpSource = SeedMcp & { readonly nonPortable: readonly string[] };
+export type NonPortableMcp = { readonly name: string; readonly reason: "home-path" | "inline-script" };
+
+/** The carried MCP servers of one harness, and its stdio servers that Ferry does not carry. */
+export type McpSource = SeedMcp & { readonly nonPortable: readonly NonPortableMcp[] };
 
 /** Something ferry found and did not import. Init prints these. */
 export type Leftover = Note & { readonly path: string };
@@ -791,19 +800,19 @@ export function readMcpSources(home: string, harnesses: readonly HarnessDescript
  * The file never leaves the machine. A remote server keeps only its name,
  * type, and URL. A stdio server keeps its command, its arguments, and the
  * names of its environment keys, never their values. Another server, and a
- * stdio server that refers to a path in the home, is noted in `leftovers`. A
- * remote server with headers, environment values, arguments, or a credential,
- * and a stdio server with a token, a secret, a URL credential, or an inline
- * script in its command or arguments, refuse the seed.
+ * stdio server that refers to a path in the home or runs an inline script, is
+ * noted in `leftovers`. A remote server with headers, environment values,
+ * arguments, or a credential, and a stdio server with a token, a secret, or a
+ * URL credential in its command or arguments, refuse the seed.
  */
 function readMcp(
   home: string,
   mcp: NonNullable<HarnessDescriptor["mcp"]>,
   forbidden: ForbiddenHit[],
   leftovers: Leftover[],
-): { servers: McpServer[]; nonPortable: string[] } {
+): { servers: McpServer[]; nonPortable: NonPortableMcp[] } {
   const servers: McpServer[] = [];
-  const nonPortable: string[] = [];
+  const nonPortable: NonPortableMcp[] = [];
   const path = join(home, mcp.file);
   let text: string;
   try {
@@ -847,9 +856,6 @@ function readMcp(
       const words = [stdio.command, ...stdio.args];
       const parts = argumentParts(words);
       const rules = argumentRules(path, words, parts);
-      const homePath = refersToHome(words, home);
-      // A server with a home path is not carried, so its script needs no check.
-      if (rules.length === 0 && !homePath && runsInlineScript(parts)) rules.push("inline-script");
       if (rules.length > 0) {
         forbidden.push({
           path,
@@ -858,12 +864,21 @@ function readMcp(
         });
         continue;
       }
-      if (homePath) {
-        nonPortable.push(name);
+      if (refersToHome(words, home)) {
+        nonPortable.push({ name, reason: "home-path" });
         leftovers.push({
           path,
           code: DENY_RULES["mcp-path"].code,
           reason: `MCP server ${name} refers to a path in the home, which the box does not have`,
+        });
+        continue;
+      }
+      if (runsInlineScript(parts)) {
+        nonPortable.push({ name, reason: "inline-script" });
+        leftovers.push({
+          path,
+          code: DENY_RULES["mcp-script"].code,
+          reason: `MCP server ${name} runs an inline shell or interpreter script, which Ferry cannot check. Put the script in a file that Ferry carries, or run the server through a tool on the PATH`,
         });
         continue;
       }

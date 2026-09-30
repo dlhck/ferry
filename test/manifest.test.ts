@@ -329,7 +329,7 @@ describe("the deny set", () => {
       },
       {
         code: "mcp-argument",
-        description: "stdio MCP server command or argument with a token, a secret, a URL credential, or an inline script",
+        description: "stdio MCP server command or argument with a token, a secret, or a URL credential",
         behavior: "refuse",
       },
       {
@@ -368,6 +368,11 @@ describe("the deny set", () => {
       {
         code: "mcp-path",
         description: "stdio MCP server whose command or arguments refer to a path in the operator home",
+        behavior: "skip",
+      },
+      {
+        code: "mcp-script",
+        description: "stdio MCP server that runs an inline shell or interpreter script, which Ferry cannot check",
         behavior: "skip",
       },
     ]);
@@ -1572,18 +1577,6 @@ describe("carried MCP server declarations", () => {
     ["a URL with a password inside a longer argument", "tool-mcp", ["connect to 'postgresql://alice:example-pass@db.example/app' now"], "url-credential"],
     ["a secret flag in a shell script", "sh", ["-c", "exec tool --password example-pass"], "secret-field"],
     ["a quoted secret flag in a shell script", "bash", ["-c", 'exec tool --api-key="example-pass"'], "secret-field"],
-    ["an inline sh script", "sh", ["-c", "exec tool serve"], "inline-script"],
-    ["an inline script for a shell path", "/bin/sh", ["-c", "exec tool serve"], "inline-script"],
-    ["an inline bash login script", "bash", ["-lc", "exec tool serve"], "inline-script"],
-    ["an inline bash script after a shell option", "bash", ["-o", "pipefail", "-c", "exec tool serve"], "inline-script"],
-    ["an inline zsh script", "zsh", ["-c", "exec tool serve"], "inline-script"],
-    ["an inline node script", "node", ["-e", "require('tool').serve()"], "inline-script"],
-    ["an inline node script with --eval", "node", ["--input-type=module", "--eval", "serve()"], "inline-script"],
-    ["an inline python script", "python3", ["-c", "import tool; tool.serve()"], "inline-script"],
-    ["an inline script for a python version", "python3.12", ["-c", "import tool; tool.serve()"], "inline-script"],
-    ["an inline deno script", "deno", ["eval", "serve()"], "inline-script"],
-    ["an inline script behind env", "env", ["bash", "-c", "exec tool serve"], "inline-script"],
-    ["an inline script in a container", "docker", ["run", "-i", "example/tool", "sh", "-c", "exec tool serve"], "inline-script"],
   ];
   for (const [what, command, args, rule] of credentialCommands) {
     test(`refuses a stdio server with ${what}, and names the server and the rule`, () => {
@@ -1600,6 +1593,42 @@ describe("carried MCP server declarations", () => {
         },
       ]);
       expect(JSON.stringify(hits)).not.toContain("example-pass");
+    });
+  }
+
+  const inlineScripts: readonly (readonly [string, string, readonly string[]])[] = [
+    ["an inline sh script", "sh", ["-c", "exec tool serve"]],
+    ["an inline script for a shell path", "/bin/sh", ["-c", "exec tool serve"]],
+    ["an inline bash login script", "bash", ["-lc", "exec tool serve"]],
+    ["an inline bash script after a shell option", "bash", ["-o", "pipefail", "-c", "exec tool serve"]],
+    ["an inline zsh script", "zsh", ["-c", "exec tool serve"]],
+    ["an inline node script", "node", ["-e", "require('tool').serve()"]],
+    ["an inline node script with --eval", "node", ["--input-type=module", "--eval", "serve()"]],
+    ["an inline python script", "python3", ["-c", "import tool; tool.serve()"]],
+    ["an inline script for a python version", "python3.12", ["-c", "import tool; tool.serve()"]],
+    ["an inline deno script", "deno", ["eval", "serve()"]],
+    ["an inline script behind env", "env", ["bash", "-c", "exec tool serve"]],
+    ["an inline script in a container", "docker", ["run", "-i", "example/tool", "sh", "-c", "exec tool serve"]],
+  ];
+  for (const [what, command, args] of inlineScripts) {
+    test(`skips a stdio server with ${what}, and says what to do`, () => {
+      const home = makeHome();
+      write(home, ".cursor/mcp.json", JSON.stringify({ mcpServers: { tool: { command, args }, other: { command: "other-mcp" } } }));
+
+      const seed = seedOf(home);
+
+      expect(mcpOf(seed, "cursor")).toEqual([{ name: "other", type: "stdio", command: "other-mcp", args: [], env: [] }]);
+      expect(seed.leftovers.filter((leftover) => leftover.code === "mcp-script")).toEqual([
+        {
+          path: join(home, ".cursor", "mcp.json"),
+          code: "mcp-script",
+          reason:
+            "MCP server tool runs an inline shell or interpreter script, which Ferry cannot check. Put the script in a file that Ferry carries, or run the server through a tool on the PATH",
+        },
+      ]);
+      expect(readMcpSources(home, BUILTIN_HARNESSES)).toEqual([
+        { harness: "cursor", servers: mcpOf(seed, "cursor") as never, nonPortable: [{ name: "tool", reason: "inline-script" }] },
+      ]);
     });
   }
 
@@ -1656,7 +1685,7 @@ describe("carried MCP server declarations", () => {
       "MCP server local refers to a path in the home, which the box does not have",
     ]);
     expect(readMcpSources(home, BUILTIN_HARNESSES)).toEqual([
-      { harness: "claude", servers: mcpOf(seed, "claude") as never, nonPortable: ["data", "local"] },
+      { harness: "claude", servers: mcpOf(seed, "claude") as never, nonPortable: ["data", "local"].map((name) => ({ name, reason: "home-path" })) },
     ]);
   });
 
@@ -1688,7 +1717,7 @@ describe("carried MCP server declarations", () => {
       skipped.map((name) => `MCP server ${name} refers to a path in the home, which the box does not have`),
     );
     expect(readMcpSources(home, BUILTIN_HARNESSES)).toEqual([
-      { harness: "claude", servers: mcpOf(seed, "claude") as never, nonPortable: skipped },
+      { harness: "claude", servers: mcpOf(seed, "claude") as never, nonPortable: skipped.map((name) => ({ name, reason: "home-path" })) },
     ]);
   });
 

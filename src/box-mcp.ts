@@ -17,7 +17,7 @@ import {
   quoteShell,
   type BoxSettingsLink,
 } from "./box-settings.ts";
-import type { McpSource, RemoteMcpServer, SeedMcp, StdioMcpServer } from "./manifest.ts";
+import type { McpSource, NonPortableMcp, RemoteMcpServer, SeedMcp, StdioMcpServer } from "./manifest.ts";
 import type { Progress } from "./progress.ts";
 import type { HarnessDescriptor, ToolDescriptor, ToolMcp } from "./registry/types.ts";
 
@@ -101,13 +101,14 @@ export async function registerBoxMcp(input: {
  * entry sets no value for `keys`. `env-unchecked`: the box has no jq, so Ferry
  * cannot check `keys`. `command-missing`: `command` is not on the box PATH and
  * no registry tool supplies it. `not-portable`: ferry does not carry the
- * server, because it refers to a path in the operator home.
+ * server, because it refers to a path in the operator home or runs an inline
+ * script. `reason` says which.
  */
 export type BoxMcpIssue =
   | { readonly kind: "env-missing"; readonly harness: string; readonly server: string; readonly keys: readonly string[]; readonly file: string }
   | { readonly kind: "env-unchecked"; readonly harness: string; readonly server: string; readonly keys: readonly string[] }
   | { readonly kind: "command-missing"; readonly harness: string; readonly server: string; readonly command: string }
-  | { readonly kind: "not-portable"; readonly harness: string; readonly server: string };
+  | { readonly kind: "not-portable"; readonly harness: string; readonly server: string; readonly reason: NonPortableMcp["reason"] };
 
 /**
  * Check the carried stdio servers on the box, read-only. A command that a
@@ -127,7 +128,7 @@ export async function checkBoxMcp(input: {
   const recipes = new Map<string, ToolMcp>();
   for (const { entry, recipe } of declared(input.sources, input.tools)) {
     recipes.set(entry.harness, recipe);
-    for (const server of entry.nonPortable) issues.push({ kind: "not-portable", harness: entry.harness, server });
+    for (const server of entry.nonPortable) issues.push({ kind: "not-portable", harness: entry.harness, server: server.name, reason: server.reason });
     for (const server of entry.servers) if (server.type === "stdio") stdio.push({ harness: entry.harness, server });
   }
 

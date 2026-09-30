@@ -608,6 +608,7 @@ describe("runSync", () => {
         JSON.stringify({
           mcpServers: {
             repl: { command: join(home, "bin", "repl"), env: { KEY: "value" } },
+            wrapped: { command: "sh", args: ["-c", "exec tool serve"] },
             linear: { type: "http", url: "https://mcp.linear.app/mcp" },
           },
         }),
@@ -627,6 +628,7 @@ describe("runSync", () => {
 
       expect(lines).toEqual([
         `Skipped MCP server: MCP server repl refers to a path in the home, which the box does not have: ${join(home, ".claude.json")}`,
+        `Skipped MCP server: MCP server wrapped runs an inline shell or interpreter script, which Ferry cannot check. Put the script in a file that Ferry carries, or run the server through a tool on the PATH: ${join(home, ".claude.json")}`,
       ]);
       expect(printed[0]?.mcpServers).toEqual(["claude/linear"]);
     } finally {
