@@ -542,7 +542,7 @@ describe("registerBoxMcp with a skipped app bundle server", () => {
     expect(JSON.parse(box.read(".cursor/mcp.json"))).toEqual({ mcpServers: { boxonly: { command: NODE_REPL } } });
   });
 
-  test("runs no box command for the removal when the box has no MCP file and no harness CLI", async () => {
+  test("changes nothing and prints nothing when the box has no MCP file and no harness CLI", async () => {
     const box = shellBox();
 
     const warnings = await registerBoxMcp({
@@ -571,7 +571,9 @@ describe("registerBoxMcp with a skipped app bundle server", () => {
       link: box.link,
     });
 
-    expect(warnings).toEqual(["jq is not on the box, so Ferry did not check cursor MCP server node_repl. Run ferry update to install jq."]);
+    expect(warnings).toEqual([
+      "jq is not on the box, so Ferry cannot tell if cursor MCP server node_repl on the box runs from a macOS app bundle, and leaves it. Run ferry update to install jq.",
+    ]);
     expect(box.read(".cursor/mcp.json")).toBe(text);
   });
 });
