@@ -1564,7 +1564,14 @@ with that code and changes nothing. Run it again when the sync ends.
 
 When Ferry cannot reach the box, or a box step fails, the box stays in the
 config. Run the command without --uninstall to remove the box from the
-config only. Ferry refuses the last box of the config.`)
+config only.
+
+Without --uninstall, Ferry refuses the last box of the config, because the
+box keeps Ferry. With --uninstall, Ferry removes the last box too, also the
+box default of a [host] config. Then the config has no [host] table and no
+[box.<name>] table, and the rest of the config stays. ferry sync, ferry
+status, ferry install, and ferry watch fail and name ferry box add, until
+you add a box with ferry box add <name>. ferry init adds a box too.`)
     .argument("<name>", "box name")
     .option("--uninstall", "remove Ferry from the box, then remove the box from the config")
     .option("--yes", "with --uninstall, do not ask for the box name")

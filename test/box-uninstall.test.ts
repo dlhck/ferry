@@ -15,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { runBoxUninstall, type BoxUninstallDependencies } from "../src/box.ts";
+import { hasNoBox, resolveBoxes } from "../src/boxes.ts";
 import { boxUninstallLines, commitBoxUninstall, planBoxUninstall } from "../src/box-uninstall.ts";
 import { readConfig, writeConfig, type BoxesOperatorConfig } from "../src/config.ts";
 import type { Seed } from "../src/manifest.ts";
@@ -407,19 +408,19 @@ describe("ferry box remove --uninstall", () => {
     ]);
   });
 
-  describe("the box lock", () => {
-    const seed: Seed = {
-      ok: true,
-      skills: [],
-      instructions: null,
-      roots: [],
-      settings: [],
-      mcp: [],
-      identity: "seed-identity",
-      leftovers: [],
-      storeUpdates: [],
-    };
+  const seed: Seed = {
+    ok: true,
+    skills: [],
+    instructions: null,
+    roots: [],
+    settings: [],
+    mcp: [],
+    identity: "seed-identity",
+    leftovers: [],
+    storeUpdates: [],
+  };
 
+  describe("the box lock", () => {
     /** A sync of box b, as the watch runs it. `events` gets each publish and each box command. */
     function syncBoxB(home: string, events: string[]) {
       return runSync(
@@ -599,13 +600,88 @@ describe("ferry box remove --uninstall", () => {
     expect(text()).toBe(CONFIG);
   });
 
-  test("refuses an unknown box and the last box before it connects", async () => {
+  test("refuses an unknown box before it connects", async () => {
     const unknown = operator(offline);
     await expect(runBoxUninstall({ name: "c", yes: true, dryRun: false }, unknown.deps)).rejects.toThrow("unknown box c. Known boxes: a, b.");
     expect(unknown.links).toEqual([]);
+  });
 
-    const last = operator(offline, {}, CONFIG.replace('default_box = "b"\n', "").split("[box.b]")[0]);
-    await expect(runBoxUninstall({ name: "a", yes: true, dryRun: false }, last.deps)).rejects.toThrow("box a is the last box");
-    expect(last.links).toEqual([]);
+  describe("the last box", () => {
+    const SHARED = ["version = 1", 'publisher = "operator"', 'snapshot_url = "snapshot.git"', ""];
+    const REST = ["[status]", "disk_free_gib = 20", "", "[integrations]", "paseo = true", "", "[tools]", 'gh = "operator"', ""];
+    const ONE_BOX = [...SHARED.slice(0, 3), 'default_box = "b"', "", ...REST, "[box.b]", 'transport = "ssh"', 'destination = "user@box.example"', ""].join("\n");
+    const HOST = [...SHARED, "[host]", 'transport = "ssh"', 'destination = "user@box.example"', "", ...REST].join("\n");
+    const NO_BOX = [...SHARED, ...REST].join("\n");
+    const LAST = (name: string) =>
+      `Box ${name} is the last box. After the removal, the config has no box. Then ferry sync, ferry status, and ferry watch fail until you add a box with ferry box add <name>.`;
+    const WARNING = "Warning: the config has no box now. ferry sync, ferry status, and ferry watch fail until you add a box with ferry box add <name>.";
+
+    test("removes Ferry from the only box table, and the config has no box and keeps the rest", async () => {
+      const box = await ferryBox();
+      const { home, deps, lines, warnings, questions, text } = operator(box, {}, ONE_BOX);
+
+      const result = await runBoxUninstall({ name: "b", yes: false, dryRun: false }, deps);
+
+      expect(questions).toEqual(["Type b to remove Ferry from the box."]);
+      expect(lines[0]).toBe(LAST("b"));
+      expect(box.exists(".ferry/store")).toBe(false);
+      for (const path of KEPT) expect(box.exists(path)).toBe(true);
+      expect(result).toMatchObject({ name: "b", defaultBoxRemoved: true, uninstall: { dryRun: false } });
+      expect(text()).toBe(NO_BOX);
+      // One warning: a default_box has no use without a box.
+      expect(warnings).toEqual([WARNING]);
+      expect(lines.slice(-2)).toEqual(["Removed box b from the config.", WARNING]);
+      expect(hasNoBox(readConfig(home))).toBe(true);
+      expect(() => resolveBoxes(readConfig(home) ?? {})).toThrow("Ferry config has no box. Add a box with ferry box add <name>.");
+    });
+
+    test("removes Ferry from the box default of a [host] config, and removes only the [host] table", async () => {
+      const box = await ferryBox();
+      const { home, deps, links, warnings, text } = operator(box, {}, HOST);
+
+      const result = await runBoxUninstall({ name: "default", yes: true, dryRun: false }, deps);
+
+      expect(links).toEqual([{ destination: "user@box.example" }]);
+      expect(box.exists(".ferry/store")).toBe(false);
+      expect(result).toMatchObject({ name: "default", defaultBoxRemoved: false });
+      expect(text()).toBe(NO_BOX);
+      expect(warnings).toEqual([WARNING]);
+      expect(readConfig(home)).toMatchObject({ status: { diskFreeGiB: 20 }, integrations: { paseo: true }, tools: { gh: "operator" } });
+    });
+
+    test("another answer than the box name, and --dry-run, change nothing", async () => {
+      const box = await ferryBox();
+      const cancelled = operator(box, { confirmName: async () => "yes" }, HOST);
+      expect(await runBoxUninstall({ name: "default", yes: false, dryRun: false }, cancelled.deps)).toBeNull();
+      expect(cancelled.questions).toEqual([]);
+      expect(cancelled.text()).toBe(HOST);
+
+      const dryRun = operator(box, {}, HOST);
+      await runBoxUninstall({ name: "default", yes: false, dryRun: true }, dryRun.deps);
+      expect(dryRun.lines[0]).toBe(LAST("default"));
+      expect(dryRun.lines.at(-1)).toBe("Dry run: Ferry made no changes.");
+      expect(dryRun.questions).toEqual([]);
+      expect(dryRun.text()).toBe(HOST);
+      expect(box.exists(".ferry/store")).toBe(true);
+    });
+
+    test("a box that Ferry cannot reach stays in the config", async () => {
+      const { deps, text } = operator(offline, {}, HOST);
+
+      const error = await runBoxUninstall({ name: "default", yes: true, dryRun: false }, deps).catch((error) => error);
+
+      expect(errorInfo(error).code).toBe("box-offline");
+      expect(text()).toBe(HOST);
+    });
+
+    test("ferry sync names ferry box add after the removal", async () => {
+      const { home, deps } = operator(await ferryBox(), {}, HOST);
+      await runBoxUninstall({ name: "default", yes: true, dryRun: false }, deps);
+
+      const error = await runSync({ home }, { publisher: () => "operator", readSeed: () => seed }).catch((error) => error);
+
+      expect(error.message).toBe("operator: Ferry config has no box. Add a box with ferry box add <name>.");
+      expect(errorInfo(error).code).toBe("config-missing");
+    });
   });
 });

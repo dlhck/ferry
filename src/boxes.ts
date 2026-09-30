@@ -36,7 +36,8 @@ export type ResolvedBox = {
 
 /**
  * The selected boxes, in config order. An empty selection selects all boxes.
- * A `[host]` config has one box, named `default`. Commands that converge all
+ * A `[host]` config has one box, named `default`. A config without a box
+ * throws `ConfigMissingError`. Commands that converge all
  * boxes (`sync`, `watch`, `status`, `update`) use this function. `default_box`
  * does not narrow their selection.
  */
@@ -66,10 +67,32 @@ export function resolveTargetBox(config: PartialOperatorConfig, name?: string): 
   );
 }
 
+/**
+ * True for a config that is complete but has no box. `ferry box remove
+ * <name> --uninstall` leaves it when it removes the last box. Then `ferry box
+ * add` adds a box again.
+ */
+export function hasNoBox(config: PartialOperatorConfig | null): boolean {
+  return (
+    config?.version === 1 &&
+    config.publisher !== undefined &&
+    config.snapshotUrl !== undefined &&
+    !config.boxes &&
+    Object.keys(config.host ?? {}).length === 0
+  );
+}
+
+/** The message of a command that needs a box, for a config without a complete box. */
+export function missingBoxMessage(config: PartialOperatorConfig | null): string {
+  return hasNoBox(config)
+    ? "Ferry config has no box. Add a box with ferry box add <name>."
+    : "Ferry config has no complete box. Run ferry init.";
+}
+
 function configuredBoxes(config: PartialOperatorConfig): readonly BoxConfig[] {
   if (config.boxes) return config.boxes;
   const host = completeHostConfig(config.host);
-  if (!host) throw new ConfigMissingError("Ferry config has no complete box. Run ferry init.");
+  if (!host) throw new ConfigMissingError(missingBoxMessage(config));
   return [{ name: "default", host }];
 }
 

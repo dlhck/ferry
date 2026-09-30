@@ -707,6 +707,42 @@ describe("ferry init", () => {
     });
   });
 
+  test("a run on a config without a box adds the [host] table and keeps the rest of the config", async () => {
+    const home = makeHome();
+    const rest = [
+      "[[harness]]",
+      'id = "custom"',
+      'skill_root = ".custom/skills"',
+      "",
+      "[update]",
+      "watch = true",
+      "",
+      "[status]",
+      "disk_free_gib = 20",
+      "",
+      "[integrations]",
+      "paseo = true",
+      "",
+      "[tools]",
+      'gh = "operator"',
+      "",
+      "[tools.bun]",
+      'version = "1.4.2"',
+      'local = "bun --version"',
+      'install = "curl -fsSL https://bun.sh/install | bash -s bun-v{version}"',
+      "",
+    ];
+    const shared = ["version = 1", 'publisher = "first-operator"', 'snapshot_url = "snapshot.git"', ""];
+    write(join(home, ".ferry/config.toml"), [...shared, ...rest].join("\n"));
+    const { deps } = dependencies(home);
+
+    await runInit({ home, sshDestination: "user@box.example", harnesses: BUILTIN_HARNESSES }, deps);
+
+    expect(readFileSync(join(home, ".ferry/config.toml"), "utf8")).toBe(
+      [...shared, "[host]", 'transport = "ssh"', 'destination = "user@box.example"', "", ...rest].join("\n"),
+    );
+  });
+
   test("a second run keeps the integration switches", async () => {
     const home = makeHome();
     write(join(home, ".ferry/config.toml"), [
