@@ -36,6 +36,7 @@ import { FerryError } from "./errors.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
 import { BUILTIN_HARNESSES } from "./registry/builtin.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
+import { sessionContentHits } from "./session-scan.ts";
 import { stageSessions } from "./sessions.ts";
 
 export type MoveInput = {
@@ -342,7 +343,8 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
     if (input.dryRun) return { ...result, trash: null };
 
     const secretSessions = plan.sessions.carry.filter((session) => session.secrets.length > 0);
-    const secrets = [...plan.carry.filter((file) => file.secrets.length > 0), ...secretSessions.flatMap((session) => session.files)];
+    const secretFiles = plan.carry.filter((file) => file.secrets.length > 0);
+    const secrets = [...secretFiles, ...secretSessions.flatMap((session) => session.files)];
     if (secrets.length > 0 && !input.yes) {
       if (!dependencies.interactive) {
         throw new FerryError(
@@ -375,9 +377,10 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
       await step(progress, `Carrying ${plan.carry.length} ${plan.carry.length === 1 ? "file" : "files"}`, async () => {
         const archive = await createArchive(plan.stage, plan.carry.map((file) => file.path));
         // tar keeps the source mode, so the files with secrets get mode 600 after the extraction.
+        // `carrySessions` sets the mode of the session files, whose paths are relative to the home.
         const chmod =
-          secrets.length > 0
-            ? ` && cd ${destinationPath} && chmod 600 ${secrets.map((file) => quoteShell(`./${file.path}`)).join(" ")}`
+          secretFiles.length > 0
+            ? ` && cd ${destinationPath} && chmod 600 ${secretFiles.map((file) => quoteShell(`./${file.path}`)).join(" ")}`
             : "";
         await must(
           destination.run(`tar -xf - -C ${destinationPath}${chmod}`, { input: archive, timeoutMs: TRANSFER_TIMEOUT_MS }),
@@ -579,8 +582,9 @@ async function preflight(
 
 /**
  * Stage the sessions of the project and apply the deny rules to each file. A
- * hit refuses the whole session. With `allowSecrets`, a session whose files
- * fail only the token or secret-field rules is carried.
+ * transcript also gets the session scan, which reads each record. A hit
+ * refuses the whole session. With `allowSecrets`, a session whose files fail
+ * only the token or secret-field rules is carried.
  */
 async function sessionPreflight(
   input: MoveInput,
@@ -611,7 +615,7 @@ async function sessionPreflight(
       const bytes = readFileSync(join(staged.stage!, file.target));
       const path = `~/${file.source}`;
       const nameHit = carriedNameHit(file.source);
-      const found = nameHit ? [nameHit] : carriedContentHits(file.source, bytes);
+      const found = nameHit ? [nameHit] : [...carriedContentHits(file.source, bytes), ...sessionContentHits(file.source, bytes)];
       if (nameHit || found.some((hit) => ALWAYS_REFUSED.has(hit.code))) blocked = true;
       hits.push(...found.map((hit) => ({ ...hit, path })));
       files.push({ path: file.target, sha256: createHash("sha256").update(bytes).digest("hex"), secrets: [] });

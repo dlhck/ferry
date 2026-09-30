@@ -368,77 +368,78 @@ describe("Paseo health", () => {
 });
 
 describe("Paseo project move", () => {
-  test("registers the moved project on the box", async () => {
+  /** A box link that records each command. `answer` gives the status word of the box script. */
+  function boxPaseo(answer: (command: string) => string = () => "ok") {
     const commands: string[] = [];
     const link: IntegrationLink = {
       async run(command) {
         commands.push(command);
-        return { ok: true, address: "100.64.0.8", stdout: "", stderr: "" };
+        return { ok: true, address: "100.64.0.8", stdout: `${answer(command)}\n`, stderr: "" };
       },
     };
+    return { commands, link, first: () => commands.map((command) => command.split("\n")[0]) };
+  }
 
-    await createPaseo().box.onProjectMoved(link, "~/Developer/it's", []);
+  test("registers the moved project on the box, and keeps the paseo output there", async () => {
+    const box = boxPaseo();
 
-    expect(commands).toEqual([`paseo project create "$HOME"/'Developer/it'"'"'s' >/dev/null`]);
+    await createPaseo().box.onProjectMoved(box.link, "~/Developer/it's", []);
+
+    expect(box.commands).toEqual([[
+      `out=$(paseo project create "$HOME"/'Developer/it'"'"'s' 2>&1) && { echo ok; exit 0; }`,
+      "case $out in",
+      "  *'Provider session is already imported'*) echo duplicate ;;",
+      "  *directory_not_found*) echo no-directory ;;",
+      "  *) echo failed ;;",
+      "esac",
+    ].join("\n")]);
   });
 
-  test("fails with the box message when the command fails", async () => {
-    const link: IntegrationLink = {
+  test("fails with a fixed message for each status word, and never with the box text", async () => {
+    const failure = (link: IntegrationLink) => createPaseo().box.onProjectMoved(link, "~/app", []).catch(String);
+
+    expect(await failure(boxPaseo(() => "no-directory").link)).toBe(
+      "Error: paseo project create failed: Paseo did not find the directory on the box (directory_not_found)",
+    );
+    expect(await failure(boxPaseo(() => "failed").link)).toBe(
+      `Error: paseo project create failed: Paseo printed an error. Run paseo project create "$HOME"/'app' on the box to see it`,
+    );
+    const broken: IntegrationLink = {
       async run() {
-        return { ok: false, error: { code: "command-failed", origin: "box", message: "directory_not_found" } };
+        return { ok: false, error: { code: "command-failed", origin: "box", message: "box-text" } };
       },
     };
-
-    await expect(createPaseo().box.onProjectMoved(link, "~/app", [])).rejects.toThrow(
-      "paseo project create failed: directory_not_found",
-    );
+    expect(await failure(broken)).toBe("Error: paseo project create failed: box/command-failed");
   });
 
   test("imports each moved session into the moved project", async () => {
-    const commands: string[] = [];
-    const link: IntegrationLink = {
-      async run(command) {
-        commands.push(command);
-        return { ok: true, address: "100.64.0.8", stdout: "", stderr: "" };
-      },
-    };
+    const box = boxPaseo();
 
-    await createPaseo().box.onProjectMoved(link, "~/Developer/app", [
+    await createPaseo().box.onProjectMoved(box.link, "~/Developer/app", [
       { provider: "claude", id: "1a2b" },
       { provider: "codex", id: "it's" },
     ]);
 
-    expect(commands).toEqual([
-      `paseo project create "$HOME"/'Developer/app' >/dev/null`,
-      `paseo import '1a2b' --provider 'claude' --cwd "$HOME"/'Developer/app' >/dev/null`,
-      `paseo import 'it'"'"'s' --provider 'codex' --cwd "$HOME"/'Developer/app' >/dev/null`,
+    expect(box.first()).toEqual([
+      `out=$(paseo project create "$HOME"/'Developer/app' 2>&1) && { echo ok; exit 0; }`,
+      `out=$(paseo import '1a2b' --provider 'claude' --cwd "$HOME"/'Developer/app' 2>&1) && { echo ok; exit 0; }`,
+      `out=$(paseo import 'it'"'"'s' --provider 'codex' --cwd "$HOME"/'Developer/app' 2>&1) && { echo ok; exit 0; }`,
     ]);
   });
 
   test("skips a session that an agent already has, and names each failed import after it tries all", async () => {
-    const commands: string[] = [];
-    const link: IntegrationLink = {
-      async run(command) {
-        commands.push(command);
-        if (command.includes("'known'")) {
-          const message = "Error: Failed to import agent: Provider session is already imported: known";
-          return { ok: false, error: { code: "command-failed", origin: "box", message } };
-        }
-        if (command.includes("'broken'")) {
-          return { ok: false, error: { code: "command-failed", origin: "box", message: "Error: no session" } };
-        }
-        return { ok: true, address: "100.64.0.8", stdout: "", stderr: "" };
-      },
-    };
+    const box = boxPaseo((command) => (command.includes("'known'") ? "duplicate" : command.includes("'broken'") ? "failed" : "ok"));
 
     await expect(
-      createPaseo().box.onProjectMoved(link, "~/app", [
+      createPaseo().box.onProjectMoved(box.link, "~/app", [
         { provider: "claude", id: "known" },
         { provider: "codex", id: "broken" },
         { provider: "claude", id: "new" },
       ]),
-    ).rejects.toThrow("paseo import failed for codex session broken (Error: no session)");
-    expect(commands.filter((command) => command.startsWith("paseo import"))).toHaveLength(3);
+    ).rejects.toThrow(
+      `paseo import failed for codex session broken (Paseo printed an error. Run paseo import 'broken' --provider 'codex' --cwd "$HOME"/'app' on the box to see it)`,
+    );
+    expect(box.first().filter((command) => command?.startsWith("out=$(paseo import"))).toHaveLength(3);
   });
 
   /** A local `paseo` that records each argv. `answer` gives the stderr of a failed command, or null. */

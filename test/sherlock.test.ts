@@ -304,10 +304,10 @@ fi
 echo '{"connections":[]}'
 `;
 
-  /** Waits for SIGTERM and records that it had no terminal. */
+  /** Answers the connect test of reach. Else it waits for SIGTERM and records that it had no terminal. */
   const FAKE_SSH = `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_SSH_LOG"
-case "$*" in *"-W "*) exit 0 ;; esac
+case "$*" in *"/dev/tcp/"*) echo "exit 0"; exit 0 ;; esac
 [ -t 0 ] && echo "stdin is a terminal" >> "$FAKE_SSH_LOG"
 trap 'echo stopped >> "$FAKE_SSH_LOG"; exit 0' TERM
 touch "$FAKE_SSH_LOG.ready"

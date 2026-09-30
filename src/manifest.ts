@@ -67,7 +67,7 @@ const DENY_RULES = {
   },
   "mcp-argument": {
     code: "mcp-argument",
-    reason: "stdio MCP server command or argument with a token or secret",
+    reason: "stdio MCP server command or argument with a token, a secret, or a URL credential",
     verdict: "refuse",
   },
   "mcp-name": {
@@ -106,6 +106,11 @@ const DENY_RULES = {
   "mcp-path": {
     code: "mcp-path",
     reason: "stdio MCP server whose command or arguments refer to a path in the operator home",
+    verdict: "skip",
+  },
+  "mcp-script": {
+    code: "mcp-script",
+    reason: "stdio MCP server that runs an inline shell or interpreter script, which Ferry cannot check",
     verdict: "skip",
   },
 } as const satisfies Record<string, DenyRule>;
@@ -192,7 +197,7 @@ const CONFIG_EXTS = { ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml":
  * Group 1 is the key, group 2 the value. The match does not see a key in a
  * flow mapping such as `{ password: value }`, or a value on the next line.
  */
-const CONFIG_LINE = /^\s*(?:-\s+)?["']?([\w-]+)["']?\s*[:=]\s*(.*)$/;
+export const CONFIG_LINE = /^\s*(?:-\s+)?["']?([\w-]+)["']?\s*[:=]\s*(.*)$/;
 /** Mach-O magic numbers, thin and universal, as the first four bytes of the file. */
 const MACHO_MAGICS = new Set(["feedface", "feedfacf", "cefaedfe", "cffaedfe", "cafebabe", "cafebabf"]);
 /** A carried MCP server name reaches remote shell commands, so it may hold only these characters. */
@@ -214,6 +219,34 @@ const SECRET_PARAMETER = /token|secret|credential|password|api.?key/i;
 const HOME_REFERENCE = /^(?:~|\$HOME|\$\{HOME\})\/(.*)$/;
 /** Shell quotes, operators, and `=` separate the words of a hook command. */
 const COMMAND_SEPARATORS = /[\s"'`;|&()<>=]+/;
+/** The home as a shell variable, `$HOME` or `${HOME}`, at any place in an argument. */
+const HOME_VARIABLE = /\$\{?HOME\b/;
+/**
+ * Whitespace and shell operators separate the words inside one MCP argument.
+ * `&` and `=` stay, because they join the parameters of a URL and the parts of
+ * a `key=value` word.
+ */
+const ARGUMENT_SEPARATORS = /[\s;|()<>]+/;
+/** A URL inside an argument. Group 1 is the scheme, group 2 the authority, group 3 the path, query, and fragment. */
+const ARGUMENT_URL = /([a-z][a-z0-9+.-]*):\/\/([^\s/?#]*)(\S*)/gi;
+/** The HTTP schemes, also as `git+https`. A user without a password there is often a token. */
+const HTTP_SCHEME = /^(?:.+\+)?https?$/i;
+/** A `key=value` parameter in the query or the fragment of a URL. */
+const URL_PARAMETER = /[?&#]([^=&#]+)=([^&#]*)/g;
+/** Shells and interpreters run a script argument that Ferry cannot check. */
+export const SCRIPT_RUNNERS = new Set([
+  "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "env", "node", "deno", "bun",
+  "python", "python3", "perl", "ruby", "php", "lua", "pwsh", "powershell", "cmd", "osascript",
+]);
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"]);
+/** A shell option that takes the script as an argument: `-c`, alone or in a group such as `-lc`. */
+const SHELL_SCRIPT_OPTION = /^(?:-[A-Za-z]*c|--command)$/;
+/** An interpreter option that takes the script as an argument, such as `-e`, `-c`, `-pe`, or `--eval`. */
+const INTERPRETER_SCRIPT_OPTION = /^(?:-[A-Za-z]*[ce]|-p|--eval|--print|-[Cc]ommand|-[Ee]ncoded[Cc]ommand)$/;
+/** A script option of one interpreter only. Python has `-E` and Node.js has `-r` for other uses. */
+const RUNNER_SCRIPT_OPTION: Readonly<Record<string, RegExp>> = { perl: /^-[A-Za-z]*E$/, php: /^-r$/ };
+/** An interpreter option that takes the next word as its value, so that word is not the script file. */
+const INTERPRETER_VALUE_OPTION = /^(?:-r|--require|--import|--loader|-C|--conditions|-W|-X|-I)$/;
 
 /**
  * A file whose path relative to its skill directory is `path`. `executable` is
@@ -252,10 +285,14 @@ export type McpServer = RemoteMcpServer | StdioMcpServer;
 export type SeedMcp = { readonly harness: string; readonly servers: readonly McpServer[] };
 
 /**
- * The carried MCP servers of one harness, and the names of its stdio servers
- * that Ferry does not carry because they refer to a path in the operator home.
+ * A stdio server that Ferry does not carry. `home-path`: it refers to a path
+ * in the operator home. `inline-script`: it runs an inline shell or
+ * interpreter script, which Ferry cannot check.
  */
-export type McpSource = SeedMcp & { readonly nonPortable: readonly string[] };
+export type NonPortableMcp = { readonly name: string; readonly reason: "home-path" | "inline-script" };
+
+/** The carried MCP servers of one harness, and its stdio servers that Ferry does not carry. */
+export type McpSource = SeedMcp & { readonly nonPortable: readonly NonPortableMcp[] };
 
 /** Something ferry found and did not import. Init prints these. */
 export type Leftover = Note & { readonly path: string };
@@ -592,7 +629,7 @@ function secretLineKeys(text: string): string[] {
   });
 }
 
-function secretKeyHits(path: string, keys: readonly string[]): ForbiddenHit[] {
+export function secretKeyHits(path: string, keys: readonly string[]): ForbiddenHit[] {
   return [...new Set(keys)].map((key) => ({
     path,
     code: DENY_RULES["secret-field"].code,
@@ -610,13 +647,13 @@ function secretKeys(value: unknown): string[] {
   );
 }
 
-function isSecretKey(key: string): boolean {
+export function isSecretKey(key: string): boolean {
   const normal = key.toLowerCase().replace(/[-_]/g, "");
   return SECRET_KEYS.has(normal) || SECRET_WORDS.some((word) => normal.includes(word));
 }
 
 /** A non-empty string that is not a placeholder by the token placeholder rule. */
-function isSecretValue(value: string): boolean {
+export function isSecretValue(value: string): boolean {
   return value !== "" && !PLACEHOLDER_BODY.test(value);
 }
 
@@ -769,19 +806,19 @@ export function readMcpSources(home: string, harnesses: readonly HarnessDescript
  * The file never leaves the machine. A remote server keeps only its name,
  * type, and URL. A stdio server keeps its command, its arguments, and the
  * names of its environment keys, never their values. Another server, and a
- * stdio server that refers to a path in the home, is noted in `leftovers`. A
- * remote server with headers, environment values, arguments, or a credential,
- * and a stdio server with a token or secret in its command or arguments,
- * refuse the seed.
+ * stdio server that refers to a path in the home or runs an inline script, is
+ * noted in `leftovers`. A remote server with headers, environment values,
+ * arguments, or a credential, and a stdio server with a token, a secret, or a
+ * URL credential in its command or arguments, refuse the seed.
  */
 function readMcp(
   home: string,
   mcp: NonNullable<HarnessDescriptor["mcp"]>,
   forbidden: ForbiddenHit[],
   leftovers: Leftover[],
-): { servers: McpServer[]; nonPortable: string[] } {
+): { servers: McpServer[]; nonPortable: NonPortableMcp[] } {
   const servers: McpServer[] = [];
-  const nonPortable: string[] = [];
+  const nonPortable: NonPortableMcp[] = [];
   const path = join(home, mcp.file);
   let text: string;
   try {
@@ -823,7 +860,8 @@ function readMcp(
     }
     if (stdio) {
       const words = [stdio.command, ...stdio.args];
-      const rules = argumentRules(path, words);
+      const parts = argumentParts(words);
+      const rules = argumentRules(path, words, parts);
       if (rules.length > 0) {
         forbidden.push({
           path,
@@ -832,12 +870,21 @@ function readMcp(
         });
         continue;
       }
-      if (words.some((word) => word.split(COMMAND_SEPARATORS).some((part) => part === home || part.startsWith(`${home}/`)))) {
-        nonPortable.push(name);
+      if (refersToHome(words, home)) {
+        nonPortable.push({ name, reason: "home-path" });
         leftovers.push({
           path,
           code: DENY_RULES["mcp-path"].code,
           reason: `MCP server ${name} refers to a path in the home, which the box does not have`,
+        });
+        continue;
+      }
+      if (runsInlineScript(parts)) {
+        nonPortable.push({ name, reason: "inline-script" });
+        leftovers.push({
+          path,
+          code: DENY_RULES["mcp-script"].code,
+          reason: `MCP server ${name} runs an inline shell or interpreter script, which Ferry cannot check. Put the script in a file that Ferry carries, or run the server through a tool on the PATH`,
         });
         continue;
       }
@@ -879,16 +926,30 @@ function stdioServer(declaration: Record<string, unknown>): Omit<StdioMcpServer,
 }
 
 /**
- * The codes of the secret rules that the words of a stdio command match: a
- * token pattern, or a secret key with a value as `--key=value`, `key=value`,
- * or `--key value`. The codes never hold the value.
+ * The words inside each argument of a stdio command, without shell quotes. An
+ * argument can hold more words, such as the script of `sh -c`.
  */
-function argumentRules(path: string, words: readonly string[]): string[] {
+function argumentParts(words: readonly string[]): string[] {
+  return words.flatMap((word) => {
+    const parts = word.replace(/["'`]/g, "").split(ARGUMENT_SEPARATORS).filter((part) => part !== "");
+    return parts.length > 0 ? parts : [word];
+  });
+}
+
+/**
+ * The names of the secret rules that the words of a stdio command match: a
+ * token pattern, `url-credential` for a URL with a user, a password, or a
+ * secret parameter, or a secret key with a value as `--key=value`,
+ * `key=value`, or `--key value`. `parts` are the words inside the arguments.
+ * The names never hold the value.
+ */
+function argumentRules(path: string, words: readonly string[], parts: readonly string[]): string[] {
   const rules = new Set(tokenHits(path, Buffer.from(words.join("\n"))).map((hit) => hit.code));
-  words.forEach((word, index) => {
+  if (parts.some(hasUrlCredential)) rules.add("url-credential");
+  parts.forEach((word, index) => {
     const pair = word.match(/^-{0,2}([\w-]+)=(.*)$/);
     const flag = word.match(/^--?([\w-]+)$/);
-    const next = words[index + 1];
+    const next = parts[index + 1];
     if (
       (pair && isSecretKey(pair[1]!) && isSecretValue(pair[2]!)) ||
       (flag && isSecretKey(flag[1]!) && next !== undefined && !next.startsWith("-") && isSecretValue(next))
@@ -897,6 +958,65 @@ function argumentRules(path: string, words: readonly string[]): string[] {
     }
   });
   return [...rules];
+}
+
+/**
+ * True when a word holds a URL with a credential: a password before the host,
+ * a user without a password in an HTTP URL, or a secret key with a value in
+ * the query or the fragment. A user without a password can be a token there,
+ * as in `https://<token>@host`. In another scheme it is a login name, as in
+ * `ssh://git@host` or `postgresql://alice@host`. A placeholder value passes.
+ */
+function hasUrlCredential(word: string): boolean {
+  return [...word.matchAll(ARGUMENT_URL)].some(([, scheme = "", authority = "", rest = ""]) => {
+    const at = authority.lastIndexOf("@");
+    const [user = "", ...more] = at < 0 ? [] : authority.slice(0, at).split(":");
+    const password = more.join(":");
+    return (
+      (password === ""
+        ? isSecretValue(user) && HTTP_SCHEME.test(scheme)
+        : isSecretValue(password)) ||
+      [...rest.matchAll(URL_PARAMETER)].some(
+        ([, key = "", value = ""]) => (isSecretKey(key) || SECRET_PARAMETER.test(key)) && isSecretValue(value),
+      )
+    );
+  });
+}
+
+/** True when a word of a stdio command is `~`, `$HOME`, `${HOME}`, or the operator home, or a path in it. */
+function refersToHome(words: readonly string[], home: string): boolean {
+  return words.some(
+    (word) =>
+      HOME_VARIABLE.test(word) ||
+      word
+        .split(COMMAND_SEPARATORS)
+        .some((part) => part === home || part.startsWith(`${home}/`) || part === "~" || part.startsWith("~/")),
+  );
+}
+
+/**
+ * True when the words start a shell or an interpreter with an inline script,
+ * such as `sh -c`, `node -e`, `python -c`, or `deno eval`. The runner can be
+ * the command or a later word, as in `env bash -c`. A shell takes its script
+ * option at any place. An interpreter takes it before its script file, also
+ * after other options, as in `node --require x -e`. The options after a script
+ * file pass.
+ */
+function runsInlineScript(parts: readonly string[]): boolean {
+  return parts.some((part, index) => {
+    // `python3.12` is `python`.
+    const runner = posix.basename(part).toLowerCase().replace(/[\d.]+$/, "");
+    if (!SCRIPT_RUNNERS.has(runner)) return false;
+    const rest = parts.slice(index + 1);
+    if (SHELLS.has(runner)) return rest.some((word) => SHELL_SCRIPT_OPTION.test(word));
+    for (let at = 0; at < rest.length; at++) {
+      const word = rest[at]!;
+      if (!word.startsWith("-")) return word === "eval";
+      if (INTERPRETER_SCRIPT_OPTION.test(word) || RUNNER_SCRIPT_OPTION[runner]?.test(word)) return true;
+      if (INTERPRETER_VALUE_OPTION.test(word)) at++;
+    }
+    return false;
+  });
 }
 
 /** The type and URL of a declaration with an HTTPS URL and an HTTP or SSE transport, else `null`. */

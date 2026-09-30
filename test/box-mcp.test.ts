@@ -620,7 +620,7 @@ describe("checkBoxMcp", () => {
             stdio("agent", { command: "claude" }),
             { name: "linear", type: "http", url: "https://mcp.linear.app/mcp" },
           ],
-          nonPortable: ["local"],
+          nonPortable: [{ name: "local", reason: "home-path" }, { name: "wrapped", reason: "inline-script" }],
         },
         { harness: "codex", servers: [stdio("docs", { command: "sh", env: ["DOCS_KEY"] })], nonPortable: [] },
       ],
@@ -628,7 +628,8 @@ describe("checkBoxMcp", () => {
     });
 
     expect(issues).toEqual([
-      { kind: "not-portable", harness: "cursor", server: "local" },
+      { kind: "not-portable", harness: "cursor", server: "local", reason: "home-path" },
+      { kind: "not-portable", harness: "cursor", server: "wrapped", reason: "inline-script" },
       { kind: "command-missing", harness: "cursor", server: "missing", command: "not-on-this-box-mcp" },
       { kind: "env-missing", harness: "codex", server: "docs", keys: ["DOCS_KEY"], file: ".codex/config.toml" },
       { kind: "env-missing", harness: "cursor", server: "github", keys: ["GITHUB_ORG", "GITHUB_URL"], file: ".cursor/mcp.json" },

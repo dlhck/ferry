@@ -611,6 +611,7 @@ describe("runSync", () => {
         JSON.stringify({
           mcpServers: {
             repl: { command: join(home, "bin", "repl"), env: { KEY: "value" } },
+            wrapped: { command: "sh", args: ["-c", "exec tool serve"] },
             linear: { type: "http", url: "https://mcp.linear.app/mcp" },
           },
         }),
@@ -630,6 +631,7 @@ describe("runSync", () => {
 
       expect(lines).toEqual([
         `Skipped MCP server: MCP server repl refers to a path in the home, which the box does not have: ${join(home, ".claude.json")}`,
+        `Skipped MCP server: MCP server wrapped runs an inline shell or interpreter script, which Ferry cannot check. Put the script in a file that Ferry carries, or run the server through a tool on the PATH: ${join(home, ".claude.json")}`,
       ]);
       expect(printed[0]?.mcpServers).toEqual(["claude/linear"]);
     } finally {
@@ -1035,7 +1037,7 @@ describe("runSync progress", () => {
           let stdout = "";
           if (command.startsWith("printf")) stdout = "/srv/ferry\n";
           else if (command.includes("git clone")) return update;
-          else if (command.includes("broken@team")) stdout = "P\tbroken@team\tnot found\n";
+          else if (command.includes("broken@team")) stdout = "F\n";
           else if (command.includes("settings.json")) stdout = "M";
           return { ok: true as const, address: "box", stdout, stderr: "" };
         },
@@ -1125,7 +1127,7 @@ describe("runSync progress", () => {
       "count:1/2",
       "count:2/2",
       "done",
-      "line:Box plugins: could not install plugin broken@team: not found",
+      "line:Box plugins: could not install plugin broken@team: claude plugin install failed on the box. Run it on the box to see the error.",
       "start:Merging settings on the box",
       "done",
       "start:Declaring MCP servers",
@@ -1386,8 +1388,10 @@ describe("sync with the Paseo integration", () => {
             let stdout = "";
             if (command.startsWith("printf")) stdout = "/srv/ferry\n";
             else if (command.includes("paseo daemon status")) stdout = status;
-            else if (command.startsWith("if [ -e '.config/systemd/user/ferry-paseo.service' ]")) {
-              stdout = options.unit === null ? "M" : `F${options.unit ?? unitFile(BUILTIN_BOX_PATH_DIRS)}`;
+            else if (command.includes("ferry-paseo.service")) {
+              // The box compares the PATH line and prints a status word.
+              const line = (options.unit ?? unitFile(BUILTIN_BOX_PATH_DIRS)).split("\n").find((text) => text.startsWith("Environment=PATH="));
+              stdout = options.unit === null ? "missing\n" : command.includes(`want='${line}'`) ? "unchanged\n" : "updated\n";
             }
             else if (command.includes(".paseo/config.json")) stdout = "W\n";
             return { ok: true as const, address: "box", stdout, stderr: "" };
@@ -1436,7 +1440,7 @@ describe("sync with the Paseo integration", () => {
     expect(write).toContain('"name":"Reviewer"');
     expect(write).not.toContain("Pilot");
     expect(write).not.toContain("providers");
-    expect(sync.commands.at(-2)).toBe("paseo daemon reload");
+    expect(sync.commands.at(-2)).toBe("paseo daemon reload >/dev/null 2>&1");
   });
 
   test("reports no profiles and runs no Paseo command when the operator has none", async () => {
@@ -1459,7 +1463,7 @@ describe("sync with the Paseo integration", () => {
     ...paseoConfig,
     tools: { bun: { local: "bun --version", install: "curl -fsSL https://bun.sh/install | bash", path: [".bun/bin"] } },
   };
-  const restart = "systemctl --user daemon-reload && systemctl --user restart ferry-paseo.service";
+  const restart = "systemctl --user daemon-reload >/dev/null && systemctl --user restart ferry-paseo.service >/dev/null";
 
   test("rewrites the unit PATH and restarts the daemon as the last box step when a config tool adds a directory", async () => {
     const sync = run(paseoHome(null), { config: bunConfig });
@@ -1469,7 +1473,8 @@ describe("sync with the Paseo integration", () => {
     expect(sync.commands).toContain(profileBlockCommand(dirs));
     const write = sync.commands.find((command) => command.includes("ferry-paseo.service") && command.includes(" mv "));
     expect(write).toContain(":%h/.bun/bin:/usr/local/sbin");
-    expect(sync.commands.at(-1)).toBe(restart);
+    expect(write).toContain(restart);
+    expect(sync.commands.at(-1)).toBe(write);
     expect(sync.events.slice(-4, -2)).toEqual(["start:Updating the Paseo unit PATH", "done:restarted"]);
     expect(sync.lines).toContain(
       "The box PATH changed, so Ferry updated ferry-paseo.service and restarted the Paseo daemon. The restart stopped the agents that ran on the box.",
@@ -1481,8 +1486,6 @@ describe("sync with the Paseo integration", () => {
     const sync = run(paseoHome(null), { config: bunConfig, unit: unitFile(dirs) });
     await sync.result;
 
-    expect(sync.commands.some((command) => command.includes("ferry-paseo.service") && command.includes(" mv "))).toBe(false);
-    expect(sync.commands).not.toContain(restart);
     expect(sync.events.slice(-4, -2)).toEqual(["start:Updating the Paseo unit PATH", "done:no changes"]);
     expect(sync.lines.some((line) => line.includes("restart"))).toBe(false);
   });
@@ -1492,7 +1495,6 @@ describe("sync with the Paseo integration", () => {
     await sync.result;
 
     expect(sync.events.slice(-4, -2)).toEqual(["start:Updating the Paseo unit PATH", "fail"]);
-    expect(sync.commands).not.toContain(restart);
     expect(sync.lines.at(-1)).toBe(
       "Warning: Ferry could not update the PATH of ferry-paseo.service: ~/.config/systemd/user/ferry-paseo.service is not on the box. Run ferry integrations enable paseo. The sync is complete.",
     );

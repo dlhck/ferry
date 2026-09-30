@@ -2,11 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { carryAgentProfiles, carryPaseoPreferences } from "../src/integrations/paseo.ts";
+import { carryAgentProfiles, carryPaseoPreferences, unitFile } from "../src/integrations/paseo.ts";
 import { carryPaseoPlugins, type PaseoPlugin } from "../src/integrations/paseo-plugins.ts";
 import { carryPaseoProviders, type PaseoProviders } from "../src/integrations/paseo-providers.ts";
 import { carryPaseoTerminalProfiles } from "../src/integrations/paseo-terminal-profiles.ts";
 import { runSync, type SyncPlan } from "../src/sync.ts";
+import { BUILTIN_BOX_PATH_DIRS } from "../src/tools/path.ts";
 import { jqTest, shellBox, type ShellBox } from "./paseo-shell-box.ts";
 
 const roots: (() => void)[] = [];
@@ -17,6 +18,8 @@ const PROVIDER_SECRET = "sk-" + "provider-" + "q7Zx9".repeat(6);
 const TERMINAL_SECRET = "gh" + "p_" + "T".repeat(36);
 const SECRETS = [PROVIDER_SECRET, TERMINAL_SECRET];
 const PLUGIN_SECRET = "gl" + "pat-" + "R4v".repeat(7);
+const UNIT_SECRET = "box-only-" + "password-" + "K2m".repeat(5);
+const UNIT_PATH = ".config/systemd/user/ferry-paseo.service";
 /** A Git remote with an embedded credential, as a box can hold it. */
 const credentialRemote = (repository: string) => `https://user:${PLUGIN_SECRET}@git.example.com/${repository}.git`;
 
@@ -80,7 +83,7 @@ function box(config: unknown, answer?: (command: string) => string | undefined):
 
 function expectNoSecret(value: unknown): void {
   const text = typeof value === "string" ? value : JSON.stringify(value);
-  for (const secret of [...SECRETS, PLUGIN_SECRET]) expect(text).not.toContain(secret);
+  for (const secret of [...SECRETS, PLUGIN_SECRET, UNIT_SECRET]) expect(text).not.toContain(secret);
 }
 
 describe("box Paseo config secrets", () => {
@@ -135,8 +138,13 @@ describe("box Paseo config secrets", () => {
     // Only the Paseo commands run in the shell. The other box commands of a sync get a fixed reply.
     const b = box(boxConfig(), (command) =>
       command.includes(".paseo/config.json") || command.startsWith("paseo ") || command.includes("paseo daemon status") || command.includes("paseo plugin ls")
+        || command.includes("ferry-paseo.service")
         ? undefined
         : command.startsWith("printf") ? "/home/user\n" : command.includes("command -v -- 'lazygit'") ? "ok lazygit\n" : "");
+    // A unit with a line that the operator added on the box by hand.
+    const unit = `${unitFile(BUILTIN_BOX_PATH_DIRS)}Environment=DATABASE_PASSWORD=${UNIT_SECRET}\n`;
+    mkdirSync(join(b.home, UNIT_PATH, ".."), { recursive: true });
+    writeFileSync(join(b.home, UNIT_PATH), unit);
     const lines: string[] = [];
     const warnings: string[] = [];
     const plans: SyncPlan[] = [];
@@ -153,7 +161,9 @@ describe("box Paseo config secrets", () => {
 
     expect(result.boxes[0]?.failure).toBeUndefined();
     expectNoSecret({ outputs: b.outputs, commands: b.commands, lines, warnings, plans, result });
-    expect(warnings.filter((line) => line.includes("Paseo"))).toEqual([]);
+    expect(warnings.filter((line) => /paseo/i.test(line))).toEqual([]);
+    expect(b.outputs).toContain("unchanged\n");
+    expect(readFileSync(join(b.home, UNIT_PATH), "utf8")).toBe(unit);
     const { pluginsEnabled: _switch, ...carried } = merged;
     expect(b.config()).toEqual(carried);
   });
