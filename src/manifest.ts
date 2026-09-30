@@ -39,7 +39,7 @@ export type DenyRuleDescription = {
  * a box whose number is lower than this one, because older rules can pass a
  * file that this machine refuses.
  */
-export const DENY_RULES_VERSION = 8;
+export const DENY_RULES_VERSION = 9;
 
 const DENY_RULES = {
   dotenv: { code: "dotenv", reason: "environment file", verdict: "refuse" },
@@ -248,10 +248,14 @@ const HOME_VARIABLE = /\$\{?HOME\b/;
  * a `key=value` word.
  */
 const ARGUMENT_SEPARATORS = /[\s;|()<>]+/;
-/** A URL inside an argument. Group 1 is the scheme, group 2 the authority, group 3 the path, query, and fragment. */
-const ARGUMENT_URL = /([a-z][a-z0-9+.-]*):\/\/([^\s/?#]*)(\S*)/gi;
-/** The HTTP schemes, also as `git+https`. A user without a password there is often a token. */
-const HTTP_SCHEME = /^(?:.+\+)?https?$/i;
+/** The text between a scheme and the authority of a URL. Each one in a text starts a URL, also inside another URL. */
+const URL_START = "://";
+/** The last character of a scheme. */
+const SCHEME_END = /[a-z0-9+.-]/i;
+/** The end of an HTTP scheme, also as `git+https`. A user without a password there is often a token. */
+const HTTP_SCHEME_END = /https?$/i;
+/** The first character after the authority of a URL. */
+const AUTHORITY_END = /[/?#]/g;
 /** A `key=value` parameter in the query or the fragment of a URL. A `?` also starts one, for a URL inside a value. */
 const URL_PARAMETER = /[?&#]([^=&#?]+)=([^&#?]*)/g;
 /** Shells and interpreters run a script argument that Ferry cannot check. */
@@ -259,8 +263,10 @@ export const SCRIPT_RUNNERS = new Set([
   "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "env", "node", "deno", "bun",
   "python", "python3", "perl", "ruby", "php", "lua", "pwsh", "powershell", "cmd", "osascript",
 ]);
-/** A run of percent escapes in a URL, such as `%73` or `%C3%A9`. */
-const URL_ESCAPES = /(?:%[0-9a-f]{2})+/gi;
+/** A `+`, or a run of percent escapes in a URL, such as `%73` or `%C3%A9`. */
+const URL_ESCAPES = /\+|(?:%[0-9a-f]{2})+/gi;
+/** The rounds of decoding that Ferry reads. A word that still changes after them counts as a credential. */
+const URL_DECODE_ROUNDS = 8;
 /** A `data:` URL as a word or as the value of an option. An interpreter runs its text as a script. */
 const DATA_URL = /(?:^|=)data:/i;
 
@@ -1175,7 +1181,8 @@ function argumentParts(words: readonly string[]): string[] {
  */
 function argumentRules(path: string, words: readonly string[], parts: readonly string[]): string[] {
   const rules = new Set(tokenHits(path, Buffer.from(words.join("\n"))).map((hit) => hit.code));
-  if (parts.some(hasUrlCredential)) rules.add("url-credential");
+  // An argument as it is can hold a password with a separator, as in `scheme://user:pa;ss@host`.
+  if ([...words, ...parts].some(hasUrlCredential)) rules.add("url-credential");
   parts.forEach((word, index) => {
     const pair = word.match(/^-{0,2}([\w-]+)=(.*)$/);
     const flag = word.match(/^--?([\w-]+)$/);
@@ -1190,74 +1197,156 @@ function argumentRules(path: string, words: readonly string[], parts: readonly s
   return [...rules];
 }
 
+/** The start and the end of a part of a text. The end is the offset after the last character. */
+type Span = readonly [number, number];
+
 /**
- * The readings of a part of a URL: the text itself, and the text after each
- * round of decoding, until it does not change. A round decodes `+` to a space
- * and each valid percent escape, so `pa%73sword` and `pa%2573sword` both read
- * as `password`. A malformed escape such as `%zz` stays as text, and the
- * escapes around it still decode, so it cannot hide a key.
+ * A word after some rounds of decoding. `start[i]` and `end[i]` give the span
+ * in the word that character `i` comes from. Without them, the text is the
+ * word itself.
  */
-function urlReadings(text: string): string[] {
-  const readings = [text];
-  for (;;) {
-    const last = readings.at(-1)!;
-    const next = last
-      .replace(/\+/g, " ")
-      .replace(URL_ESCAPES, (run) => Buffer.from(run.replaceAll("%", ""), "hex").toString("utf8"));
-    if (next === last) return readings;
-    readings.push(next);
+type UrlReading = { readonly text: string; readonly start?: Int32Array; readonly end?: Int32Array };
+
+/**
+ * The reading after one more round of decoding, else `null` when the round
+ * changes nothing. A round decodes `+` to a space and each valid percent
+ * escape, so `pa%73sword` reads as `password`, and `pa%2573sword` does after
+ * two rounds. A malformed escape such as `%zz` stays as text, and the escapes
+ * around it still decode, so it cannot hide a key.
+ */
+function decodedReading(reading: UrlReading): UrlReading | null {
+  const { text } = reading;
+  let start: Int32Array | undefined;
+  let end: Int32Array | undefined;
+  const pieces: string[] = [];
+  let length = 0;
+  let from = 0;
+  const keep = (to: number): void => {
+    for (let at = from; at < to; at++, length++) {
+      start![length] = reading.start ? reading.start[at]! : at;
+      end![length] = reading.end ? reading.end[at]! : at + 1;
+    }
+    pieces.push(text.slice(from, to));
+  };
+  for (const match of text.matchAll(URL_ESCAPES)) {
+    const run = match[0];
+    start ??= new Int32Array(text.length);
+    end ??= new Int32Array(text.length);
+    keep(match.index);
+    from = match.index + run.length;
+    const decoded = run === "+" ? " " : Buffer.from(run.replaceAll("%", ""), "hex").toString("utf8");
+    // A run of ASCII escapes gives one character for each escape. Else each character stands for the whole run.
+    const exact = decoded.length * 3 === run.length;
+    for (let index = 0; index < decoded.length; index++, length++) {
+      const first = exact ? match.index + 3 * index : match.index;
+      const last = exact ? first + 2 : from - 1;
+      start[length] = reading.start ? reading.start[first]! : first;
+      end[length] = reading.end ? reading.end[last]! : last + 1;
+    }
+    pieces.push(decoded);
   }
+  if (start === undefined || end === undefined) return null;
+  keep(text.length);
+  return { text: pieces.join(""), start: start.subarray(0, length), end: end.subarray(0, length) };
 }
 
 /**
- * True when a word holds a URL with a credential: a password before the host,
- * a user without a password in an HTTP URL, or a secret key with a value in
- * the query or the fragment. A user without a password can be a token there,
- * as in `https://<token>@host`. In another scheme it is a login name, as in
- * `ssh://git@host` or `postgresql://alice@host`. A placeholder value passes.
- * Each rule applies to each reading of `urlReadings`, because a URL consumer
- * decodes the percent escapes.
+ * The spans of a word that hold a credential of a URL in one reading. Each
+ * `://` after a scheme starts a URL, also in the path, the query, or the
+ * fragment of another URL, so a URL inside a URL gets the same rules:
+ *
+ * - The user and the password before the host, when the password is a secret.
+ * - The user without a password in an HTTP URL, because it can be a token, as
+ *   in `https://<token>@host`. In another scheme it is a login name, as in
+ *   `ssh://git@host` or `postgresql://alice@host`.
+ * - The value of a secret key in the query or the fragment, at any place after
+ *   the first `://`.
+ *
+ * A placeholder value is not a secret.
  */
-export function hasUrlCredential(word: string): boolean {
-  return [...word.matchAll(ARGUMENT_URL)].some(
-    ([, scheme = "", authority = "", rest = ""]) =>
-      urlReadings(authority).some((reading) => {
-        const at = reading.lastIndexOf("@");
-        const [user = "", ...more] = at < 0 ? [] : reading.slice(0, at).split(":");
-        const password = more.join(":");
-        return password === "" ? isSecretValue(user) && HTTP_SCHEME.test(scheme) : isSecretValue(password);
-      }) ||
-      urlReadings(rest).some((reading) =>
-        [...reading.matchAll(URL_PARAMETER)].some(
-          ([, key = "", value = ""]) => (isSecretKey(key) || SECRET_PARAMETER.test(key)) && isSecretValue(value),
-        ),
-      ),
-  );
+function readingCredentialSpans(reading: UrlReading): Span[] {
+  const { text } = reading;
+  const span = (from: number, to: number): Span => [reading.start ? reading.start[from]! : from, reading.end ? reading.end[to - 1]! : to];
+  const spans: Span[] = [];
+  const first = text.indexOf(URL_START);
+  for (let at = first; at >= 0; at = text.indexOf(URL_START, at + URL_START.length)) {
+    if (at === 0 || !SCHEME_END.test(text[at - 1]!)) continue;
+    const from = at + URL_START.length;
+    AUTHORITY_END.lastIndex = from;
+    const authority = text.slice(from, AUTHORITY_END.exec(text)?.index ?? text.length);
+    const login = authority.slice(0, Math.max(authority.lastIndexOf("@"), 0));
+    const colon = login.indexOf(":");
+    const user = colon < 0 ? login : login.slice(0, colon);
+    const password = colon < 0 ? "" : login.slice(colon + 1);
+    const secret = password === "" ? isSecretValue(user) && HTTP_SCHEME_END.test(text.slice(Math.max(at - 5, 0), at)) : isSecretValue(password);
+    if (secret) spans.push(span(from, from + login.length));
+  }
+  if (first < 0) return spans;
+  for (const match of text.slice(first).matchAll(URL_PARAMETER)) {
+    const [, key = "", value = ""] = match;
+    const from = first + match.index + match[0].length - value.length;
+    if ((isSecretKey(key) || SECRET_PARAMETER.test(key)) && isSecretValue(value)) spans.push(span(from, from + value.length));
+  }
+  return spans;
+}
+
+/**
+ * The spans of `text` that hold a credential of a URL, by the rules of
+ * `readingCredentialSpans`. `hasUrlCredential` and `redactUrlCredentials` both
+ * use this scan, so they agree on each text.
+ *
+ * Ferry reads each word between whitespace as it is, and again after each
+ * round of decoding, because a URL consumer decodes the percent escapes. So it
+ * finds `https%3A%2F%2Fuser%3Apass%40host` in a query value. A word that still
+ * changes after `URL_DECODE_ROUNDS` rounds counts as a credential as a whole.
+ *
+ * The scan has no limit for the length of a line and does not skip a part of
+ * it. Its time is in proportion to the length of the text.
+ */
+function urlCredentialSpans(text: string): Span[] {
+  const spans: Span[] = [];
+  if (!text.includes(URL_START) && !text.includes("%")) return spans;
+  for (const match of text.matchAll(/\S+/g)) {
+    const word = match[0];
+    // Only a percent escape can give `://` in a later reading.
+    if (!word.includes(URL_START) && !word.includes("%")) continue;
+    let reading: UrlReading | null = { text: word };
+    for (let round = 0; reading !== null; round++) {
+      if (round > URL_DECODE_ROUNDS) {
+        spans.push([match.index, match.index + word.length]);
+        break;
+      }
+      for (const [from, to] of readingCredentialSpans(reading)) spans.push([match.index + from, match.index + to]);
+      reading = decodedReading(reading);
+    }
+  }
+  return spans;
+}
+
+/** True when a text holds a URL with a credential, by the rules of `urlCredentialSpans`. */
+export function hasUrlCredential(text: string): boolean {
+  return urlCredentialSpans(text).length > 0;
 }
 
 /** The text that `redactUrlCredentials` puts in the place of a credential in a URL. */
 export const CREDENTIAL_MARK = "[credential]";
 
 /**
- * `text` with `CREDENTIAL_MARK` in the place of each credential in a URL, by
- * the rules of `hasUrlCredential`: the user and the password before the host,
- * and the value of a secret parameter. A login name stays, as in
- * `ssh://git@host` and `git@host:path`. Ferry applies this to a text before
- * it leaves its machine, such as the origin URL of a project.
+ * `text` with `CREDENTIAL_MARK` in the place of each span of
+ * `urlCredentialSpans`: the user and the password before the host, and the
+ * value of a secret parameter, also for a URL inside a URL. A login name
+ * stays, as in `ssh://git@host` and `git@host:path`. Ferry applies this to a
+ * text before it leaves its machine, such as the origin URL of a project.
  */
 export function redactUrlCredentials(text: string): string {
-  return text.replace(ARGUMENT_URL, (_url, scheme: string, authority: string, rest: string) => {
-    const at = authority.lastIndexOf("@");
-    // Without `@` in the text, only a decoded reading has the credential. Ferry cannot take it out of the host.
-    if (hasUrlCredential(`${scheme}://${authority}`)) return at < 0 ? CREDENTIAL_MARK : `${scheme}://${CREDENTIAL_MARK}${authority.slice(at)}${parameters(rest)}`;
-    return `${scheme}://${authority}${parameters(rest)}`;
-
-    function parameters(part: string): string {
-      return part.replace(URL_PARAMETER, (parameter, key: string) =>
-        hasUrlCredential(`${scheme}://host/${parameter}`) ? `${parameter[0]}${key}=${CREDENTIAL_MARK}` : parameter,
-      );
-    }
-  });
+  const pieces: string[] = [];
+  let at = 0;
+  for (const [from, to] of urlCredentialSpans(text).sort((a, b) => a[0] - b[0])) {
+    // A span that starts in the span before it is a part of the same mark.
+    if (from >= at) pieces.push(text.slice(at, from), CREDENTIAL_MARK);
+    at = Math.max(at, to);
+  }
+  return pieces.length === 0 ? text : pieces.join("") + text.slice(at);
 }
 
 /** True when a word of a stdio command is `~`, `$HOME`, `${HOME}`, or the operator home, or a path in it. */
