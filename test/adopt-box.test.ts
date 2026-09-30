@@ -1,0 +1,335 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { listBoxSkills, runAdoptFromBox, type AdoptFromBoxDependencies, type AdoptFromBoxInput } from "../src/adopt-box.ts";
+import type { Link, LinkResult, RunOptions } from "../src/link.ts";
+import { readSeed } from "../src/manifest.ts";
+import { errorInfo } from "../src/output.ts";
+import type { HarnessDescriptor } from "../src/registry/types.ts";
+
+const roots: string[] = [];
+
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+const HARNESSES: readonly HarnessDescriptor[] = [
+  { id: "agents", name: "Agents", skillRoot: ".agents/skills" },
+  { id: "claude", name: "Claude", skillRoot: ".claude/skills" },
+  { id: "codex", name: "Codex", skillRoot: ".codex/skills", ownSkills: false },
+];
+
+const GIT_ENV = {
+  GIT_AUTHOR_NAME: "Test",
+  GIT_AUTHOR_EMAIL: "test@example.com",
+  GIT_COMMITTER_NAME: "Test",
+  GIT_COMMITTER_EMAIL: "test@example.com",
+};
+
+function git(cwd: string, ...args: string[]): void {
+  const result = Bun.spawnSync(["git", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", ...args], {
+    cwd,
+    env: { ...process.env, ...GIT_ENV },
+  });
+  if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr.toString()}`);
+}
+
+function write(path: string, body: string, mode?: number): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, body);
+  if (mode !== undefined) chmodSync(path, mode);
+}
+
+/**
+ * An operator home and a box home. The box checkout tracks the skill `tracked`,
+ * and the box Claude root links it.
+ */
+function world() {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "ferry-adopt-box-test-")));
+  roots.push(root);
+  const operator = join(root, "operator");
+  const box = join(root, "box");
+  mkdirSync(operator);
+  const checkout = join(box, ".ferry", "store");
+  write(join(checkout, "skills", "tracked", "SKILL.md"), "# Tracked\n");
+  git(checkout, "init", "-q");
+  git(checkout, "add", ".");
+  git(checkout, "commit", "-q", "-m", "snapshot");
+  mkdirSync(join(box, ".claude", "skills"), { recursive: true });
+  symlinkSync(join(checkout, "skills", "tracked"), join(box, ".claude", "skills", "tracked"));
+  const commands: { command: string; options: RunOptions }[] = [];
+  return { root, operator, box, checkout, commands, link: boxLink(box, commands) };
+}
+
+/** Runs each box command in `sh` with the box home, as OpenSSH would on the box. */
+function boxLink(home: string, commands: { command: string; options: RunOptions }[]): Pick<Link, "run"> {
+  return {
+    async run(command, options = {}) {
+      commands.push({ command, options });
+      const child = Bun.spawnSync(["sh", "-c", command], {
+        stdin: options.input ?? "ignore",
+        env: { ...process.env, HOME: home },
+      });
+      const stdout = child.stdout.toString();
+      const stderr = child.stderr.toString();
+      const result: LinkResult =
+        child.exitCode === 0
+          ? { ok: true, address: "user@box.example", stdout, stderr }
+          : { ok: false, error: { code: "command-failed", origin: "box", message: stderr.trim() || "failed" } };
+      return result;
+    },
+  };
+}
+
+type World = ReturnType<typeof world>;
+
+async function adopt(w: World, input: Partial<AdoptFromBoxInput> & { name: string }, overrides: Partial<AdoptFromBoxDependencies> = {}) {
+  const lines: string[] = [];
+  const questions: string[] = [];
+  let error: unknown = null;
+  let value = null;
+  try {
+    value = await runAdoptFromBox(
+      { box: "a", yes: true, ...input },
+      {
+        readConfig: () => ({ boxes: [{ name: "a", host: { transport: "ssh", destination: "user@box.example" } }] }),
+        createLink: () => w.link,
+        home: w.operator,
+        harnesses: HARNESSES,
+        now: () => new Date("2026-09-29T10:11:12.345Z"),
+        writeLine: (line) => lines.push(line),
+        interactive: false,
+        confirm: async (question) => {
+          questions.push(question);
+          return true;
+        },
+        ...overrides,
+      },
+    );
+  } catch (caught) {
+    error = caught;
+  }
+  return { value, error, lines, questions };
+}
+
+describe("box-only skills", () => {
+  test("lists real directories, outside links, and untracked checkout skills, and skips Ferry's links", async () => {
+    const w = world();
+    write(join(w.box, ".claude", "skills", "draft", "SKILL.md"), "# Draft\n");
+    mkdirSync(join(w.box, ".agents", "skills"), { recursive: true });
+    symlinkSync("../../.claude/skills/draft", join(w.box, ".agents", "skills", "draft"));
+    write(join(w.box, "notes", "outside", "SKILL.md"), "# Outside\n");
+    symlinkSync(join(w.box, "notes", "outside"), join(w.box, ".claude", "skills", "outside"));
+    write(join(w.checkout, "skills", "untracked", "SKILL.md"), "# Untracked\n");
+    symlinkSync(join(w.checkout, "skills", "untracked"), join(w.box, ".claude", "skills", "untracked"));
+    write(join(w.box, ".claude", "skills", "README.md"), "not a skill\n");
+    write(join(w.box, ".codex", "skills", ".system", "SKILL.md"), "# Codex\n");
+
+    expect(await listBoxSkills(w.link, HARNESSES)).toEqual([
+      { name: "draft", paths: ["~/.agents/skills/draft", "~/.claude/skills/draft"] },
+      { name: "outside", paths: ["~/.claude/skills/outside"] },
+      { name: "untracked", paths: ["~/.ferry/store/skills/untracked"] },
+    ]);
+  });
+
+  test("a box without a checkout lists each skill directory", async () => {
+    const w = world();
+    rmSync(w.checkout, { recursive: true });
+    rmSync(join(w.box, ".claude", "skills", "tracked"));
+    write(join(w.box, ".claude", "skills", "draft", "SKILL.md"), "# Draft\n");
+
+    expect(await listBoxSkills(w.link, HARNESSES)).toEqual([{ name: "draft", paths: ["~/.claude/skills/draft"] }]);
+  });
+});
+
+describe("ferry adopt --from-box", () => {
+  test("copies a new skill to the same root, keeps the executable bit, and moves the box copy aside", async () => {
+    const w = world();
+    write(join(w.box, ".claude", "skills", "draft", "SKILL.md"), "# Draft\n");
+    write(join(w.box, ".claude", "skills", "draft", "scripts", "run.sh"), "#!/bin/sh\necho run\n", 0o755);
+    write(join(w.box, ".claude", "skills", "draft", "node_modules", "dep.js"), "dep\n");
+
+    const { value, error, lines } = await adopt(w, { name: "draft" });
+
+    expect(error).toBeNull();
+    const local = join(w.operator, ".claude", "skills", "draft");
+    expect(readFileSync(join(local, "SKILL.md"), "utf8")).toBe("# Draft\n");
+    expect(statSync(join(local, "scripts", "run.sh")).mode & 0o111).not.toBe(0);
+    expect(statSync(join(local, "SKILL.md")).mode & 0o111).toBe(0);
+    expect(existsSync(join(local, "node_modules"))).toBe(false);
+    expect(existsSync(join(w.box, ".claude", "skills", "draft"))).toBe(false);
+    expect(existsSync(join(w.box, ".ferry", "backups", "20260929T101112Z", "adopt", ".claude", "skills", "draft", "SKILL.md"))).toBe(true);
+    expect(value).toEqual({
+      box: "a",
+      name: "draft",
+      source: "~/.claude/skills/draft",
+      destination: "~/.claude/skills/draft",
+      replaces: false,
+      files: [
+        { path: "SKILL.md", executable: false },
+        { path: "scripts/run.sh", executable: true },
+      ],
+      skipped: [{ path: "node_modules", code: "cache", reason: "cache or build output" }],
+      diff: null,
+      adopted: true,
+      boxBackup: "~/.ferry/backups/20260929T101112Z/adopt",
+    });
+    expect(lines).toEqual([
+      "New skill draft from ~/.claude/skills/draft on box a:",
+      "  + SKILL.md",
+      "  + scripts/run.sh (executable)",
+      "Skip: node_modules (cache or build output)",
+      "Adopted draft at ~/.claude/skills/draft. Run ferry sync to publish it to all boxes.",
+    ]);
+    // The next sync publishes it: the seed of this machine has the skill with its executable bit.
+    const seed = readSeed(w.operator, HARNESSES, { storeUpdates: true });
+    expect(seed.ok && seed.skills.find((skill) => skill.name === "draft")?.files.map((file) => [file.path, file.executable])).toEqual([
+      ["SKILL.md", false],
+      ["scripts/run.sh", true],
+    ]);
+  });
+
+  test("a skill that fails a deny rule does not reach this machine, and the box keeps it", async () => {
+    const w = world();
+    write(join(w.box, ".claude", "skills", "leaky", "SKILL.md"), "# Leaky\n");
+    write(join(w.box, ".claude", "skills", "leaky", "notes.md"), `token ghp_${"a".repeat(36)}\n`);
+
+    const { error } = await adopt(w, { name: "leaky" });
+
+    expect(errorInfo(error).code).toBe("deny-rule-match");
+    expect((error as Error).message).toContain("github-token GitHub token in file content: notes.md");
+    expect((error as Error).message).not.toContain("ghp_");
+    expect(existsSync(join(w.operator, ".claude", "skills", "leaky"))).toBe(false);
+    expect(existsSync(join(w.box, ".claude", "skills", "leaky", "notes.md"))).toBe(true);
+  });
+
+  test("without a terminal and --yes, it shows the files, asks nothing, and changes nothing", async () => {
+    const w = world();
+    write(join(w.box, ".claude", "skills", "draft", "SKILL.md"), "# Draft\n");
+
+    const { error, lines, questions } = await adopt(w, { name: "draft", yes: false });
+
+    expect(errorInfo(error).code).toBe("confirmation-required");
+    expect(lines).toEqual(["New skill draft from ~/.claude/skills/draft on box a:", "  + SKILL.md"]);
+    expect(questions).toEqual([]);
+    expect(existsSync(join(w.operator, ".claude", "skills", "draft"))).toBe(false);
+    expect(existsSync(join(w.box, ".claude", "skills", "draft"))).toBe(true);
+  });
+
+  test("on a terminal, a declined question changes nothing", async () => {
+    const w = world();
+    write(join(w.box, ".claude", "skills", "draft", "SKILL.md"), "# Draft\n");
+    const questions: string[] = [];
+
+    const { value, lines } = await adopt(w, { name: "draft", yes: false }, {
+      interactive: true,
+      confirm: async (question) => {
+        questions.push(question);
+        return false;
+      },
+    });
+
+    expect(value).toBeNull();
+    expect(questions).toEqual([
+      "Adopt draft to ~/.claude/skills/draft? Ferry moves the box copy to ~/.ferry/backups on box a.",
+    ]);
+    expect(lines.at(-1)).toBe("Adopt cancelled.");
+    expect(existsSync(join(w.operator, ".claude", "skills", "draft"))).toBe(false);
+    expect(existsSync(join(w.box, ".claude", "skills", "draft"))).toBe(true);
+  });
+
+  test("shows the diff against the store copy, so the sync publishes the adopted copy as a store update", async () => {
+    const w = world();
+    const store = join(w.operator, ".ferry", "store", "skills", "draft");
+    write(join(store, "SKILL.md"), "# Draft\nold\n");
+    mkdirSync(join(w.operator, ".claude", "skills"), { recursive: true });
+    symlinkSync(store, join(w.operator, ".claude", "skills", "draft"));
+    write(join(w.checkout, "skills", "draft", "SKILL.md"), "# Draft\nnew\n");
+
+    const { value, error, lines } = await adopt(w, { name: "draft" });
+
+    expect(error).toBeNull();
+    expect(value?.replaces).toBe(true);
+    expect(value?.source).toBe("~/.ferry/store/skills/draft");
+    expect(value?.diff).toContain("-old\n+new\n");
+    expect(lines).toContain("--- a/old/SKILL.md");
+    // A checkout skill has no harness root on the box, so it goes to the first root that owns skills.
+    expect(value?.destination).toBe("~/.agents/skills/draft");
+    expect(lstatSync(join(w.operator, ".claude", "skills", "draft")).isSymbolicLink()).toBe(true);
+    const local = join(w.operator, ".agents", "skills", "draft");
+    expect(lstatSync(local).isDirectory()).toBe(true);
+    expect(readFileSync(join(local, "SKILL.md"), "utf8")).toBe("# Draft\nnew\n");
+    expect(readFileSync(join(store, "SKILL.md"), "utf8")).toBe("# Draft\nold\n");
+    const seed = readSeed(w.operator, HARNESSES, { storeUpdates: true });
+    expect(seed.ok && seed.storeUpdates).toEqual([{ name: "draft", path: local }]);
+  });
+
+  test("replaces a local link to the store copy in the same root", async () => {
+    const w = world();
+    const store = join(w.operator, ".ferry", "store", "skills", "draft");
+    write(join(store, "SKILL.md"), "old\n");
+    mkdirSync(join(w.operator, ".claude", "skills"), { recursive: true });
+    symlinkSync(store, join(w.operator, ".claude", "skills", "draft"));
+    write(join(w.box, ".claude", "skills", "draft", "SKILL.md"), "new\n");
+
+    const { value, error } = await adopt(w, { name: "draft" });
+
+    expect(error).toBeNull();
+    expect(value?.destination).toBe("~/.claude/skills/draft");
+    const local = join(w.operator, ".claude", "skills", "draft");
+    expect(lstatSync(local).isDirectory()).toBe(true);
+    expect(readFileSync(join(local, "SKILL.md"), "utf8")).toBe("new\n");
+    expect(readFileSync(join(store, "SKILL.md"), "utf8")).toBe("old\n");
+  });
+
+  test("the same skill on both machines changes nothing", async () => {
+    const w = world();
+    const store = join(w.operator, ".ferry", "store", "skills", "draft");
+    write(join(store, "SKILL.md"), "# Draft\n");
+    write(join(w.box, ".claude", "skills", "draft", "SKILL.md"), "# Draft\n");
+
+    const { value, lines } = await adopt(w, { name: "draft" });
+
+    expect(value?.adopted).toBe(false);
+    expect(lines).toEqual(["draft on box a is the same as the copy on this machine."]);
+    expect(existsSync(join(w.operator, ".claude", "skills", "draft"))).toBe(false);
+    expect(existsSync(join(w.box, ".claude", "skills", "draft"))).toBe(true);
+  });
+
+  test("refuses a local directory with the same name that is not a Ferry link", async () => {
+    const w = world();
+    write(join(w.operator, ".agents", "skills", "draft", "SKILL.md"), "# Mine\n");
+    write(join(w.box, ".claude", "skills", "draft", "SKILL.md"), "# Draft\n");
+
+    const { error } = await adopt(w, { name: "draft" });
+
+    expect(errorInfo(error).code).toBe("refused");
+    expect((error as Error).message).toBe("~/.agents/skills/draft exists on this machine and is not a Ferry link. Move it away first.");
+    expect(readFileSync(join(w.operator, ".agents", "skills", "draft", "SKILL.md"), "utf8")).toBe("# Mine\n");
+  });
+
+  test("refuses a skill that is not box-only, and a name with a slash", async () => {
+    const w = world();
+
+    const tracked = await adopt(w, { name: "tracked" });
+    expect(errorInfo(tracked.error).code).toBe("usage");
+    expect((tracked.error as Error).message).toBe("Box a has no box-only skill tracked.");
+
+    const path = await adopt(w, { name: "../tracked" });
+    expect(errorInfo(path.error).code).toBe("usage");
+    expect(w.commands).toHaveLength(1);
+  });
+});

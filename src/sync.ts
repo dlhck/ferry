@@ -589,14 +589,18 @@ async function applyOnBox(context: {
       (warnings) => (warnings.length > 0 ? plural(warnings.length, "warning") : undefined),
     );
     for (const warning of warnings) warn(`Box plugins: ${warning}`);
-    await boxStep("Merging settings on the box", () =>
-      mergeBoxSettings({
-        remoteHome: required(plan.remoteHome),
-        harnesses,
-        settings,
-        link,
-      }),
+    const merged = await boxStep(
+      "Merging settings on the box",
+      () =>
+        mergeBoxSettings({
+          remoteHome: required(plan.remoteHome),
+          harnesses,
+          settings,
+          link,
+        }),
+      (result) => (result.warnings.length > 0 ? plural(result.warnings.length, "warning") : undefined),
     );
+    for (const warning of merged.warnings) warn(`Box settings: ${warning}`);
   } catch (cause) {
     throw new SyncError(
       "apply-failure",

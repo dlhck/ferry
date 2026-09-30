@@ -1,3 +1,4 @@
+import type { BoxSkill } from "./adopt-box.ts";
 import type { ApplyAction, ApplyPlan } from "./apply.ts";
 import type { AuthProviderStatus, AuthStatusReport, McpLoginStatus } from "./auth-start.ts";
 import type { BoxMcpIssue } from "./box-mcp.ts";
@@ -57,6 +58,10 @@ export type BoxStatusDependencies = {
   readonly hookPaths?: () => readonly UncarriedHookPath[];
   /** The integrations that are enabled for this box only. */
   readonly integrations?: readonly IntegrationCheck[];
+  /** The skills on the box that its snapshot does not track. Only the full status reads them. */
+  readonly boxSkills?: {
+    list(): Promise<readonly BoxSkill[]>;
+  };
   /** The disk, memory, and load that the probe read, and the limits. Only the brief check reads them. */
   readonly resources?: {
     read(): BoxResources | null;
@@ -145,6 +150,12 @@ export type BoxStatus = {
   };
   /** One entry for each registry tool. Empty when the box check failed; the error is in `errors`. */
   readonly tools?: readonly ToolStatus[];
+  /** The skills on the box that its snapshot does not track. `ferry adopt --from-box` brings one to this machine. */
+  readonly boxOnlySkills?: {
+    /** `null` when Ferry could not read them, or the box is offline. */
+    readonly skills: readonly BoxSkill[] | null;
+    readonly error: StatusDependencyError | null;
+  };
   /** Present only when at least one integration is enabled for this box. */
   readonly integrations?: Readonly<Partial<Record<IntegrationId, IntegrationStatus>>>;
   /** The errors of this box. */
@@ -443,7 +454,8 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
     1 +
       operatorIntegrations.length +
       dependencies.boxes.reduce(
-        (total, box) => total + BOX_STEPS + (box.tools ? 1 : 0) + (box.integrations?.length ?? 0),
+        (total, box) =>
+          total + BOX_STEPS + (box.tools ? 1 : 0) + (box.boxSkills ? 1 : 0) + (box.integrations?.length ?? 0),
         0,
       ),
   );
@@ -633,6 +645,24 @@ async function composeBoxStatus(
     progress.skip("Checking managed links on the box", OFFLINE);
   }
 
+  let boxOnlySkills: BoxStatus["boxOnlySkills"];
+  if (dependencies.boxSkills) {
+    const name = "Listing box-only skills";
+    if (online) {
+      const list = dependencies.boxSkills;
+      try {
+        boxOnlySkills = { skills: await step(progress, name, () => list.list()), error: null };
+      } catch (cause) {
+        const error = dependencyError("box", cause);
+        errors.push(error);
+        boxOnlySkills = { skills: null, error };
+      }
+    } else {
+      progress.skip(name, OFFLINE);
+      boxOnlySkills = { skills: null, error: null };
+    }
+  }
+
   let authError: StatusDependencyError | null = null;
   let providers: readonly AuthProviderStatus[] = [];
   if (online) {
@@ -727,6 +757,7 @@ async function composeBoxStatus(
     auth: { providers, loginRequired, error: authError },
     mcpLogins: { loginRequired: mcpLoginRequired, error: mcpError },
     ...(tools ? { tools } : {}),
+    ...(boxOnlySkills ? { boxOnlySkills } : {}),
     ...(enabledIntegrations.length > 0 ? { integrations } : {}),
     errors,
   };
