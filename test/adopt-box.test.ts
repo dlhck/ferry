@@ -291,13 +291,15 @@ describe("ferry adopt --from-box", () => {
     expect(existsSync(skill)).toBe(true);
   });
 
-  test("refuses when the box has no Ferry, and when its Ferry has no scan command, before it copies a file", async () => {
+  test("refuses when the box has no Ferry, a Ferry without the scan command, or a Ferry with older rules, before it copies a file", async () => {
     const usage = { schemaVersion: 1, command: "", ok: false, result: null, warnings: [], error: { code: "usage", message: "too many arguments", hint: null } };
     const cases: [string | null, string, string][] = [
       [null, "Ferry is not installed on box a.", "Run ferry install."],
       [`echo "error: unknown command 'scan'" >&2; exit 1`, "The Ferry on box a is too old to check the files there.", "Run ferry update."],
       [`echo '${JSON.stringify(usage)}'; exit 1`, "The Ferry on box a is too old to check the files there.", "Run ferry update."],
       ["echo 'Usage: ferry [options] [command]'", "The Ferry on box a is too old to check the files there.", "Run ferry update."],
+      // A Ferry from before the rules version: it passes the skill, but its rules are older.
+      [`echo '${JSON.stringify({ ...usage, ok: true, error: null, result: { files: [{ path: "SKILL.md", sha256: "0", executable: false }], forbidden: [], skipped: [] } })}'`, "The Ferry on box a has older deny rules than this machine", "Run ferry update"],
     ];
     for (const [script, message, hint] of cases) {
       const w = world();

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { DENY_RULES_VERSION } from "../src/manifest.ts";
 import { errorInfo } from "../src/output.ts";
 import type { Link, LinkResult } from "../src/link.ts";
 import { changedFiles, isInside, parseScanRequest, runScan, scanOnBox } from "../src/scan.ts";
@@ -188,7 +189,7 @@ describe("the scan on a box", () => {
   }
 
   test("runs ferry scan of the box install with the request on stdin, and returns its result", async () => {
-    const result = { files: [{ path: "SKILL.md", sha256: sha256("# Demo\n"), executable: false }], forbidden: [], skipped: [] };
+    const result = { rules: DENY_RULES_VERSION, files: [{ path: "SKILL.md", sha256: sha256("# Demo\n"), executable: false }], forbidden: [], skipped: [] };
     const box = link({ stdout: `${envelope({ result })}\n` });
 
     const scan = await scanOnBox(box.link, "box a", { kind: "skill", root: ".claude/skills/demo" });
@@ -219,6 +220,32 @@ describe("the scan on a box", () => {
     expect(await failure("")).toEqual(old);
     expect(await failure("Usage: ferry [options] [command]\n")).toEqual(old);
     expect(await failure(envelope({ ok: false, error: { code: "usage", message: "too many arguments", hint: null } }))).toEqual(old);
+  });
+
+  test("refuses a box whose deny rules are older than the rules of this machine, and a result without the rules version", async () => {
+    const result = (rules?: number) => envelope({ result: { ...(rules === undefined ? {} : { rules }), files: [], forbidden: [], skipped: [] } });
+    const older = {
+      code: "refused" as const,
+      message:
+        "The Ferry on box a has older deny rules than this machine, so its check can pass a file that this machine refuses. Ferry copied no file.",
+      hint: "Run ferry update to put the Ferry of this machine on box a.",
+    };
+
+    expect(await failure(result(DENY_RULES_VERSION - 1))).toEqual(older);
+    expect(await failure(result())).toEqual(older);
+    expect(await failure(envelope({ result: { rules: "1", files: [], forbidden: [], skipped: [] } }))).toEqual(older);
+    expect(await failure(result(DENY_RULES_VERSION))).toBeNull();
+    expect(await failure(result(DENY_RULES_VERSION + 1))).toBeNull();
+  });
+
+  test("each scan result has the rules version of the machine that ran it", () => {
+    const root = home();
+    write(join(root, "app/AGENTS.md"), "# Agents\n");
+
+    expect(runScan({ kind: "skill", root: "app" }, root).rules).toBe(DENY_RULES_VERSION);
+    expect(runScan({ kind: "files", root: "app", paths: ["AGENTS.md"], allowSecrets: false }, root).rules).toBe(DENY_RULES_VERSION);
+    expect(runScan({ kind: "sessions", paths: [], project: join(root, "app") }, root).rules).toBe(DENY_RULES_VERSION);
+    expect(DENY_RULES_VERSION).toBeGreaterThanOrEqual(1);
   });
 
   test("reports another error of the scan, and a failed box command", async () => {

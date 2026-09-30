@@ -8,6 +8,10 @@
  * never has file content. A reason can name a key, never its value. The
  * operator machine compares the hash of each file that arrives with the hash
  * of the scan, so the check applies to the bytes that it gets.
+ *
+ * Each result has `rules`, the `DENY_RULES_VERSION` of the machine that ran
+ * the scan. The operator machine refuses a result with a lower number than its
+ * own, because older rules can pass a file that it refuses.
  */
 
 import { createHash } from "node:crypto";
@@ -16,7 +20,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { BOX_MARKER } from "./box-ferry.ts";
 import { FerryError } from "./errors.ts";
 import type { Link } from "./link.ts";
-import { carriedContentHits, carriedNameHit, scanSkill } from "./manifest.ts";
+import { carriedContentHits, carriedNameHit, DENY_RULES_VERSION, scanSkill } from "./manifest.ts";
 import { sessionContentHits } from "./session-scan.ts";
 
 export type ScanHit = { readonly path: string; readonly code: string; readonly reason: string };
@@ -53,7 +57,8 @@ export type SessionsScan = {
 };
 
 type Scans = { skill: SkillScan; files: FilesScan; sessions: SessionsScan };
-export type ScanOf<Request extends ScanRequest> = Scans[Request["kind"]];
+/** `rules` is the `DENY_RULES_VERSION` of the machine that ran the scan. */
+export type ScanOf<Request extends ScanRequest> = Scans[Request["kind"]] & { readonly rules: number };
 
 /** Content rules that refuse a file also with `allowSecrets`. */
 const ALWAYS_REFUSED = new Set(["private-key", "executable"]);
@@ -65,10 +70,11 @@ const BOX_SCAN_COMMAND = `if [ -f "$HOME/${BOX_MARKER}" ] && [ -x "$HOME/.local/
 
 /** Run `request` on this machine, whose home is `home`. */
 export function runScan<Request extends ScanRequest>(request: Request, home: string): ScanOf<Request>;
-export function runScan(request: ScanRequest, home: string): SkillScan | FilesScan | SessionsScan {
-  if (request.kind === "skill") return scanSkillFiles(join(home, request.root));
-  if (request.kind === "files") return scanFiles(join(home, request.root), request.paths, request.allowSecrets);
-  return scanSessionFiles(home, request.paths, request.project);
+export function runScan(request: ScanRequest, home: string): ScanOf<ScanRequest> {
+  const rules = DENY_RULES_VERSION;
+  if (request.kind === "skill") return { rules, ...scanSkillFiles(join(home, request.root)) };
+  if (request.kind === "files") return { rules, ...scanFiles(join(home, request.root), request.paths, request.allowSecrets) };
+  return { rules, ...scanSessionFiles(home, request.paths, request.project) };
 }
 
 /** The request in the JSON text `text`. */
@@ -91,8 +97,9 @@ export function parseScanRequest(text: string): ScanRequest {
 
 /**
  * Run `request` with the Ferry on the box. `label` names the box in an error.
- * Ferry refuses when the box has no Ferry, or a Ferry without `ferry scan`.
- * It never copies a file to check it on this machine.
+ * Ferry refuses when the box has no Ferry, a Ferry without `ferry scan`, or a
+ * Ferry with older deny rules. It never copies a file to check it on this
+ * machine.
  */
 export async function scanOnBox<Request extends ScanRequest>(
   link: Pick<Link, "run">,
@@ -116,7 +123,14 @@ export async function scanOnBox<Request extends ScanRequest>(
     // An old Ferry prints its help or an error text.
   }
   if (envelope.ok === true && typeof envelope.result === "object" && envelope.result !== null) {
-    return envelope.result as ScanOf<Request>;
+    const scan = envelope.result as ScanOf<Request>;
+    // A result without the number is from a Ferry before the number, so its rules are older.
+    if (typeof scan.rules === "number" && scan.rules >= DENY_RULES_VERSION) return scan;
+    throw new FerryError(
+      "refused",
+      `The Ferry on ${label} has older deny rules than this machine, so its check can pass a file that this machine refuses. Ferry copied no file.`,
+      { hint: `Run ferry update to put the Ferry of this machine on ${label}.` },
+    );
   }
   if (envelope.ok === false && envelope.error && envelope.error.code !== "usage") {
     throw new FerryError("box-command-failed", `Ferry could not check the files on ${label}: ${String(envelope.error.message)}`);

@@ -32,6 +32,15 @@ export type DenyRuleDescription = {
   readonly behavior: DenyVerdict;
 };
 
+/**
+ * The version of the deny rules and of the session scan. Raise it with each
+ * change to a deny rule, a name list, a token pattern, the secret-field rule,
+ * or the session scan. `ferry scan` prints it, and Ferry refuses the check of
+ * a box whose number is lower than this one, because older rules can pass a
+ * file that this machine refuses.
+ */
+export const DENY_RULES_VERSION = 1;
+
 const DENY_RULES = {
   dotenv: { code: "dotenv", reason: "environment file", verdict: "refuse" },
   credentials: { code: "credentials", reason: "vendor auth or credential file", verdict: "refuse" },
