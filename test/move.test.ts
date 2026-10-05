@@ -174,6 +174,19 @@ async function move(w: World, input: Partial<MoveInput> & { path: string }, over
   return { lines, events: progress.events, error: error as Error | null, value };
 }
 
+describe("move source type", () => {
+  test.each([false, true])("rejects a file as not a directory, from box: %s", async (fromBox) => {
+    const w = world();
+    write(join(fromBox ? w.box : w.operator, "Downloads/report.pdf"), "report");
+    const result = await move(w, {
+      path: "Downloads/report.pdf",
+      ...(fromBox ? { fromBox: "default" } : {}),
+      dryRun: true,
+    });
+    expect(result.error?.message).toBe("~/Downloads/report.pdf is not a directory on " + (fromBox ? "the box." : "this machine."));
+  });
+});
+
 function commit(repo: string, path: string, body: string, message: string): string {
   write(join(repo, path), body);
   git(repo, "add", ".");

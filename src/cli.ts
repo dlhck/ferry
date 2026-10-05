@@ -117,6 +117,7 @@ import {
   type RevertResult,
 } from "./revert.ts";
 import { runSkillsAdd, SkillsAddError, type RunProcess } from "./skills-add.ts";
+import { runCp } from "./cp.ts";
 import { runMove, type MoveDependencies, type MoveInput, type MoveResult } from "./move.ts";
 import {
   runAdoptFromBox,
@@ -169,6 +170,7 @@ type CliDependencies = {
   readonly runSync?: (input: SyncInput, dependencies?: SyncDependencies) => Promise<SyncResult>;
   readonly runHistory?: typeof runHistory;
   readonly runRevert?: (input: RevertInput, dependencies?: RevertDependencies) => Promise<RevertResult>;
+  readonly runCp?: typeof runCp;
   readonly runMove?: (input: MoveInput, dependencies?: Partial<MoveDependencies>) => Promise<MoveResult | null>;
   readonly runAdoptFromBox?: (
     input: AdoptFromBoxInput,
@@ -293,6 +295,7 @@ const JSON_RESULTS: Record<string, string> = {
   history: "{ commits: [{ commit, date, subject, paths }] }, newest first",
   revert:
     "{ dryRun, commit, subject, tip, paths, settings: [{ file, keys }], sync }. sync is the sync result, or null with --dry-run or --no-sync",
+  cp: "{ box, source, destination, sha256 }",
   move: "{ path, source, destination, dryRun, git, carry, refused, skipped, notes, trash, sessions }",
   adopt: "{ box, name, source, destination, replaces, files: [{ path, executable }], skipped, diff, adopted, boxBackup }, or null when cancelled",
   tunnel:
@@ -844,7 +847,8 @@ first. Run ferry history for the commit ids.`)
     .summary("Continue a project on a box, on this machine with --from-box, or on another box with both")
     .description(`Continue a project on a box, on this machine with --from-box, or on another box with both.
 
-The path must be inside the home directory. The destination uses the same path
+The path must be a directory inside the home. For one file, use ferry cp.
+The destination uses the same path
 relative to its home. Ferry refuses unpushed commits, uncommitted changes to
 tracked files, and a destination path that exists. The destination clones from
 origin with its own SSH key, so run ferry auth gh for a box first. Ferry
@@ -917,6 +921,46 @@ this, so the box needs a release of Ferry from ferry install or ferry update.
         report(result);
       },
     );
+
+  const cp = program
+    .command("cp")
+    .summary("Copy one checked file between this machine and a box")
+    .description(`Copy one checked file between this machine and a box.
+
+Use ferry cp <box>:<path> <local-path> to copy from a box, or
+ferry cp <local-path> <box>:<path> to copy to a box. The prefix is a configured
+box name. A conflicting --box is an error. With :<path>, the box is --box,
+then default_box, then the only box. Exactly one endpoint must be a box.
+Use ./ before a local file name that contains a colon.
+
+A relative box path starts at the box home. Local paths start at the current
+folder. Both accept ~/ and absolute paths. Give an exact destination file
+path with an existing parent directory. Ferry refuses directories and
+symbolic links, including symbolic links in the source path.
+
+The source checks the file with the move deny rules before its bytes leave.
+A source box needs Ferry from ferry install or ferry update. Ferry refuses
+files larger than 128 MiB. It checks SHA-256 before it installs the file at
+the destination. An existing destination stays unless --force is given.
+Git state, agent sessions, and project memory do not take part in this copy.`)
+    .argument("<source>", "source file, local or <box>:<path>")
+    .argument("<destination>", "destination file, local or <box>:<path>")
+    .option("--force", "replace an existing destination file")
+    .action(async (source: string, destination: string, options: { force?: boolean }) => {
+      const [box, ...others] = boxNames();
+      if (others.length > 0) throw new FerryError("usage", "ferry cp selects one box. Give --box once.");
+      const result = await (dependencies.runCp ?? runCp)(
+        { source, destination, box, force: options.force === true },
+        {
+          readConfig: config,
+          createLink,
+          home: (dependencies.home ?? homedir)(),
+          lockBox: boxLocker((dependencies.home ?? homedir)(), config, "cp"),
+        },
+      );
+      report(result, (result) => writeLine(`Copied ${result.source} to ${result.destination}. SHA-256 verified.`));
+    });
+  boxCommands.add(cp);
 
   program
     .command("adopt")

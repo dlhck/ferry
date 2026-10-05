@@ -15,7 +15,31 @@ ferry move ~/code/shop --from-box a       # back to this machine
 ferry move ~/code/shop --from-box a --to-box b
 ```
 
-The path must be inside the home directory. The destination uses the same path relative to its home. `ferry move` does not accept `--box`.
+The path must be a directory inside the home. For one file, use `ferry cp`. The destination uses the same path relative to its home. `ferry move` does not accept `--box`.
+
+## Copy one file
+
+For a report or screenshot, use `ferry cp` on the operator machine:
+
+```sh
+ferry cp a:~/reports/report.pdf ~/Downloads/report.pdf
+ferry cp ~/Downloads/report.pdf a:~/reports/report.pdf
+```
+
+The prefix names a configured box. It must agree with `--box` when you give both.
+Use `:<path>` for `--box`, then `default_box`, then the only box.
+
+Local relative paths start at the current folder. Box relative paths start at
+the box home. Both accept `~/` and absolute paths. Give an exact destination
+file path with an existing parent directory. Ferry refuses directories and
+symbolic links, including a symbolic link in the source path.
+
+The source checks the file with the same file name and content deny rules as
+`move`, before the bytes leave. There is no secret override. A source box
+needs a release of Ferry with current deny rules. The 128 MiB scan limit
+applies. Ferry verifies SHA-256 before it installs the destination file.
+An existing file stays unless you give `--force`. Ferry holds the box lock
+during the copy. It copies no git state, agent sessions, or project memory.
 
 ## Before a move
 
