@@ -81,6 +81,8 @@ Ferry reads `agents.providers` from `~/.paseo/config.json` and merges an allowli
 | `enabled`, `order` | No. Each host keeps its own provider state and menu order. |
 
 - A provider that the box defines keeps its box `env`, `command`, `params`, `enabled`, `order`, and other box fields. A field that the local entry does not set keeps the box value.
+- An entry without `extends` is an override of a registered provider. Plugin overrides need no `label`. Ferry checks plugin provider availability with `paseo provider ls --json` on the box before it creates or updates an override. The provider must be available and enabled. If the check fails or the provider is unavailable, Ferry skips that override with a warning and continues other sync work. The box filters the registry with jq and sends back only requested provider IDs, never registry contents. Built-in overrides keep their existing carry rules.
+- A new custom provider declares `extends` and needs a non-empty `label`. A provider that extends `acp` also needs a `command`.
 - Ferry keeps box-only providers. Removing a local provider does not remove its box copy.
 - When the box defines the same ID with a different `extends` value, Ferry produces a warning and does not change it.
 - Ferry creates a provider that the box does not define only when the result works without local runtime fields. It skips the provider with a warning when the local entry has `env` or `params`, or is disabled. Define the provider on the box first. Then Ferry syncs its portable fields.
