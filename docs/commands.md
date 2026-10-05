@@ -550,10 +550,16 @@ can access them. Values are plaintext for the box user in ~/.ferry/secrets,
 with directory mode 700 and file mode 600. Transfer uses SSH stdin.
 Normal sync never transfers these values. Paseo is optional.
 
-The loader supports sh/dash login via ~/.profile, bash login and interactive
-shells, and zsh login and interactive shells with the default ZDOTDIR.
+Ferry writes ~/.ferry/secrets/load.sh and does not edit shell startup files.
+To load variables in new shells, add this exact line on the box:
+[ -r "$HOME/.ferry/secrets/load.sh" ] && . "$HOME/.ferry/secrets/load.sh"
+Use ~/.profile for sh/dash login. Interactive non-login sh/dash use the
+file selected by ENV, if set. For bash login use the first existing
+~/.bash_profile, ~/.bash_login, or ~/.profile; use ~/.bashrc for interactive
+non-login shells. Use ~/.zprofile for zsh login and ~/.zshrc for interactive
+shells, under ZDOTDIR if set. Put the line before an early return.
 Non-interactive paths that bypass startup files need explicit integration.
-New shells load updates. Start agents from the updated environment.
+New shells load updates after you configure loading. Start agents there.
 Paseo needs an explicit service restart, which stops active agents.
 
 Options:
@@ -586,7 +592,16 @@ other control characters except tab, or invalid UTF-8.
 
 Every process started from a shell or service that loads these variables
 can access them. --yes accepts this scope. Values are plaintext on the box.
-Open a new shell and start new agents after transfer. Restart Paseo explicitly
+Ferry writes ~/.ferry/secrets/load.sh and does not edit shell startup files.
+For new shells, add this exact line to your own startup file on the box:
+[ -r "$HOME/.ferry/secrets/load.sh" ] && . "$HOME/.ferry/secrets/load.sh"
+Use ~/.profile for sh/dash login; interactive non-login sh/dash use ENV.
+For bash login use the first existing ~/.bash_profile, ~/.bash_login, or
+~/.profile, and use ~/.bashrc for interactive non-login shells. Use
+~/.zprofile for zsh login and ~/.zshrc for interactive shells, under ZDOTDIR
+if set. Put the line before an early return.
+After you configure loading, open a new shell and start new agents. Restart
+Paseo explicitly
 to load its new environment; the restart stops active agents.
 
 Arguments:

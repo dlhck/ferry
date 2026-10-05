@@ -17,7 +17,7 @@ Normal sync excludes logins, credential files, tokens, API keys, `.env` files, a
 
 Before transfer, Ferry explains that every process started from a shell or service that loads the variables can access them. This is a box-user environment with no project isolation. Values are plaintext accessible to the box user in `~/.ferry/secrets`, with directory mode `700` and data file mode `600`. An atomic pointer update selects the literal shell data and separately escaped systemd data together. The shell loader reads and exports values without evaluating them as code. Paseo is optional, and a missing secrets file permits a shell or its service to start.
 
-New shell sessions load updates. Existing processes keep their environment. Paseo needs an explicit restart, which stops active agents. Removal does not revoke a key at its issuer or clear a running process environment. Ferry does not stop a CLI or agent from printing its own environment. Native login sessions and credential stores are outside this feature. See [Box-local secrets](box-secrets.md) for supported startup modes, limits, and commands.
+Shell loading requires the user to add the documented loader line to their own startup file. Ferry does not read or change startup files for secrets. After that opt-in, new shell sessions load updates. Existing processes keep their environment. Paseo needs an explicit restart, which stops active agents. Removal does not revoke a key at its issuer or clear a running process environment. Ferry does not stop a CLI or agent from printing its own environment. Native login sessions and credential stores are outside this feature. See [Box-local secrets](box-secrets.md) for supported startup modes, limits, and commands.
 
 ## Deny rules
 

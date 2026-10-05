@@ -34,8 +34,7 @@ export type SecretsDependencies = {
   readonly lockBox?: BoxLocker;
 };
 
-export const SECRETS_BLOCK_START = "# >>> ferry secrets >>>";
-export const SECRETS_BLOCK_END = "# <<< ferry secrets <<<";
+export const SECRETS_LOAD_LINE = '[ -r "$HOME/.ferry/secrets/load.sh" ] && . "$HOME/.ferry/secrets/load.sh"';
 export const SECRETS_UNIT_LINE = "EnvironmentFile=-%h/.ferry/secrets/current/systemd.env";
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const validName = (name: string) => NAME.test(name) && !name.startsWith("FERRY_SECRET_");
@@ -75,39 +74,6 @@ else
   unset FERRY_SECRET_TRACE
 fi
 `.replaceAll("\\${", "${");
-
-/** Prepend the same marked block to each supported startup file, before early returns. */
-export function secretsStartupCommand(remove = false): string {
-  const block = [SECRETS_BLOCK_START,
-    '[ ! -r "$HOME/.ferry/secrets/load.sh" ] || . "$HOME/.ferry/secrets/load.sh"', SECRETS_BLOCK_END].join("\n");
-  return [
-    "set -e",
-    ...(!remove ? [
-      'test ! -L "$HOME/.ferry" && test ! -L "$HOME/.ferry/secrets"',
-      'umask 077; mkdir -p "$HOME/.ferry/secrets"; chmod 700 "$HOME/.ferry/secrets"',
-      'ferry_loader=$(mktemp "$HOME/.ferry/secrets/.loader.XXXXXX")',
-      `printf '%s' ${quoteShell(LOADER)} > "$ferry_loader"`,
-      'chmod 600 "$ferry_loader"; mv -f "$ferry_loader" "$HOME/.ferry/secrets/load.sh"',
-    ] : []),
-    `FERRY_SECRET_BLOCK=${quoteShell(remove ? "" : block)}; export FERRY_SECRET_BLOCK`,
-    'for file in .profile .bashrc .bash_profile .bash_login .zprofile .zshrc; do',
-    '  profile="$HOME/$file"',
-    ...(remove ? ['  [ -f "$profile" ] || continue'] : [
-      '  case "$file" in .bash_profile|.bash_login) [ -f "$profile" ] || continue ;; esac',
-    ]),
-    '  [ ! -L "$profile" ] || exit 1',
-    '  tmp=$(mktemp "$HOME/.ferry-startup.XXXXXX")',
-    '  if [ -f "$profile" ]; then cp -p "$profile" "$tmp"; else chmod 600 "$tmp"; fi',
-    `  { [ ! -f "$profile" ] || cat "$profile"; } | awk ${quoteShell([
-      'BEGIN { if (ENVIRON["FERRY_SECRET_BLOCK"] != "") print ENVIRON["FERRY_SECRET_BLOCK"] }',
-      `$0 == "${SECRETS_BLOCK_START}" { skip=1; next }`,
-      `skip && $0 == "${SECRETS_BLOCK_END}" { skip=0; next }`,
-      '!skip { print }',
-    ].join("\n"))} > "$tmp"`,
-    '  if [ -f "$profile" ] && cmp -s "$profile" "$tmp"; then rm -f "$tmp"; else mv -f "$tmp" "$profile"; fi',
-    'done',
-  ].join("\n");
-}
 
 /** No value, value hash, or arbitrary box output can enter status. */
 export const SECRETS_STATUS_COMMAND = String.raw`if [ -f "$HOME/.ferry/secrets/current/agent.env" ]; then
@@ -173,6 +139,10 @@ END {
     'fi',
     `LC_ALL=C awk ${quoteShell(encode)} "$stage/agent.env" > "$stage/systemd.env"`,
     'chmod 600 "$stage/agent.env" "$stage/systemd.env"; rm -f "$stage/selected"',
+    ...(action === "set" ? [
+      `printf '%s' ${quoteShell(LOADER)} > "$stage/load.sh"`,
+      'chmod 600 "$stage/load.sh"; mv -f "$stage/load.sh" "$dir/load.sh"',
+    ] : []),
     'pointer="$dir/.current-$$"; ln -s "${stage##*/}" "$pointer"',
     'mv -Tf "$pointer" "$dir/current"',
     'committed="$stage"; stage=""; pointer=""',
@@ -253,14 +223,19 @@ export async function runSecrets(input: SecretsInput, overrides: Partial<Secrets
   }
   try {
     if (input.action !== "status") {
-      await safeRun(link, secretsStartupCommand());
       const state = (await safeRun(link, updateCommand(input.action, input.replace === true), { input: Buffer.from(records.join("\n") + "\n") })).trim();
       if (state === "conflict") throw new FerryError("refused", "A selected variable already exists. Add --replace to authorize replacement.");
-      if (state !== "updated") throw new FerryError("refused", "The box secrets are busy or contain invalid records. No values were changed.");
+      if (state === "busy") throw new FerryError("refused", "The box secrets lock directory ~/.ferry/secrets/.lock is busy. Wait for the active command. If no secrets command is running, remove that empty directory on the box and retry. Ferry does not remove stale locks automatically.");
+      if (state !== "updated") throw new FerryError("refused", "The box secrets contain invalid records. No values were changed.");
     }
     const secrets = parseSecretsStatus(await safeRun(link, SECRETS_STATUS_COMMAND));
     const steps = input.action === "status" ? [] : [
-      "Open a new shell session and start the agent from that environment. Existing shells, agents, and daemons keep their old environment.",
+      ...(input.action === "set" ? [
+        "Ferry writes the loader but does not edit shell startup files. To load variables in new shells, add this exact line to your own startup file on the box:",
+        SECRETS_LOAD_LINE,
+        "Use ~/.profile for sh/dash login; interactive non-login sh/dash use the file selected by ENV, if set. For bash login use the first existing ~/.bash_profile, ~/.bash_login, or ~/.profile, and use ~/.bashrc for interactive non-login shells. Use ~/.zprofile for zsh login and ~/.zshrc for interactive shells, under ZDOTDIR if set. Put the line before an early return.",
+      ] : []),
+      "After you configure shell loading, open a new shell session and start the agent from that environment. Existing shells, agents, and daemons keep their old environment.",
       ...(input.action === "remove" ? ["Removal does not revoke a key at its issuer or clear a running process environment."] : []),
     ];
     if (input.action !== "status" && box.integrations.paseo === true) {

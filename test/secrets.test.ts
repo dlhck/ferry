@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runSecrets, secretsStartupCommand, type SecretsDependencies, type SecretsInput } from "../src/secrets.ts";
+import { runSecrets, type SecretsDependencies, type SecretsInput } from "../src/secrets.ts";
 import { Link, type HostCommand, type RunOptions } from "../src/link.ts";
 import { readSeed as readManifest } from "../src/manifest.ts";
 import { createPaseo, ensureSecretsUnit, refreshUnit, unitFile } from "../src/integrations/paseo.ts";
 import { buildProgram, runCli } from "../src/cli.ts";
 import { commitBoxUninstall, planBoxUninstall } from "../src/box-uninstall.ts";
-import { profileBlockCommand } from "../src/tools/path.ts";
+import { BUILTIN_BOX_PATH_DIRS, profileBlockCommand } from "../src/tools/path.ts";
 import { runSync } from "../src/sync.ts";
 import { noProgress } from "../src/progress.ts";
 
@@ -66,6 +66,8 @@ describe("box secrets", () => {
     expect(statSync(join(w.home, ".ferry/secrets")).mode & 0o777).toBe(0o700);
     for (const name of ["agent.env", "systemd.env"]) expect(statSync(w.file(name)).mode & 0o777).toBe(0o600);
     expect(result?.steps.join(" ")).toContain("new shell");
+    expect(result?.steps).toContain('[ -r "$HOME/.ferry/secrets/load.sh" ] && . "$HOME/.ferry/secrets/load.sh"');
+    expect(result?.steps.join(" ")).toContain("does not edit shell startup files");
     expect(result?.steps.join(" ")).not.toContain("restart ferry-paseo");
   });
 
@@ -101,30 +103,77 @@ describe("box secrets", () => {
     expect(existsSync(join(w.home, "BAD"))).toBe(false);
   });
 
-  test("startup blocks are idempotent, precede bashrc early returns, and keep unrelated text", async () => {
+  test.each(["set", "remove", "sync", "uninstall"])("%s leaves user startup files byte-identical, including symlinks", async (action) => {
+    const files = [".profile", ".bash_profile", ".bash_login", ".bashrc", ".zprofile", ".zshrc"];
     const w = world();
-    for (const file of [".profile", ".bash_profile", ".bash_login", ".bashrc", ".zprofile", ".zshrc"]) {
-      writeFileSync(join(w.home, file), "# user config\nreturn 0\n", { mode: 0o640 });
+    const target = join(w.root, "user-bashrc");
+    writeFileSync(target, '# user config\n[ -r "$HOME/.ferry/secrets/load.sh" ] && . "$HOME/.ferry/secrets/load.sh"\n');
+    for (const file of files) {
+      if (file === ".bashrc") symlinkSync(target, join(w.home, file));
+      else writeFileSync(join(w.home, file), `# user ${file}\n`, { mode: 0o640 });
     }
+    // Sync still maintains the existing PATH block, exactly as on main.
+    if (action === "sync") await w.link.run(profileBlockCommand(BUILTIN_BOX_PATH_DIRS));
+    const before = files.map((file) => readFileSync(join(w.home, file)));
+    if (action === "set" || action === "remove") {
+      await runSecrets({ ...input, action }, w.dependencies);
+    } else if (action === "uninstall") {
+      await commitBoxUninstall(await planBoxUninstall([], w.link), w.link);
+    } else {
+      const result = await runSync({ home: w.home, publish: false }, {
+        readConfig: () => ({ ...w.dependencies.readConfig(), publisher: "operator", snapshotUrl: "snapshot.git", version: 1 }),
+        publisher: () => "operator",
+        createLink: () => ({ run: (command, options) => command.includes(".profile")
+          ? w.link.run(command, options)
+          : Promise.resolve({ ok: true as const, address: "box", stdout: command.startsWith("printf") ? `${w.home}\n` : "", stderr: "" }) }),
+        apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }),
+        acquireLock: () => () => {}, adopt: () => {}, writePlan: () => {}, writeLine: () => {}, warn: () => {},
+      });
+      expect(result.boxes[0]?.failure).toBeUndefined();
+      expect(existsSync(join(w.home, ".ferry/secrets"))).toBe(false);
+    }
+    for (const [index, file] of files.entries()) {
+      expect(readFileSync(join(w.home, file))).toEqual(before[index]!);
+      if (file !== ".bashrc") expect(statSync(join(w.home, file)).mode & 0o777).toBe(0o640);
+    }
+    expect(lstatSync(join(w.home, ".bashrc")).isSymbolicLink()).toBe(true);
+    expect(readFileSync(target)).toEqual(before[3]!);
+  });
+
+  test.each(["set", "remove", "uninstall"])("%s never creates absent startup files", async (action) => {
+    const w = world();
+    if (action === "set" || action === "remove") await runSecrets({ ...input, action }, w.dependencies);
+    else await commitBoxUninstall(await planBoxUninstall([], w.link), w.link);
+    for (const file of [".profile", ".bash_profile", ".bash_login", ".bashrc", ".zprofile", ".zshrc"]) {
+      expect(existsSync(join(w.home, file))).toBe(false);
+    }
+    expect(existsSync(join(w.home, ".ferry/secrets/load.sh"))).toBe(action === "set");
+    if (action === "set") expect(statSync(join(w.home, ".ferry/secrets/load.sh")).mode & 0o777).toBe(0o600);
+  });
+
+  test("busy set and remove name the box lock directory and leave it for manual recovery", async () => {
+    const w = world();
     await runSecrets(input, w.dependencies);
-    await w.dependencies.createLink({ destination: "user@box.example" }).run(secretsStartupCommand());
-    for (const file of [".profile", ".bash_profile", ".bash_login", ".bashrc", ".zprofile", ".zshrc"]) {
-      const text = readFileSync(join(w.home, file), "utf8");
-      expect(text.match(/# >>> ferry secrets >>>/g)?.length).toBe(1);
-      expect(text).toContain("# user config\nreturn 0\n");
-      expect(statSync(join(w.home, file)).mode & 0o777).toBe(0o640);
+    const before = readFileSync(w.file());
+    const lock = join(w.home, ".ferry/secrets/.lock");
+    mkdirSync(lock);
+    for (const action of ["set", "remove"] as const) {
+      const error = await runSecrets({ ...input, action, replace: true }, w.dependencies).catch(String);
+      expect(error).toContain("~/.ferry/secrets/.lock");
+      expect(error).toContain("busy");
+      expect(error).not.toContain("invalid records");
+      expect(error).not.toContain(value);
+      expect(existsSync(lock)).toBe(true);
+      expect(readFileSync(w.file())).toEqual(before);
     }
-    const p = Bun.spawnSync(["bash", "-ic", 'printf "%s" "$EXAMPLE_KEY"'], { env: { ...process.env, HOME: w.home } });
-    expect(p.stdout.toString()).toBe(value);
-    rmSync(join(w.home, ".ferry/secrets/current"));
-    const absent = Bun.spawnSync(["bash", "-ic", "true"], { env: { ...process.env, HOME: w.home } });
-    expect(absent.exitCode).toBe(0);
   });
 
   test("status returns only presence and names, and no value hashes", async () => {
     const w = world();
     await runSecrets(input, w.dependencies);
+    w.commands.length = 0;
     const result = await runSecrets({ action: "status", names: [] }, w.dependencies);
+    expect(w.commands.map((c) => c.argv.at(-1)).join(" ")).not.toMatch(/\.(profile|bashrc|bash_profile|bash_login|zprofile|zshrc)\b/);
     expect(result?.secrets).toEqual({ present: true, names: ["EXAMPLE_KEY"] });
     expect(JSON.stringify(result)).not.toContain(value);
     expect(JSON.stringify(result)).not.toMatch(/hash|sha256/);
@@ -236,25 +285,29 @@ describe("box secrets", () => {
     expect(readFileSync(log, "utf8")).not.toContain("restart");
   });
 
-  test("login startup covers bash overrides and sh/dash; sync keeps the blocks; uninstall keeps secrets", async () => {
+  test("user-added loader lines support new shells; uninstall keeps the loader and secrets", async () => {
     const w = world();
-    writeFileSync(join(w.home, ".bash_profile"), "# login config\n");
     await runSecrets(input, w.dependencies);
+    const unconfigured = Bun.spawnSync(["bash", "-ic", 'printf "%s" "$EXAMPLE_KEY"'], { env: { ...process.env, HOME: w.home, EXAMPLE_KEY: "" } });
+    expect(unconfigured.exitCode).toBe(0);
+    expect(unconfigured.stdout.toString()).toBe("");
+    const line = '[ -r "$HOME/.ferry/secrets/load.sh" ] && . "$HOME/.ferry/secrets/load.sh"';
+    for (const file of [".profile", ".bash_profile", ".bashrc"]) writeFileSync(join(w.home, file), `${line}\n`);
     for (const shell of ["sh", "dash", "bash"]) {
       const p = Bun.spawnSync([shell, "-lc", 'sh -c \'printf "%s" "$EXAMPLE_KEY"\''], { env: { ...process.env, HOME: w.home } });
       expect(p.exitCode).toBe(0);
       expect(p.stdout.toString()).toBe(value);
     }
-    await w.link.run(profileBlockCommand([".local/bin"]));
-    await w.link.run(secretsStartupCommand());
-    expect(readFileSync(join(w.home, ".profile"), "utf8").match(/# >>> ferry secrets >>>/g)).toHaveLength(1);
-    const plan = await planBoxUninstall([], w.link);
-    expect(plan.secretsBlocks).toBe(true);
-    await commitBoxUninstall(plan, w.link);
-    for (const file of [".profile", ".bashrc", ".bash_profile", ".zprofile", ".zshrc"]) {
-      expect(readFileSync(join(w.home, file), "utf8")).not.toContain("# >>> ferry secrets >>>");
-    }
+    const interactive = Bun.spawnSync(["bash", "-ic", 'sh -c \'printf "%s" "$EXAMPLE_KEY"\''], { env: { ...process.env, HOME: w.home } });
+    expect(interactive.exitCode).toBe(0);
+    expect(interactive.stdout.toString()).toBe(value);
+    expect((await runSecrets({ action: "status", names: [] }, w.dependencies))?.steps).toEqual([]);
+    await commitBoxUninstall(await planBoxUninstall([], w.link), w.link);
+    expect(readFileSync(join(w.home, ".profile"), "utf8")).toBe(`${line}\n`);
     expect(readFileSync(w.file(), "utf8")).toContain(value);
+    rmSync(join(w.home, ".ferry/secrets/current"));
+    const absent = Bun.spawnSync(["bash", "-ic", "true"], { env: { ...process.env, HOME: w.home } });
+    expect(absent.exitCode).toBe(0);
   });
 
   test("an interrupted publication keeps both old files, cleans the stage, and reports no value", async () => {

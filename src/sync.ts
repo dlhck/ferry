@@ -61,7 +61,6 @@ import {
 import { denyRuleCause, FerryError, linkFailure } from "./errors.ts";
 import { groupProgress, noProgress, plural, step, type Progress } from "./progress.ts";
 import { boxPathDirs, profileBlockCommand } from "./tools/path.ts";
-import { secretsStartupCommand } from "./secrets.ts";
 
 export type SyncInput = {
   readonly home?: string;
@@ -693,8 +692,6 @@ async function applyOnBox(context: {
           { cause: linkFailure(result.error) },
         );
       }
-      const startup = await link.run(secretsStartupCommand());
-      if (!startup.ok) throw new SyncError("apply-failure", "box", "could not write the box secrets startup blocks");
       return result.stdout.trim() === "unchanged" ? "no changes" : "updated ~/.profile";
     },
     (detail) => detail,
@@ -1036,7 +1033,6 @@ function printPlan(plan: SyncPlan, gitAuth: GitAuth, writeLine: (line: string) =
       `Box PATH: ${plan.pathDirs.map((dir) => `~/${dir}`).join(", ")} -> the ferry block of ~/.profile${
         plan.paseoProfiles === null ? "" : UNIT_PLAN
       }`,
-      "Box secrets: preserve box-local values; maintain the marked loader blocks for login sh/dash and login or interactive bash/zsh. Normal sync transfers no secret value.",
       `Store updates from a harness root: ${
         plan.storeUpdates.map((update) => `${update.name} (${update.path})`).join(", ") || "none"
       }`,

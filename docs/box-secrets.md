@@ -50,25 +50,34 @@ Status shows file presence and stored names. The full `ferry status` report also
 
 ## Shell startup and direct CLI commands
 
-Provisioning installs one marked block per supported startup file. Sync maintains the blocks. Updates keep them. Ferry preserves the other configuration lines and file modes. It prepends the loader before early returns in `.bashrc`. It refuses symbolic links for startup files instead of replacing them.
+`ferry secrets set` writes the literal data reader `~/.ferry/secrets/load.sh`. Shell loading is an explicit opt-in. Add this exact line to your own startup file on the box:
+
+```sh
+[ -r "$HOME/.ferry/secrets/load.sh" ] && . "$HOME/.ferry/secrets/load.sh"
+```
+
+Ferry does not add this line. Secrets commands, sync, update, and uninstall do not read or change shell startup files for secrets, including symbolic links. The existing Ferry PATH block in `~/.profile` still follows the normal sync and uninstall behavior.
 
 | Shell | Supported startup modes | Files |
 | --- | --- | --- |
 | POSIX sh and dash | Login, including an SSH login session | `~/.profile` |
-| bash | Login, including SSH login; interactive non-login | `~/.profile`, existing `~/.bash_profile` and `~/.bash_login`, `~/.bashrc` |
-| zsh | Login, including SSH login; interactive non-login, with default `ZDOTDIR` | `~/.zprofile`, `~/.zshrc` |
+| POSIX sh and dash | Interactive non-login | The file selected by `ENV`, if you set it |
+| bash | Login, including SSH login | The first existing readable file of `~/.bash_profile`, `~/.bash_login`, `~/.profile` |
+| bash | Interactive non-login | `~/.bashrc` |
+| zsh | Login, including SSH login | `${ZDOTDIR:-$HOME}/.zprofile` |
+| zsh | Interactive, including interactive login | `${ZDOTDIR:-$HOME}/.zshrc` |
 
-Ferry does not create `.bash_profile` or `.bash_login`, because those files would stop bash from reading `.profile`. If they already exist, Ferry adds the loader to both. If you create a startup file later, run provisioning or sync again. Custom `ZDOTDIR`, fish, shells started with startup files disabled, cron, and other services need explicit environment integration.
+Put the line before any early return in the chosen file. For bash login, edit the file bash already reads; creating `.bash_profile` or `.bash_login` can stop it from reading `.profile`. An interactive zsh login reads both `.zprofile` and `.zshrc`; sourcing the loader twice exports the same stored values. With no user-added line, a new shell does not load these secrets. Fish, shells started with startup files disabled, cron, and other services need their own environment integration.
 
 A non-interactive `ssh box command` or `sh -c` can bypass startup files. Do not depend on it loading secrets. Some bash SSH command modes read `.bashrc`, but that behavior is not a portable promise. For an explicit shell integration, source the loader before you start the agent:
 
 ```sh
-. "$HOME/.ferry/secrets/load.sh"
+[ -r "$HOME/.ferry/secrets/load.sh" ] && . "$HOME/.ferry/secrets/load.sh"
 ```
 
 The loader exports literal records with no `eval` or value expansion. It disables shell tracing while it reads values. Do not source `agent.env` or `systemd.env` directly. Programs can still print or log their own environment, so Ferry cannot prevent an agent or CLI from disclosing a key.
 
-After a transfer, open a new SSH session and start the agent there. Its direct child CLI processes inherit the variables. Existing shells, agents, and daemons keep their old environment. A nested shell also inherits its parent's old environment; removal from storage does not unset an inherited value. Reconnect for a fresh environment, or explicitly unset removed names in a shell that you control.
+After you add the line, open a new SSH session after a transfer and start the agent there. Its direct child CLI processes inherit the variables. Existing shells, agents, and daemons keep their old environment. A nested shell also inherits its parent's old environment; removal from storage does not unset an inherited value. Reconnect for a fresh environment, or explicitly unset removed names in a shell that you control.
 
 For Stripe, provision `STRIPE_API_KEY`, then an agent in the updated session can run `stripe customers list --limit 1` directly. [Stripe documents `STRIPE_API_KEY` as the CLI API key variable](https://docs.stripe.com/cli/api_keys). Its environment variables take precedence over its other key sources. Use a test or restricted key that permits the intended command. Stripe's native login session and credential store are outside this feature. `STRIPE_SECRET_KEY` is not the variable in this CLI example.
 
@@ -94,4 +103,6 @@ Ferry stores the data under `~/.ferry/secrets`, outside `~/.ferry/store`. The di
 
 Shell and systemd parsing rules differ. Ferry generates the systemd file from the same literal data and escapes its quotes and backslashes under the [systemd EnvironmentFile rules](https://github.com/systemd/systemd/blob/main/man/systemd.exec.xml). The shell loader never sources that file.
 
-`ferry box remove --uninstall` removes the loader blocks but keeps the private directory and stored values. Revoke keys at their issuers when they are no longer needed. Normal sync still excludes credentials. There is no reverse secret transfer, automatic distribution, or project-specific environment in this feature.
+A busy operation reports the box lock directory `~/.ferry/secrets/.lock`. Wait for the active secrets command to finish. If a command was killed and no secrets command is running, remove the empty lock directory on the box with `rmdir "$HOME/.ferry/secrets/.lock"`, then retry. Ferry does not remove stale locks automatically.
+
+`ferry box remove --uninstall` keeps the loader, private directory, stored values, and any loading line that you added yourself. Remove your line when you no longer want shell loading. Revoke keys at their issuers when they are no longer needed. Normal sync still excludes credentials. There is no reverse secret transfer, automatic distribution, or project-specific environment in this feature.
