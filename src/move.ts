@@ -621,12 +621,13 @@ async function preflight(
 
   const kind = await must(
     source.run(
-      `if [ ! -d ${sourcePath} ]; then echo missing; elif cd ${sourcePath} && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then echo git; git rev-parse --show-prefix; else echo plain; fi`,
+      `if [ ! -e ${sourcePath} ]; then echo missing; elif [ ! -d ${sourcePath} ]; then echo file; elif cd ${sourcePath} && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then echo git; git rev-parse --show-prefix; else echo plain; fi`,
       { timeoutMs: PROBE_TIMEOUT_MS },
     ),
     `Ferry could not read ~/${rel} on ${source.label}`,
   );
   const [shape, prefix] = kind.split("\n");
+  if (shape === "file") throw new MoveError(`~/${rel} is not a directory on ${source.label}.`);
   if (shape === "missing") throw new MoveError(`~/${rel} does not exist on ${source.label}.`);
   if (shape === "git" && prefix) {
     throw new MoveError(`~/${rel} is inside a git repository. Move the repository root.`);
@@ -1035,7 +1036,7 @@ function redacted(command: string): string {
 }
 
 /** With `redact`, the box is the source: the output of each command goes through `ferry redact`. The pack has its own checks. */
-function boxSide(link: Pick<Link, "run">, label: string, redact = false): Side {
+export function boxSide(link: Pick<Link, "run">, label: string, redact = false): Side {
   return {
     label,
     home: '"$HOME"',
@@ -1049,7 +1050,7 @@ function boxSide(link: Pick<Link, "run">, label: string, redact = false): Side {
   };
 }
 
-function localSide(home: string, platform: NodeJS.Platform): Side {
+export function localSide(home: string, platform: NodeJS.Platform): Side {
   const quoted = quoteShell(home);
   return {
     label: "this machine",
@@ -1097,13 +1098,13 @@ async function exec(
   };
 }
 
-async function must(result: Promise<SideResult>, context: string): Promise<string> {
+export async function must(result: Promise<SideResult>, context: string): Promise<string> {
   const settled = await result;
   if (!settled.ok) throw new MoveError(`${context}: ${settled.message}`);
   return settled.stdout;
 }
 
-function loadConfig(read: () => PartialOperatorConfig | null): PartialOperatorConfig {
+export function loadConfig(read: () => PartialOperatorConfig | null): PartialOperatorConfig {
   let config: PartialOperatorConfig | null;
   try {
     config = read();
@@ -1158,6 +1159,6 @@ function timestamp(date: Date): string {
   return date.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
 }
 
-function quoteShell(value: string): string {
+export function quoteShell(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }

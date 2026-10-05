@@ -21,6 +21,7 @@ The `ferry sherlock` commands exist only when the Sherlock integration is on and
   - [`ferry history`](#ferry-history)
   - [`ferry revert`](#ferry-revert)
   - [`ferry move`](#ferry-move)
+  - [`ferry cp`](#ferry-cp)
   - [`ferry adopt`](#ferry-adopt)
   - [`ferry tunnel`](#ferry-tunnel)
     - [`ferry tunnel install`](#ferry-tunnel-install)
@@ -65,121 +66,128 @@ Ferry never copies logins. Vendor sessions stay on the machine that created
 them. Ferry starts a login on the box and you finish it in a browser here.
 
 Options:
-  -V, --version                  output the version number
-  --box <name>                   select a box of the config; repeat it to select
-                                 more boxes
-  --json                         print JSON on stdout: one result envelope, or
-                                 one event for each line for watch, tunnel, and
-                                 expose. Progress goes to stderr
-  -h, --help                     display help for command
+  -V, --version                        output the version number
+  --box <name>                         select a box of the config; repeat it to
+                                       select more boxes
+  --json                               print JSON on stdout: one result
+                                       envelope, or one event for each line for
+                                       watch, tunnel, and expose. Progress goes
+                                       to stderr
+  -h, --help                           display help for command
 
 Commands:
-  init [options]                 Record a Tailscale host or SSH destination,
-                                 seed the snapshot, and convert this machine
-  install [options]              Install the supported agent tools on the
-                                 configured box
-  update [options]               Update the agent tools on the configured box
-                                 and on this machine
-  uninstall [options]            Remove Ferry's local state and restore paths
-                                 changed by init
-  auth [options] [provider]      Start a login on the configured box without
-                                 copying credentials
-  sync [options]                 Publish the snapshot and apply it to the
-                                 selected boxes, or to all boxes
-  history [options]              List the recent snapshot commits and the paths
-                                 each one changed
-  revert [options] <commit>      Undo one snapshot commit on this machine and on
-                                 all boxes
-  move [options] <path>          Continue a project on a box, on this machine
-                                 with --from-box, or on another box with both
-  adopt [options] <skill>        Copy a skill that an agent wrote on a box to
-                                 this machine
-  tunnel [options] [ports...]    Open box ports on this machine until Ctrl-C,
-                                 list the ports that listen on the box, or
-                                 follow the ports of ferry expose
-  expose [options] <command...>  Run a command on the box and announce its port
-                                 to ferry tunnel --follow
-  status [options]               Inspect link, snapshot, managed paths, and box
-                                 logins without writing
-  doctor                         Check SSH, Tailscale, snapshot access, linger,
-                                 and services, and print a fix for each failure
-  integrations                   List the integrations of each box, whether each
-                                 one is enabled, its parts, and the local app
-                                 versions
-  sherlock                       Add Sherlock database connections that tunnel
-                                 through a box
-  tools                          List the tools, the version policy of each one
-                                 and of each box, and the versions on this
-                                 machine
-  watch                          Watch the portable set and sync accepted
-                                 changes
-  menubar                        Install or remove the macOS menu bar app that
-                                 shows what needs action on the boxes
-  self-update                    Update Ferry on this machine to the latest
-                                 release.
+  init [options]                       Record a Tailscale host or SSH
+                                       destination, seed the snapshot, and
+                                       convert this machine
+  install [options]                    Install the supported agent tools on the
+                                       configured box
+  update [options]                     Update the agent tools on the configured
+                                       box and on this machine
+  uninstall [options]                  Remove Ferry's local state and restore
+                                       paths changed by init
+  auth [options] [provider]            Start a login on the configured box
+                                       without copying credentials
+  sync [options]                       Publish the snapshot and apply it to the
+                                       selected boxes, or to all boxes
+  history [options]                    List the recent snapshot commits and the
+                                       paths each one changed
+  revert [options] <commit>            Undo one snapshot commit on this machine
+                                       and on all boxes
+  move [options] <path>                Continue a project on a box, on this
+                                       machine with --from-box, or on another
+                                       box with both
+  cp [options] <source> <destination>  Copy one checked file between this
+                                       machine and a box
+  adopt [options] <skill>              Copy a skill that an agent wrote on a box
+                                       to this machine
+  tunnel [options] [ports...]          Open box ports on this machine until
+                                       Ctrl-C, list the ports that listen on the
+                                       box, or follow the ports of ferry expose
+  expose [options] <command...>        Run a command on the box and announce its
+                                       port to ferry tunnel --follow
+  status [options]                     Inspect link, snapshot, managed paths,
+                                       and box logins without writing
+  doctor                               Check SSH, Tailscale, snapshot access,
+                                       linger, and services, and print a fix for
+                                       each failure
+  integrations                         List the integrations of each box,
+                                       whether each one is enabled, its parts,
+                                       and the local app versions
+  sherlock                             Add Sherlock database connections that
+                                       tunnel through a box
+  tools                                List the tools, the version policy of
+                                       each one and of each box, and the
+                                       versions on this machine
+  watch                                Watch the portable set and sync accepted
+                                       changes
+  menubar                              Install or remove the macOS menu bar app
+                                       that shows what needs action on the boxes
+  self-update                          Update Ferry on this machine to the
+                                       latest release.
 
-                                 Ferry updates in the same way as it was
-                                 installed: with npm, or with the
-                                 release installer in the directory of this
-                                 binary. It restarts installed
-                                 watch and tunnel services that point at this
-                                 Ferry. On macOS, it also updates
-                                 an installed release menu bar app. It writes
-                                 the Ferry agent skill of the new
-                                 version to ~/.agents/skills/ferry, unless ferry
-                                 init --no-skill turned it off
-                                 or the skill folder has local changes. Then run
-                                 ferry update to put the new
-                                 version on the boxes.
+                                       Ferry updates in the same way as it was
+                                       installed: with npm, or with the
+                                       release installer in the directory of
+                                       this binary. It restarts installed
+                                       watch and tunnel services that point at
+                                       this Ferry. On macOS, it also updates
+                                       an installed release menu bar app. It
+                                       writes the Ferry agent skill of the new
+                                       version to ~/.agents/skills/ferry, unless
+                                       ferry init --no-skill turned it off
+                                       or the skill folder has local changes.
+                                       Then run ferry update to put the new
+                                       version on the boxes.
 
-                                 A release is visible before its build attaches
-                                 the files. When the latest
-                                 release does not have its files yet, Ferry says
-                                 that the release is not ready
-                                 and does not start the update. This is not an
-                                 error. Run the command again
-                                 some minutes later.
+                                       A release is visible before its build
+                                       attaches the files. When the latest
+                                       release does not have its files yet,
+                                       Ferry says that the release is not ready
+                                       and does not start the update. This is
+                                       not an error. Run the command again
+                                       some minutes later.
 
-                                 On a terminal, each command also asks to update
-                                 when a newer release is
-                                 there. Ferry reads the latest release at most
-                                 once a day. It does not ask
-                                 with --json, with CI set, or with
-                                 FERRY_NO_UPDATE_CHECK=1, and it does not
-                                 ask for a release that does not have its files
-                                 yet.
-  whoami                         Print the role of this machine: the operator
-                                 machine or a Ferry box.
+                                       On a terminal, each command also asks to
+                                       update when a newer release is
+                                       there. Ferry reads the latest release at
+                                       most once a day. It does not ask
+                                       with --json, with CI set, or with
+                                       FERRY_NO_UPDATE_CHECK=1, and it does not
+                                       ask for a release that does not have its
+                                       files yet.
+  whoami                               Print the role of this machine: the
+                                       operator machine or a Ferry box.
 
-                                 On a box, Ferry also prints the box name from
-                                 the last ferry sync, and the
-                                 parts of the generated instruction file
-                                 ~/.ferry/box/AGENTS.md in their
-                                 order: the Ferry header, the per-box
-                                 instructions from
-                                 ~/.ferry/boxes/<name>/AGENTS.md on the operator
-                                 machine when the box has
-                                 them, and the shared ~/AGENTS.md. The operator
-                                 machine is the source of
-                                 truth. On a box, change a Ferry-managed file on
-                                 the operator machine, not
-                                 on the box. This command runs on the operator
-                                 machine and on a box install.
+                                       On a box, Ferry also prints the box name
+                                       from the last ferry sync, and the
+                                       parts of the generated instruction file
+                                       ~/.ferry/box/AGENTS.md in their
+                                       order: the Ferry header, the per-box
+                                       instructions from
+                                       ~/.ferry/boxes/<name>/AGENTS.md on the
+                                       operator machine when the box has
+                                       them, and the shared ~/AGENTS.md. The
+                                       operator machine is the source of
+                                       truth. On a box, change a Ferry-managed
+                                       file on the operator machine, not
+                                       on the box. This command runs on the
+                                       operator machine and on a box install.
 
-                                 The managed paths of a box are the paths that
-                                 the last ferry sync linked
-                                 there: the instruction files, the skill roots,
-                                 and the other roots of the
-                                 harnesses that are on for the box, with the
-                                 custom harnesses of the config.
-                                 A box that an earlier Ferry synced has no such
-                                 record until the next sync.
-                                 Until then, Ferry lists the paths of the
-                                 built-in harnesses that are links
-                                 of Ferry on the box.
-  box                            List, add, and remove the boxes of the config
-  skills                         Install skills into the global harness roots
-                                 that Ferry manages
+                                       The managed paths of a box are the paths
+                                       that the last ferry sync linked
+                                       there: the instruction files, the skill
+                                       roots, and the other roots of the
+                                       harnesses that are on for the box, with
+                                       the custom harnesses of the config.
+                                       A box that an earlier Ferry synced has no
+                                       such record until the next sync.
+                                       Until then, Ferry lists the paths of the
+                                       built-in harnesses that are links
+                                       of Ferry on the box.
+  box                                  List, add, and remove the boxes of the
+                                       config
+  skills                               Install skills into the global harness
+                                       roots that Ferry manages
 
 JSON output (--json):
   stdout has only JSON. Progress and the text lines go to stderr. Ferry
@@ -445,7 +453,8 @@ Usage: ferry move [options] <path>
 Continue a project on a box, on this machine with --from-box, or on another box
 with both.
 
-The path must be inside the home directory. The destination uses the same path
+The path must be a directory inside the home. For one file, use ferry cp.
+The destination uses the same path
 relative to its home. Ferry refuses unpushed commits, uncommitted changes to
 tracked files, and a destination path that exists. The destination clones from
 origin with its own SSH key, so run ferry auth gh for a box first. Ferry
@@ -486,6 +495,41 @@ Options:
   -h, --help         display help for command
 
 With --json: { path, source, destination, dryRun, git, carry, refused, skipped, notes, trash, sessions }.
+```
+
+## ferry cp
+
+```text
+Usage: ferry cp [options] <source> <destination>
+
+Copy one checked file between this machine and a box.
+
+Use ferry cp <box>:<path> <local-path> to copy from a box, or
+ferry cp <local-path> <box>:<path> to copy to a box. The prefix is a configured
+box name. A conflicting --box is an error. With :<path>, the box is --box,
+then default_box, then the only box. Exactly one endpoint must be a box.
+Use ./ before a local file name that contains a colon.
+
+A relative box path starts at the box home. Local paths start at the current
+folder. Both accept ~/ and absolute paths. Give an exact destination file
+path with an existing parent directory. Ferry refuses directories and
+symbolic links, including symbolic links in the source path.
+
+The source checks the file with the move deny rules before its bytes leave.
+A source box needs Ferry from ferry install or ferry update. Ferry refuses
+files larger than 128 MiB. It checks SHA-256 before it installs the file at
+the destination. An existing destination stays unless --force is given.
+Git state, agent sessions, and project memory do not take part in this copy.
+
+Arguments:
+  source       source file, local or <box>:<path>
+  destination  destination file, local or <box>:<path>
+
+Options:
+  --force      replace an existing destination file
+  -h, --help   display help for command
+
+With --json: { box, source, destination, sha256 }.
 ```
 
 ## ferry adopt
