@@ -184,8 +184,7 @@ export function readPaseoProviders(home: string): PaseoProviders {
     const fields = portableFields(entry);
     if (typeof fields === "string") throw invalid(id, `${fields} does not match the Paseo schema`);
     const builtin = BUILTIN_IDS.includes(id);
-    if (!builtin && fields.extends === undefined) throw invalid(id, "a custom provider needs extends");
-    if (!builtin && fields.label === undefined) throw invalid(id, "a custom provider needs label");
+    if (!builtin && fields.extends !== undefined && !fields.label) throw invalid(id, "a custom provider needs label");
     if (fields.extends !== undefined && ![...BUILTIN_IDS, "acp"].includes(fields.extends as string)) {
       throw invalid(id, "extends names an unknown provider");
     }
@@ -275,12 +274,30 @@ export async function carryPaseoProviders(link: IntegrationLink, source: PaseoPr
   if (lines.includes("E")) throw invalid;
   const states = new Map(lines.map((line) => line.split("\t") as [string, string]));
 
+  // Entries without extends refer to registered providers. A config entry alone is not registration.
+  const overrides = source.providers.filter((provider) => provider.fields.extends === undefined && !BUILTIN_IDS.includes(provider.id));
+  const available = new Set<string>();
+  if (overrides.length > 0) {
+    const ids = overrides.map((provider) => provider.id);
+    const filter = 'if type == "array" then . as $registry | $w[] as $id | select(any($registry[]; .provider == $id and .status == "available" and .enabled == "Enabled")) | $id else error("invalid registry") end';
+    const script = [
+      'registry=$(paseo provider ls --json 2>/dev/null) || exit 0',
+      `printf '%s' "$registry" | jq -r --argjson w ${quoteShell(JSON.stringify(ids))} ${quoteShell(filter)} 2>/dev/null`,
+    ].join("\n");
+    const result = await link.run(`sh -c ${quoteShell(script)}`, { timeoutMs: 30_000 });
+    if (result.ok) {
+      for (const id of result.stdout.split("\n")) if (ids.includes(id)) available.add(id);
+    }
+  }
+
   const updates: Record<string, unknown> = {};
   const creates: Record<string, unknown> = {};
   const verify: PaseoProvider[] = [];
   for (const provider of source.providers) {
     const state = states.get(provider.id);
-    if (state === "legacy") {
+    if (overrides.includes(provider) && !available.has(provider.id)) {
+      warnings.push(`Paseo provider ${provider.id} was skipped: its registered provider availability could not be verified on the box. Install and enable the provider plugin and its command on the box.`);
+    } else if (state === "legacy") {
       warnings.push(`Paseo provider ${provider.id} was skipped: the box entry uses the legacy provider format. Open and save it in Paseo on the box to migrate it.`);
     } else if (state === "differs") {
       warnings.push(`Paseo provider ${provider.id} was skipped: the box defines it with a different extends value.`);

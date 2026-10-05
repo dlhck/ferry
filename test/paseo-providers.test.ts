@@ -37,6 +37,17 @@ function refusal(path: string): string {
 }
 
 describe("Paseo provider discovery", () => {
+  test("accepts plugin overrides without extends or label", () => {
+    const result = readPaseoProviders(home({
+      muse: { command: ["muse"] },
+      antigravity: { models },
+      "example-plugin": { description: "Example provider" },
+    }));
+    expect(result.providers.map((provider) => provider.id)).toEqual(["muse", "antigravity", "example-plugin"]);
+    expect(result.providers[0]?.fields).toEqual({});
+    expect(result.providers[0]?.command).toEqual(["muse"]);
+  });
+
   test("reads only the allowlisted fields and keeps the model order", () => {
     const path = home({
       zai: {
@@ -135,8 +146,8 @@ describe("Paseo provider discovery", () => {
   test("refuses entries that Paseo's schema rejects, naming the provider and rule", () => {
     const cases: [unknown, string][] = [
       [{ Bad: { extends: "claude", label: "Bad" } }, "provider ID"],
-      [{ custom: { label: "No extends" } }, "extends"],
       [{ custom: { extends: "claude" } }, "label"],
+      [{ custom: { extends: "claude", label: "" } }, "label"],
       [{ custom: { extends: "gemini", label: "Unknown" } }, "extends"],
       [{ custom: { extends: "acp", label: "No command" } }, "command"],
       [{ custom: { extends: "claude", label: "Models", models: [{ id: "" , label: "x" }] } }, "models"],
@@ -179,12 +190,17 @@ describe("Paseo provider discovery", () => {
  * commands that `command -v` finds. `written` gives the box config when the box
  * wrote the file, else undefined.
  */
-function box(config: unknown = {}, onPath: readonly string[] = []) {
+function box(config: unknown = {}, onPath: readonly string[] = [], registry: unknown = []) {
   const b = shellBox({ config, answer: (command) => {
     if (!command.includes("command -v -- ")) return undefined;
     const names = [...command.matchAll(/command -v -- '([^']+)'/g)].map((match) => match[1]!);
     return names.map((name) => `${onPath.includes(name) ? "ok" : "missing"} ${name}\n`).join("");
   } });
+  const registryPath = join(b.home, "../registry.json");
+  writeFileSync(registryPath, JSON.stringify(registry));
+  const paseoPath = join(b.home, "../bin/paseo");
+  writeFileSync(paseoPath, readFileSync(paseoPath, "utf8").replace('case "$1 $2" in',
+    `case "$1 $2" in\n  "provider ls") cat '${registryPath}' ;;`));
   boxes.push(b.remove);
   const before = config === null ? null : b.text();
   return { ...b, written: (): any => (before !== null && b.text() === before ? undefined : b.config()) };
@@ -197,6 +213,67 @@ const boxes: (() => void)[] = [];
 afterEach(() => { for (const remove of boxes.splice(0)) remove(); });
 
 describe("Paseo provider carry", () => {
+  jqTest("creates registered plugin overrides without extends or label", async () => {
+    const ids = ["muse", "antigravity", "example-plugin"];
+    const b = box({}, ["muse"], ids.map((provider) => ({ provider, status: "available", enabled: "Enabled", description: token })));
+    const result = await carryPaseoProviders(b.link, source({
+      muse: { command: ["muse"] }, antigravity: { models }, "example-plugin": { description: "Example provider" },
+    }));
+    expect(result).toEqual({ carried: ids, warnings: [], changed: true });
+    expect(b.written().agents.providers).toEqual({
+      muse: { command: ["muse"] }, antigravity: { models }, "example-plugin": { description: "Example provider" },
+    });
+    expect(b.outputs.join("\n")).not.toContain("Enabled");
+    expect(b.outputs.join("\n")).not.toContain(token);
+  });
+
+  jqTest("skips unavailable plugin overrides and still carries unrelated providers", async () => {
+    for (const registry of [
+      [], [{ provider: "muse", status: "unavailable", enabled: "Enabled" }],
+      [{ provider: "muse", status: "available", enabled: "Disabled" }], {},
+    ]) {
+      for (const providers of [{}, { muse: { env: { KEY: "box-only" } } }]) {
+        const b = box({ agents: { providers } }, ["muse"], registry);
+        const result = await carryPaseoProviders(b.link, source({
+          muse: { command: ["muse"], models }, qwen: { extends: "claude", label: "Qwen" },
+        }));
+        expect(result.carried).toEqual(["qwen"]);
+        expect(result.warnings[0]).toContain("muse");
+        expect(result.warnings[0]).toContain("availability");
+        expect(b.written().agents.providers.muse).toEqual((providers as any).muse);
+        expect(b.outputs.join("\n")).not.toContain("box-only");
+      }
+    }
+  });
+
+  jqTest("a failed registry command warns without exposing output or blocking other providers", async () => {
+    const b = box({});
+    const paseoPath = join(b.home, "../bin/paseo");
+    writeFileSync(paseoPath, readFileSync(paseoPath, "utf8").replace(
+      /"provider ls"\).*?;;/, '"provider ls") echo box-private; echo box-private >&2; exit 1 ;;',
+    ));
+    const result = await carryPaseoProviders(b.link, source({
+      muse: { models }, qwen: { extends: "claude", label: "Qwen" },
+    }));
+    expect(result.carried).toEqual(["qwen"]);
+    expect(result.warnings[0]).toContain("availability");
+    expect(b.written().agents.providers.muse).toBeUndefined();
+    expect(b.outputs.join("\n")).not.toContain("box-private");
+  });
+
+  jqTest("keeps plugin runtime fields on each host and applies the existing create rules", async () => {
+    const registry = [{ provider: "muse", status: "available", enabled: "Enabled" }];
+    const local = source({ muse: { models, env: { KEY: "local-only" }, command: ["/home/user/muse"] } });
+    const missing = box({}, [], registry);
+    expect((await carryPaseoProviders(missing.link, local)).carried).toEqual([]);
+    expect(missing.written()).toBeUndefined();
+    const existing = box({ agents: { providers: { muse: { env: { KEY: "box-only" }, command: ["box-muse"] } } } }, [], registry);
+    expect((await carryPaseoProviders(existing.link, local)).carried).toEqual(["muse"]);
+    expect(existing.written().agents.providers.muse).toEqual({ models, env: { KEY: "box-only" }, command: ["box-muse"] });
+    expect(existing.commands.join("\n")).not.toContain("local-only");
+    expect(existing.commands.join("\n")).not.toContain("/home/user/muse");
+  });
+
   jqTest("merges matching providers field by field and keeps box-only fields and providers", async () => {
     const boxConfig = {
       version: 1,
@@ -400,6 +477,16 @@ test("dry runs show providers only for Paseo boxes, without values, and make no 
   expect(text).not.toContain(token);
 });
 
+test("dry runs accept plugin command overrides without a label or a connection", async () => {
+  const result = await runSync({ home: home({ muse: { command: ["muse"] } }), dryRun: true }, {
+    publisher: () => "operator", readConfig: syncConfig,
+    createLink: () => { throw new Error("must stay offline"); }, writeLine: () => {},
+  });
+  expect(result.boxes[0]?.plan.paseoProviders?.providers).toEqual([
+    { id: "muse", fields: [], models: [], command: true, createBlocker: null },
+  ]);
+});
+
 test("sync refuses a secret in a carried provider field before it connects", async () => {
   const path = home({ zai: { extends: "claude", label: `Uses ${token}` } });
   let connected = false;
@@ -449,15 +536,15 @@ test("sync applies provider definitions before it checks provider availability f
   expect(preferences).toBeGreaterThan(reload);
 });
 
-test("watch detects provider-only changes with its real observer", async () => {
-  const path = home({ zai: { extends: "claude", label: "Z.AI", models } });
+test("watch detects plugin override changes with its real observer", async () => {
+  const path = home({ muse: { models } });
   mkdirSync(join(path, ".ferry"));
   writeFileSync(join(path, ".ferry/config.toml"), `version = 1\npublisher = ${JSON.stringify(hostname())}\nsnapshot_url = "snapshot.git"\n[host]\ntailscale = "box"\nssh_user = "user"\n[integrations]\npaseo = true\n`);
   const controller = new AbortController();
   let polls = 0, syncs = 0;
   await runWatch({ home: path, signal: controller.signal, pollMs: 1, debounceMs: 1 }, {
     sleep: async () => {
-      if (++polls === 1) write(path, { zai: { extends: "claude", label: "Z.AI", models: [...models].reverse() } });
+      if (++polls === 1) write(path, { muse: { models: [...models].reverse() } });
       if (polls > 5) controller.abort();
     },
     sync: async () => { syncs++; controller.abort(); }, writeLine: () => {},
