@@ -38,6 +38,7 @@ import {
 } from "../src/sync.ts";
 import { noProgress, type Progress } from "../src/progress.ts";
 import { BUILTIN_BOX_PATH_DIRS, profileBlockCommand } from "../src/tools/path.ts";
+import { secretsStartupCommand } from "../src/secrets.ts";
 import { fakeTerminal } from "./fake-progress.ts";
 
 const config: OperatorConfig = {
@@ -472,6 +473,7 @@ describe("runSync", () => {
       "apply",
       "write-box-files",
       "write-path",
+      "write-path",
       "unlock",
       "adopt",
     ]);
@@ -493,6 +495,7 @@ describe("runSync", () => {
         options: undefined,
       },
       { command: profileBlockCommand(BUILTIN_BOX_PATH_DIRS), options: undefined },
+      { command: secretsStartupCommand(), options: undefined },
     ]);
     expect(applyInput).toMatchObject({
       checkout: "/srv/ferry/.ferry/store",

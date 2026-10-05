@@ -16,6 +16,7 @@ import { EXPOSED_DIR } from "./expose.ts";
 import type { Link } from "./link.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
 import { PROFILE_BLOCK_END, PROFILE_BLOCK_START } from "./tools/path.ts";
+import { SECRETS_BLOCK_START, secretsStartupCommand } from "./secrets.ts";
 
 const STORE = ".ferry/store";
 const BACKUPS = ".ferry/backups";
@@ -38,6 +39,7 @@ export type BoxUninstallPlan = {
   readonly links: readonly { readonly path: string; readonly link: string; readonly backup: string | null }[];
   /** True when `~/.profile` has the ferry PATH block. */
   readonly profileBlock: boolean;
+  readonly secretsBlocks?: boolean;
   /** The Ferry files and directories that are on the box, in the order of removal. */
   readonly paths: readonly string[];
 };
@@ -77,6 +79,9 @@ for path do
   if [ -e "$path" ] || [ -L "$path" ]; then record X "$path"; fi
 done
 if [ -f .profile ] && grep -qxF '${PROFILE_BLOCK_START}' .profile; then echo P; fi
+for profile in .profile .bashrc .bash_profile .bash_login .zprofile .zshrc; do
+  if [ -f "$profile" ] && grep -qxF '${SECRETS_BLOCK_START}' "$profile"; then echo S; break; fi
+done
 if [ -d ${BACKUPS} ]; then
   find ${BACKUPS} -mindepth 3 -maxdepth "$backup_depth" | while IFS= read -r backup; do record B "$backup"; done
 fi
@@ -107,6 +112,7 @@ export async function planBoxUninstall(
   /** The timestamps of each backup, by its path below the timestamp directory. */
   const backups = new Map<string, string[]>();
   let profileBlock = false;
+  let secretsBlocks = false;
   for (const line of result.stdout.split("\n")) {
     const [kind, first = "", second = ""] = line.split("\t");
     const value = fromHex(first);
@@ -115,6 +121,7 @@ export async function planBoxUninstall(
     else if (kind === "U") services.push(value);
     else if (kind === "X") present.add(value);
     else if (kind === "P") profileBlock = true;
+    else if (kind === "S") secretsBlocks = true;
     else if (kind === "B") {
       const [timestamp = "", ...rest] = value.slice(BACKUPS.length + 1).split("/");
       backups.set(rest.join("/"), [...(backups.get(rest.join("/")) ?? []), timestamp]);
@@ -151,7 +158,7 @@ export async function planBoxUninstall(
     .sort((a, b) => compare(a.path, b.path));
   // Without the marker, the binary is not a box install of Ferry, so it stays.
   const paths = FERRY_PATHS.filter((path) => present.has(path) && (path !== BINARY || present.has(BOX_MARKER)));
-  return { home, services: services.sort(compare), links, profileBlock, paths };
+  return { home, services: services.sort(compare), links, profileBlock, ...(secretsBlocks ? { secretsBlocks } : {}), paths };
 }
 
 /** The plan as lines. Ferry prints them before it asks. */
@@ -164,6 +171,7 @@ export function boxUninstallLines(plan: BoxUninstallPlan): string[] {
       entry.backup === null ? `Remove the link ~/${entry.path}` : `Remove the link ~/${entry.path} and move ~/${entry.backup} back`,
     ),
     ...(plan.profileBlock ? ["Remove the ferry PATH block of ~/.profile"] : []),
+    ...(plan.secretsBlocks ? ["Remove the ferry secrets blocks of the supported shell startup files. Keep ~/.ferry/secrets and its plaintext values."] : []),
     ...plan.paths.map((path) => `Remove ~/${path}`),
   ];
   return [
@@ -213,6 +221,7 @@ function boxUninstallCommand(plan: BoxUninstallPlan): string {
       "fi",
     );
   }
+  lines.push(secretsStartupCommand(true));
   for (const path of plan.paths) lines.push(`rm -rf ${quoteShell(path)}`);
   lines.push(
     `rmdir ${BACKUPS} .ferry 2>/dev/null || true`,

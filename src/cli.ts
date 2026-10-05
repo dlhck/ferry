@@ -118,6 +118,7 @@ import {
 } from "./revert.ts";
 import { runSkillsAdd, SkillsAddError, type RunProcess } from "./skills-add.ts";
 import { runCp } from "./cp.ts";
+import { runSecrets } from "./secrets.ts";
 import { runMove, type MoveDependencies, type MoveInput, type MoveResult } from "./move.ts";
 import {
   runAdoptFromBox,
@@ -171,6 +172,7 @@ type CliDependencies = {
   readonly runHistory?: typeof runHistory;
   readonly runRevert?: (input: RevertInput, dependencies?: RevertDependencies) => Promise<RevertResult>;
   readonly runCp?: typeof runCp;
+  readonly runSecrets?: typeof runSecrets;
   readonly runMove?: (input: MoveInput, dependencies?: Partial<MoveDependencies>) => Promise<MoveResult | null>;
   readonly runAdoptFromBox?: (
     input: AdoptFromBoxInput,
@@ -296,6 +298,9 @@ const JSON_RESULTS: Record<string, string> = {
   revert:
     "{ dryRun, commit, subject, tip, paths, settings: [{ file, keys }], sync }. sync is the sync result, or null with --dry-run or --no-sync",
   cp: "{ box, source, destination, sha256 }",
+  "secrets set": "{ box, secrets: { present, names }, steps }, or null when cancelled. Never values or hashes",
+  "secrets remove": "{ box, secrets: { present, names }, steps }, or null when cancelled",
+  "secrets status": "{ box, secrets: { present, names }, steps }",
   move: "{ path, source, destination, dryRun, git, carry, refused, skipped, notes, trash, sessions }",
   adopt: "{ box, name, source, destination, replaces, files: [{ path, executable }], skipped, diff, adopted, boxBackup }, or null when cancelled",
   tunnel:
@@ -961,6 +966,66 @@ Git state, agent sessions, and project memory do not take part in this copy.`)
       report(result, (result) => writeLine(`Copied ${result.source} to ${result.destination}. SHA-256 verified.`));
     });
   boxCommands.add(cp);
+
+  const secrets = program.command("secrets")
+    .summary("Provision selected environment variables on one box outside the snapshot")
+    .description(`Provision selected environment variables on one box outside the snapshot.
+
+Every process started from a shell or service that loads these variables
+can access them. Values are plaintext for the box user in ~/.ferry/secrets,
+with directory mode 700 and file mode 600. Transfer uses SSH stdin.
+Normal sync never transfers these values. Paseo is optional.
+
+The loader supports sh/dash login via ~/.profile, bash login and interactive
+shells, and zsh login and interactive shells with the default ZDOTDIR.
+Non-interactive paths that bypass startup files need explicit integration.
+New shells load updates. Start agents from the updated environment.
+Paseo needs an explicit service restart, which stops active agents.`);
+  for (const action of ["set", "remove", "status"] as const) {
+    const command = secrets.command(action).summary(action === "set"
+      ? "Transfer explicitly selected variables from the environment, a file, or hidden prompts"
+      : action === "remove" ? "Remove selected variables without revoking keys or clearing running processes"
+      : "Show stored names and file presence, never values or hashes");
+    if (action !== "status") command.argument("<names...>", "portable environment variable names")
+      .option("--yes", "authorize box-user environment scope without a confirmation prompt");
+    if (action === "set") command
+      .description(`Transfer selected names only. The default source is the operator environment.
+--file reads literal NAME=value lines, with no shell evaluation, expansion,
+or quote removal. --prompt reads each value with hidden input and requires
+a terminal. --file and --prompt cannot be combined. Do not put values in argv.
+
+Existing entries stay unless --replace authorizes replacement. Unrelated
+entries stay. Names use letters, digits, and underscores, with no initial
+digit. FERRY_SECRET_ is reserved. Values cannot contain line breaks, NUL,
+other control characters except tab, or invalid UTF-8.
+
+Every process started from a shell or service that loads these variables
+can access them. --yes accepts this scope. Values are plaintext on the box.
+Open a new shell and start new agents after transfer. Restart Paseo explicitly
+to load its new environment; the restart stops active agents.`)
+      .option("--file <path>", "read selected names from a literal NAME=value file")
+      .option("--prompt", "read selected values with hidden terminal input")
+      .option("--replace", "authorize replacing existing selected values");
+    command.action(async (...args: unknown[]) => {
+      const names = action === "status" ? [] : args[0] as string[];
+      const options = (action === "status" ? args[0] : args[1]) as { file?: string; prompt?: boolean; replace?: boolean; yes?: boolean };
+      const [box, ...others] = boxNames();
+      if (others.length > 0) throw new FerryError("usage", "ferry secrets selects one box. Give --box once.");
+      const result = await (dependencies.runSecrets ?? runSecrets)(
+        { action, names, box, file: options.file, prompt: options.prompt, replace: options.replace, yes: options.yes, json: json() },
+        { readConfig: config, createLink, writeLine,
+          lockBox: boxLocker((dependencies.home ?? homedir)(), config, `secrets ${action}`),
+          ...(dependencies.confirm ? { confirm: async (message) => (await dependencies.confirm!(message)) === true } : {}),
+        },
+      );
+      report(result, (value) => {
+        if (value === null) { writeLine("Cancelled."); return; }
+        writeLine(`Box ${value.box} secrets: ${value.secrets.present ? "present" : "absent"}. Names: ${value.secrets.names.join(", ") || "none"}.`);
+        for (const step of value.steps) writeLine(step);
+      });
+    });
+    boxCommands.add(command);
+  }
 
   program
     .command("adopt")

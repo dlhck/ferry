@@ -22,6 +22,10 @@ The `ferry sherlock` commands exist only when the Sherlock integration is on and
   - [`ferry revert`](#ferry-revert)
   - [`ferry move`](#ferry-move)
   - [`ferry cp`](#ferry-cp)
+  - [`ferry secrets`](#ferry-secrets)
+    - [`ferry secrets set`](#ferry-secrets-set)
+    - [`ferry secrets remove`](#ferry-secrets-remove)
+    - [`ferry secrets status`](#ferry-secrets-status)
   - [`ferry adopt`](#ferry-adopt)
   - [`ferry tunnel`](#ferry-tunnel)
     - [`ferry tunnel install`](#ferry-tunnel-install)
@@ -98,6 +102,8 @@ Commands:
                                        box with both
   cp [options] <source> <destination>  Copy one checked file between this
                                        machine and a box
+  secrets                              Provision selected environment variables
+                                       on one box outside the snapshot
   adopt [options] <skill>              Copy a skill that an agent wrote on a box
                                        to this machine
   tunnel [options] [ports...]          Open box ports on this machine until
@@ -530,6 +536,97 @@ Options:
   -h, --help   display help for command
 
 With --json: { box, source, destination, sha256 }.
+```
+
+## ferry secrets
+
+```text
+Usage: ferry secrets [options] [command]
+
+Provision selected environment variables on one box outside the snapshot.
+
+Every process started from a shell or service that loads these variables
+can access them. Values are plaintext for the box user in ~/.ferry/secrets,
+with directory mode 700 and file mode 600. Transfer uses SSH stdin.
+Normal sync never transfers these values. Paseo is optional.
+
+The loader supports sh/dash login via ~/.profile, bash login and interactive
+shells, and zsh login and interactive shells with the default ZDOTDIR.
+Non-interactive paths that bypass startup files need explicit integration.
+New shells load updates. Start agents from the updated environment.
+Paseo needs an explicit service restart, which stops active agents.
+
+Options:
+  -h, --help                   display help for command
+
+Commands:
+  set [options] <names...>     Transfer explicitly selected variables from the
+                               environment, a file, or hidden prompts
+  remove [options] <names...>  Remove selected variables without revoking keys
+                               or clearing running processes
+  status                       Show stored names and file presence, never values
+                               or hashes
+  help [command]               display help for command
+```
+
+### ferry secrets set
+
+```text
+Usage: ferry secrets set [options] <names...>
+
+Transfer selected names only. The default source is the operator environment.
+--file reads literal NAME=value lines, with no shell evaluation, expansion,
+or quote removal. --prompt reads each value with hidden input and requires
+a terminal. --file and --prompt cannot be combined. Do not put values in argv.
+
+Existing entries stay unless --replace authorizes replacement. Unrelated
+entries stay. Names use letters, digits, and underscores, with no initial
+digit. FERRY_SECRET_ is reserved. Values cannot contain line breaks, NUL,
+other control characters except tab, or invalid UTF-8.
+
+Every process started from a shell or service that loads these variables
+can access them. --yes accepts this scope. Values are plaintext on the box.
+Open a new shell and start new agents after transfer. Restart Paseo explicitly
+to load its new environment; the restart stops active agents.
+
+Arguments:
+  names          portable environment variable names
+
+Options:
+  --yes          authorize box-user environment scope without a confirmation
+                 prompt
+  --file <path>  read selected names from a literal NAME=value file
+  --prompt       read selected values with hidden terminal input
+  --replace      authorize replacing existing selected values
+  -h, --help     display help for command
+
+With --json: { box, secrets: { present, names }, steps }, or null when cancelled. Never values or hashes.
+```
+
+### ferry secrets remove
+
+```text
+Usage: ferry secrets remove [options] <names...>
+
+Arguments:
+  names       portable environment variable names
+
+Options:
+  --yes       authorize box-user environment scope without a confirmation prompt
+  -h, --help  display help for command
+
+With --json: { box, secrets: { present, names }, steps }, or null when cancelled.
+```
+
+### ferry secrets status
+
+```text
+Usage: ferry secrets status [options]
+
+Options:
+  -h, --help  display help for command
+
+With --json: { box, secrets: { present, names }, steps }.
 ```
 
 ## ferry adopt
