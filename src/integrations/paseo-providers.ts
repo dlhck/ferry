@@ -1,6 +1,6 @@
 /**
  * Carry the portable fields of Paseo provider definitions (`agents.providers`).
- * Credentials, env blocks, params, command paths, and enabled and order states stay on each host.
+ * Credentials, env blocks, options, params, command paths, and enabled and order states stay on each host.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -128,6 +128,7 @@ function createBlocker(entry: Record<string, unknown>, command: readonly string[
   const reasons: string[] = [];
   if (entry.env !== undefined) reasons.push("it has an env block");
   if (entry.params !== undefined) reasons.push("it has params");
+  if (object(entry.options) && Object.keys(entry.options).length > 0) reasons.push("it has non-empty options");
   if (entry.enabled === false) reasons.push("it is disabled locally");
   if (command !== undefined) {
     const [executable = "", ...args] = command;
@@ -180,6 +181,10 @@ export function readPaseoProviders(home: string): PaseoProviders {
     if (object(entry.command)) {
       warnings.push(`Paseo provider ${id} was skipped: it uses the legacy provider format. Open and save it in Paseo to migrate it.`);
       continue;
+    }
+    if (entry.options !== undefined && !object(entry.options)) throw invalid(id, "options does not match the Paseo schema");
+    if (object(entry.options) && Object.keys(entry.options).length > 0) {
+      warnings.push(`Paseo provider ${id} options were omitted: options stay on each host. Define the provider on the box first with its box options; Ferry syncs only its portable fields.`);
     }
     const fields = portableFields(entry);
     if (typeof fields === "string") throw invalid(id, `${fields} does not match the Paseo schema`);
@@ -246,7 +251,7 @@ const MERGE = [
 
 /**
  * Merge the local providers into `agents.providers` of the box Paseo config.
- * A provider that the box defines keeps its box env, command, params, enabled,
+ * A provider that the box defines keeps its box env, command, options, params, enabled,
  * order, and other box fields. A provider that the box lacks is created only
  * when it needs no local runtime field, and its command executable is on the
  * box PATH. Ferry never removes a box provider. `paseo daemon reload` applies
