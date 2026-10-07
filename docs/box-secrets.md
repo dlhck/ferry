@@ -50,13 +50,23 @@ Status shows file presence and stored names. The full `ferry status` report also
 
 ## Shell startup and direct CLI commands
 
-`ferry secrets set` writes the literal data reader `~/.ferry/secrets/load.sh`. Shell loading is an explicit opt-in. Add this exact line to your own startup file on the box:
+`ferry secrets set` writes the literal data reader `~/.ferry/secrets/load.sh`. Shell loading is an explicit opt-in. On the operator machine, select one startup file on the box:
+
+```sh
+ferry secrets shell install --file .bashrc --box dev
+```
+
+This example enables loading in interactive non-login bash sessions. Select the file for the shell and session you use from the table below. `--file` is required and accepts one filename relative to the box home: `.profile`, `.bashrc`, `.bash_profile`, `.bash_login`, `.zprofile`, or `.zshrc`. It does not accept an operator file path. Run the command separately for each file you want to configure.
+
+Install names the selected file and asks you to accept the environment scope. `--yes` accepts both without a prompt and is required with `--json`. The command prepends the guarded line before existing content, preserves other content and file permissions, and creates a missing selected file with mode `600`. If the exact line is already present, it leaves the file unchanged. It refuses symbolic links and other non-regular files with a named error. For a symlink, add the line through your dotfile manager. Custom `ZDOTDIR` or `ENV` files also need manual configuration.
+
+You can instead add this exact line yourself on the box:
 
 ```sh
 [ -r "$HOME/.ferry/secrets/load.sh" ] && . "$HOME/.ferry/secrets/load.sh"
 ```
 
-Ferry does not add this line. Secrets commands, sync, update, and uninstall do not read or change shell startup files for secrets, including symbolic links. The existing Ferry PATH block in `~/.profile` still follows the normal sync and uninstall behavior.
+Only the explicit `ferry secrets shell install` command reads or edits startup files for secrets, and only the selected file. Provisioning, removal, status, sync, update, and uninstall leave this loading line alone. The existing Ferry PATH block in `~/.profile` still follows the normal sync and uninstall behavior. Shell install transfers no secret value and does not create the loader; `set` writes it. You can install the line before provisioning, and a missing loader permits shell startup.
 
 | Shell | Supported startup modes | Files |
 | --- | --- | --- |
@@ -67,7 +77,7 @@ Ferry does not add this line. Secrets commands, sync, update, and uninstall do n
 | zsh | Login, including SSH login | `${ZDOTDIR:-$HOME}/.zprofile` |
 | zsh | Interactive, including interactive login | `${ZDOTDIR:-$HOME}/.zshrc` |
 
-Put the line before any early return in the chosen file. For bash login, edit the file bash already reads; creating `.bash_profile` or `.bash_login` can stop it from reading `.profile`. An interactive zsh login reads both `.zprofile` and `.zshrc`; sourcing the loader twice exports the same stored values. With no user-added line, a new shell does not load these secrets. Fish, shells started with startup files disabled, cron, and other services need their own environment integration.
+Keep the line before any early return in the chosen file. If an existing line is after an early return, move it yourself; install leaves an existing exact line in place. For bash login, select the file bash already reads; creating `.bash_profile` or `.bash_login` can stop it from reading `.profile`. Install reports this effect before confirmation. An interactive zsh login reads both `.zprofile` and `.zshrc`; sourcing the loader twice exports the same stored values. Without an installed or user-added line, a new shell does not load these secrets. Fish, shells started with startup files disabled, cron, and other services need their own environment integration.
 
 A non-interactive `ssh box command` or `sh -c` can bypass startup files. Do not depend on it loading secrets. Some bash SSH command modes read `.bashrc`, but that behavior is not a portable promise. For an explicit shell integration, source the loader before you start the agent:
 
@@ -105,4 +115,4 @@ Shell and systemd parsing rules differ. Ferry generates the systemd file from th
 
 A busy operation reports the box lock directory `~/.ferry/secrets/.lock`. Wait for the active secrets command to finish. If a command was killed and no secrets command is running, remove the empty lock directory on the box with `rmdir "$HOME/.ferry/secrets/.lock"`, then retry. Ferry does not remove stale locks automatically.
 
-`ferry box remove --uninstall` keeps the loader, private directory, stored values, and any loading line that you added yourself. Remove your line when you no longer want shell loading. Revoke keys at their issuers when they are no longer needed. Normal sync still excludes credentials. There is no reverse secret transfer, automatic distribution, or project-specific environment in this feature.
+`ferry box remove --uninstall` keeps the loader, private directory, stored values, and any loading line that you installed or added yourself. Remove the line yourself when you no longer want shell loading. Revoke keys at their issuers when they are no longer needed. Normal sync still excludes credentials. There is no reverse secret transfer, automatic distribution, or project-specific environment in this feature.

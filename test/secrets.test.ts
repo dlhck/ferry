@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runSecrets, type SecretsDependencies, type SecretsInput } from "../src/secrets.ts";
+import { runSecrets, runSecretsShellInstall, type SecretsDependencies, type SecretsInput } from "../src/secrets.ts";
 import { Link, type HostCommand, type RunOptions } from "../src/link.ts";
 import { readSeed as readManifest } from "../src/manifest.ts";
 import { createPaseo, ensureSecretsUnit, refreshUnit, unitFile } from "../src/integrations/paseo.ts";
@@ -398,5 +398,162 @@ describe("box secrets", () => {
     });
     expect(result?.steps.join(" ")).toContain("Secrets were stored for shell sessions");
     expect(JSON.stringify(result)).not.toContain(value);
+  });
+});
+
+describe("explicit secrets shell install", () => {
+  const files = [".profile", ".bashrc", ".bash_profile", ".bash_login", ".zprofile", ".zshrc"];
+  const line = '[ -r "$HOME/.ferry/secrets/load.sh" ] && . "$HOME/.ferry/secrets/load.sh"';
+
+  test.each(files)("installs once in selected %s, preserving other files, contents, and modes", async (file) => {
+    const w = world();
+    for (const name of files) writeFileSync(join(w.home, name), `# user ${name}\n# ${value}\nreturn 0\n`, { mode: 0o640 });
+    const before = files.map((name) => readFileSync(join(w.home, name), "utf8"));
+    const result = await runSecretsShellInstall({ file, yes: true }, w.dependencies);
+    for (const [index, name] of files.entries()) {
+      expect(readFileSync(join(w.home, name), "utf8")).toBe((name === file ? `${line}\n` : "") + before[index]);
+      expect(statSync(join(w.home, name)).mode & 0o777).toBe(0o640);
+    }
+    expect(result).toMatchObject({ box: "default", file, changed: true });
+    expect(result?.steps.join(" ")).toContain("new shell");
+    const inode = statSync(join(w.home, file)).ino;
+    expect(await runSecretsShellInstall({ file, yes: true }, w.dependencies)).toMatchObject({ changed: false });
+    expect(statSync(join(w.home, file)).ino).toBe(inode);
+    expect(w.commands.every((c) => c.input === undefined)).toBe(true);
+    expect(JSON.stringify({ result, commands: w.commands, outputs: w.outputs, lines: w.lines })).not.toContain(value);
+    expect(JSON.stringify(readManifest(w.home, []))).not.toContain(value);
+  });
+
+  test("creates only the selected missing file; a missing loader permits shell startup", async () => {
+    const w = world();
+    await runSecretsShellInstall({ file: ".bashrc", yes: true }, w.dependencies);
+    expect(readFileSync(join(w.home, ".bashrc"), "utf8")).toBe(`${line}\n`);
+    expect(statSync(join(w.home, ".bashrc")).mode & 0o777).toBe(0o600);
+    for (const file of files.filter((name) => name !== ".bashrc")) expect(existsSync(join(w.home, file))).toBe(false);
+    expect(existsSync(join(w.home, ".ferry/secrets"))).toBe(false);
+    const p = Bun.spawnSync(["bash", "-ic", "true"], { env: { ...process.env, HOME: w.home } });
+    expect(p.exitCode).toBe(0);
+  });
+
+  test("installed loading precedes an early return and exports literal values to a direct child", async () => {
+    const w = world();
+    await runSecrets(input, w.dependencies);
+    writeFileSync(join(w.home, ".bashrc"), "# user config\nreturn 0\n");
+    await runSecretsShellInstall({ file: ".bashrc", yes: true }, w.dependencies);
+    const before = readFileSync(join(w.home, ".bashrc"));
+    const p = Bun.spawnSync(["bash", "-ic", 'sh -c \'printf "%s" "$EXAMPLE_KEY"\''], {
+      env: { ...process.env, HOME: w.home, EXAMPLE_KEY: "" }, cwd: w.home,
+    });
+    expect(p.exitCode).toBe(0);
+    expect(p.stdout.toString()).toBe(value);
+    expect(existsSync(join(w.home, "BAD"))).toBe(false);
+    await runSecrets({ ...input, replace: true }, w.dependencies);
+    await runSecrets({ ...input, action: "remove" }, w.dependencies);
+    await commitBoxUninstall(await planBoxUninstall([], w.link), w.link);
+    expect(readFileSync(join(w.home, ".bashrc"))).toEqual(before);
+  });
+
+  test("selects one box and holds its lock; ambiguous or busy boxes start no SSH command", async () => {
+    const w = world();
+    const selected: string[] = [];
+    const boxes = ["a", "b"].map((name) => ({ name, host: { transport: "ssh" as const, destination: `user@${name}.example` } }));
+    const dependencies = { ...w.dependencies, readConfig: () => ({ boxes }), createLink: (options: Parameters<SecretsDependencies["createLink"]>[0]) => {
+      selected.push("destination" in options ? options.destination : options.host); return w.link;
+    } };
+    await expect(runSecretsShellInstall({ file: ".bashrc", yes: true }, dependencies)).rejects.toThrow("More than one box");
+    expect(selected).toEqual([]);
+    const held: string[] = [];
+    let released = false;
+    await runSecretsShellInstall({ file: ".bashrc", box: "b", yes: true }, { ...dependencies,
+      lockBox: (box) => { held.push(box.name); return () => { released = true; }; },
+    });
+    expect(selected).toEqual(["user@b.example"]);
+    expect(held).toEqual(["b"]);
+    expect(released).toBe(true);
+    w.commands.length = 0;
+    await expect(runSecretsShellInstall({ file: ".bashrc", box: "b", yes: true }, { ...dependencies,
+      lockBox: () => ({ busy: true, reason: "sync is running", box: "b", owner: { pid: 1234, command: "sync", earlierVersion: false, otherProgram: false } }),
+    })).rejects.toThrow("sync");
+    expect(w.commands).toEqual([]);
+  });
+
+  test("refuses symlinks and non-files with named errors, without following or replacing them", async () => {
+    for (const kind of ["symlink", "dangling symlink", "directory"]) {
+      const w = world();
+      const target = join(w.root, "user-config");
+      if (kind === "symlink") writeFileSync(target, value);
+      if (kind === "directory") mkdirSync(join(w.home, ".bashrc"));
+      else symlinkSync(target, join(w.home, ".bashrc"));
+      const error = await runSecretsShellInstall({ file: ".bashrc", yes: true }, w.dependencies).catch(String);
+      expect(error).toContain("~/.bashrc");
+      expect(error).toContain(kind === "directory" ? "regular file" : "symbolic link");
+      expect(error).not.toContain(value);
+      if (kind === "symlink") expect(readFileSync(target, "utf8")).toBe(value);
+      if (kind !== "directory") expect(lstatSync(join(w.home, ".bashrc")).isSymbolicLink()).toBe(true);
+    }
+  });
+
+  test("confirmation names one file and scope before SSH; JSON needs explicit authorization", async () => {
+    const w = world();
+    await expect(runSecretsShellInstall({ file: ".bashrc", json: true }, w.dependencies)).rejects.toThrow("~/.bashrc");
+    expect(w.commands).toEqual([]);
+    expect(w.lines.join(" ")).toContain("Every process");
+    expect(await runSecretsShellInstall({ file: ".bashrc" }, { ...w.dependencies, confirm: async () => false })).toBeNull();
+    expect(w.commands).toEqual([]);
+    await runSecretsShellInstall({ file: ".bash_profile", yes: true }, w.dependencies);
+    expect(w.lines.join(" ")).toContain("stop bash from reading ~/.profile");
+  });
+
+  test("rejects unrecognized filenames without echoing arbitrary input or starting SSH", async () => {
+    const w = world();
+    for (const file of ["", "../.bashrc", "/home/user/.bashrc", ".bashrc; touch BAD", value]) {
+      const error = await runSecretsShellInstall({ file, yes: true }, w.dependencies).catch(String);
+      expect(error).toContain("--file");
+      expect(error).not.toContain(value);
+      expect(w.commands).toEqual([]);
+    }
+  });
+
+  test("failed atomic publication keeps the file, cleans the temp file, and releases the box lock", async () => {
+    const w = world();
+    writeFileSync(join(w.home, ".bashrc"), value);
+    let released = false;
+    const error = await runSecretsShellInstall({ file: ".bashrc", yes: true }, { ...w.dependencies,
+      lockBox: () => () => { released = true; },
+      createLink: () => ({ run: (command, options) => w.link.run(command.replace('mv -f "$tmp" "$profile"', "false"), options) }),
+    }).catch(String);
+    expect(error).not.toContain(value);
+    expect(readFileSync(join(w.home, ".bashrc"), "utf8")).toBe(value);
+    expect(readdirSync(w.home).filter((name) => name.startsWith(".ferry-shell."))).toEqual([]);
+    expect(released).toBe(true);
+    for (const failure of ["failed", "thrown", "unexpected output"]) {
+      const error = await runSecretsShellInstall({ file: ".bashrc", yes: true }, { ...w.dependencies,
+        createLink: () => ({ async run() {
+          if (failure === "thrown") throw new Error(value);
+          if (failure === "unexpected output") return { ok: true as const, address: "box", stdout: value, stderr: value };
+          return { ok: false as const, error: { code: "command-failed" as const, origin: "box" as const, message: value } };
+        } }),
+      }).catch(String);
+      expect(error).not.toContain(value);
+    }
+  });
+
+  test("CLI requires a selected file, selects one box, and returns installation metadata in JSON", async () => {
+    const lines: string[] = [];
+    const inputs: unknown[] = [];
+    const program = () => {
+      const result = buildProgram({ runSecretsShellInstall: async (input) => {
+        inputs.push(input); return { box: "a", file: input.file, changed: true, steps: [] };
+      }, writeLine: (line) => lines.push(line) });
+      result.commands.find((c) => c.name() === "secrets")!.commands.find((c) => c.name() === "shell")!
+        .commands.find((c) => c.name() === "install")!.configureOutput({ writeErr: () => {}, writeOut: () => {} });
+      return result;
+    };
+    await program().parseAsync(["secrets", "shell", "install", "--file", ".bashrc", "--box", "a", "--yes", "--json"], { from: "user" });
+    expect(inputs).toEqual([{ file: ".bashrc", box: "a", yes: true, json: true }]);
+    expect(JSON.parse(lines[0]!)).toMatchObject({ command: "secrets shell install", ok: true, result: { box: "a", file: ".bashrc", changed: true } });
+    await expect(program().parseAsync(["secrets", "shell", "install"], { from: "user" })).rejects.toThrow("--file");
+    await expect(program().parseAsync(["secrets", "shell", "install", "--file", ".bashrc", "--box", "a", "--box", "b"], { from: "user" })).rejects.toThrow("one box");
+    expect(inputs).toHaveLength(1);
   });
 });

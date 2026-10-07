@@ -26,6 +26,8 @@ The `ferry sherlock` commands exist only when the Sherlock integration is on and
     - [`ferry secrets set`](#ferry-secrets-set)
     - [`ferry secrets remove`](#ferry-secrets-remove)
     - [`ferry secrets status`](#ferry-secrets-status)
+    - [`ferry secrets shell`](#ferry-secrets-shell)
+      - [`ferry secrets shell install`](#ferry-secrets-shell-install)
   - [`ferry adopt`](#ferry-adopt)
   - [`ferry tunnel`](#ferry-tunnel)
     - [`ferry tunnel install`](#ferry-tunnel-install)
@@ -550,8 +552,9 @@ can access them. Values are plaintext for the box user in ~/.ferry/secrets,
 with directory mode 700 and file mode 600. Transfer uses SSH stdin.
 Normal sync never transfers these values. Paseo is optional.
 
-Ferry writes ~/.ferry/secrets/load.sh and does not edit shell startup files.
-To load variables in new shells, add this exact line on the box:
+Provisioning writes ~/.ferry/secrets/load.sh and does not edit startup files.
+To opt in, run ferry secrets shell install --file <name> for one selected
+startup file, or add this exact line yourself on the box:
 [ -r "$HOME/.ferry/secrets/load.sh" ] && . "$HOME/.ferry/secrets/load.sh"
 Use ~/.profile for sh/dash login. Interactive non-login sh/dash use the
 file selected by ENV, if set. For bash login use the first existing
@@ -572,6 +575,8 @@ Commands:
                                or clearing running processes
   status                       Show stored names and file presence, never values
                                or hashes
+  shell                        Configure explicit shell loading of box-local
+                               secrets
   help [command]               display help for command
 ```
 
@@ -592,8 +597,9 @@ other control characters except tab, or invalid UTF-8.
 
 Every process started from a shell or service that loads these variables
 can access them. --yes accepts this scope. Values are plaintext on the box.
-Ferry writes ~/.ferry/secrets/load.sh and does not edit shell startup files.
-For new shells, add this exact line to your own startup file on the box:
+Provisioning writes ~/.ferry/secrets/load.sh and does not edit startup files.
+To opt in, run ferry secrets shell install --file <name> for one selected
+startup file, or add this exact line yourself on the box:
 [ -r "$HOME/.ferry/secrets/load.sh" ] && . "$HOME/.ferry/secrets/load.sh"
 Use ~/.profile for sh/dash login; interactive non-login sh/dash use ENV.
 For bash login use the first existing ~/.bash_profile, ~/.bash_login, or
@@ -642,6 +648,58 @@ Options:
   -h, --help  display help for command
 
 With --json: { box, secrets: { present, names }, steps }.
+```
+
+### ferry secrets shell
+
+```text
+Usage: ferry secrets shell [options] [command]
+
+Options:
+  -h, --help         display help for command
+
+Commands:
+  install [options]  Add the loader line to one selected startup file on one box
+  help [command]     display help for command
+```
+
+### ferry secrets shell install
+
+```text
+Usage: ferry secrets shell install [options]
+
+Add the guarded loader line once, before the existing content of one
+selected startup file on the box. Other content and file permissions stay.
+An absent selected file is created with mode 600. Symbolic links and other
+non-regular files are refused; use your dotfile manager for a symlink.
+
+Select one filename relative to the box home: .profile, .bashrc,
+.bash_profile, .bash_login, .zprofile, or .zshrc. There is no default.
+Use .profile for sh/dash login. For bash login select the first existing
+readable file of .bash_profile, .bash_login, or .profile; use .bashrc for
+interactive non-login shells. Creating bash login override files can stop
+bash from reading .profile. Use .zprofile for zsh login and .zshrc for
+interactive shells with default ZDOTDIR. Custom ZDOTDIR and ENV files need
+the loading line added by the user.
+
+The installed line is:
+[ -r "$HOME/.ferry/secrets/load.sh" ] && . "$HOME/.ferry/secrets/load.sh"
+A missing loader permits shell startup. Install does not transfer values
+or create the loader; ferry secrets set writes it. Every process started
+from a shell that loads these variables can access them.
+
+Only this explicit command edits startup files for secrets. Provisioning,
+removal, sync, update, and uninstall leave this line alone. After install,
+open a new shell session that reads the selected file and start agents there.
+Existing processes keep their old environment. No service restarts occur.
+
+Options:
+  --file <name>  select one startup filename on the box, relative to its home
+  --yes          authorize editing the selected file and the box-user
+                 environment scope
+  -h, --help     display help for command
+
+With --json: { box, file, changed, steps }, or null when cancelled. Never startup file content or secret values.
 ```
 
 ## ferry adopt

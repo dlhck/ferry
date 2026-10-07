@@ -34,8 +34,23 @@ export type SecretsDependencies = {
   readonly lockBox?: BoxLocker;
 };
 
+export type SecretsShellInstallInput = {
+  readonly file: string;
+  readonly box?: string;
+  readonly yes?: boolean;
+  readonly json?: boolean;
+};
+export type SecretsShellInstallResult = {
+  readonly box: string;
+  readonly file: string;
+  readonly changed: boolean;
+  readonly steps: readonly string[];
+};
+type SecretsShellInstallDependencies = Pick<SecretsDependencies, "readConfig" | "createLink" | "confirm" | "writeLine" | "lockBox">;
+
 export const SECRETS_LOAD_LINE = '[ -r "$HOME/.ferry/secrets/load.sh" ] && . "$HOME/.ferry/secrets/load.sh"';
 export const SECRETS_UNIT_LINE = "EnvironmentFile=-%h/.ferry/secrets/current/systemd.env";
+const STARTUP_FILES = [".profile", ".bashrc", ".bash_profile", ".bash_login", ".zprofile", ".zshrc"];
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const validName = (name: string) => NAME.test(name) && !name.startsWith("FERRY_SECRET_");
 const SCOPE = "Every process started from a shell or service that loads these variables can access them. Values are plaintext for the box user, outside the snapshot.";
@@ -161,6 +176,58 @@ async function safeRun(link: Pick<Link, "run">, command: string, options?: RunOp
   throw new FerryError("box-command-failed", "The secrets command failed on the box. No values were reported.");
 }
 
+/** Only this explicit command edits a selected startup file. Its content stays on the box. */
+export async function runSecretsShellInstall(
+  input: SecretsShellInstallInput,
+  overrides: Partial<SecretsShellInstallDependencies> = {},
+): Promise<SecretsShellInstallResult | null> {
+  const dependencies: SecretsShellInstallDependencies = {
+    readConfig, createLink: (options) => new Link(options),
+    confirm: async (message) => (await prompts.confirm({ message })) === true,
+    writeLine: console.log, ...overrides,
+  };
+  if (!STARTUP_FILES.includes(input.file)) throw new FerryError("usage", `Select --file with one startup filename: ${STARTUP_FILES.join(", ")}.`);
+  const config = dependencies.readConfig();
+  if (!config) throw new FerryError("config-missing", "Ferry has no config. Run ferry init first.");
+  const box = resolveTargetBox(config, input.box);
+  const question = `${SCOPE} Prepend the loader line to ~/${input.file} on box ${box.name}, creating that file if absent?`;
+  dependencies.writeLine(question);
+  if ([".bash_profile", ".bash_login"].includes(input.file)) {
+    dependencies.writeLine("Creating ~/.bash_profile or ~/.bash_login can stop bash from reading ~/.profile.");
+  }
+  if (!input.yes) {
+    if (input.json) throw confirmationRequired(question);
+    if (!await dependencies.confirm(question)) return null;
+  }
+  const link = dependencies.createLink(resolveLinkOptions(box.host));
+  const lock = dependencies.lockBox?.(box);
+  if (lock !== undefined && typeof lock !== "function") {
+    const { boxLockError } = await import("./sync.ts");
+    throw boxLockError(lock);
+  }
+  try {
+    const state = (await safeRun(link, [
+      "set -e; set +x; umask 077",
+      `profile="$HOME"/${quoteShell(input.file)}`,
+      'if [ -L "$profile" ]; then echo symlink; exit 0; fi',
+      'if [ -e "$profile" ] && [ ! -f "$profile" ]; then echo not-file; exit 0; fi',
+      `if [ -f "$profile" ] && grep -qxF ${quoteShell(SECRETS_LOAD_LINE)} "$profile"; then echo unchanged; exit 0; fi`,
+      'tmp=$(mktemp "$HOME/.ferry-shell.XXXXXX")',
+      'trap \'rm -f "$tmp"\' EXIT',
+      'if [ -f "$profile" ]; then cp -p "$profile" "$tmp"; fi',
+      `{ printf '%s\\n' ${quoteShell(SECRETS_LOAD_LINE)}; if [ -f "$profile" ]; then cat "$profile"; fi; } > "$tmp"`,
+      'mv -f "$tmp" "$profile"',
+      'echo changed',
+    ].join("\n"))).trim();
+    if (state === "symlink") throw new FerryError("refused", `Ferry refuses ~/${input.file} on box ${box.name} because it is a symbolic link. Add the loading line through your dotfile manager.`);
+    if (state === "not-file") throw new FerryError("refused", `Ferry refuses ~/${input.file} on box ${box.name} because it is not a regular file.`);
+    if (state !== "changed" && state !== "unchanged") throw new FerryError("box-command-failed", `Ferry could not install shell loading in ~/${input.file} on box ${box.name}. No file content was reported.`);
+    return { box: box.name, file: input.file, changed: state === "changed", steps: [
+      "Open a new shell session that reads this file and start the agent from that environment. Existing shells, agents, and daemons keep their old environment.",
+    ] };
+  } finally { if (typeof lock === "function") lock(); }
+}
+
 export async function runSecrets(input: SecretsInput, overrides: Partial<SecretsDependencies> = {}): Promise<SecretsResult | null> {
   const dependencies: SecretsDependencies = {
     readConfig, createLink: (options) => new Link(options), env: process.env,
@@ -231,7 +298,7 @@ export async function runSecrets(input: SecretsInput, overrides: Partial<Secrets
     const secrets = parseSecretsStatus(await safeRun(link, SECRETS_STATUS_COMMAND));
     const steps = input.action === "status" ? [] : [
       ...(input.action === "set" ? [
-        "Ferry writes the loader but does not edit shell startup files. To load variables in new shells, add this exact line to your own startup file on the box:",
+        "Provisioning writes the loader but does not edit shell startup files. To configure loading explicitly, run ferry secrets shell install --file <name> for a selected startup file on this box, or add this exact line yourself:",
         SECRETS_LOAD_LINE,
         "Use ~/.profile for sh/dash login; interactive non-login sh/dash use the file selected by ENV, if set. For bash login use the first existing ~/.bash_profile, ~/.bash_login, or ~/.profile, and use ~/.bashrc for interactive non-login shells. Use ~/.zprofile for zsh login and ~/.zshrc for interactive shells, under ZDOTDIR if set. Put the line before an early return.",
       ] : []),
