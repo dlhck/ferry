@@ -80,6 +80,8 @@ const expectedMetadata = {
           "includeCoAuthoredBy",
           "model",
           "alwaysThinkingEnabled",
+          "autoCompactWindow",
+          "modelSettings",
         ],
       },
     },

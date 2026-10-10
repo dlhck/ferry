@@ -214,6 +214,50 @@ describe("mergeBoxSettings", () => {
     });
   });
 
+  jqTest("replaces Claude model preferences and removes them when the operator drops them", async () => {
+    const home = makeRoot();
+    const path = join(home, ".claude", "settings.json");
+    write(path, JSON.stringify({
+      outputStyle: "Explanatory",
+      autoCompactWindow: 100000,
+      modelSettings: {
+        "claude-opus-5-5": { effortLevel: "low", maxEffortLevel: "high", autoCompactWindow: 200000 },
+        "claude-sonnet-5-5": { effortLevel: "low" },
+      },
+    }));
+    const link = new ShellLink();
+    const preferences = {
+      autoCompactWindow: 500000,
+      modelSettings: {
+        "claude-opus-5-5": { effortLevel: "high", autoCompactWindow: 750000 },
+      },
+    };
+
+    for (const autoCompactWindow of [500000, "auto"]) {
+      await mergeBoxSettings({
+        remoteHome: home,
+        harnesses: BUILTIN_HARNESSES,
+        settings: carried({ ...preferences, autoCompactWindow }),
+        link,
+      });
+
+      expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
+        outputStyle: "Explanatory",
+        autoCompactWindow,
+        modelSettings: preferences.modelSettings,
+      });
+    }
+
+    await mergeBoxSettings({
+      remoteHome: home,
+      harnesses: BUILTIN_HARNESSES,
+      settings: carried({}),
+      link,
+    });
+
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ outputStyle: "Explanatory" });
+  });
+
   test("creates a missing box settings file that only the owner can read", async () => {
     const home = makeRoot();
     const path = join(home, ".claude", "settings.json");
