@@ -118,6 +118,7 @@ import {
 } from "./revert.ts";
 import { runSkillsAdd, SkillsAddError, type RunProcess } from "./skills-add.ts";
 import { runCp } from "./cp.ts";
+import { runSecrets, runSecretsShellInstall, SECRETS_LOAD_LINE } from "./secrets.ts";
 import { runMove, type MoveDependencies, type MoveInput, type MoveResult } from "./move.ts";
 import {
   runAdoptFromBox,
@@ -171,6 +172,8 @@ type CliDependencies = {
   readonly runHistory?: typeof runHistory;
   readonly runRevert?: (input: RevertInput, dependencies?: RevertDependencies) => Promise<RevertResult>;
   readonly runCp?: typeof runCp;
+  readonly runSecrets?: typeof runSecrets;
+  readonly runSecretsShellInstall?: typeof runSecretsShellInstall;
   readonly runMove?: (input: MoveInput, dependencies?: Partial<MoveDependencies>) => Promise<MoveResult | null>;
   readonly runAdoptFromBox?: (
     input: AdoptFromBoxInput,
@@ -296,6 +299,10 @@ const JSON_RESULTS: Record<string, string> = {
   revert:
     "{ dryRun, commit, subject, tip, paths, settings: [{ file, keys }], sync }. sync is the sync result, or null with --dry-run or --no-sync",
   cp: "{ box, source, destination, sha256 }",
+  "secrets set": "{ box, secrets: { present, names }, steps }, or null when cancelled. Never values or hashes",
+  "secrets remove": "{ box, secrets: { present, names }, steps }, or null when cancelled",
+  "secrets status": "{ box, secrets: { present, names }, steps }",
+  "secrets shell install": "{ box, file, changed, steps }, or null when cancelled. Never startup file content or secret values",
   move: "{ path, source, destination, dryRun, git, carry, refused, skipped, notes, trash, sessions }",
   adopt: "{ box, name, source, destination, replaces, files: [{ path, executable }], skipped, diff, adopted, boxBackup }, or null when cancelled",
   tunnel:
@@ -961,6 +968,130 @@ Git state, agent sessions, and project memory do not take part in this copy.`)
       report(result, (result) => writeLine(`Copied ${result.source} to ${result.destination}. SHA-256 verified.`));
     });
   boxCommands.add(cp);
+
+  const secrets = program.command("secrets")
+    .summary("Provision selected environment variables on one box outside the snapshot")
+    .description(`Provision selected environment variables on one box outside the snapshot.
+
+Every process started from a shell or service that loads these variables
+can access them. Values are plaintext for the box user in ~/.ferry/secrets,
+with directory mode 700 and file mode 600. Transfer uses SSH stdin.
+Normal sync never transfers these values. Paseo is optional.
+
+Provisioning writes ~/.ferry/secrets/load.sh and does not edit startup files.
+To opt in, run ferry secrets shell install --file <name> for one selected
+startup file, or add this exact line yourself on the box:
+${SECRETS_LOAD_LINE}
+Use ~/.profile for sh/dash login. Interactive non-login sh/dash use the
+file selected by ENV, if set. For bash login use the first existing
+~/.bash_profile, ~/.bash_login, or ~/.profile; use ~/.bashrc for interactive
+non-login shells. Use ~/.zprofile for zsh login and ~/.zshrc for interactive
+shells, under ZDOTDIR if set. Put the line before an early return.
+Non-interactive paths that bypass startup files need explicit integration.
+New shells load updates after you configure loading. Start agents there.
+Paseo needs an explicit service restart, which stops active agents.`);
+  for (const action of ["set", "remove", "status"] as const) {
+    const command = secrets.command(action).summary(action === "set"
+      ? "Transfer explicitly selected variables from the environment, a file, or hidden prompts"
+      : action === "remove" ? "Remove selected variables without revoking keys or clearing running processes"
+      : "Show stored names and file presence, never values or hashes");
+    if (action !== "status") command.argument("<names...>", "portable environment variable names")
+      .option("--yes", "authorize box-user environment scope without a confirmation prompt");
+    if (action === "set") command
+      .description(`Transfer selected names only. The default source is the operator environment.
+--file reads literal NAME=value lines, with no shell evaluation, expansion,
+or quote removal. --prompt reads each value with hidden input and requires
+a terminal. --file and --prompt cannot be combined. Do not put values in argv.
+
+Existing entries stay unless --replace authorizes replacement. Unrelated
+entries stay. Names use letters, digits, and underscores, with no initial
+digit. FERRY_SECRET_ is reserved. Values cannot contain line breaks, NUL,
+other control characters except tab, or invalid UTF-8.
+
+Every process started from a shell or service that loads these variables
+can access them. --yes accepts this scope. Values are plaintext on the box.
+Provisioning writes ~/.ferry/secrets/load.sh and does not edit startup files.
+To opt in, run ferry secrets shell install --file <name> for one selected
+startup file, or add this exact line yourself on the box:
+${SECRETS_LOAD_LINE}
+Use ~/.profile for sh/dash login; interactive non-login sh/dash use ENV.
+For bash login use the first existing ~/.bash_profile, ~/.bash_login, or
+~/.profile, and use ~/.bashrc for interactive non-login shells. Use
+~/.zprofile for zsh login and ~/.zshrc for interactive shells, under ZDOTDIR
+if set. Put the line before an early return.
+After you configure loading, open a new shell and start new agents. Restart Paseo explicitly
+to load its new environment; the restart stops active agents.`)
+      .option("--file <path>", "read selected names from a literal NAME=value file")
+      .option("--prompt", "read selected values with hidden terminal input")
+      .option("--replace", "authorize replacing existing selected values");
+    command.action(async (...args: unknown[]) => {
+      const names = action === "status" ? [] : args[0] as string[];
+      const options = (action === "status" ? args[0] : args[1]) as { file?: string; prompt?: boolean; replace?: boolean; yes?: boolean };
+      const [box, ...others] = boxNames();
+      if (others.length > 0) throw new FerryError("usage", "ferry secrets selects one box. Give --box once.");
+      const result = await (dependencies.runSecrets ?? runSecrets)(
+        { action, names, box, file: options.file, prompt: options.prompt, replace: options.replace, yes: options.yes, json: json() },
+        { readConfig: config, createLink, writeLine,
+          lockBox: boxLocker((dependencies.home ?? homedir)(), config, `secrets ${action}`),
+          ...(dependencies.confirm ? { confirm: async (message) => (await dependencies.confirm!(message)) === true } : {}),
+        },
+      );
+      report(result, (value) => {
+        if (value === null) { writeLine("Cancelled."); return; }
+        writeLine(`Box ${value.box} secrets: ${value.secrets.present ? "present" : "absent"}. Names: ${value.secrets.names.join(", ") || "none"}.`);
+        for (const step of value.steps) writeLine(step);
+      });
+    });
+    boxCommands.add(command);
+  }
+
+  const secretsShellInstall = secrets.command("shell")
+    .summary("Configure explicit shell loading of box-local secrets")
+    .command("install")
+    .summary("Add the loader line to one selected startup file on one box")
+    .description(`Add the guarded loader line once, before the existing content of one
+selected startup file on the box. Other content and file permissions stay.
+An absent selected file is created with mode 600. Symbolic links and other
+non-regular files are refused; use your dotfile manager for a symlink.
+
+Select one filename relative to the box home: .profile, .bashrc,
+.bash_profile, .bash_login, .zprofile, or .zshrc. There is no default.
+Use .profile for sh/dash login. For bash login select the first existing
+readable file of .bash_profile, .bash_login, or .profile; use .bashrc for
+interactive non-login shells. Creating bash login override files can stop
+bash from reading .profile. Use .zprofile for zsh login and .zshrc for
+interactive shells with default ZDOTDIR. Custom ZDOTDIR and ENV files need
+the loading line added by the user.
+
+The installed line is:
+${SECRETS_LOAD_LINE}
+A missing loader permits shell startup. Install does not transfer values
+or create the loader; ferry secrets set writes it. Every process started
+from a shell that loads these variables can access them.
+
+Only this explicit command edits startup files for secrets. Provisioning,
+removal, sync, update, and uninstall leave this line alone. After install,
+open a new shell session that reads the selected file and start agents there.
+Existing processes keep their old environment. No service restarts occur.`)
+    .requiredOption("--file <name>", "select one startup filename on the box, relative to its home")
+    .option("--yes", "authorize editing the selected file and the box-user environment scope")
+    .action(async (options: { file: string; yes?: boolean }) => {
+      const [box, ...others] = boxNames();
+      if (others.length > 0) throw new FerryError("usage", "ferry secrets shell install selects one box. Give --box once.");
+      const result = await (dependencies.runSecretsShellInstall ?? runSecretsShellInstall)(
+        { file: options.file, box, yes: options.yes, json: json() },
+        { readConfig: config, createLink, writeLine,
+          lockBox: boxLocker((dependencies.home ?? homedir)(), config, "secrets shell install"),
+          ...(dependencies.confirm ? { confirm: async (message) => (await dependencies.confirm!(message)) === true } : {}),
+        },
+      );
+      report(result, (value) => {
+        if (value === null) { writeLine("Cancelled."); return; }
+        writeLine(`Box ${value.box}: ${value.changed ? "installed the loader line in" : "loader line already present in"} ~/${value.file}.`);
+        for (const step of value.steps) writeLine(step);
+      });
+    });
+  boxCommands.add(secretsShellInstall);
 
   program
     .command("adopt")

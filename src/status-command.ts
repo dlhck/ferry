@@ -9,6 +9,7 @@ import {
   type McpLoginStatus,
 } from "./auth-start.ts";
 import { boxFerryStatus } from "./box-ferry.ts";
+import { parseSecretsStatus, SECRETS_STATUS_COMMAND } from "./secrets.ts";
 import { checkBoxMcp } from "./box-mcp.ts";
 import { BOX_RESOURCES_COMMAND, DEFAULT_RESOURCE_LIMITS, parseBoxResources, type BoxResources } from "./box-resources.ts";
 import { BOX_SNAPSHOT_KEY, resolveBoxes, type ResolvedBox } from "./boxes.ts";
@@ -223,6 +224,13 @@ function boxDependencies(
       ],
     },
     boxSkills: { list: () => listBoxSkills(link, registry.harnesses) },
+    secrets: {
+      async read() {
+        const result = await link.run(SECRETS_STATUS_COMMAND);
+        if (!result.ok) throw new Error("Ferry could not read box secret names.");
+        return parseSecretsStatus(result.stdout);
+      },
+    },
     resources: {
       read: () => resources,
       limits: { ...DEFAULT_RESOURCE_LIMITS, ...config.status },
@@ -309,6 +317,8 @@ function boxLines(box: BoxStatus, operator: GitIdentity | null): string[] {
     managedPaths(box),
     ...box.managedPaths.unhealthy.map((action) => `  - ${managedPath(action)}`),
     ...boxSkillLines(box),
+    ...(box.secrets === undefined ? [] : ["", box.secrets === null ? "Secrets: unavailable" :
+      `Secrets: ${box.secrets.present ? "present" : "absent"}; names: ${box.secrets.names.join(", ") || "none"}`]),
     ...toolLines(box.tools),
     "",
     "Authentication:",

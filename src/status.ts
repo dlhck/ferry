@@ -13,6 +13,7 @@ import { groupProgress, noProgress, plural, step, type Progress } from "./progre
 import type { TipReport } from "./store.ts";
 import { changedPaths } from "./sync.ts";
 import type { ToolStatus } from "./tools/check.ts";
+import type { SecretsStatus } from "./secrets.ts";
 
 export type StatusDependencyError = {
   readonly code: "inspection-failed";
@@ -62,6 +63,7 @@ export type BoxStatusDependencies = {
   readonly boxSkills?: {
     list(): Promise<readonly BoxSkill[]>;
   };
+  readonly secrets?: { read(): Promise<SecretsStatus> };
   /** The disk, memory, and load that the probe read, and the limits. Only the brief check reads them. */
   readonly resources?: {
     read(): BoxResources | null;
@@ -158,6 +160,8 @@ export type BoxStatus = {
     readonly skills: readonly BoxSkill[] | null;
     readonly error: StatusDependencyError | null;
   };
+  /** Box-local file presence and names only, or null when the inspection failed. */
+  readonly secrets?: SecretsStatus | null;
   /** Present only when at least one integration is enabled for this box. */
   readonly integrations?: Readonly<Partial<Record<IntegrationId, IntegrationStatus>>>;
   /** The errors of this box. */
@@ -522,7 +526,7 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
       operatorIntegrations.length +
       dependencies.boxes.reduce(
         (total, box) =>
-          total + BOX_STEPS + (box.tools ? 1 : 0) + (box.boxSkills ? 1 : 0) + (box.integrations?.length ?? 0),
+          total + BOX_STEPS + (box.tools ? 1 : 0) + (box.boxSkills ? 1 : 0) + (box.secrets ? 1 : 0) + (box.integrations?.length ?? 0),
         0,
       ),
   );
@@ -695,6 +699,13 @@ async function composeBoxStatus(
   }
 
   const operatorIdentity = shared.operatorIdentity;
+  let secrets: SecretsStatus | null = null;
+  if (dependencies.secrets) {
+    if (online) {
+      try { secrets = await step(progress, "Reading box secret names", () => dependencies.secrets!.read()); }
+      catch { errors.push({ code: "inspection-failed", origin: "box", message: "Ferry could not read box secret names." }); }
+    } else progress.skip("Reading box secret names", OFFLINE);
+  }
   const boxConfigured = boxIdentity && boxIdentity.name !== null && boxIdentity.email !== null;
   const matchesOperator =
     boxIdentity && operatorIdentity
@@ -816,6 +827,7 @@ async function composeBoxStatus(
     name: dependencies.name,
     host: dependencies.host,
     gitAuth: dependencies.gitAuth,
+    ...(dependencies.secrets ? { secrets } : {}),
     link: { online, address, error: linkError },
     tip: boxTip,
     remoteMatchesBox,
