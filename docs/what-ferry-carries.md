@@ -32,12 +32,13 @@ Ferry never carries a whole settings file. It carries these keys, and the box me
 
 | Agent | File | Keys |
 | --- | --- | --- |
-| Claude Code | `~/.claude/settings.json` | `enabledPlugins`, `extraKnownMarketplaces`, `permissions`, `hooks`, `attribution`, `includeCoAuthoredBy`, `model`, `alwaysThinkingEnabled` |
+| Claude Code | `~/.claude/settings.json` | `enabledPlugins`, `extraKnownMarketplaces`, `permissions`, `hooks`, `attribution`, `includeCoAuthoredBy`, `model`, `alwaysThinkingEnabled`, `autoCompactWindow`, `modelSettings` |
 | Codex | `~/.codex/config.toml` | `model`, `model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`, `features`, `web_search` |
 | Pi | `~/.pi/agent/settings.json` | `defaultProvider`, `defaultModel`, `defaultThinkingLevel`, `enabledModels`, `thinkingBudgets`, `enableSkillCommands` |
 | Cursor Agent | `~/.cursor/cli-config.json` | `model`, `maxMode`, `hasChangedDefaultModel`, `attribution` |
 
 - Sync replaces the carried keys on the box. A key that the operator machine does not have is removed from the box. The box keeps its other keys.
+- Sync replaces the whole Claude `modelSettings` object with the operator's object. This replaces per-model effort levels and auto-compact windows saved on the box with `/effort` or `/autocompact`.
 - Keys that can hold secrets, commands, or local paths stay on the operator machine. Examples are `env` and `apiKeyHelper` of Claude Code, and the providers, profiles, `notify`, and project trust of Codex.
 - When a carried Codex key changes, sync writes `config.toml` again, and the comments in that file are lost.
 - The box installs the Claude plugins of `enabledPlugins`. If a plugin comes from a marketplace that `extraKnownMarketplaces` does not list, run `claude plugin marketplace add` for it once on the operator machine.

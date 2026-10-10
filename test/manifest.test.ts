@@ -977,6 +977,10 @@ describe("carried Claude settings keys", () => {
     attribution: { commit: "", pr: "" },
     model: "opus",
     alwaysThinkingEnabled: true,
+    autoCompactWindow: 500000,
+    modelSettings: {
+      "claude-opus-5-5": { effortLevel: "high", maxEffortLevel: "max", autoCompactWindow: 750000 },
+    },
     enabledPlugins: { "review@team": true, "old@team": false },
     extraKnownMarketplaces: {
       team: { source: { source: "github", repo: "example/claude-plugins" } },
@@ -997,6 +1001,8 @@ describe("carried Claude settings keys", () => {
       attribution: settings.attribution,
       model: settings.model,
       alwaysThinkingEnabled: settings.alwaysThinkingEnabled,
+      autoCompactWindow: settings.autoCompactWindow,
+      modelSettings: settings.modelSettings,
     });
     const text = Buffer.from(seed.settings[0]?.bytes ?? []).toString();
     for (const secret of ["env", "env-secret-value", "apiKeyHelper", "print-key", "status-line"]) {

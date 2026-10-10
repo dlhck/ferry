@@ -124,6 +124,8 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
         "includeCoAuthoredBy",
         "model",
         "alwaysThinkingEnabled",
+        "autoCompactWindow",
+        "modelSettings",
       ],
     },
     // The same file holds account and OAuth state. Only mcpServers is read.
