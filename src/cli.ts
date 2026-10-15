@@ -143,6 +143,7 @@ import {
 import { isReleaseVersion, VERSION } from "./version.ts";
 import { redactTokens, redactUrlCredentials } from "./manifest.ts";
 import { packLines, parseScanRequest, redactPackLine, runScan } from "./scan.ts";
+import { writeStdout } from "./stdout.ts";
 import { offerSelfUpdate, offersSelfUpdate, runSelfUpdate, type SelfUpdateDependencies } from "./self-update.ts";
 
 const DESCRIPTION = `Ferry keeps a remote Linux agent box in the same shape as this machine.
@@ -356,6 +357,7 @@ function createProgram(dependencies: CliDependencies): { program: Command; state
   const program = new Command();
   const json = () => program.opts<{ json?: boolean }>().json === true;
   const writeOut = (line: string) => (dependencies.writeLine ?? console.log)(line);
+  const writeBoxLine = (line: string) => (dependencies.writeLine ?? ((text: string) => writeStdout(`${text}\n`)))(line);
   const writeError = (line: string) => (dependencies.writeError ?? ((text: string) => process.stderr.write(`${text}\n`)))(line);
   /** The text lines of a command. With --json, stdout carries only JSON, so they go to stderr. */
   const writeLine = (line: string) => (json() ? writeError : writeOut)(line);
@@ -1567,11 +1569,11 @@ of Ferry on the box.`)
       const request = parseScanRequest(await (dependencies.readStdin ?? (() => Bun.stdin.text()))());
       const home = (dependencies.home ?? homedir)();
       // A pack is one JSON line for each part, so that one file is in memory at a time.
-      if (request.pack) for (const line of packLines(request, home)) writeOut(line);
+      if (request.pack) for (const line of packLines(request, home)) await writeBoxLine(line);
       else {
         // The result leaves this machine. A name that no rule took out gets the mark of the token filter.
         const result = runScan(request, home);
-        writeOut(redactPackLine(JSON.stringify(json() ? successEnvelope(active ?? "scan", result, warnings) : result)));
+        await writeBoxLine(redactPackLine(JSON.stringify(json() ? successEnvelope(active ?? "scan", result, warnings) : result)));
       }
     });
 
@@ -1581,7 +1583,7 @@ of Ferry on the box.`)
     .description("Copy stdin to stdout with [token] in the place of each token and [credential] in the place of each credential in a URL")
     .action(async () => {
       const text = redactUrlCredentials(redactTokens(await (dependencies.readStdin ?? (() => Bun.stdin.text()))()));
-      (dependencies.writeText ?? ((value: string) => void process.stdout.write(value)))(text);
+      await (dependencies.writeText ?? writeStdout)(text);
     });
 
   // self-update runs this command of the new Ferry, because only the new binary has the new skill.
