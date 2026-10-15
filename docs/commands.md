@@ -22,6 +22,12 @@ The `ferry sherlock` commands exist only when the Sherlock integration is on and
   - [`ferry revert`](#ferry-revert)
   - [`ferry move`](#ferry-move)
   - [`ferry cp`](#ferry-cp)
+  - [`ferry secrets`](#ferry-secrets)
+    - [`ferry secrets set`](#ferry-secrets-set)
+    - [`ferry secrets remove`](#ferry-secrets-remove)
+    - [`ferry secrets status`](#ferry-secrets-status)
+    - [`ferry secrets shell`](#ferry-secrets-shell)
+      - [`ferry secrets shell install`](#ferry-secrets-shell-install)
   - [`ferry adopt`](#ferry-adopt)
   - [`ferry tunnel`](#ferry-tunnel)
     - [`ferry tunnel install`](#ferry-tunnel-install)
@@ -98,6 +104,8 @@ Commands:
                                        box with both
   cp [options] <source> <destination>  Copy one checked file between this
                                        machine and a box
+  secrets                              Provision selected environment variables
+                                       on one box outside the snapshot
   adopt [options] <skill>              Copy a skill that an agent wrote on a box
                                        to this machine
   tunnel [options] [ports...]          Open box ports on this machine until
@@ -530,6 +538,168 @@ Options:
   -h, --help   display help for command
 
 With --json: { box, source, destination, sha256 }.
+```
+
+## ferry secrets
+
+```text
+Usage: ferry secrets [options] [command]
+
+Provision selected environment variables on one box outside the snapshot.
+
+Every process started from a shell or service that loads these variables
+can access them. Values are plaintext for the box user in ~/.ferry/secrets,
+with directory mode 700 and file mode 600. Transfer uses SSH stdin.
+Normal sync never transfers these values. Paseo is optional.
+
+Provisioning writes ~/.ferry/secrets/load.sh and does not edit startup files.
+To opt in, run ferry secrets shell install --file <name> for one selected
+startup file, or add this exact line yourself on the box:
+[ -r "$HOME/.ferry/secrets/load.sh" ] && . "$HOME/.ferry/secrets/load.sh"
+Use ~/.profile for sh/dash login. Interactive non-login sh/dash use the
+file selected by ENV, if set. For bash login use the first existing
+~/.bash_profile, ~/.bash_login, or ~/.profile; use ~/.bashrc for interactive
+non-login shells. Use ~/.zprofile for zsh login and ~/.zshrc for interactive
+shells, under ZDOTDIR if set. Put the line before an early return.
+Non-interactive paths that bypass startup files need explicit integration.
+New shells load updates after you configure loading. Start agents there.
+Paseo needs an explicit service restart, which stops active agents.
+
+Options:
+  -h, --help                   display help for command
+
+Commands:
+  set [options] <names...>     Transfer explicitly selected variables from the
+                               environment, a file, or hidden prompts
+  remove [options] <names...>  Remove selected variables without revoking keys
+                               or clearing running processes
+  status                       Show stored names and file presence, never values
+                               or hashes
+  shell                        Configure explicit shell loading of box-local
+                               secrets
+  help [command]               display help for command
+```
+
+### ferry secrets set
+
+```text
+Usage: ferry secrets set [options] <names...>
+
+Transfer selected names only. The default source is the operator environment.
+--file reads literal NAME=value lines, with no shell evaluation, expansion,
+or quote removal. --prompt reads each value with hidden input and requires
+a terminal. --file and --prompt cannot be combined. Do not put values in argv.
+
+Existing entries stay unless --replace authorizes replacement. Unrelated
+entries stay. Names use letters, digits, and underscores, with no initial
+digit. FERRY_SECRET_ is reserved. Values cannot contain line breaks, NUL,
+other control characters except tab, or invalid UTF-8.
+
+Every process started from a shell or service that loads these variables
+can access them. --yes accepts this scope. Values are plaintext on the box.
+Provisioning writes ~/.ferry/secrets/load.sh and does not edit startup files.
+To opt in, run ferry secrets shell install --file <name> for one selected
+startup file, or add this exact line yourself on the box:
+[ -r "$HOME/.ferry/secrets/load.sh" ] && . "$HOME/.ferry/secrets/load.sh"
+Use ~/.profile for sh/dash login; interactive non-login sh/dash use ENV.
+For bash login use the first existing ~/.bash_profile, ~/.bash_login, or
+~/.profile, and use ~/.bashrc for interactive non-login shells. Use
+~/.zprofile for zsh login and ~/.zshrc for interactive shells, under ZDOTDIR
+if set. Put the line before an early return.
+After you configure loading, open a new shell and start new agents. Restart
+Paseo explicitly
+to load its new environment; the restart stops active agents.
+
+Arguments:
+  names          portable environment variable names
+
+Options:
+  --yes          authorize box-user environment scope without a confirmation
+                 prompt
+  --file <path>  read selected names from a literal NAME=value file
+  --prompt       read selected values with hidden terminal input
+  --replace      authorize replacing existing selected values
+  -h, --help     display help for command
+
+With --json: { box, secrets: { present, names }, steps }, or null when cancelled. Never values or hashes.
+```
+
+### ferry secrets remove
+
+```text
+Usage: ferry secrets remove [options] <names...>
+
+Arguments:
+  names       portable environment variable names
+
+Options:
+  --yes       authorize box-user environment scope without a confirmation prompt
+  -h, --help  display help for command
+
+With --json: { box, secrets: { present, names }, steps }, or null when cancelled.
+```
+
+### ferry secrets status
+
+```text
+Usage: ferry secrets status [options]
+
+Options:
+  -h, --help  display help for command
+
+With --json: { box, secrets: { present, names }, steps }.
+```
+
+### ferry secrets shell
+
+```text
+Usage: ferry secrets shell [options] [command]
+
+Options:
+  -h, --help         display help for command
+
+Commands:
+  install [options]  Add the loader line to one selected startup file on one box
+  help [command]     display help for command
+```
+
+### ferry secrets shell install
+
+```text
+Usage: ferry secrets shell install [options]
+
+Add the guarded loader line once, before the existing content of one
+selected startup file on the box. Other content and file permissions stay.
+An absent selected file is created with mode 600. Symbolic links and other
+non-regular files are refused; use your dotfile manager for a symlink.
+
+Select one filename relative to the box home: .profile, .bashrc,
+.bash_profile, .bash_login, .zprofile, or .zshrc. There is no default.
+Use .profile for sh/dash login. For bash login select the first existing
+readable file of .bash_profile, .bash_login, or .profile; use .bashrc for
+interactive non-login shells. Creating bash login override files can stop
+bash from reading .profile. Use .zprofile for zsh login and .zshrc for
+interactive shells with default ZDOTDIR. Custom ZDOTDIR and ENV files need
+the loading line added by the user.
+
+The installed line is:
+[ -r "$HOME/.ferry/secrets/load.sh" ] && . "$HOME/.ferry/secrets/load.sh"
+A missing loader permits shell startup. Install does not transfer values
+or create the loader; ferry secrets set writes it. Every process started
+from a shell that loads these variables can access them.
+
+Only this explicit command edits startup files for secrets. Provisioning,
+removal, sync, update, and uninstall leave this line alone. After install,
+open a new shell session that reads the selected file and start agents there.
+Existing processes keep their old environment. No service restarts occur.
+
+Options:
+  --file <name>  select one startup filename on the box, relative to its home
+  --yes          authorize editing the selected file and the box-user
+                 environment scope
+  -h, --help     display help for command
+
+With --json: { box, file, changed, steps }, or null when cancelled. Never startup file content or secret values.
 ```
 
 ## ferry adopt

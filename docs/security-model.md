@@ -5,11 +5,19 @@ description: The rules that keep credentials on the machine that has them, and t
 
 # Security model
 
-Ferry carries configuration. It does not carry anything that proves who you are. The rule is: no credential leaves the machine that has it.
+Normal Ferry sync carries configuration and excludes credentials. An explicit `ferry secrets set` command is an exception. It transfers selected environment variables from the operator machine to one selected box, outside the Git snapshot.
 
-## What never leaves a machine
+## What normal sync excludes
 
-Logins, credential files, tokens, API keys, `.env` files, and whole settings files never leave the machine that has them. A login starts on the box with `ferry auth`, and its token stays there.
+Normal sync excludes logins, credential files, tokens, API keys, `.env` files, and whole settings files. A login starts on the box with `ferry auth`, and its token stays there.
+
+## Explicit secret transfer
+
+`ferry secrets set` reads only selected names from the operator environment, an explicit literal file, or hidden prompt input. It sends values directly over SSH standard input, never through the snapshot or command arguments. Status, plans, logs, JSON results, and errors show no values or value hashes. Replacement requires `--replace`; unrelated entries stay.
+
+Before transfer, Ferry explains that every process started from a shell or service that loads the variables can access them. This is a box-user environment with no project isolation. Values are plaintext accessible to the box user in `~/.ferry/secrets`, with directory mode `700` and data file mode `600`. An atomic pointer update selects the literal shell data and separately escaped systemd data together. The shell loader reads and exports values without evaluating them as code. Paseo is optional, and a missing secrets file permits a shell or its service to start.
+
+Shell loading requires an explicit opt-in. `ferry secrets shell install --file <name>` adds the guarded loader line to one selected startup file on one box, after confirmation or `--yes`. It preserves unrelated content and file permissions, refuses symlinks, and reports no startup file content. Users can instead add the documented line through their dotfile manager. Provisioning, removal, status, sync, update, and uninstall do not read or change startup files for secrets. After the opt-in, new shell sessions load updates. Existing processes keep their environment. Paseo needs an explicit restart, which stops active agents. Removal does not revoke a key at its issuer or clear a running process environment. Ferry does not stop a CLI or agent from printing its own environment. Native login sessions and credential stores are outside this feature. See [Box-local secrets](box-secrets.md) for supported startup modes, limits, and commands.
 
 ## Deny rules
 
@@ -102,7 +110,7 @@ A credential in the origin URL of a project stays on its machine. `ferry move` t
 
 ## The limit of the rule
 
-The rule "no credential leaves the machine that has it" holds for a box that runs an honest Ferry.
+The normal sync and file-transfer deny rules depend on a box that runs an honest Ferry. Explicit `ferry secrets set` is the selected operator-to-box environment transfer exception described above.
 
 The check on the box protects against mistakes and against files that change. It does not protect against a box account that an attacker controls, because that Ferry can give any answer and any bytes. This is why the operator machine applies its own deny rules to the bytes that arrive from a box.
 
