@@ -48,6 +48,35 @@ describe("Paseo provider discovery", () => {
     expect(result.providers[0]?.command).toEqual(["muse"]);
   });
 
+  test("keeps non-empty options local and warns for built-in, custom, and plugin providers", () => {
+    const result = source({
+      pi: { options: { rpcTimeoutMs: 90000 } },
+      "custom-pi": { extends: "pi", label: "Custom Pi", options: { credential: token, path: "/home/user/private" } },
+      muse: { options: { approval_policy: "never" } },
+    });
+    expect(result.providers.map((provider) => provider.fields)).toEqual([{}, { extends: "pi", label: "Custom Pi" }, {}]);
+    for (const provider of result.providers) {
+      expect(provider.createBlocker).toBe("it has non-empty options");
+      expect(provider.command).toBeNull();
+    }
+    expect(result.warnings).toEqual(["pi", "custom-pi", "muse"].map((id) =>
+      `Paseo provider ${id} options were omitted: options stay on each host. Define the provider on the box first with its box options; Ferry syncs only its portable fields.`));
+    for (const hidden of [token, "/home/user/private", "rpcTimeoutMs", "90000", "approval_policy", "never"]) {
+      expect(JSON.stringify(result)).not.toContain(hidden);
+    }
+    expect(source({ pi: { options: {} } }).providers[0]?.createBlocker).toBeNull();
+    expect(source({ pi: { options: {} } }).warnings).toEqual([]);
+  });
+
+  test("rejects options that are not a record without showing their values", () => {
+    for (const options of [null, [], "private-option", 90000]) {
+      const message = refusal(home({ pi: { options } }));
+      expect(message).toContain("options does not match the Paseo schema");
+      expect(message).not.toContain("private-option");
+      expect(message).not.toContain("90000");
+    }
+  });
+
   test("reads only the allowlisted fields and keeps the model order", () => {
     const path = home({
       zai: {
@@ -213,6 +242,47 @@ const boxes: (() => void)[] = [];
 afterEach(() => { for (const remove of boxes.splice(0)) remove(); });
 
 describe("Paseo provider carry", () => {
+  jqTest("blocks creation with options and preserves existing box options", async () => {
+    const local = source({
+      pi: { options: { rpcTimeoutMs: 90000 } },
+      "custom-pi": { extends: "pi", label: "Custom Pi", options: { credential: token, path: "/home/user/private" } },
+      muse: { models, options: { approval_policy: "never" } },
+    });
+    const registry = [{ provider: "muse", status: "available", enabled: "Enabled" }];
+    const missing = box({}, [], registry);
+    const skipped = await carryPaseoProviders(missing.link, local);
+    expect(skipped.carried).toEqual([]);
+    expect(skipped.changed).toBe(false);
+    expect(skipped.warnings).toEqual([...local.warnings, ...local.providers.map((provider) =>
+      `Paseo provider ${provider.id} was not created on the box: it has non-empty options. Define it on the box first, then Ferry syncs its portable fields.`)]);
+    expect(missing.written()).toBeUndefined();
+    const boxOptions = { rpcTimeoutMs: 30000, sandbox: { writableRoots: ["/srv/project"] }, approval_policy: "on-request", credential: "box-only" };
+    const defined = box({ agents: { providers: {
+      pi: { options: boxOptions },
+      "custom-pi": { extends: "pi", label: "Old", options: boxOptions },
+      muse: { options: boxOptions },
+    } } }, [], registry);
+    const carried = await carryPaseoProviders(defined.link, local);
+    expect(carried.carried).toEqual(["pi", "custom-pi", "muse"]);
+    expect(carried.warnings).toEqual(local.warnings);
+    for (const id of carried.carried) expect(defined.written().agents.providers[id].options).toEqual(boxOptions);
+    expect(defined.written().agents.providers["custom-pi"].label).toBe("Custom Pi");
+    expect(defined.written().agents.providers.muse.models).toEqual(models);
+    for (const hidden of [token, "/home/user/private", "90000", "/srv/project", "box-only", "approval_policy"]) {
+      expect(JSON.stringify([skipped, carried, missing.commands, defined.commands, missing.outputs, defined.outputs])).not.toContain(hidden);
+    }
+  });
+
+  jqTest("warns about omitted plugin options even when the registry is unavailable", async () => {
+    const local = source({ muse: { options: { rpcTimeoutMs: 90000 } } });
+    const b = box({});
+    const result = await carryPaseoProviders(b.link, local);
+    expect(result.warnings).toEqual([...local.warnings,
+      "Paseo provider muse was skipped: its registered provider availability could not be verified on the box. Install and enable the provider plugin and its command on the box."]);
+    expect(result.carried).toEqual([]);
+    expect(b.written()).toBeUndefined();
+  });
+
   jqTest("creates registered plugin overrides without extends or label", async () => {
     const ids = ["muse", "antigravity", "example-plugin"];
     const b = box({}, ["muse"], ids.map((provider) => ({ provider, status: "available", enabled: "Enabled", description: token })));
@@ -477,6 +547,21 @@ test("dry runs show providers only for Paseo boxes, without values, and make no 
   expect(text).not.toContain(token);
 });
 
+test("dry runs report omitted options in text and JSON without option keys or values", async () => {
+  const lines: string[] = [];
+  const result = await runSync({ home: home({ pi: { options: { rpcTimeoutMs: 90000, privateCredential: token } } }), dryRun: true }, {
+    publisher: () => "operator", readConfig: syncConfig,
+    createLink: () => { throw new Error("must stay offline"); }, writeLine: (line) => lines.push(line),
+  });
+  const plan = result.boxes[0]?.plan.paseoProviders;
+  expect(plan?.providers).toEqual([{ id: "pi", fields: [], models: [], command: false, createBlocker: "it has non-empty options" }]);
+  expect(plan?.warnings[0]).toContain("options were omitted");
+  expect(lines.join("\n")).toContain(plan!.warnings[0]!);
+  for (const hidden of [token, "rpcTimeoutMs", "90000", "privateCredential"]) {
+    expect(JSON.stringify([result, lines])).not.toContain(hidden);
+  }
+});
+
 test("dry runs accept plugin command overrides without a label or a connection", async () => {
   const result = await runSync({ home: home({ muse: { command: ["muse"] } }), dryRun: true }, {
     publisher: () => "operator", readConfig: syncConfig,
@@ -500,7 +585,7 @@ test("sync refuses a secret in a carried provider field before it connects", asy
 });
 
 test("sync applies provider definitions before it checks provider availability for profiles and metadata preferences", async () => {
-  const path = home({ zai: { extends: "claude", label: "Z.AI", models } });
+  const path = home({ zai: { extends: "claude", label: "Z.AI", models }, pi: { options: { rpcTimeoutMs: 90000, privateCredential: token } } });
   const config = JSON.parse(readFileSync(join(path, ".paseo/config.json"), "utf8"));
   config.daemon = { agentProfiles: [{ id: "glm", name: "GLM", provider: "zai" }] };
   config.agents.metadataGeneration = { providers: [{ provider: "zai", model: "glm-4.6" }] };
@@ -519,13 +604,17 @@ test("sync applies provider definitions before it checks provider availability f
       const status = JSON.stringify({ localDaemon: "running", providers: [{ provider: "zai", available: boxConfig === "written" }] });
       return { ok: true, address: "box", stdout: command.startsWith("printf") ? "/home/user\n"
         : command.includes("paseo daemon status --json") ? status
-        : merge ? "W\n" : command.includes("$w | to_entries") ? "zai\tabsent\n" : "", stderr: "" };
+        : merge ? "W\n" : command.includes("$w | to_entries") ? "zai\tabsent\npi\tabsent\n" : "", stderr: "" };
     } }),
     apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }),
     acquireLock: () => () => {}, adopt: () => {}, writePlan: () => {}, writeLine: () => {},
     warn: (line) => warnings.push(line),
   });
   expect(result.boxes[0]?.failure).toBeUndefined();
+  expect(result.boxes[0]?.plan.paseoProviders?.warnings[0]).toContain("options were omitted");
+  expect(warnings.some((line) => line.includes("Paseo provider pi options were omitted"))).toBe(true);
+  expect(JSON.stringify([result, warnings, commands])).not.toContain(token);
+  expect(JSON.stringify([result, warnings, commands])).not.toContain("rpcTimeoutMs");
   const reload = commands.indexOf("paseo daemon reload >/dev/null 2>&1");
   const status = commands.findIndex((command) => command.includes("paseo daemon status --json"));
   expect(reload).toBeGreaterThan(-1);
