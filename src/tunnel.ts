@@ -5,7 +5,7 @@
  * `ferry expose` announces on the box.
  */
 
-import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { quoteShell } from "./box-settings.ts";
@@ -14,6 +14,7 @@ import { EXPOSED_DIR } from "./expose.ts";
 import { Link, type ControlConnection, type LinkOptions, type TunnelPort } from "./link.ts";
 import { FerryError } from "./errors.ts";
 import { errorEvent, type OutputEvent } from "./output.ts";
+import { EVENTS_DIR, eventsFilePath, mergeEvents, parseBoxEvent, type AgentEvent, type EventsFile } from "./notify.ts";
 
 export type TunnelInput = {
   /** Port specs: `[<host>:]<box>[:<local>]`. */
@@ -42,6 +43,10 @@ export type TunnelDependencies = {
   readonly writeTunnelFile: (file: TunnelFile) => void;
   /** Removes `~/.ferry/tunnels/<box>.json` when `--follow` stops. */
   readonly removeTunnelFile: (box: string) => void;
+  /** Reads `~/.ferry/tunnels/<box>.events.json`, or null when it is missing or not valid. */
+  readonly readEventsFile: (box: string) => EventsFile | null;
+  /** Writes `~/.ferry/tunnels/<box>.events.json`. The file stays when `--follow` stops, so a restart does not give an event again. */
+  readonly writeEventsFile: (file: EventsFile) => void;
 };
 
 /** The content of `~/.ferry/tunnels/<box>.json`. The menu bar app reads it. */
@@ -86,15 +91,16 @@ export const LIST_COMMAND =
 
 /**
  * The long command of `--follow` on the box. It prints the box home once, then
- * a snapshot of the live entries each time they change: one line
- * `<pid> TAB <entry JSON>` for each entry whose pid runs, then a line `.`. It
- * waits with inotifywait when the box has it, else it polls each second. The
+ * a snapshot of the live entries and the agent events each time they change:
+ * one line `<pid> TAB <entry JSON>` for each entry whose pid runs, one line
+ * `event TAB <event JSON>` for each file in `~/.ferry/events`, then a line `.`.
+ * It waits with inotifywait when the box has it, else it polls each second. The
  * wait has a limit, so an entry whose process stopped without removing its
  * file goes away too. An empty line every 30 s or so lets the command notice
  * a closed connection.
  */
 export const FOLLOW_COMMAND = [
-  `dir="$HOME/${EXPOSED_DIR}"`,
+  `dir="$HOME/${EXPOSED_DIR}"; events="$HOME/${EVENTS_DIR}"`,
   "printf 'home\\t%s\\n' \"$HOME\"",
   "last=; first=1; beat=0",
   "while :; do",
@@ -104,11 +110,16 @@ export const FOLLOW_COMMAND = [
   "    case \"$pid\" in (''|*[!0-9]*) continue ;; esac",
   "    kill -0 \"$pid\" 2>/dev/null || continue",
   "    printf '%s\\t' \"$pid\"; tr -d '\\n' < \"$f\"; echo",
+  "  done",
+  "  for f in \"$events\"/*.json; do",
+  "    [ -f \"$f\" ] || continue",
+  "    printf 'event\\t'; tr -d '\\n' < \"$f\"; echo",
   "  done)",
   "  if [ -n \"$first\" ] || [ \"$now\" != \"$last\" ]; then printf '%s\\n.\\n' \"$now\" || exit 0; last=$now; first=; beat=0; fi",
   "  beat=$((beat + 1)); if [ \"$beat\" -ge 30 ]; then echo || exit 0; beat=0; fi",
-  "  if [ -d \"$dir\" ] && command -v inotifywait >/dev/null 2>&1; then",
-  "    inotifywait -qq -t 1 -e create,delete,moved_to,close_write \"$dir\" >/dev/null 2>&1",
+  "  set --; [ -d \"$dir\" ] && set -- \"$dir\"; [ -d \"$events\" ] && set -- \"$@\" \"$events\"",
+  "  if [ $# -gt 0 ] && command -v inotifywait >/dev/null 2>&1; then",
+  "    inotifywait -qq -t 1 -e create,delete,moved_to,close_write \"$@\" >/dev/null 2>&1",
   "    [ $? -eq 1 ] && sleep 1",
   "  else",
   "    sleep 1",
@@ -259,7 +270,8 @@ async function followSession(
     (value) => {
       home = value;
     },
-    (entries) => {
+    (entries, events) => {
+      receiveEvents(boxName, events, resolved);
       queue = queue
         .then(() => reconcile(master, forwards, entries, boxName, () => home, resolved, signal))
         .then(() => {
@@ -278,6 +290,14 @@ async function followSession(
   }
   await master.closed;
   return { connected: true, reason: ended.ok ? "the SSH connection ended" : ended.error.message };
+}
+
+/** Add the new events of a snapshot to the events file of the box. */
+function receiveEvents(boxName: string, events: readonly AgentEvent[], resolved: TunnelDependencies): void {
+  if (events.length === 0) return;
+  const now = new Date().toISOString();
+  const merged = mergeEvents(resolved.readEventsFile(boxName)?.events ?? [], events, now);
+  if (merged !== null) resolved.writeEventsFile({ schemaVersion: 1, box: boxName, updatedAt: now, events: merged });
 }
 
 /** Open and close forwards so they match the entries. Each change prints one line. */
@@ -363,23 +383,25 @@ export async function pickLocalPort(
 
 /**
  * A reader for the output of FOLLOW_COMMAND. It gets text chunks, and calls
- * `onHome` for the home line and `onSnapshot` with the entries of each
- * snapshot. A line that is not a valid entry is ignored.
+ * `onHome` for the home line and `onSnapshot` with the entries and the agent
+ * events of each snapshot. A line that is not a valid entry or event is ignored.
  */
 export function snapshotReader(
   onHome: (home: string) => void,
-  onSnapshot: (entries: FollowEntry[]) => void,
+  onSnapshot: (entries: FollowEntry[], events: AgentEvent[]) => void,
 ): (text: string) => void {
   let buffer = "";
   let entries: FollowEntry[] = [];
+  let events: AgentEvent[] = [];
   return (text) => {
     buffer += text;
     const lines = buffer.split("\n");
     buffer = lines.pop() ?? "";
     for (const line of lines) {
       if (line === ".") {
-        onSnapshot(entries);
+        onSnapshot(entries, events);
         entries = [];
+        events = [];
         continue;
       }
       const tab = line.indexOf("\t");
@@ -387,7 +409,10 @@ export function snapshotReader(
       const key = line.slice(0, tab);
       const value = line.slice(tab + 1);
       if (key === "home") onHome(value);
-      else {
+      else if (key === "event") {
+        const event = parseBoxEvent(value);
+        if (event) events.push(event);
+      } else {
         const entry = parseEntry(key, value);
         if (entry) entries.push(entry);
       }
@@ -609,6 +634,14 @@ function validPort(port: number): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65_535;
 }
 
+/** Replace the file in one rename, so a reader never sees half a file. */
+function writeJsonFile(path: string, value: unknown): void {
+  const temporary = `${path}.tmp`;
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  renameSync(temporary, path);
+}
+
 const defaultDependencies: TunnelDependencies = {
   createLink: (options) => new Link(options),
   writeLine: console.log,
@@ -625,13 +658,15 @@ const defaultDependencies: TunnelDependencies = {
   controlPath: join(tmpdir(), `ferry-tunnel-${process.pid}.sock`),
   reconnectMs: 5_000,
   emit: () => {},
-  // Replace the file in one rename, so a reader never sees half a file.
-  writeTunnelFile: (file) => {
-    const path = tunnelFilePath(file.box);
-    const temporary = `${path}.tmp`;
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(temporary, `${JSON.stringify(file)}\n`, { mode: 0o600 });
-    renameSync(temporary, path);
-  },
+  writeTunnelFile: (file) => writeJsonFile(tunnelFilePath(file.box), file),
   removeTunnelFile: (box) => rmSync(tunnelFilePath(box), { force: true }),
+  readEventsFile: (box) => {
+    try {
+      const file = JSON.parse(readFileSync(eventsFilePath(box), "utf8")) as EventsFile;
+      return file.schemaVersion === 1 && Array.isArray(file.events) ? file : null;
+    } catch {
+      return null;
+    }
+  },
+  writeEventsFile: (file) => writeJsonFile(eventsFilePath(file.box), file),
 };
