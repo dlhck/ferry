@@ -46,6 +46,27 @@ projects = ["code/app", "work/api"]
 
 `ferry status` reports the [unsaved work](status.md#unsaved-work) of each project. A path must be below the box home, with no `~` and no `..`. You do not need to add a project that `ferry move` moved to the box, because the box records it.
 
+### A memory limit for each agent
+
+`agent_memory_max` in `[box.<name>]` sets a memory limit for each agent on the box. The key is optional, and there is no limit without it. One value does not fit all boxes, so Ferry sets no default.
+
+```toml
+[box.b]
+transport = "ssh"
+destination = "user@box-b.example"
+agent_memory_max = "6G"
+```
+
+The value is a systemd `MemoryMax` size: a number of bytes with an optional `K`, `M`, `G`, `T`, `P`, or `E` suffix (base 1024), or a percentage of the box memory, such as `"50%"`. When an agent uses more memory than the limit, the kernel stops that agent only. The other agents and the Paseo daemon continue.
+
+Ferry does not start the agents. With the [Paseo integration](paseo-sync.md#agent-memory-limit), `ferry sync` applies the limit to each agent that Paseo starts on the box. `ferry ps` shows the limit next to the box name.
+
+To give the same limit to an agent that you start from a shell or from a Paseo terminal profile, start it in a systemd scope:
+
+```sh
+systemd-run --user --scope -p MemoryMax=6G -- claude
+```
+
 ## Create a box at Hetzner Cloud
 
 `ferry box create <name>` creates a machine in your Hetzner Cloud project, with your API token. Ferry does not host machines. The machine costs money until you run `ferry box destroy <name>`.

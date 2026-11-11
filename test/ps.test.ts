@@ -94,7 +94,7 @@ describe("ferry ps", () => {
       now: () => NOW,
       readConfig: () => ({
         boxes: [
-          { name: "a", host: { transport: "ssh" as const, destination: "user@box-a.example" } },
+          { name: "a", host: { transport: "ssh" as const, destination: "user@box-a.example" }, agentMemoryMax: "6G" },
           { name: "b", host: { transport: "ssh" as const, destination: "user@box-b.example" } },
         ],
       }),
@@ -110,12 +110,12 @@ describe("ferry ps", () => {
     });
 
     expect(commands).toHaveLength(2);
-    expect(report.boxes.map((box) => ({ name: box.name, online: box.online, error: box.error }))).toEqual([
-      { name: "a", online: true, error: null },
-      { name: "b", online: false, error: "the host is offline" },
+    expect(report.boxes.map((box) => ({ name: box.name, online: box.online, error: box.error, agentMemoryMax: box.agentMemoryMax }))).toEqual([
+      { name: "a", online: true, error: null, agentMemoryMax: "6G" },
+      { name: "b", online: false, error: "the host is offline", agentMemoryMax: null },
     ]);
     expect(psLines(report)).toEqual([
-      "a:",
+      "a (agent memory limit 6G):",
       "  HARNESS  PID  STARTED UTC       MEMORY  CPU  PROJECT",
       "  claude   100  2026-01-02 11:58  2 GiB   3%   /home/user/app",
       "b: offline (the host is offline)",
@@ -124,5 +124,10 @@ describe("ferry ps", () => {
 
   test("a box with no agent gets one line", () => {
     expect(psLines({ boxes: [{ name: "a", online: true, error: null, agents: [] }] })).toEqual(["a: no agents"]);
+  });
+
+  test("the box line shows agent_memory_max when the box has it", () => {
+    expect(psLines({ boxes: [{ name: "a", online: true, error: null, agentMemoryMax: "6G", agents: [] }] }))
+      .toEqual(["a (agent memory limit 6G): no agents"]);
   });
 });
