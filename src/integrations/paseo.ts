@@ -12,6 +12,7 @@ import { carriedContentHits } from "../manifest.ts";
 import { step, type Progress } from "../progress.ts";
 import { nodeBootstrap } from "../registry/builtin.ts";
 import { BUILTIN_BOX_PATH_DIRS } from "../tools/path.ts";
+import { SECRETS_UNIT_LINE } from "../secrets.ts";
 import type {
   BoxIntegration,
   IntegrationAction,
@@ -82,6 +83,7 @@ export function unitFile(pathDirs: readonly string[], relay = false): string {
     "Type=simple",
     "ExecStart=%h/.local/bin/paseo daemon run",
     unitPathLine(pathDirs),
+    SECRETS_UNIT_LINE,
     `Environment=PASEO_LISTEN=${LISTEN}`,
     `Environment=PASEO_RELAY_ENABLED=${relay}`,
     // The daemon self-update runs npm -g. This prefix points it to the Ferry install.
@@ -156,15 +158,16 @@ const UNIT_WRITE_COMMAND = [
  * `[Service]` line. awk exits with 3 when it finds no place for the PATH line.
  */
 const UNIT_LINES_AWK = [
-  'BEGIN { want = ENVIRON["FERRY_PATH_LINE"]; path = ENVIRON["FERRY_PATH"]; oom = ENVIRON["FERRY_OOM"] == 1 }',
+  'BEGIN { want = ENVIRON["FERRY_PATH_LINE"]; path = ENVIRON["FERRY_PATH"]; oom = ENVIRON["FERRY_OOM"] == 1; secrets = ENVIRON["FERRY_SECRETS"] == 1 }',
   'path == "replace" && /^Environment=PATH=/ { print want; path = "keep"; next }',
   "{ print }",
   '!service && $0 == "[Service]" {',
   "  service = 1",
   `  if (oom) print "${OOM_LINE}"`,
+  `  if (secrets) { print "${SECRETS_UNIT_LINE}"; secrets=0 }`,
   '  if (path == "add") { print want; path = "keep" }',
   "}",
-  'END { if (path != "keep") exit 3 }',
+  'END { if (path != "keep" || secrets) exit 3 }',
 ].join("\n");
 // The stderr of `paseo daemon status` stays on the box. Ferry keeps only the named fields of the JSON.
 const STATUS_COMMAND = `systemctl --user is-active --quiet ${UNIT} && paseo daemon status --json 2>/dev/null`;
@@ -466,11 +469,14 @@ export function createPaseo(options: PaseoOptions = {}): BoxIntegration & Operat
       return lines;
     },
     async update(link: IntegrationLink, progress: Progress): Promise<readonly string[]> {
+      const secretsAdded = await ensureSecretsUnit(link);
       const local = await self.localVersion();
       const check = await step(progress, "Checking the Paseo version on the box", () => checkUpdate(link, local),
         undefined, (result) => result.box ?? "unknown");
       const current = currentLine(check);
-      if (current !== null) return [current];
+      if (current !== null) return [current, ...(secretsAdded ? [
+        "Ferry added the optional secrets EnvironmentFile without a restart. Restart ferry-paseo.service explicitly to load it. A restart stops its agents.",
+      ] : [])];
       await install(link, progress, check.target);
       await step(progress, `Restarting ${UNIT}`, () => boxRun(link, RESTART_COMMAND, `Ferry could not restart ${UNIT}`));
       const running = await step(progress, "Waiting for the Paseo daemon", () => waitForDaemon(link), undefined, (v) => v);
@@ -611,6 +617,26 @@ async function runVersion(host: HostAdapter, argv: readonly string[]): Promise<s
 /** What a sync did to the unit: the detail of the sync step, and a line for the operator, or null. */
 export type UnitRefresh = { readonly detail: string; readonly note: string | null };
 
+/** Add the optional environment file to an existing unit without restarting its agents. */
+export async function ensureSecretsUnit(link: IntegrationLink): Promise<boolean> {
+  const script = [
+    `f=${quoteShell(UNIT_PATH)}`,
+    '[ -f "$f" ] || { echo missing; exit 0; }',
+    `grep -qxF ${quoteShell(SECRETS_UNIT_LINE)} "$f" && { echo unchanged; exit 0; }`,
+    'umask 077; tmp=$(mktemp "${f}.XXXXXX")',
+    `if awk ${quoteShell(`{ print } !done && $0 == "[Service]" { print "${SECRETS_UNIT_LINE}"; done=1 } END { if (!done) exit 1 }`)} "$f" > "$tmp" 2>/dev/null; then`,
+    '  mv -f "$tmp" "$f" && systemctl --user daemon-reload >/dev/null 2>&1 || exit 1',
+    '  echo added',
+    'else rm -f "$tmp"; exit 1; fi',
+  ].join("\n");
+  // The unit can contain credentials. Suppress its output and transport error text.
+  try {
+    const result = await link.run(script);
+    if (result.ok && ["missing", "unchanged", "added"].includes(result.stdout.trim())) return result.stdout.trim() === "added";
+  } catch { /* Report only the action. */ }
+  throw new PaseoError("Ferry could not add the optional secrets file to ferry-paseo.service. The service was not restarted.");
+}
+
 /** The part of the sync plan line for the box PATH that names the unit. */
 export const UNIT_PLAN =
   ` and the PATH of ${UNIT}. A PATH change restarts the Paseo daemon and stops its agents. ` +
@@ -626,7 +652,7 @@ export const UNIT_PLAN =
  * drop-in file has priority over the unit.
  * The unit can hold an `Environment=` line with a credential, so the box
  * compares and edits the lines itself and keeps each other line. It prints
- * `missing`, `unchanged`, `policy`, `updated`, or `failed`. Ferry never reads
+ * `missing`, `unchanged`, `policy`, `secrets`, `updated`, or `failed`. Ferry never reads
  * the unit.
  */
 export async function refreshUnit(link: IntegrationLink, pathDirs: readonly string[]): Promise<UnitRefresh> {
@@ -636,12 +662,13 @@ export async function refreshUnit(link: IntegrationLink, pathDirs: readonly stri
     '[ -f "$f" ] || { echo missing; exit 0; }',
     `path=keep; grep -qxF -e "$want" "$f" 2>/dev/null || { path=add; grep -q '^Environment=PATH=' "$f" 2>/dev/null && path=replace; }`,
     `oom=0; grep -qxF '[Service]' "$f" 2>/dev/null && ! grep -q '^[[:space:]]*OOMPolicy[[:space:]]*=' "$f" 2>/dev/null && oom=1`,
-    '[ "$path" = keep ] && [ "$oom" = 0 ] && { echo unchanged; exit 0; }',
+    `secrets=0; grep -qxF ${quoteShell(SECRETS_UNIT_LINE)} "$f" 2>/dev/null || secrets=1`,
+    '[ "$path" = keep ] && [ "$oom" = 0 ] && [ "$secrets" = 0 ] && { echo unchanged; exit 0; }',
     "umask 077",
-    `if FERRY_PATH_LINE="$want" FERRY_PATH="$path" FERRY_OOM="$oom" awk ${quoteShell(UNIT_LINES_AWK)} "$f" > "$f.ferry-tmp" 2>/dev/null && mv "$f.ferry-tmp" "$f" 2>/dev/null; then`,
+    `if FERRY_PATH_LINE="$want" FERRY_PATH="$path" FERRY_OOM="$oom" FERRY_SECRETS="$secrets" awk ${quoteShell(UNIT_LINES_AWK)} "$f" > "$f.ferry-tmp" 2>/dev/null && mv "$f.ferry-tmp" "$f" 2>/dev/null; then`,
     '  if [ "$path" = keep ]; then',
     "    systemctl --user daemon-reload >/dev/null || exit 1",
-    "    echo policy",
+    '    if [ "$secrets" = 1 ]; then echo secrets; else echo policy; fi',
     "  else",
     `    systemctl --user daemon-reload >/dev/null && ${RESTART_COMMAND} >/dev/null || exit 1`,
     "    echo updated",
@@ -653,6 +680,10 @@ export async function refreshUnit(link: IntegrationLink, pathDirs: readonly stri
   const status = (await boxRun(link, script, `Ferry could not reload or restart ${UNIT}`)).trim();
   if (status === "missing") throw new PaseoError(`~/${UNIT_PATH} is not on the box. Run ferry integrations enable paseo`);
   if (status === "unchanged") return { detail: "no changes", note: null };
+  if (status === "secrets") return {
+    detail: "added secrets file, no restart",
+    note: "Ferry added the optional secrets EnvironmentFile without a restart. Restart ferry-paseo.service explicitly to load it. A restart stops its agents.",
+  };
   if (status === "policy") {
     return { detail: `${OOM_LINE} added, no restart`, note: `Ferry added ${OOM_LINE} to ${UNIT} on the box. ${OOM_APPLIED}` };
   }
