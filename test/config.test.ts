@@ -89,6 +89,16 @@ describe("operator config", () => {
     expect(readConfig(homeWithConfig(BASE))?.update).toBeUndefined();
   });
 
+  test("reads [notifications] agents, refuses a value that is not a boolean, and keeps it when it writes the config", () => {
+    const home = homeWithConfig([...BASE, "", "[notifications]", "agents = true"]);
+    expect(readConfig(home)?.notifications).toEqual({ agents: true });
+    expect(readConfig(homeWithConfig(BASE))?.notifications).toBeUndefined();
+    expect(() => readConfig(homeWithConfig([...BASE, "", "[notifications]", 'agents = "yes"']))).toThrow("invalid boolean");
+
+    setIntegration("paseo", true, home);
+    expect(readConfig(home)?.notifications).toEqual({ agents: true });
+  });
+
   test("refuses a watch update value that is not a boolean", () => {
     const home = homeWithConfig([...BASE, "", "[update]", 'watch = "yes"']);
 

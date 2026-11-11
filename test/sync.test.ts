@@ -567,6 +567,47 @@ describe("runSync", () => {
     ]);
   });
 
+  test("adds the ferry notify hooks to the box settings only with [notifications] agents = true", async () => {
+    const mergeCommand = async (agents: boolean | undefined) => {
+      const commands: string[] = [];
+      const link = {
+        run: async (command: string) => {
+          commands.push(command);
+          return { ok: true as const, address: "box", stdout: command.startsWith("printf") ? "/srv/ferry\n" : "", stderr: "" };
+        },
+      };
+      await runSync(
+        { home: "/operator" },
+        {
+          readConfig: () => ({ ...config, ...(agents === undefined ? {} : { notifications: { agents } }) }),
+          publisher: () => "operator-machine",
+          readSeed: () => ({
+            ...seed,
+            settings: [{ harness: "claude", bytes: Buffer.from(JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "paseo hooks claude stop" }] }] } })) }],
+          }),
+          createLink: () => link,
+          writePlan: () => {},
+          warn: () => {},
+          acquireStoreLock: async () => () => {},
+          acquireLock: () => () => {},
+          openStore: async () => ({ path: "/operator/.ferry/store", publish: async () => ({ published: true, tip: "abc123" }) }),
+          apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }),
+          adopt: () => {},
+        },
+      );
+      return commands.find((command) => command.includes("settings.json")) ?? "";
+    };
+
+    const on = await mergeCommand(true);
+    expect(on).toContain("paseo hooks claude stop");
+    expect(on).toContain("notify claude turn-ended");
+    expect(on).toContain("notify claude waiting-for-input");
+    for (const off of [await mergeCommand(undefined), await mergeCommand(false)]) {
+      expect(off).toContain("paseo hooks claude stop");
+      expect(off).not.toContain("notify claude");
+    }
+  });
+
   test("declares the carried MCP servers on the box after the settings, and prints each warning", async () => {
     const events: string[] = [];
     const lines: string[] = [];
