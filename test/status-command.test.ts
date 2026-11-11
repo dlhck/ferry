@@ -105,7 +105,7 @@ function fakeStack(
       return {
         ok: true,
         address: "100.64.0.8",
-        stdout: command.startsWith("printf")
+        stdout: command.includes("secrets/current/agent.env") ? "absent\n" : command.startsWith("printf")
           ? "/box/home\n"
           : command.startsWith("sudo -n /usr/bin/true")
             ? boxSudo
@@ -545,6 +545,8 @@ describe("ferry status progress", () => {
       "done",
       "start:Checking sudo on the box",
       "done",
+      "start:Reading box secret names",
+      "done",
       "start:Checking managed links on the box",
       "done",
       "start:Listing box-only skills",
@@ -573,6 +575,7 @@ describe("ferry status progress", () => {
       "skip:Reading the box checkout changes",
       "skip:Reading the box git identity",
       "skip:Checking sudo on the box",
+      "skip:Reading box secret names",
       "skip:Checking managed links on the box",
       "skip:Listing box-only skills",
       "skip:Checking logins on the box",
@@ -596,6 +599,7 @@ describe("ferry status progress", () => {
       "Reading the box checkout changes   – skipped  host offline",
       "Reading the box git identity       – skipped  host offline",
       "Checking sudo on the box           – skipped  host offline",
+      "Reading box secret names           – skipped  host offline",
       "Checking managed links on the box  – skipped  host offline",
       "Listing box-only skills            – skipped  host offline",
       "Checking logins on the box         – skipped  host offline",
@@ -911,6 +915,7 @@ describe("ferry status with more than one box", () => {
       "[a] Reading the box checkout changes",
       "[a] Reading the box git identity",
       "[a] Checking sudo on the box",
+      "[a] Reading box secret names",
       "[a] Checking managed links on the box",
       "[a] Listing box-only skills",
       "[a] Checking logins on the box",
@@ -922,6 +927,7 @@ describe("ferry status with more than one box", () => {
       "[b] Reading the box checkout changes",
       "[b] Reading the box git identity",
       "[b] Checking sudo on the box",
+      "[b] Reading box secret names",
       "[b] Checking managed links on the box",
       "[b] Listing box-only skills",
       "[b] Checking logins on the box",
