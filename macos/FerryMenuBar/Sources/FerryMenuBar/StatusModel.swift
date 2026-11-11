@@ -76,6 +76,35 @@ struct TunnelForward: Decodable, Sendable {
     }
 }
 
+/// The content of ~/.ferry/tunnels/<box>.events.json, which `ferry tunnel --follow` writes.
+struct EventsFile: Decodable, Sendable {
+    let schemaVersion: Int
+    let box: String
+    let updatedAt: String
+    /// The newest events, oldest first.
+    let events: [AgentEvent]
+}
+
+/// An event that `ferry notify` wrote on the box. It has no prompt text and no agent output.
+struct AgentEvent: Decodable, Sendable {
+    let id: String
+    let harness: String
+    /// `turn-ended` or `waiting-for-input`.
+    let kind: String
+    let project: String
+    /// The time on the box.
+    let at: String
+    /// The time on this Mac when `ferry tunnel --follow` received the event.
+    let receivedAt: String
+
+    /// `claude ended its turn in shop.`: the harness, the kind, and the last folder of the project.
+    var body: String {
+        let folder = URL(fileURLWithPath: project).lastPathComponent
+        let action = kind == "waiting-for-input" ? "waits for input" : "ended its turn"
+        return "\(harness) \(action) in \(folder)."
+    }
+}
+
 /// The menu part of one box: its report in status.json, its tunnel file, or both.
 struct BoxSection: Sendable, Identifiable {
     let name: String
@@ -149,6 +178,10 @@ final class StatusModel: ObservableObject {
     private let notifier = Notifier()
     /// The items of the last report that give a notification when they are new, or nil before the first report.
     private var alertItems: Set<String>?
+    /// The agent events that the app read, as `<box> TAB <id>`. Each event gives one notification.
+    private var seenEvents = Set<String>()
+    /// An event that Ferry received before the app started gives no notification.
+    private let launchedAt = Date()
     private let statusFile = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".ferry/status.json")
     private let tunnelsDirectory = FileManager.default.homeDirectoryForCurrentUser
@@ -205,6 +238,7 @@ final class StatusModel: ObservableObject {
     func reload() {
         watch()
         tunnels = readTunnels()
+        notifyAgentEvents()
         guard let data = try? Data(contentsOf: statusFile),
               let report = try? JSONDecoder().decode(BriefReport.self, from: data)
         else {
@@ -353,6 +387,22 @@ final class StatusModel: ObservableObject {
         guard let previous, notificationsEnabled else { return }
         for item in items where !previous.contains(item.key) {
             notifier.post(title: item.title, body: item.body)
+        }
+    }
+
+    /// Post one notification for each agent event in ~/.ferry/tunnels/<box>.events.json that the app did not read before.
+    /// With notifications off, the app marks the events as read, so they give no notification later.
+    private func notifyAgentEvents() {
+        let files = (try? FileManager.default.contentsOfDirectory(at: tunnelsDirectory, includingPropertiesForKeys: nil)) ?? []
+        for url in files where url.lastPathComponent.hasSuffix(".events.json") {
+            guard let data = try? Data(contentsOf: url),
+                  let file = try? JSONDecoder().decode(EventsFile.self, from: data),
+                  file.schemaVersion == 1
+            else { continue }
+            for event in file.events where seenEvents.insert("\(file.box)\t\(event.id)").inserted {
+                guard notificationsEnabled, let received = Self.parseDate(event.receivedAt), received >= launchedAt else { continue }
+                notifier.post(title: "Ferry: \(file.box)", body: event.body)
+            }
         }
     }
 
