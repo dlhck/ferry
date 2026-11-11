@@ -93,6 +93,9 @@ import { failedChecks, formatDoctor, runDoctor, type DoctorDependencies, type Do
 import { runToolsCommand, toolsLines, type ToolsCommandDependencies, type ToolsReport } from "./tools/command.ts";
 import { psLines, runPs } from "./ps.ts";
 import { countUsage } from "./usage-count.ts";
+import { DEFAULT_GATEWAY_PORT, startGateway } from "./mcp-gateway/gateway.ts";
+import { gatewayListLines, listGateway, loginServer } from "./mcp-gateway/login.ts";
+import { knownSecrets, readServers, scrub } from "./mcp-gateway/store.ts";
 import { parseSince, runUsage, usageLines } from "./usage.ts";
 import { boxPathDirs } from "./tools/path.ts";
 import { runWatch, type WatchDependencies, type WatchInput } from "./watch.ts";
@@ -266,8 +269,11 @@ type CliDependencies = {
 /** The commands that stay running and print one event for each line with --json. */
 const STREAM_COMMANDS = new Set(["watch", "tunnel", "expose"]);
 
-/** The commands that a box install runs. `scan`, `redact`, and `usage-count` are hidden: the operator machine runs them over Link. */
-const BOX_INSTALL_COMMANDS = new Set(["expose", "whoami", "scan", "redact", "usage-count"]);
+/**
+ * The commands that a box install runs. `scan`, `redact`, and `usage-count` are hidden: the operator machine runs them over Link.
+ * The hidden `mcp` commands run the MCP gateway of the box.
+ */
+const BOX_INSTALL_COMMANDS = new Set(["expose", "whoami", "scan", "redact", "usage-count", "mcp serve", "mcp list", "mcp login"]);
 
 const JSON_HELP = `JSON output (--json):
   stdout has only JSON. Progress and the text lines go to stderr. Ferry
@@ -1800,6 +1806,57 @@ of Ferry on the box.`)
       const text = JSON.stringify(json() ? successEnvelope(active ?? "usage-count", result, warnings) : result);
       await writeBoxLine(redactUrlCredentials(redactTokens(text)));
     });
+
+  // The MCP gateway of a box. The output and each error go through scrub, so that no token or client key leaves the gateway.
+  const gatewayHome = () => (dependencies.home ?? homedir)();
+  const gatewayAction =
+    <A extends unknown[]>(run: (...args: A) => Promise<void> | void) =>
+    async (...args: A) => {
+      try {
+        await run(...args);
+      } catch (error) {
+        const home = gatewayHome();
+        let servers: string[] = [];
+        try {
+          servers = readServers(home).map((server) => server.name);
+        } catch {}
+        throw new FerryError(error instanceof FerryError ? error.code : "failed", scrub(errorMessage(error), knownSecrets(home, servers)));
+      }
+    };
+  const mcp = program.command("mcp", { hidden: true }).description("Run the MCP gateway of this box");
+  mcp
+    .command("serve")
+    .description("Serve the remote MCP servers of ~/.ferry/mcp-gateway/servers.json on 127.0.0.1, one path /mcp/<server> for each server")
+    .option("--port <port>", "the port on 127.0.0.1", String(DEFAULT_GATEWAY_PORT))
+    .action(
+      gatewayAction(async (options: { port: string }) => {
+        const port = Number(options.port);
+        if (!Number.isInteger(port) || port < 0 || port > 65535) throw new FerryError("usage", `invalid port ${options.port}`);
+        const home = gatewayHome();
+        const box = whoami({ home, boxMode: true, harnesses: [] }).box;
+        const gateway = startGateway({ home, port, box, log: writeError });
+        await new Promise<void>((resolve) => {
+          for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => resolve());
+        });
+        await gateway.stop();
+      }),
+    );
+  mcp
+    .command("list")
+    .description("Print the state of the MCP gateway and the login state of each server: ready or login-required. Prints no URL, token, or key")
+    .action(
+      gatewayAction(() => {
+        report(listGateway(gatewayHome()), (result) => gatewayListLines(result).forEach((line) => writeLine(line)));
+      }),
+    );
+  mcp
+    .command("login <server>")
+    .description("Log the MCP gateway in to a server: print the authorize URL, then wait for the callback on a loopback port and write the token file")
+    .action(
+      gatewayAction(async (server: string) => {
+        await loginServer({ home: gatewayHome(), server, print: writeLine });
+      }),
+    );
 
   // move --from-box sends the output of each box command through this filter, so that a name with a token stays on the box.
   program
