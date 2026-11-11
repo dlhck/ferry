@@ -26,11 +26,20 @@ struct FerryMenuBarApp: App {
             }
         }
         .menuBarExtraStyle(.menu)
+
+        // One window: openWindow brings an open window to the front. It does not open at launch.
+        Window("Ferry", id: BoxesWindow.id) {
+            BoxesWindow(model: model)
+        }
+        .defaultSize(width: 820, height: 520)
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
     }
 }
 
 struct MenuContent: View {
     @ObservedObject var model: StatusModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Group {
@@ -65,6 +74,12 @@ struct MenuContent: View {
                 }
             }
             Divider()
+            Button("Open Ferry") {
+                // The app has a Dock icon only while the window is open. BoxesWindow removes it again.
+                NSApplication.shared.setActivationPolicy(.regular)
+                openWindow(id: BoxesWindow.id)
+                NSApplication.shared.activate()
+            }
             if let message = model.syncMessage {
                 lines(message)
             }
@@ -81,18 +96,8 @@ struct MenuContent: View {
         }
     }
 
-    @ViewBuilder
     private var summary: some View {
-        switch model.state {
-        case .missing:
-            Text("No Ferry status. Run ferry watch install.")
-        case let .stale(date):
-            lines("ferry watch is not running. Last check \(age(date)).")
-        case .clear:
-            lines("All clear. Checked \(age(model.checkedAt ?? Date())).")
-        case let .issues(count):
-            lines("\(count) \(count == 1 ? "item needs" : "items need") action. Checked \(age(model.checkedAt ?? Date())).")
-        }
+        lines(model.summary)
     }
 
     /// One issue: the short title, and a submenu with the full message, the fix command, and Copy.
@@ -124,11 +129,5 @@ struct MenuContent: View {
         ForEach(Array(wrapped(text).enumerated()), id: \.offset) { _, line in
             Text(line)
         }
-    }
-
-    private func age(_ date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .full
-        return formatter.localizedString(for: date, relativeTo: Date())
     }
 }

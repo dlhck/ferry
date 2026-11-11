@@ -103,7 +103,26 @@ At the start, every 5 minutes, and after each sync, the watch writes the report 
 - The app sends a macOS notification when a box goes offline, a login or MCP login needs a login, or a tool has drift. Turn off Notifications in the menu to stop them.
 - Sync now runs `ferry sync`.
 
+The app needs macOS 26 or later.
+
 Ferry downloads the app of the release of this Ferry, verifies it against `SHA256SUMS` of the release, and unpacks it to `~/Applications/Ferry Menu Bar.app`. When the release does not have these files yet, Ferry stops and the installed app stays. The app starts at login. Run the command again after you move Ferry or update it. `ferry menubar uninstall` removes the app.
+
+### The window
+
+Open Ferry in the menu opens a window with a table of the boxes. A second click brings the same window to the front. The app shows a Dock icon while the window is open.
+
+The table has one row for each box of `~/.ferry/status.json`, then one row for each box that has only a tunnel file. The columns are:
+
+- Box: the box name.
+- State: Online or Offline.
+- Free disk: the free space of the file system of the box home.
+- Free memory: the available memory.
+- Needs action: the count of items that need action. An offline box counts as one item, and so does a disconnected tunnel of an online box.
+- Ports: the ports of its running `ferry tunnel --follow`.
+
+Select a row to see the items of the box with the full message, the fix command, and Copy. Click a fix command to run it in Terminal. Click a port to open it in the browser. Sync now and Refresh now do the same as in the menu.
+
+The window reads the same files as the menu. It updates when `~/.ferry/status.json` or a tunnel file changes. When the status file is missing, or `ferry watch` did not write it in the last 15 minutes, the window shows the same message as the menu.
 
 ## Linux
 
