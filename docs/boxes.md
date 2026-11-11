@@ -103,16 +103,14 @@ ssh_public_key = "~/.ssh/id_ed25519.pub"
 
 ### Destroy a box
 
-`ferry box destroy <name>` finds the machine with the label `ferry-box=<name>`, prints the plan, and asks you to type the box name. Then it does these steps:
+`ferry box destroy <name>` finds the machine with the label `ferry-box=<name>`, prints the plan, and prints the projects on the box with [unsaved work](status.md#unsaved-work), as `ferry box remove --uninstall` does. When Ferry cannot reach the box, it says so in one line and continues. Then it asks you to type the box name, and does these steps:
 
 1. It runs `tailscale logout` on the box, so the box leaves the tailnet. When that fails, Ferry warns. Then remove the machine in the Tailscale admin console.
 2. It removes the machine and its firewall at Hetzner Cloud. The data on the machine is lost.
 3. It removes the lines of the box from `~/.ssh/known_hosts`. Ferry removes only the lines that it added.
 4. It does what `ferry box remove <name>` does on this machine. It also removes the last box.
 
-A box that is not in the config, for example after a failed create, loses only its machine. When the removal at Hetzner Cloud fails, the box stays in the config. `--dry-run` prints the plan and changes nothing. `--yes` skips the question.
-
-`ferry box destroy` does not list the work that exists only on the box. Move the projects that you need with `ferry move` first.
+A box that is not in the config, for example after a failed create, loses only its machine. When the removal at Hetzner Cloud fails, the box stays in the config. `--dry-run` prints the plan and changes nothing. `--yes` skips the question. Move the projects that you need with `ferry move` first.
 
 ## Install and update tools
 

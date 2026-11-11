@@ -1582,8 +1582,10 @@ Remove the machine of a box at Hetzner Cloud, then remove the box from the
 config.
 
 Ferry finds the machine by its label ferry-box=<name>, which ferry box create
-sets. It prints the plan and asks you to type the box name. Then it does
-these steps:
+sets. It prints the plan and the projects on the box with unsaved work, as
+ferry box remove --uninstall does, and asks you to type the box name. When
+Ferry cannot reach the box, it says so in one line and continues. Then it
+does these steps:
 
   1. It runs tailscale logout on the box, so the box leaves the tailnet.
      When that fails, Ferry warns, and you remove the machine in the
@@ -1609,7 +1611,7 @@ Options:
   --yes       do not ask for the box name
   -h, --help  display help for command
 
-With --json: { name, dryRun, machine, removed, knownHosts }, or null when cancelled. removed is the box remove result, or null when the box was not in the config or with --dry-run. knownHosts is the number of removed known_hosts lines.
+With --json: { name, dryRun, machine, removed, knownHosts, unsavedWork }, or null when cancelled. removed is the box remove result, or null when the box was not in the config or with --dry-run. knownHosts is the number of removed known_hosts lines. unsavedWork is { checked, projects: [{ path, branch, changes, unpushed: [{ branch, commits }] }] }, or null when the box is not in the config or Ferry could not reach it.
 ```
 
 ### ferry box default

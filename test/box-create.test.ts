@@ -364,7 +364,9 @@ describe("ferry box destroy", () => {
 
     expect(result).toMatchObject({ name: "b", dryRun: false, machine: MACHINE, knownHosts: 1, removed: { name: "b" } });
     expect(provider.destroyed).toEqual([MACHINE]);
-    expect(link.commands.map((entry) => [entry.options, entry.command])).toEqual([[{ host: DNS_NAME, user: "ferry" }, "sudo -n tailscale logout"]]);
+    expect(link.commands.map((entry) => entry.options)).toEqual([{ host: DNS_NAME, user: "ferry" }, { host: DNS_NAME, user: "ferry" }]);
+    expect(link.commands[0]?.command).toStartWith("sh -c ");
+    expect(link.commands[1]?.command).toBe("sudo -n tailscale logout");
     expect(readConfig(home)?.boxes?.map((box) => box.name)).toEqual(["a"]);
     expect(knownHosts(home)).toBe(`keep.example ${NEW_KEY}\n`);
     expect(lines.join("\n")).not.toContain(TOKEN);
@@ -389,9 +391,32 @@ describe("ferry box destroy", () => {
     const failing = destroyDependencies(configured, {
       createLink: fakeLink(() => ({ ok: false, error: { code: "ssh-failed", origin: "network", message: "offline" } })).createLink,
     });
-    await runBoxDestroy({ name: "b", dryRun: false, yes: true }, failing.dependencies);
+    expect(await runBoxDestroy({ name: "b", dryRun: false, yes: true }, failing.dependencies)).toMatchObject({ unsavedWork: null });
+    expect(failing.lines).toContain("Unsaved work: unavailable. Ferry cannot reach box b: network/ssh-failed: offline");
     expect(failing.warnings[0]).toContain("Remove the machine in the Tailscale admin console");
     expect(failing.provider.destroyed).toEqual([MACHINE]);
+  });
+
+  test("prints the projects with unsaved work before the question", async () => {
+    const home = makeHome(`${CREATED_CONFIG}projects = ["code/app"]\n`);
+    const work = "project\tcode/app\tmain\t2\nbranch\tcode/app\tmain\t1\n";
+    const link = fakeLink((command) => (command.startsWith("sh -c ") ? { ok: true, address: DNS_NAME, stdout: work, stderr: "" } : undefined));
+    const order: string[] = [];
+    const run = destroyDependencies(home, {
+      createLink: link.createLink,
+      confirmName: async () => (order.push("question"), "b"),
+    });
+    const writeLine = run.dependencies.writeLine;
+    const result = await runBoxDestroy(
+      { name: "b", dryRun: false, yes: false },
+      { ...run.dependencies, writeLine: (line) => (order.push(line), writeLine(line)) },
+    );
+    expect(link.commands[0]?.command).toContain("'code/app'");
+    expect(result?.unsavedWork).toEqual({ checked: 1, projects: [{ path: "code/app", branch: "main", changes: 2, unpushed: [{ branch: "main", commits: 1 }] }] });
+    const heading = order.indexOf("Unsaved work: 1 of 1 project, only on the box");
+    expect(heading).toBeGreaterThan(-1);
+    expect(order[heading + 1]).toBe("  ~/code/app (main): 2 changed files, main has 1 commit that no remote has");
+    expect(order.indexOf("question")).toBeGreaterThan(heading);
   });
 
   test("--dry-run and a wrong name change nothing", async () => {
@@ -480,7 +505,8 @@ describe("ferry box create and destroy with --json", () => {
 
     const provider = fakeProvider();
     provider.machines.push(MACHINE);
-    const destroy = await runJson(["box", "destroy", "b"], home, provider);
+    // Box b is not in this config, so destroy does not connect to a box.
+    const destroy = await runJson(["box", "destroy", "b"], makeHome(), provider);
     expect(destroy.json[0]).toMatchObject({ command: "box destroy", ok: false, error: { code: "confirmation-required" } });
     expect(provider.destroyed).toEqual([]);
     expect(destroy.text).not.toContain(TOKEN);

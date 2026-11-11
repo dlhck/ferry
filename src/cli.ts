@@ -350,7 +350,7 @@ const JSON_RESULTS: Record<string, string> = {
   "box create":
     "{ name, dryRun, provider, serverType, image, location, monthlyPrice, currency, machine: { id, name, box, ipv4, ipv6, serverType, location }, tailscale }, or null when cancelled. machine and tailscale are null with --dry-run. A failure after the machine exists has error.details.machine",
   "box destroy":
-    "{ name, dryRun, machine, removed, knownHosts }, or null when cancelled. removed is the box remove result, or null when the box was not in the config or with --dry-run. knownHosts is the number of removed known_hosts lines",
+    "{ name, dryRun, machine, removed, knownHosts, unsavedWork }, or null when cancelled. removed is the box remove result, or null when the box was not in the config or with --dry-run. knownHosts is the number of removed known_hosts lines. unsavedWork is { checked, projects: [{ path, branch, changes, unpushed: [{ branch, commits }] }] }, or null when the box is not in the config or Ferry could not reach it",
   "skills add": "{ argv }. The output of npx goes to stderr",
 };
 
@@ -2032,8 +2032,10 @@ destroy <name> to remove it.
     .description(`Remove the machine of a box at Hetzner Cloud, then remove the box from the config.
 
 Ferry finds the machine by its label ferry-box=<name>, which ferry box create
-sets. It prints the plan and asks you to type the box name. Then it does
-these steps:
+sets. It prints the plan and the projects on the box with unsaved work, as
+ferry box remove --uninstall does, and asks you to type the box name. When
+Ferry cannot reach the box, it says so in one line and continues. Then it
+does these steps:
 
   1. It runs tailscale logout on the box, so the box leaves the tailnet.
      When that fails, Ferry warns, and you remove the machine in the

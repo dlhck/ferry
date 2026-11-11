@@ -8,6 +8,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { removeFromOperator, type BoxRemoveDependencies, type BoxRemoveResult } from "./box.ts";
 import { hasNoBox, resolveBoxes, type ResolvedBox } from "./boxes.ts";
+import { boxWorkLines, readBoxWork, type BoxWork } from "./box-work.ts";
 import { isBoxName, type OperatorHostConfig, type PartialOperatorConfig } from "./config.ts";
 import { FerryError } from "./errors.ts";
 import { keyOf, pinHostKey, unpinBox } from "./known-hosts.ts";
@@ -317,6 +318,8 @@ export type BoxDestroyResult = {
   readonly removed: BoxRemoveResult | null;
   /** The number of known_hosts lines of the box that Ferry removed. */
   readonly knownHosts: number;
+  /** The projects on the box with unsaved work, or null when the box is not in the config or Ferry could not reach it. */
+  readonly unsavedWork: BoxWork | null;
 };
 
 /**
@@ -359,9 +362,18 @@ export async function runBoxDestroy(input: BoxDestroyInput, dependencies: BoxDes
     write(`  On this machine: remove box ${name} from the config and its tunnel service, as ferry box remove ${name} does.`);
   } else write(`  Box ${name} is not in the config. Ferry removes the machine only.`);
   write(`  On this machine: remove the lines of box ${name} from ~/.ssh/known_hosts.`);
+  let unsavedWork: BoxWork | null = null;
+  if (box !== null) {
+    const link = dependencies.createLink(linkOptionsOf(box.host));
+    unsavedWork = await step(dependencies.progress, "Reading the unsaved work", () => readBoxWork(link, box.projects)).catch((cause) => {
+      write(`Unsaved work: unavailable. Ferry cannot reach box ${name}: ${messageOf(cause)}`);
+      return null;
+    });
+    if (unsavedWork !== null) for (const line of boxWorkLines(unsavedWork, name)) write(line);
+  }
   if (input.dryRun) {
     write("Dry run: Ferry made no changes.");
-    return { name, dryRun: true, machine, removed: null, knownHosts: 0 };
+    return { name, dryRun: true, machine, removed: null, knownHosts: 0, unsavedWork };
   }
   if (!input.yes) {
     dependencies.progress.pause();
@@ -392,7 +404,7 @@ export async function runBoxDestroy(input: BoxDestroyInput, dependencies: BoxDes
     const knownHosts = unpinBox(dependencies.home, name);
     const config = dependencies.readConfig();
     const removed = box !== null && configBox(config, name) !== null ? await removeFromOperator(config!, name, dependencies, "") : null;
-    return { name, dryRun: false, machine, removed, knownHosts };
+    return { name, dryRun: false, machine, removed, knownHosts, unsavedWork };
   } finally {
     release();
   }
