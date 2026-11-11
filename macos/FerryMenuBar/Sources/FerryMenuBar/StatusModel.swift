@@ -15,6 +15,24 @@ struct BriefBox: Decodable, Sendable {
     /// Why the box is offline.
     let error: String?
     let issues: [BriefIssue]
+    /// The disk and memory of the box. Nil when the box is offline, the check has no resource read, or the file is of an older Ferry.
+    let resources: BoxResources?
+}
+
+struct BoxResources: Decodable, Sendable {
+    struct Disk: Decodable, Sendable {
+        let totalKiB: Double
+        let freeKiB: Double
+    }
+
+    struct Memory: Decodable, Sendable {
+        let totalKiB: Double
+        let availableKiB: Double
+    }
+
+    /// The file system of the box home.
+    let disk: Disk?
+    let memory: Memory?
 }
 
 struct BriefIssue: Decodable, Sendable {
@@ -59,10 +77,20 @@ struct TunnelForward: Decodable, Sendable {
 }
 
 /// The menu part of one box: its report in status.json, its tunnel file, or both.
-struct BoxSection: Sendable {
+struct BoxSection: Sendable, Identifiable {
     let name: String
     let box: BriefBox?
     let tunnel: TunnelFile?
+
+    var id: String { name }
+
+    /// An offline box counts as one item, and so does a disconnected tunnel. Ports do not count.
+    /// The tunnel of an offline box does not count, because the offline box is the cause.
+    var actionCount: Int {
+        let boxCount = box.map { $0.online ? $0.issues.count : 1 } ?? 0
+        let tunnelCount = tunnel.map { !$0.connected && box?.online != false ? 1 : 0 } ?? 0
+        return boxCount + tunnelCount
+    }
 }
 
 /// The envelope of `ferry --json`.
@@ -126,6 +154,8 @@ final class StatusModel: ObservableObject {
     private let tunnelsDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".ferry/tunnels")
     private var timer: Timer?
+    /// The watchers of ~/.ferry and ~/.ferry/tunnels, by path.
+    private var watchers: [String: DispatchSourceFileSystemObject] = [:]
 
     init() {
         if notificationsEnabled { requestNotificationPermission() }
@@ -140,14 +170,24 @@ final class StatusModel: ObservableObject {
     }
 
     var state: MenuState {
-        guard let report, let checkedAt else { return .missing }
+        guard report != nil, let checkedAt else { return .missing }
         if Date().timeIntervalSince(checkedAt) > Self.staleAfter { return .stale(checkedAt) }
-        // An offline box counts as one issue, and so does a disconnected tunnel. Ports do not count.
-        // The tunnel of an offline box does not count, because the offline box is the cause.
-        let offline = Set(report.boxes.filter { !$0.online }.map(\.name))
-        let count = report.boxes.reduce(0) { $0 + ($1.online ? $1.issues.count : 1) }
-            + tunnels.filter { !$0.connected && !offline.contains($0.box) }.count
+        let count = sections.reduce(0) { $0 + $1.actionCount }
         return count == 0 ? .clear : .issues(count)
+    }
+
+    /// The first line of the menu and of the window.
+    var summary: String {
+        switch state {
+        case .missing:
+            return "No Ferry status. Run ferry watch install."
+        case let .stale(date):
+            return "ferry watch is not running. Last check \(Self.age(date))."
+        case .clear:
+            return "All clear. Checked \(Self.age(checkedAt ?? Date()))."
+        case let .issues(count):
+            return "\(count) \(count == 1 ? "item needs" : "items need") action. Checked \(Self.age(checkedAt ?? Date()))."
+        }
     }
 
     /// The boxes of status.json in their order, then the boxes that have only a tunnel file.
@@ -163,6 +203,7 @@ final class StatusModel: ObservableObject {
 
     /// Read ~/.ferry/status.json and ~/.ferry/tunnels/ again.
     func reload() {
+        watch()
         tunnels = readTunnels()
         guard let data = try? Data(contentsOf: statusFile),
               let report = try? JSONDecoder().decode(BriefReport.self, from: data)
@@ -251,6 +292,30 @@ final class StatusModel: ObservableObject {
             .sorted { $0.box < $1.box }
     }
 
+    /// Reload after a change in ~/.ferry or ~/.ferry/tunnels. Ferry replaces each file with a rename, which changes its directory.
+    /// A directory that does not exist yet gets its watcher at a later reload. A removed or moved directory loses its watcher.
+    private func watch() {
+        for directory in [statusFile.deletingLastPathComponent().path, tunnelsDirectory.path] where watchers[directory] == nil {
+            let descriptor = open(directory, O_EVTONLY)
+            guard descriptor >= 0 else { continue }
+            let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: [.write, .delete, .rename], queue: .main)
+            source.setEventHandler { [weak self] in
+                let events = source.data
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if !events.isDisjoint(with: [.delete, .rename]) {
+                        source.cancel()
+                        self.watchers[directory] = nil
+                    }
+                    self.reload()
+                }
+            }
+            source.setCancelHandler { close(descriptor) }
+            source.resume()
+            watchers[directory] = source
+        }
+    }
+
     /// kill(pid, 0) sends no signal. ESRCH means no process has the pid. EPERM means that the process runs as another user.
     private static func isRunning(_ pid: Int) -> Bool {
         guard pid > 0, pid <= Int(Int32.max) else { return false }
@@ -331,6 +396,12 @@ final class StatusModel: ObservableObject {
         }
         if envelope.ok, let result = envelope.result { return .success(result) }
         return .failure(RunError(message: envelope.error?.message ?? "\(command) failed."))
+    }
+
+    private static func age(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 
     /// `checkedAt` is `Date.toISOString()` of JavaScript, with milliseconds.
