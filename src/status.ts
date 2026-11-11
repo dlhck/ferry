@@ -9,6 +9,7 @@ import { parseGitIdentity, type GitIdentity } from "./git-identity.ts";
 import type { UncarriedHookPath } from "./hook-paths.ts";
 import type { LinkError, LinkResult } from "./link.ts";
 import type { IntegrationHealth, IntegrationId } from "./integrations/types.ts";
+import type { McpGatewayStatus } from "./mcp-gateway/service.ts";
 import { MCP_SKIPS, type DenyRuleDescription, type NonPortableMcp } from "./manifest.ts";
 import { groupProgress, noProgress, plural, step, type Progress } from "./progress.ts";
 import type { TipReport } from "./store.ts";
@@ -51,6 +52,10 @@ export type BoxStatusDependencies = {
   /** The carried stdio MCP servers of this box. Only the brief check reads them. The full status has the skipped servers in `skippedMcp` of the report. */
   readonly mcpServers?: {
     check(): Promise<readonly BoxMcpIssue[]>;
+  };
+  /** The MCP gateway of a box with `mcp_gateway = true`. Absent for a box without the key. */
+  readonly mcpGateway?: {
+    read(): Promise<McpGatewayStatus>;
   };
   /** The registry tools with the policies of this box. `online` is false when the box is offline. */
   readonly tools?: {
@@ -157,6 +162,15 @@ export type BoxStatus = {
     readonly loginRequired: readonly string[];
     readonly error: StatusDependencyError | null;
   };
+  /**
+   * The MCP gateway and the login state of each of its servers. Present only
+   * for a box with `mcp_gateway = true`. `state` is null when the box is
+   * offline or the check failed.
+   */
+  readonly mcpGateway?: Omit<McpGatewayStatus, "state"> & {
+    readonly state: McpGatewayStatus["state"] | null;
+    readonly error: StatusDependencyError | null;
+  };
   /** One entry for each registry tool. Empty when the box check failed; the error is in `errors`. */
   readonly tools?: readonly ToolStatus[];
   /** The skills on the box that its snapshot does not track. `ferry adopt --from-box` brings one to this machine. */
@@ -210,7 +224,9 @@ export type StatusReport = {
 
 /**
  * One item of a box that needs action. `login`: a provider login. `mcp-login`:
- * an MCP server login, with the name `tool/server`. `mcp-server`: a carried
+ * an MCP server login, with the name `tool/server`, or `gateway/server` for a
+ * server of the MCP gateway. `mcp-gateway`: the MCP gateway service does not
+ * run, in the state `stopped`. `mcp-server`: a carried
  * stdio MCP server, with the name `harness/server`, in the state `env-missing`,
  * `env-unchecked`, `command-missing`, or `not-portable`. `tool`: a tool with the state `drift`,
  * `missing`, or `hidden`. `hook`: a hook command that refers to a home file
@@ -221,7 +237,7 @@ export type StatusReport = {
  * in words>`, of at most 60 characters. `message` is the full text.
  */
 export type BriefIssue = {
-  readonly kind: "login" | "mcp-login" | "mcp-server" | "tool" | "hook" | "resource" | "check-failed";
+  readonly kind: "login" | "mcp-login" | "mcp-gateway" | "mcp-server" | "tool" | "hook" | "resource" | "check-failed";
   readonly name: string;
   readonly state: string;
   readonly summary: string;
@@ -263,7 +279,7 @@ export async function composeBriefStatus(
   checkedAt: Date,
   progress: Progress = noProgress,
 ): Promise<BriefStatusReport> {
-  progress.plan(boxes.reduce((total, box) => total + 3 + (box.mcpServers ? 1 : 0) + (box.tools ? 1 : 0), 0));
+  progress.plan(boxes.reduce((total, box) => total + 3 + (box.mcpServers ? 1 : 0) + (box.mcpGateway ? 1 : 0) + (box.tools ? 1 : 0), 0));
   const boxProgress = orderedProgress(progress, boxes.map((box) => box.name));
   const results = await mapLimit(boxes, BOX_LIMIT, async (box, index) => {
     try {
@@ -288,6 +304,7 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
     progress.skip("Checking logins on the box", OFFLINE);
     progress.skip("Checking MCP logins on the box", OFFLINE);
     if (box.mcpServers) progress.skip("Checking MCP servers on the box", OFFLINE);
+    if (box.mcpGateway) progress.skip(GATEWAY_STEP, OFFLINE);
     if (box.tools) progress.skip("Checking tools on the box", OFFLINE);
     return { ...base, online: false, error, summary: cutMiddle(error, SUMMARY_LIMIT), issues: [], resources: null };
   }
@@ -377,6 +394,15 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
       }
     } catch (cause) {
       failed("MCP servers", cause);
+    }
+  }
+
+  if (box.mcpGateway) {
+    const gateway = box.mcpGateway;
+    try {
+      issues.push(...gatewayIssues(await step(progress, GATEWAY_STEP, () => gateway.read()), flag));
+    } catch (cause) {
+      failed("MCP gateway", cause);
     }
   }
 
@@ -486,6 +512,34 @@ function mcpServerIssue(issue: BoxMcpIssue, flag: string): BriefIssue {
   }
 }
 
+/** One item when the service does not run, and one `gateway/<server>` item for each server that needs a login. */
+function gatewayIssues(gateway: McpGatewayStatus, flag: string): BriefIssue[] {
+  const issues: BriefIssue[] = [];
+  if (gateway.state === "stopped") {
+    issues.push({
+      kind: "mcp-gateway",
+      name: "mcp-gateway",
+      state: "stopped",
+      summary: summarize("mcp-gateway", "not running"),
+      message: "The MCP gateway service ferry-mcp-gateway.service does not run on the box. A sync starts it. journalctl --user -u ferry-mcp-gateway.service on the box shows why it stopped.",
+      command: `ferry sync ${flag}`,
+    });
+  }
+  for (const server of gateway.servers) {
+    if (server.state !== "login-required") continue;
+    const name = `gateway/${server.name}`;
+    issues.push({
+      kind: "mcp-login",
+      name,
+      state: "login-required",
+      summary: summarize(name, "login needed"),
+      message: `The MCP gateway on the box needs a login for ${server.name}.`,
+      command: `ferry auth --mcp ${shellArg(server.name)} ${flag}`,
+    });
+  }
+  return issues;
+}
+
 function toolIssue(tool: ToolStatus, flag: string): BriefIssue | null {
   const base = { kind: "tool", name: tool.id, state: tool.state } as const;
   switch (tool.state) {
@@ -539,7 +593,7 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
       operatorIntegrations.length +
       dependencies.boxes.reduce(
         (total, box) =>
-          total + BOX_STEPS + (box.tools ? 1 : 0) + (box.boxSkills ? 1 : 0) + (box.secrets ? 1 : 0) + (box.unsavedWork ? 1 : 0) + (box.integrations?.length ?? 0),
+          total + BOX_STEPS + (box.tools ? 1 : 0) + (box.mcpGateway ? 1 : 0) + (box.boxSkills ? 1 : 0) + (box.secrets ? 1 : 0) + (box.unsavedWork ? 1 : 0) + (box.integrations?.length ?? 0),
         0,
       ),
   );
@@ -819,6 +873,24 @@ async function composeBoxStatus(
     progress.skip("Checking MCP logins on the box", OFFLINE);
   }
 
+  let mcpGateway: BoxStatus["mcpGateway"];
+  if (dependencies.mcpGateway) {
+    const none = { state: null, reason: null, port: null, servers: [] };
+    if (online) {
+      const gateway = dependencies.mcpGateway;
+      try {
+        mcpGateway = { ...(await step(progress, GATEWAY_STEP, () => gateway.read())), error: null };
+      } catch (cause) {
+        const error = dependencyError("box", cause);
+        errors.push(error);
+        mcpGateway = { ...none, error };
+      }
+    } else {
+      progress.skip(GATEWAY_STEP, OFFLINE);
+      mcpGateway = { ...none, error: null };
+    }
+  }
+
   let tools: readonly ToolStatus[] | undefined;
   if (dependencies.tools) {
     const name = "Checking tools on the box";
@@ -876,6 +948,7 @@ async function composeBoxStatus(
     managedPaths: { allHealthy, unhealthy, error: managedPathsError },
     auth: { providers, loginRequired, error: authError },
     mcpLogins: { loginRequired: mcpLoginRequired, error: mcpError },
+    ...(mcpGateway ? { mcpGateway } : {}),
     ...(tools ? { tools } : {}),
     ...(boxOnlySkills ? { boxOnlySkills } : {}),
     ...(unsavedWork ? { unsavedWork } : {}),
@@ -968,6 +1041,7 @@ function orderedProgress(
 }
 
 const OFFLINE = "host offline";
+const GATEWAY_STEP = "Checking the MCP gateway on the box";
 /** The tool states that print a warning. */
 const TOOL_WARNINGS: readonly ToolStatus["state"][] = ["drift", "missing", "hidden"];
 

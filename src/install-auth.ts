@@ -19,6 +19,7 @@ import {
 import { Install, outputLines, type InstallProgress, type InstallResult } from "./install.ts";
 import { FerryError } from "./errors.ts";
 import { Link, type LinkError, type LinkOptions } from "./link.ts";
+import { MCP_GATEWAY_TOOL } from "./mcp-gateway/service.ts";
 import type { OutputEvent } from "./output.ts";
 import { noProgress, step, type Progress } from "./progress.ts";
 import { BUILTIN_TOOLS } from "./registry/builtin.ts";
@@ -26,7 +27,7 @@ import type { ToolDescriptor } from "./registry/types.ts";
 import { RealGitRunner } from "./store.ts";
 import { boxLockError, type BoxLockRefusal } from "./sync.ts";
 import { describeStep, effectivePolicy, ToolPlanError, type ToolStep } from "./tools/resolve.ts";
-import { VERSION } from "./version.ts";
+import { isReleaseVersion, VERSION } from "./version.ts";
 
 const STORE_RELATIVE_PATH = ".ferry/store";
 /** The number of lines of stderr, and of stdout, that a failed install command shows. */
@@ -87,6 +88,10 @@ export type AuthCommandDependencies = {
   readonly onInterrupt: (stop: () => void) => () => void;
   /** With --json, prints the `login` event when the login waits for the browser. */
   readonly emit?: (event: OutputEvent) => void;
+  /** True when the box has `mcp_gateway = true`. Then `--mcp <server>` with no provider logs in the MCP gateway. */
+  readonly mcpGateway: boolean;
+  /** The version of this Ferry. A development build puts no Ferry on the box, so the box has no MCP gateway. */
+  readonly ferryVersion: string;
 };
 
 /** The plan of `ferry install`, and the git identity that it set on the box. */
@@ -228,7 +233,9 @@ export async function runAuthCommand(
   dependencies: Partial<AuthCommandDependencies> = {},
 ): Promise<AuthCommandResult | null> {
   const resolved = { ...defaultAuthDependencies, ...dependencies };
-  const input = mcpProvider(given, resolved.tools, resolved.writeLine);
+  // The gateway is a login target only for --mcp, so the list of auth tools does not show it.
+  const mcpTools = resolved.mcpGateway ? [...resolved.tools, MCP_GATEWAY_TOOL] : resolved.tools;
+  const input = mcpProvider(given, mcpTools, resolved.mcpGateway, resolved.writeLine);
   if (input.provider === undefined) {
     const tools = resolved.readConfig()?.tools;
     const providers = authTools(resolved.tools).map((tool) => ({
@@ -247,16 +254,23 @@ export async function runAuthCommand(
   }
 
   if (input.mcp !== undefined) {
-    if (!resolved.tools.some((tool) => tool.id === input.provider && tool.mcp)) {
+    if (!mcpTools.some((tool) => tool.id === input.provider && tool.mcp)) {
       fail(
         "operator/invalid-provider",
         `The ${input.provider} tool has no MCP login. Use claude, codex, or cursor.`,
         resolved.writeLine,
       );
     }
+    if (input.provider === MCP_GATEWAY_TOOL.id && resolved.mcpGateway && !isReleaseVersion(resolved.ferryVersion)) {
+      fail(
+        "operator/gateway-unavailable",
+        "The MCP gateway is not available, because this Ferry is a development build and the box has no Ferry.",
+        resolved.writeLine,
+      );
+    }
     const { target, config } = loadTarget(resolved.readConfig, resolved.writeLine);
-    refuseOff(input.provider, resolved.tools, config, resolved.writeLine);
-    const auth = resolved.createAuthStart(resolved.createLink(target), resolved.tools);
+    refuseOff(input.provider, mcpTools, config, resolved.writeLine);
+    const auth = resolved.createAuthStart(resolved.createLink(target), mcpTools);
     const { provider, mcp } = input;
     const started = await step(
       resolved.progress,
@@ -373,6 +387,8 @@ const defaultAuthDependencies: AuthCommandDependencies = {
     process.once("SIGINT", stop);
     return () => process.off("SIGINT", stop);
   },
+  mcpGateway: false,
+  ferryVersion: VERSION,
 };
 
 /** The `login` event: the URL to open, and the code to enter or to write on stdin. */
@@ -435,11 +451,13 @@ function loadTarget(
 
 /**
  * `--mcp <provider>/<server>`, the name that `ferry status` shows, gives the
- * provider. `--mcp <server>` needs the provider argument.
+ * provider. `--mcp <server>` needs the provider argument, except on a box
+ * with the MCP gateway: there it logs in the gateway.
  */
 function mcpProvider(
   input: AuthCommandInput,
   tools: readonly ToolDescriptor[],
+  mcpGateway: boolean,
   writeLine: (line: string) => void,
 ): AuthCommandInput {
   if (input.mcp === undefined) return input;
@@ -448,6 +466,7 @@ function mcpProvider(
   if (slash !== -1 && (input.provider ?? provider) === provider && tools.some((tool) => tool.id === provider && tool.mcp)) {
     return { provider, mcp: input.mcp.slice(slash + 1) };
   }
+  if (input.provider === undefined && mcpGateway) return { provider: MCP_GATEWAY_TOOL.id, mcp: input.mcp };
   if (input.provider === undefined) {
     const providers = tools.filter((tool) => tool.mcp).map((tool) => tool.id).join(", ");
     fail(

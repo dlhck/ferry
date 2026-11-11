@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthStart, loopbackLoginUrl, mcpLoginCommand, type AuthLink } from "../src/auth-start.ts";
 import { mcpCommand } from "../src/box-mcp.ts";
+import { MCP_GATEWAY_TOOL } from "../src/mcp-gateway/service.ts";
 import type { ForwardOptions, ForwardResult, LinkFailure, LinkResult, LinkSuccess, RunOptions } from "../src/link.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 
@@ -412,6 +413,38 @@ describe("AuthStart MCP logins", () => {
       kind: "link-failure",
       result: { error: { code: "forward-failed" } },
     });
+  });
+});
+
+describe("AuthStart MCP gateway login", () => {
+  const url = "https://auth.example/authorize?client_id=c&redirect_uri=http%3A%2F%2F127.0.0.1%3A41234%2Fcallback&state=s";
+
+  test("starts ferry mcp login on the box and polls ferry mcp list until the server is ready", async () => {
+    const timeout: LinkResult = { ok: false, error: { code: "forward-timeout", origin: "network", message: "t" } };
+    const link = new FakeLink(
+      [success(`Open this URL to log in linear: ${url}\n`), success("Gateway: running on 127.0.0.1:47820\nlinear ready\ndocs login-required\n")],
+      [timeout],
+    );
+    const auth = new AuthStart(link, [MCP_GATEWAY_TOOL]);
+
+    const started = await auth.startMcp("gateway", "linear");
+
+    expect(started).toEqual({
+      kind: "local-port-forward",
+      provider: "gateway/linear",
+      url,
+      localPort: 41234,
+      remotePort: 41234,
+      timeoutMs: 300_000,
+    });
+    expect(link.runs[0]!.command).toBe(mcpLoginCommand(`"$HOME/.local/bin/ferry" mcp login 'linear'`, 330));
+    expect(await auth.finishMcp(started as Extract<typeof started, { kind: "local-port-forward" }>)).toEqual({
+      kind: "logged-in",
+      provider: "gateway/linear",
+    });
+    expect(link.runs[1]!.command).toBe(
+      `command -v "$HOME/.local/bin/ferry" >/dev/null 2>&1 || exit 0; "$HOME/.local/bin/ferry" mcp list 2>/dev/null || true`,
+    );
   });
 });
 

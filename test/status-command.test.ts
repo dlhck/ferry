@@ -1,4 +1,5 @@
 import { BOX_FERRY_VERSION_COMMAND } from "../src/box-ferry.ts";
+import { GATEWAY_STATUS_COMMAND } from "../src/mcp-gateway/service.ts";
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1639,5 +1640,88 @@ describe("ferry status skipped MCP servers", () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe("ferry status with the MCP gateway", () => {
+  const list = JSON.stringify({
+    schemaVersion: 1,
+    command: "mcp list",
+    ok: true,
+    result: { gateway: { state: "stopped", port: null }, servers: [{ name: "linear", state: "login-required" }, { name: "docs", state: "ready" }] },
+    warnings: [],
+    error: null,
+  });
+
+  function gatewayStack(ferryVersion: string, mcpGateway = true) {
+    const base = fakeStack();
+    const baseLink = base.dependencies.createLink!({ host: "unused", user: "unused" });
+    const commands: string[] = [];
+    const dependencies: Partial<StatusCommandDependencies> = {
+      ...base.dependencies,
+      ferryVersion,
+      readConfig: () => ({
+        version: 1 as const,
+        harness: [{ id: "custom" }],
+        boxes: [{ name: "a", host: { transport: "ssh" as const, destination: "dev@box-a.example" }, ...(mcpGateway ? { mcpGateway: true as const } : {}) }],
+      }),
+      createLink: () => ({
+        ...baseLink,
+        async run(command: string) {
+          commands.push(command);
+          if (command === GATEWAY_STATUS_COMMAND) return { ok: true, address: "100.64.0.8", stdout: `${list}\n`, stderr: "" };
+          return baseLink.run(command);
+        },
+      }),
+    };
+    return { ...base, commands, dependencies };
+  }
+
+  test("shows the gateway state and one login state for each server in text and JSON", async () => {
+    const stack = gatewayStack("1.2.3");
+
+    const report = await status(stack);
+
+    expect(stack.output[0]).toContain(
+      "\nMCP gateway: STOPPED, run ferry sync --box a\n  linear: LOGIN REQUIRED, run ferry auth --mcp linear --box a\n  docs: ready",
+    );
+    expect(report.boxes[0]!.mcpGateway).toEqual({
+      state: "stopped",
+      reason: null,
+      port: null,
+      servers: [{ name: "linear", state: "login-required" }, { name: "docs", state: "ready" }],
+      error: null,
+    });
+  });
+
+  test("the brief report has the gateway items", async () => {
+    const stack = gatewayStack("1.2.3");
+
+    const report = await runBriefStatusCommand({}, stack.dependencies);
+
+    expect(report.boxes[0]!.issues.filter((issue) => issue.kind === "mcp-gateway" || issue.name.startsWith("gateway/")).map((issue) => issue.command)).toEqual([
+      "ferry sync --box a",
+      "ferry auth --mcp linear --box a",
+    ]);
+  });
+
+  test("a development build says that the gateway is not available and asks the box nothing about it", async () => {
+    const stack = gatewayStack("0.0.0-dev");
+
+    const report = await status(stack);
+
+    expect(stack.output[0]).toContain("\nMCP gateway: NOT AVAILABLE, this Ferry is a development build, so the box has no Ferry");
+    expect(report.boxes[0]!.mcpGateway?.state).toBe("unavailable");
+    expect(stack.commands).not.toContain(GATEWAY_STATUS_COMMAND);
+  });
+
+  test("a box without the key has no gateway check and no gateway line", async () => {
+    const stack = gatewayStack("1.2.3", false);
+
+    const report = await status(stack);
+
+    expect(stack.output[0]).not.toContain("MCP gateway");
+    expect(stack.commands).not.toContain(GATEWAY_STATUS_COMMAND);
+    expect("mcpGateway" in report.boxes[0]!).toBe(false);
   });
 });
