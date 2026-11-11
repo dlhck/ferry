@@ -105,7 +105,7 @@ Ferry never installs a command. `ferry status --brief` names each missing env ke
 - `/etc/sudoers.d/ferry` has mode `0440`, and `visudo -cf` checks it before it takes effect. It has this rule only:
 
   ```
-  ferry ALL=(root) NOPASSWD: /usr/bin/true, /usr/bin/apt update, /usr/bin/apt install gh -y, /usr/bin/apt install jq -y, /usr/bin/apt install nodejs npm -y
+  ferry ALL=(root) NOPASSWD: /usr/bin/true, /usr/bin/apt update, /usr/bin/apt update --error-on=any, /usr/bin/apt install gh -y, /usr/bin/apt install jq -y, /usr/bin/apt install nodejs npm -y
   ```
 
 - Each command has fixed arguments and no wildcard. `apt install` installs only these packages from the configured sources. So agents on a created box cannot get root through the `ferry` user. `/usr/bin/true` is the sudo check of `ferry status`, and the apt lines are the commands of the gh, jq, and Node recipes of `ferry install` and `ferry update`.

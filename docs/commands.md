@@ -1586,8 +1586,8 @@ Ferry does these steps:
   4. It writes /etc/sudoers.d/ferry with this rule only, and turns off root
      login:
        ferry ALL=(root) NOPASSWD: /usr/bin/true, /usr/bin/apt update,
-         /usr/bin/apt install gh -y, /usr/bin/apt install jq -y,
-         /usr/bin/apt install nodejs npm -y
+         /usr/bin/apt update --error-on=any, /usr/bin/apt install gh -y,
+         /usr/bin/apt install jq -y, /usr/bin/apt install nodejs npm -y
      So agents on the box cannot get root through the ferry user.
   5. As the ferry user, it runs ferry box add, ferry install --box <name>,
      and ferry sync --box <name>. The box gets gh = "latest" in

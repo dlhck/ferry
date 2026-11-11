@@ -546,7 +546,7 @@ const GH_INSTALL = (() => {
  * wildcard, so an agent on the box cannot get root through it. They are the
  * apt commands of the gh, jq, and Node recipes, and the check of ferry status.
  */
-export const SUDOERS_RULE = `${BOX_USER} ALL=(root) NOPASSWD: /usr/bin/true, /usr/bin/apt update, /usr/bin/apt install gh -y, /usr/bin/apt install jq -y, /usr/bin/apt install nodejs npm -y`;
+export const SUDOERS_RULE = `${BOX_USER} ALL=(root) NOPASSWD: /usr/bin/true, /usr/bin/apt update, /usr/bin/apt update --error-on=any, /usr/bin/apt install gh -y, /usr/bin/apt install jq -y, /usr/bin/apt install nodejs npm -y`;
 
 /** As root: write the rule with mode 0440 and check it with visudo before it takes effect. sudo skips a file name with a dot. */
 const WRITE_SUDOERS = [

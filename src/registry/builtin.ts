@@ -65,13 +65,18 @@ const GH_APT_SOURCE =
 
 /**
  * Read the package lists when the box has the GitHub CLI apt source and its
- * key, else add them. A box with the source needs only `sudo apt update`, so
- * a later install also works with the sudoers rule of `ferry box create`.
+ * key, else add them. `--error-on=any` makes apt update fail on a signature
+ * warning, for example after GitHub changes the key. Plain apt update then
+ * exits 0 and uses the old lists. On a failure, the full source setup gets
+ * the key again. A box with a good source needs only
+ * `sudo apt update --error-on=any`, so a later install also works with the
+ * sudoers rule of `ferry box create`.
  */
 const GH_APT_READY =
   "if test -s /etc/apt/keyrings/githubcli-archive-keyring.gpg \\\n" +
-  '&& grep -qxF "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" /etc/apt/sources.list.d/github-cli.list 2>/dev/null; then\n' +
-  "  sudo apt update\n" +
+  '&& grep -qxF "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" /etc/apt/sources.list.d/github-cli.list 2>/dev/null \\\n' +
+  "&& sudo apt update --error-on=any; then\n" +
+  "  :\n" +
   "else\n" +
   `  ${GH_APT_SOURCE}\n` +
   "fi";

@@ -336,7 +336,7 @@ describe("the sudoers rule", () => {
 
   test("has fixed arguments only: no wildcard and no ALL command", () => {
     expect(SUDOERS_RULE).toBe(
-      "ferry ALL=(root) NOPASSWD: /usr/bin/true, /usr/bin/apt update, /usr/bin/apt install gh -y, /usr/bin/apt install jq -y, /usr/bin/apt install nodejs npm -y",
+      "ferry ALL=(root) NOPASSWD: /usr/bin/true, /usr/bin/apt update, /usr/bin/apt update --error-on=any, /usr/bin/apt install gh -y, /usr/bin/apt install jq -y, /usr/bin/apt install nodejs npm -y",
     );
     expect(SUDOERS_RULE).not.toMatch(/[*?[\]\\]/);
     expect(allowed.every((command) => command.startsWith("/usr/bin/"))).toBe(true);
@@ -348,9 +348,9 @@ describe("the sudoers rule", () => {
     // The branch for a box that has the source. The other branch adds the source as root, which box create does.
     const ghInstall = gh.install!.command.split("\nelse\n")[0]! + gh.install!.command.slice(gh.install!.command.indexOf("\nfi"));
     const sudo = [gh.update!.command, ghInstall, jq.install!.command, jq.update!.command, nodeBootstrap(22, 19)].flatMap((command) =>
-      [...command.matchAll(/sudo ([^&|()\\\n]+)/g)].map((match) => `/usr/bin/${match[1]!.trim()}`),
+      [...command.matchAll(/sudo ([^&|()\\\n;]+)/g)].map((match) => `/usr/bin/${match[1]!.trim()}`),
     );
-    expect(new Set(sudo)).toEqual(new Set(["/usr/bin/apt update", "/usr/bin/apt install gh -y", "/usr/bin/apt install jq -y", "/usr/bin/apt install nodejs npm -y"]));
+    expect(new Set(sudo)).toEqual(new Set(["/usr/bin/apt update", "/usr/bin/apt update --error-on=any", "/usr/bin/apt install gh -y", "/usr/bin/apt install jq -y", "/usr/bin/apt install nodejs npm -y"]));
     for (const command of sudo) expect(allowed).toContain(command);
   });
 });

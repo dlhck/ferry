@@ -12,10 +12,10 @@ afterEach(() => {
 
 /**
  * Fake box commands. `sudo` writes its arguments to the log and
- * changes nothing. `apt-cache madison gh` lists the versions in `$VERSIONS`.
+ * changes nothing. It exits 100 for the command in `$HOME/sudo-fails`. `apt-cache madison gh` lists the versions in `$VERSIONS`.
  */
 const FAKES: Record<string, string> = {
-  sudo: 'echo "sudo $*" >> "$LOG"; [ "$1" = tee ] && cat > /dev/null; exit 0',
+  sudo: 'echo "sudo $*" >> "$LOG"; [ "$1" = tee ] && cat > /dev/null; [ -f "$HOME/sudo-fails" ] && [ "$*" = "$(cat "$HOME/sudo-fails")" ] && exit 100; exit 0',
   wget: 'for arg in "$@"; do case "$arg" in -O*) : > "${arg#-O}" ;; esac; done',
   dpkg: "echo amd64",
   mktemp: 'f="$HOME/keyring.$$"; : > "$f"; echo "$f"',
@@ -125,9 +125,20 @@ describe("gh latest install", () => {
     return gh!.install!.command.replaceAll("/etc/apt/", `${root}/etc/apt/`);
   };
 
-  test("a box with the GitHub CLI apt source and key gets only apt update and apt install gh -y", async () => {
+  test("a box with the GitHub CLI apt source and key gets only apt update --error-on=any and apt install gh -y", async () => {
     const { log } = await run("", "", (root) => relocated(root, true));
-    expect(log).toEqual(["sudo apt update", "sudo apt install gh -y"]);
+    expect(log).toEqual(["sudo apt update --error-on=any", "sudo apt install gh -y"]);
+  });
+
+  test("a failed apt update --error-on=any, for example a changed GitHub key, gets the source setup", async () => {
+    const { log } = await run("", "", (root) => {
+      writeFileSync(join(root, "sudo-fails"), "apt update --error-on=any");
+      return relocated(root, true);
+    });
+    expect(log[0]).toBe("sudo apt update --error-on=any");
+    expect(log.some((line) => line.startsWith("sudo tee ") && line.endsWith("etc/apt/keyrings/githubcli-archive-keyring.gpg"))).toBe(true);
+    expect(log.some((line) => line.startsWith("sudo tee ") && line.endsWith("etc/apt/sources.list.d/github-cli.list"))).toBe(true);
+    expect(log.slice(-2)).toEqual(["sudo apt update", "sudo apt install gh -y"]);
   });
 
   test("a box without the source gets the source setup, as before", async () => {

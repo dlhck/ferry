@@ -66,6 +66,8 @@ Ferry does these steps:
 
 The box gets `gh = "latest"` in `[box.<name>.tools]`, because the sudoers rule allows `apt install gh -y` only, and no exact gh version. Do not change that policy for the box.
 
+Before it installs gh, `ferry install` runs `sudo apt update --error-on=any`. When this command fails, Ferry adds the GitHub CLI apt source and key again, so a box gets a new key after GitHub changes it. On a created box, the sudoers rule does not allow that setup. So a warning from any apt source, for example a mirror that does not answer, stops `ferry install` with the apt warning. Run `ferry install --box <name>` again when the source answers.
+
 `--yes` skips the questions of create, of a `[host]` config change, and of the install. `--accept-host-keys` trusts the host keys of the snapshot host on the box, as for `ferry box add`.
 
 When a step fails after the machine exists, the error names the machine and its id. Run `ferry box destroy <name>` to remove it.
