@@ -21,6 +21,7 @@ import { buildProgram, runCli } from "../src/cli.ts";
 import type { OperatorConfig } from "../src/config.ts";
 import { denyRules, type Seed } from "../src/manifest.ts";
 import { unitFile } from "../src/integrations/paseo.ts";
+import { DISABLE_GATEWAY_COMMAND } from "../src/mcp-gateway/service.ts";
 import { loadRegistry, type RegistryConfig } from "../src/registry/load.ts";
 import type { LinkResult } from "../src/link.ts";
 import type { HarnessDescriptor } from "../src/registry/types.ts";
@@ -404,7 +405,12 @@ describe("runSync", () => {
             stderr: "",
           };
         }
-        events.push(command.includes(".profile") ? "write-path" : command.includes(".ferry/box") ? "write-box-files" : "update-box");
+        events.push(
+          command.includes(".profile") ? "write-path"
+          : command.includes(".ferry/box") ? "write-box-files"
+          : command.includes(".ferry/mcp-gateway") ? "remove-gateway"
+          : "update-box",
+        );
         return {
           ok: true as const,
           address: "box.example.ts.net",
@@ -472,6 +478,8 @@ describe("runSync", () => {
       "apply",
       "write-box-files",
       "write-path",
+      // A box without mcp_gateway gets only the removal check, which removes nothing when the box has no gateway.
+      "remove-gateway",
       "unlock",
       "adopt",
     ]);
@@ -493,6 +501,7 @@ describe("runSync", () => {
         options: undefined,
       },
       { command: profileBlockCommand(BUILTIN_BOX_PATH_DIRS), options: undefined },
+      { command: DISABLE_GATEWAY_COMMAND, options: undefined },
     ]);
     expect(applyInput).toMatchObject({
       checkout: "/srv/ferry/.ferry/store",
@@ -2136,7 +2145,8 @@ describe("sync with more than one box", () => {
       },
     });
 
-    expect(commands.some((command) => /claude|cursor|settings\.json|mcp/.test(command))).toBe(false);
+    // The removal check of the MCP gateway names no harness.
+    expect(commands.some((command) => /claude|cursor|settings\.json|mcp(?!-gateway)/.test(command))).toBe(false);
     expect(lines.join("\n")).toContain("\nMCP servers: declare on the box, and keep the other box servers: none\n");
   });
 

@@ -39,6 +39,8 @@ import { adoptPublishedSkills } from "./adopt.ts";
 import { installBoxPlugins, mergeBoxSettings } from "./box-settings.ts";
 import { withNotifyHooks } from "./notify.ts";
 import { registerBoxMcp } from "./box-mcp.ts";
+import { disableGateway, enableGateway, gatewayServers, MCP_GATEWAY_SERVICE } from "./mcp-gateway/service.ts";
+import { isReleaseVersion, VERSION } from "./version.ts";
 import {
   carryAgentProfiles,
   boxPaseoPreferences,
@@ -102,6 +104,8 @@ export type SyncDependencies = {
   /** Records a warning for the --json envelope. The warning line also goes to `writeLine`. */
   readonly warn?: (line: string) => void;
   readonly progress?: Progress;
+  /** The version of this Ferry. A development build puts no Ferry on the box, so the box gets no MCP gateway. */
+  readonly ferryVersion?: string;
 };
 
 type SyncConfig = PartialOperatorConfig & RegistryConfig;
@@ -323,7 +327,8 @@ export async function runSync(
         const pluginStep = plugins && (plugins.plugins.length > 0 || plugins.warnings.length > 0) ? 1 : 0;
         return total + BOX_STEPS + (box.profiles === null ? 0 : 2) + pluginStep +
           (hasProviders(box.providers) ? 1 : 0) + (hasPreferences(box.preferences) ? 1 : 0) +
-          (hasTerminals(box.terminals) ? 1 : 0) + (box.profiles !== null && box.agentMemoryMax !== null ? 1 : 0);
+          (hasTerminals(box.terminals) ? 1 : 0) + (box.profiles !== null && box.agentMemoryMax !== null ? 1 : 0) +
+          (box.mcpGateway ? 1 : 0);
       }, operatorSteps);
   if (planned !== (input.dryRun ? 1 : operatorSteps + BOX_STEPS)) progress.plan(planned);
   for (const leftover of seed.leftovers) {
@@ -451,6 +456,7 @@ export async function runSync(
           registry,
           seed,
           force: input.force === true,
+          ferryVersion: dependencies.ferryVersion ?? VERSION,
           apply: dependencies.apply ?? applyStore,
           boxStep,
           progress,
@@ -529,6 +535,7 @@ async function applyOnBox(context: {
   readonly registry: Registry;
   readonly seed: Seed;
   readonly force: boolean;
+  readonly ferryVersion: string;
   readonly apply: (input: RemoteApplyInput) => Promise<ApplyPlan>;
   readonly boxStep: <T>(name: string, work: () => T | Promise<T>, describe?: (result: T) => string | undefined) => Promise<T>;
   readonly progress: Progress;
@@ -703,6 +710,38 @@ async function applyOnBox(context: {
     },
     (detail) => detail,
   );
+
+  // The gateway only warns on failure, so it never blocks the core sync.
+  if (box.mcpGateway) {
+    const name = "Starting the MCP gateway";
+    if (!isReleaseVersion(context.ferryVersion)) {
+      progress.skip(name, "development build");
+      warn("Warning: The MCP gateway runs the Ferry of the box. This Ferry is a development build, so the box has no Ferry and Ferry did not start the gateway.");
+    } else {
+      try {
+        const { servers, warnings } = gatewayServers(seed.mcp, tools.filter((tool) => tool.mcp).map((tool) => tool.id));
+        for (const warning of warnings) warn(`Warning: ${warning}`);
+        const gateway = await boxStep(
+          name,
+          () => enableGateway(link, required(plan.remoteHome), servers),
+          (gateway) => (gateway.state === "missing" ? "no Ferry on the box" : `${plural(gateway.servers, "server")}, ${gateway.state}`),
+        );
+        if (gateway.state === "missing") {
+          warn(`Warning: The MCP gateway needs Ferry on the box. Run ferry install --box ${box.name}.`);
+        } else if (gateway.state === "stopped") {
+          warn(`Warning: ${MCP_GATEWAY_SERVICE.unit} does not run on the box. Run journalctl --user -u ${MCP_GATEWAY_SERVICE.unit} on the box to see why.`);
+        }
+      } catch (cause) {
+        warn(`Warning: Ferry could not start the MCP gateway: ${messageOf(cause)}. The core sync is complete.`);
+      }
+    }
+  } else {
+    try {
+      if (await disableGateway(link)) warn("Removed the MCP gateway, its unit, and its logins from the box.");
+    } catch (cause) {
+      warn(`Warning: Ferry could not remove the MCP gateway: ${messageOf(cause)}. The core sync is complete.`);
+    }
+  }
 
   // The Paseo steps run last and only warn on failure, so the Paseo daemon never blocks the core sync.
   if (profiles !== null) {
