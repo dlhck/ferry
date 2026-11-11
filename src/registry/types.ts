@@ -54,6 +54,34 @@ export type HarnessDescriptor = {
    * descriptor sets this.
    */
   readonly processNames?: readonly string[];
+  /** Where the harness records token counts. `ferry usage` shows a harness without it as not available. Only a builtin descriptor sets this. */
+  readonly usage?: UsageRecords;
+};
+
+/**
+ * The token counts in the JSONL session files of a harness. A dotted path,
+ * such as `message.usage`, names a value in the JSON of one line. Each line
+ * has the time of its record in `timestamp`, in ISO 8601 form.
+ */
+export type UsageRecords = {
+  /** The directory of the session files, relative to a home. Ferry looks in all its subdirectories. */
+  readonly root: string;
+  /** A glob for the file name, such as `*.jsonl`. */
+  readonly files: string;
+  /** The paths of the token record in a line. The first path that holds an object counts. */
+  readonly records: readonly string[];
+  /** The keys of the counts in a record. */
+  readonly fields: { readonly input: string; readonly output: string; readonly cacheRead: string; readonly cacheWrite: string };
+  /** True when the input count includes the cache read count. Ferry then subtracts it. */
+  readonly inputIncludesCacheRead?: boolean;
+  /** The path of the project directory in the line of the record, else in the first line of the file. */
+  readonly project: string;
+  /**
+   * A record counts once for each value at `path`: once in each file, or once
+   * in all files of the harness. A harness can write the same record two
+   * times, or copy it into a new file.
+   */
+  readonly once?: { readonly path: string; readonly scope: "file" | "harness" };
 };
 
 /**
