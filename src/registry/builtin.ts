@@ -64,6 +64,19 @@ const GH_APT_SOURCE =
   "&& sudo apt update";
 
 /**
+ * Read the package lists when the box has the GitHub CLI apt source and its
+ * key, else add them. A box with the source needs only `sudo apt update`, so
+ * a later install also works with the sudoers rule of `ferry box create`.
+ */
+const GH_APT_READY =
+  "if test -s /etc/apt/keyrings/githubcli-archive-keyring.gpg \\\n" +
+  '&& grep -qxF "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" /etc/apt/sources.list.d/github-cli.list 2>/dev/null; then\n' +
+  "  sudo apt update\n" +
+  "else\n" +
+  `  ${GH_APT_SOURCE}\n` +
+  "fi";
+
+/**
  * Install gh at `version` from the GitHub apt repository. When the repository
  * does not have that version, print a warning and install the latest gh.
  * An older version replaces a newer one.
@@ -214,7 +227,7 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
     binary: "gh",
     localVersion: "gh --version",
     boxVersion: "gh --version",
-    install: { command: `${GH_APT_SOURCE} \\\n&& sudo apt install gh -y` },
+    install: { command: `${GH_APT_READY} \\\n&& sudo apt install gh -y` },
     // gh has no own update command. The install added the apt source, so apt
     // upgrades it on the box. The operator machine can use another package
     // manager, so ferry does not update gh there.

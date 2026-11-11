@@ -23,9 +23,14 @@ const FAKES: Record<string, string> = {
 for version in $VERSIONS; do echo "        gh | $version | https://cli.github.com/packages stable/main amd64 Packages"; done`,
 };
 
-async function run(command: string, versions: string): Promise<{ stdout: string; log: string[] }> {
+async function run(
+  command: string,
+  versions: string,
+  prepare?: (root: string) => string,
+): Promise<{ stdout: string; log: string[] }> {
   const root = mkdtempSync(join(tmpdir(), "ferry-gh-recipe-"));
   roots.push(root);
+  if (prepare) command = prepare(root);
   const bin = join(root, "bin");
   mkdirSync(bin);
   for (const [name, body] of Object.entries(FAKES)) {
@@ -103,5 +108,46 @@ describe("gh version recipe", () => {
   test("the latest recipes stay", () => {
     expect(gh?.install?.command).toEndWith("&& sudo apt install gh -y");
     expect(gh?.update?.command).toBe("sudo apt update && sudo apt install gh -y");
+  });
+});
+
+describe("gh latest install", () => {
+  const LIST_LINE = "deb [arch=amd64 signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main";
+  /** The install command with /etc/apt in the test directory. */
+  const relocated = (root: string, withSource: boolean) => {
+    mkdirSync(join(root, "etc/apt/keyrings"), { recursive: true });
+    mkdirSync(join(root, "etc/apt/sources.list.d"), { recursive: true });
+    if (withSource) {
+      writeFileSync(join(root, "etc/apt/keyrings/githubcli-archive-keyring.gpg"), "key");
+      // The path in the source line moves with the command.
+      writeFileSync(join(root, "etc/apt/sources.list.d/github-cli.list"), `${LIST_LINE.replace("/etc/apt/", `${root}/etc/apt/`)}\n`);
+    }
+    return gh!.install!.command.replaceAll("/etc/apt/", `${root}/etc/apt/`);
+  };
+
+  test("a box with the GitHub CLI apt source and key gets only apt update and apt install gh -y", async () => {
+    const { log } = await run("", "", (root) => relocated(root, true));
+    expect(log).toEqual(["sudo apt update", "sudo apt install gh -y"]);
+  });
+
+  test("a box without the source gets the source setup, as before", async () => {
+    const { log } = await run("", "", (root) => relocated(root, false));
+    expect(log.some((line) => line.startsWith("sudo tee ") && line.endsWith("etc/apt/sources.list.d/github-cli.list"))).toBe(true);
+    expect(log.at(-1)).toBe("sudo apt install gh -y");
+  });
+
+  test("an empty key file or another source line gets the source setup", async () => {
+    const empty = await run("", "", (root) => {
+      const command = relocated(root, true);
+      writeFileSync(join(root, "etc/apt/keyrings/githubcli-archive-keyring.gpg"), "");
+      return command;
+    });
+    expect(empty.log.some((line) => line.startsWith("sudo mkdir"))).toBe(true);
+    const other = await run("", "", (root) => {
+      const command = relocated(root, true);
+      writeFileSync(join(root, "etc/apt/sources.list.d/github-cli.list"), "deb https://mirror.example/gh stable main\n");
+      return command;
+    });
+    expect(other.log.some((line) => line.startsWith("sudo mkdir"))).toBe(true);
   });
 });
