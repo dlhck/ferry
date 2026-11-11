@@ -745,3 +745,23 @@ describe('the "off" policy', () => {
     );
   });
 });
+
+describe("[provider.hetzner]", () => {
+  test("reads and writes the keys, and refuses an unknown key", () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-provider-config-"));
+    try {
+      mkdirSync(join(home, ".ferry"));
+      const base = 'version = 1\npublisher = "operator"\nsnapshot_url = "git@github.com:you/ferry-snapshot.git"\n\n[host]\ntransport = "ssh"\ndestination = "user@box.example"\n\n';
+      writeFileSync(join(home, ".ferry/config.toml"), `${base}[provider.hetzner]\nserver_type = "cx33"\nlocation = "hel1"\n`);
+      const config = readConfig(home);
+      expect(config?.provider).toEqual({ hetzner: { serverType: "cx33", location: "hel1" } });
+      writeConfig(withBoxes(config, [{ name: "a", host: { transport: "ssh", destination: "user@box.example" } }], undefined), home);
+      expect(readConfig(home)?.provider).toEqual({ hetzner: { serverType: "cx33", location: "hel1" } });
+
+      writeFileSync(join(home, ".ferry/config.toml"), `${base}[provider.hetzner]\ntoken = "x"\n`);
+      expect(() => readConfig(home)).toThrow("unknown key token in [provider.hetzner]");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
