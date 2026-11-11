@@ -41,6 +41,7 @@ The `ferry sherlock` commands exist only when the Sherlock integration is on and
   - [`ferry sherlock`](#ferry-sherlock)
     - [`ferry sherlock add`](#ferry-sherlock-add)
   - [`ferry tools`](#ferry-tools)
+  - [`ferry ps`](#ferry-ps)
   - [`ferry watch`](#ferry-watch)
     - [`ferry watch install`](#ferry-watch-install)
   - [`ferry menubar`](#ferry-menubar)
@@ -126,6 +127,8 @@ Commands:
   tools                                List the tools, the version policy of
                                        each one and of each box, and the
                                        versions on this machine
+  ps                                   List the agent processes on each box,
+                                       with their memory and CPU
   watch                                Watch the portable set and sync accepted
                                        changes
   menubar                              Install or remove the macOS menu bar app
@@ -1159,6 +1162,32 @@ Options:
   -h, --help  display help for command
 
 With --json: { tools: [{ id, name, kind, install, policy: { policy, default }, boxes, operatorVersion }] }.
+```
+
+## ferry ps
+
+```text
+Usage: ferry ps [options]
+
+List the agent processes on each box, with their memory and CPU.
+
+Ferry reads the processes of the box user in one SSH command and compares
+their program names with the harnesses of the registry. An agent is a matched
+process whose parent processes do not match. Its memory is the resident
+memory of the process and all its child processes. Its CPU is the sum of the
+CPU percent that ps gives for each of these processes, which is the average
+since the start of the process. 100% is one CPU. The project is the working
+directory of the agent process. The start time is in UTC.
+
+The command line of a process does not leave the box. Ferry replaces a token
+or a URL credential in a project path. An offline box gets one line with the
+reason, and Ferry continues with the other boxes. Ferry changes nothing on
+the box.
+
+Options:
+  -h, --help  display help for command
+
+With --json: { boxes: [{ name, online, error, agents: [{ harness, pid, project, startedAt, memoryKiB, cpuPercent, children }] }] }.
 ```
 
 ## ferry watch

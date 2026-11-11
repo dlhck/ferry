@@ -66,6 +66,7 @@ Use `--host <tailscale host> --ssh-user <user>` instead of `--ssh-destination` f
 | `ferry auth <tool>` | Start a login for `gh`, `claude`, `codex`, `cursor`, or a config tool with login keys on the box. `--mcp <server>` logs in to an MCP server. `--mcp <tool>/<server>`, the name in `ferry status`, also works. |
 | `ferry update` | Update the agent tools on the boxes and on this machine. |
 | `ferry tools` | List the tools and their version policies. |
+| `ferry ps` | List the agent processes on each box, or on the boxes of `--box`: the harness, the pid, the start time, the memory and CPU of the process with its child processes, and the project directory. `--json` gives the same data. An offline box gets one line with the reason. |
 | `ferry self-update` | Update Ferry on this machine, restart its installed user services, and update its release menu bar app. |
 | `ferry skills add` | Install skills with `npx skills add` as a global copy, so that Ferry carries them. |
 | `ferry adopt --from-box <name> <skill>` | Copy a skill that an agent wrote on a box to this machine. The Ferry on the box runs the deny rules, and a skill that fails one does not leave the box. Ferry shows the diff or the file list before it asks. The box needs a release of Ferry from `ferry install` or `ferry update`. Then run `ferry sync` to publish it to all boxes. `ferry status` lists the box-only skills. |

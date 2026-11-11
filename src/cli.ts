@@ -87,6 +87,7 @@ import {
 import type { BriefStatusReport, StatusReport } from "./status.ts";
 import { failedChecks, formatDoctor, runDoctor, type DoctorDependencies, type DoctorInput, type DoctorReport } from "./doctor.ts";
 import { runToolsCommand, toolsLines, type ToolsCommandDependencies, type ToolsReport } from "./tools/command.ts";
+import { psLines, runPs } from "./ps.ts";
 import { boxPathDirs } from "./tools/path.ts";
 import { runWatch, type WatchDependencies, type WatchInput } from "./watch.ts";
 import {
@@ -228,6 +229,7 @@ type CliDependencies = {
   readonly runTools?: (
     dependencies: Pick<ToolsCommandDependencies, "tools"> & Partial<ToolsCommandDependencies>,
   ) => Promise<ToolsReport>;
+  readonly runPs?: typeof runPs;
   readonly runProcess?: RunProcess;
   readonly readConfig?: () => PartialOperatorConfig | null;
   readonly integrations?: readonly Integration[];
@@ -320,6 +322,7 @@ const JSON_RESULTS: Record<string, string> = {
   "integrations enable": "{ integration, action, dryRun, plan, output, enabled, connectSteps }",
   "integrations disable": "{ integration, action, dryRun, plan, output, enabled, connectSteps }",
   tools: "{ tools: [{ id, name, kind, install, policy: { policy, default }, boxes, operatorVersion }] }",
+  ps: "{ boxes: [{ name, online, error, agents: [{ harness, pid, project, startedAt, memoryKiB, cpuPercent, children }] }] }",
   watch:
     "events watch-started, synced, sync-failed, sync-refused, content-refused, config-error, update-started, update-failed, status-failed, watch-stopped",
   "watch install": "{ manager, path }",
@@ -1537,6 +1540,31 @@ query, which can hold the login session. Give all three keys or none.`)
         for (const line of toolsLines(result)) writeLine(line);
       });
     });
+
+  const ps = program
+    .command("ps")
+    .summary("List the agent processes on each box, with their memory and CPU")
+    .description(`List the agent processes on each box, with their memory and CPU.
+
+Ferry reads the processes of the box user in one SSH command and compares
+their program names with the harnesses of the registry. An agent is a matched
+process whose parent processes do not match. Its memory is the resident
+memory of the process and all its child processes. Its CPU is the sum of the
+CPU percent that ps gives for each of these processes, which is the average
+since the start of the process. 100% is one CPU. The project is the working
+directory of the agent process. The start time is in UTC.
+
+The command line of a process does not leave the box. Ferry replaces a token
+or a URL credential in a project path. An offline box gets one line with the
+reason, and Ferry continues with the other boxes. Ferry changes nothing on
+the box.`)
+    .action(async () => {
+      const result = await (dependencies.runPs ?? runPs)(boxNames(), { harnesses: registry().harnesses, createLink, readConfig: config });
+      report(result, (result) => {
+        for (const line of psLines(result)) writeLine(line);
+      });
+    });
+  boxCommands.add(ps);
 
   const watch = program
     .command("watch")
