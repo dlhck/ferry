@@ -15,6 +15,7 @@ description: Read the state of each box with ferry status, the watch service, th
 - The logins of the tools, and the logins of the MCP servers.
 - The tools and their versions.
 - The box-only skills: skills on the box that the snapshot does not have. `ferry adopt --from-box` copies one to the operator machine.
+- The unsaved work: git projects on the box with work that is only on the box. See [Unsaved work](#unsaved-work).
 - The integrations that are on.
 
 `ferry status` does not fail for an offline box. The report shows the box as offline.
@@ -37,6 +38,32 @@ Skipped MCP servers:
 | `app-bundle` | The server runs from a macOS app bundle, which the box does not have. | Nothing. A box cannot run a macOS app. |
 
 The block shows only the name and the reason, never a command or an argument of a server. The list is the same for each box. Ferry prints no block when it skips no server. A server with a credential in its arguments is not in the block: it stops the sync, and the deny list has its rule.
+
+### Unsaved work
+
+The block `Unsaved work` of each box names each git project on the box that has work that is only on the box:
+
+```
+Unsaved work: 2 of 3 projects, only on the box
+  ~/code/app (main): 3 changed files, main has 2 commits that no remote has
+  ~/code/api (detached HEAD): feature has 1 commit that no remote has
+```
+
+Ferry checks two lists of projects:
+
+- The `projects` key of `[box.<name>]` in `~/.ferry/config.toml`. See [Boxes](boxes.md#projects-on-a-box).
+- The destinations of earlier `ferry move` commands to the box. The box records each destination in `~/.ferry/projects`.
+
+A project appears when it has one of these:
+
+- A changed tracked file or an untracked file. An ignored file does not count.
+- A local branch with commits that no remote-tracking branch has. A branch without a remote counts all its commits. Ferry does not fetch, so the counts use the remote-tracking branches of the last fetch on the box.
+
+A stash does not count. A clean project that is fully pushed does not appear. A path that is not a git project is skipped.
+
+The block shows only the path, the branch, and the counts, never a file name or a commit subject. When the box has a box install of Ferry, the output goes through `ferry redact` on the box, so a token in a path or a branch name stays on the box. The operator machine applies the same token rule again.
+
+`ferry box remove <name> --uninstall` prints the same list before it asks for the box name. Ferry keeps the project directories, but the list shows what is lost when you delete the machine. `--brief` does not have the block, because work in progress needs no action.
 
 ### Tool states
 
@@ -111,4 +138,4 @@ The menu bar app runs only on macOS. On Linux, a waybar custom module can show t
 
 ## Scripts and agents
 
-`ferry status --json` prints the status report with `schemaVersion: 2`. Its `skippedMcp` field has the skipped stdio MCP servers as `{ harness, name, reason }`. `ferry status --brief --json` prints `{ schemaVersion: 1, checkedAt, boxes }`. Each item has a `summary` of at most 60 characters and the full `message`. The [Ferry agent skill](https://github.com/dlhck/ferry/blob/main/skills/ferry/SKILL.md) describes each field.
+`ferry status --json` prints the status report with `schemaVersion: 2`. Its `skippedMcp` field has the skipped stdio MCP servers as `{ harness, name, reason }`. The `unsavedWork` field of each box has `{ checked, projects, error }`, and each project is `{ path, branch, changes, unpushed: [{ branch, commits }] }`. `ferry status --brief --json` prints `{ schemaVersion: 1, checkedAt, boxes }`. Each item has a `summary` of at most 60 characters and the full `message`. The [Ferry agent skill](https://github.com/dlhck/ferry/blob/main/skills/ferry/SKILL.md) describes each field.
