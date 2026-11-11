@@ -274,6 +274,19 @@ describe("ferry move to the box", () => {
     ]);
   });
 
+  test("records the destination in ~/.ferry/projects on the box one time", async () => {
+    const w = world();
+    project(w, w.operator);
+    mkdirSync(join(w.box, ".ferry"), { recursive: true });
+    write(join(w.box, ".ferry/projects"), "code/other\n");
+
+    expect((await move(w, { path: "Developer/app" })).error).toBeNull();
+    rmSync(join(w.box, "Developer/app"), { recursive: true });
+    expect((await move(w, { path: "Developer/app" })).error).toBeNull();
+
+    expect(readFileSync(join(w.box, ".ferry/projects"), "utf8")).toBe("code/other\nDeveloper/app\n");
+  });
+
   test("the archive for the box has no AppleDouble entries and no extended attributes", async () => {
     const w = world();
     const app = project(w, w.operator);
@@ -798,6 +811,15 @@ describe("ferry move --from-box", () => {
     expect(existsSync(boxApp)).toBe(false);
     expect(existsSync(join(w.box, ".ferry/trash/app-20260927T101112Z/AGENTS.md"))).toBe(true);
     expect(result.events).toContain("start:Moving the box copy to the Ferry trash");
+  });
+
+  test("records nothing on the box when this machine is the destination", async () => {
+    const w = world();
+    project(w, w.box);
+
+    expect((await move(w, { path: "Developer/app", fromBox: "default" })).error).toBeNull();
+
+    expect(existsSync(join(w.box, ".ferry/projects"))).toBe(false);
   });
 
   test("accepts a branch whose pull request is merged, with gh on the box", async () => {
