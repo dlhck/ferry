@@ -359,6 +359,52 @@ describe("ferry status command", () => {
     );
   });
 
+  test("names each project with unsaved work in text and JSON, and checks the configured projects", async () => {
+    const stack = fakeStack();
+    const link = stack.dependencies.createLink!({ host: "box", user: "ferry" });
+    const probes: string[] = [];
+    const dependencies = {
+      ...stack.dependencies,
+      readConfig: () => ({
+        version: 1 as const,
+        harness: [{ id: "custom" }],
+        boxes: [{ name: "a", host: { transport: "ssh" as const, destination: "user@box.example" }, projects: ["code/app", "code/clean"] }],
+      }),
+      createLink: () => ({
+        ...link,
+        async run(command: string): Promise<LinkResult> {
+          if (!command.includes("for-each-ref")) return link.run(command);
+          probes.push(command);
+          const stdout = ["project\tcode/app\tmain\t2", "branch\tcode/app\tmain\t3", "project\tcode/clean\tmain\t0"].join("\n");
+          return { ok: true, address: "100.64.0.8", stdout: `${stdout}\n`, stderr: "" };
+        },
+      }),
+    };
+
+    const report = await status(stack, false, dependencies);
+    await status(stack, true, dependencies);
+
+    expect(probes[0]).toEndWith(" 'code/app' 'code/clean'");
+    expect(report.boxes[0]!.unsavedWork).toEqual({
+      checked: 2,
+      projects: [{ path: "code/app", branch: "main", changes: 2, unpushed: [{ branch: "main", commits: 3 }] }],
+      error: null,
+    });
+    expect(stack.output[0]).toContain(
+      "Unsaved work: 1 of 2 projects, only on the box\n  ~/code/app (main): 2 changed files, main has 3 commits that no remote has\n",
+    );
+    expect(JSON.parse(stack.output[1]!).boxes[0].unsavedWork).toEqual(report.boxes[0]!.unsavedWork);
+  });
+
+  test("says that unsaved work is unavailable while the host is offline", async () => {
+    const stack = fakeStack(false);
+
+    const report = await status(stack);
+
+    expect(report.boxes[0]!.unsavedWork).toEqual({ checked: null, projects: null, error: null });
+    expect(stack.output[0]).toContain("Unsaved work: unavailable while host is offline");
+  });
+
   test("names each changed file in a dirty box checkout in text and JSON", async () => {
     const changes = " M skills/tdd/SKILL.md\0?? skills/scratch/SKILL.md\0";
     const text = fakeStack(true, changes);
@@ -551,6 +597,8 @@ describe("ferry status progress", () => {
       "done",
       "start:Listing box-only skills",
       "done",
+      "start:Reading unsaved work on the box",
+      "done",
       "start:Checking logins on the box",
       "done",
       "start:Checking MCP logins on the box",
@@ -578,6 +626,7 @@ describe("ferry status progress", () => {
       "skip:Reading box secret names",
       "skip:Checking managed links on the box",
       "skip:Listing box-only skills",
+      "skip:Reading unsaved work on the box",
       "skip:Checking logins on the box",
       "skip:Checking MCP logins on the box",
       "skip:Checking tools on the box",
@@ -602,6 +651,7 @@ describe("ferry status progress", () => {
       "Reading box secret names           – skipped  host offline",
       "Checking managed links on the box  – skipped  host offline",
       "Listing box-only skills            – skipped  host offline",
+      "Reading unsaved work on the box    – skipped  host offline",
       "Checking logins on the box         – skipped  host offline",
       "Checking MCP logins on the box     – skipped  host offline",
       "Checking tools on the box          – skipped  host offline",
@@ -918,6 +968,7 @@ describe("ferry status with more than one box", () => {
       "[a] Reading box secret names",
       "[a] Checking managed links on the box",
       "[a] Listing box-only skills",
+      "[a] Reading unsaved work on the box",
       "[a] Checking logins on the box",
       "[a] Checking MCP logins on the box",
       "[a] Checking tools on the box",
@@ -930,6 +981,7 @@ describe("ferry status with more than one box", () => {
       "[b] Reading box secret names",
       "[b] Checking managed links on the box",
       "[b] Listing box-only skills",
+      "[b] Reading unsaved work on the box",
       "[b] Checking logins on the box",
       "[b] Checking MCP logins on the box",
       "[b] Checking tools on the box",
@@ -1192,7 +1244,7 @@ describe("ferry status tools", () => {
       "  WARNING: jq is not on the box. Run ferry install.",
       "  WARNING: cursor is not on the box. Run ferry install.",
     ]);
-    expect(text).not.toMatch(/paseo|project/i);
+    expect(text.replace(/^Unsaved work:.*$/m, "")).not.toMatch(/paseo|project/i);
   });
 });
 

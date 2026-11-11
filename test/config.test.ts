@@ -507,6 +507,27 @@ describe("box tables", () => {
     expect(readConfig(home)).toEqual(config);
   });
 
+  test("reads and writes projects of a box", () => {
+    const home = homeWithConfig([...TOP, "", ...BOX_A, 'projects = ["code/app", "work/api"]']);
+    const config = readConfig(home);
+
+    expect(config?.boxes?.[0]).toEqual({
+      name: "a",
+      host: { transport: "ssh", destination: "dev@box-a.example" },
+      projects: ["code/app", "work/api"],
+    });
+    writeConfig({ version: 1, publisher: "operator", snapshotUrl: "snapshot.git", boxes: config?.boxes ?? [] }, home);
+    expect(readFileSync(configPath(home), "utf8")).toContain('projects = ["code/app","work/api"]\n');
+    expect(readConfig(home)).toEqual(config);
+  });
+
+  test("refuses a project path that is not below the box home", () => {
+    for (const value of ['["/home/user/app"]', '["~/app"]', '["code/../../app"]', '[""]', '"code/app"']) {
+      const home = homeWithConfig([...TOP, "", ...BOX_A, `projects = ${value}`]);
+      expect(() => readConfig(home)).toThrow("invalid projects in [box.a]");
+    }
+  });
+
   test("refuses an unknown git_auth value", () => {
     const home = homeWithConfig([...TOP, "", ...BOX_A, 'git_auth = "token"']);
 

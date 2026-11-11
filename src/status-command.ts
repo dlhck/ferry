@@ -11,6 +11,7 @@ import {
 import { boxFerryStatus } from "./box-ferry.ts";
 import { parseSecretsStatus, SECRETS_STATUS_COMMAND } from "./secrets.ts";
 import { checkBoxMcp } from "./box-mcp.ts";
+import { boxWorkLines, readBoxWork } from "./box-work.ts";
 import { BOX_RESOURCES_COMMAND, DEFAULT_RESOURCE_LIMITS, parseBoxResources, type BoxResources } from "./box-resources.ts";
 import { BOX_SNAPSHOT_KEY, resolveBoxes, type ResolvedBox } from "./boxes.ts";
 import { readConfig, resolveLinkOptions, type OperatorHostConfig, type PartialOperatorConfig } from "./config.ts";
@@ -231,6 +232,7 @@ function boxDependencies(
         return parseSecretsStatus(result.stdout);
       },
     },
+    unsavedWork: { read: () => readBoxWork(link, box.projects) },
     resources: {
       read: () => resources,
       limits: { ...DEFAULT_RESOURCE_LIMITS, ...config.status },
@@ -319,6 +321,7 @@ function boxLines(box: BoxStatus, operator: GitIdentity | null): string[] {
     ...boxSkillLines(box),
     ...(box.secrets === undefined ? [] : ["", box.secrets === null ? "Secrets: unavailable" :
       `Secrets: ${box.secrets.present ? "present" : "absent"}; names: ${box.secrets.names.join(", ") || "none"}`]),
+    ...unsavedWorkLines(box),
     ...toolLines(box.tools),
     "",
     "Authentication:",
@@ -501,6 +504,16 @@ function boxSkillLines(box: BoxStatus): string[] {
     `Box-only skills: ${skills.length}, the snapshot does not have them`,
     ...skills.map((skill) => `  ${skill.name}: ${skill.paths.join(", ")}, run ferry adopt --from-box ${box.name} ${/^[A-Za-z0-9._-]+$/.test(skill.name) ? skill.name : quoteShell(skill.name)}`),
   ];
+}
+
+/** The projects on the box with work that is not committed or not pushed. */
+function unsavedWorkLines(box: BoxStatus): string[] {
+  if (box.unsavedWork === undefined) return [];
+  const { checked, projects } = box.unsavedWork;
+  if (checked === null || projects === null) {
+    return ["", `Unsaved work: unavailable${box.link.online ? "" : " while host is offline"}`];
+  }
+  return ["", ...boxWorkLines({ checked, projects }, box.name)];
 }
 
 /** One row for each tool, then one warning for each tool to fix. */

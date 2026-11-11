@@ -191,8 +191,10 @@ describe("planBoxUninstall", () => {
       ],
       profileBlock: true,
       paths: [".ferry/box", ".ferry/exposed", ".ferry/store", ".local/bin/ferry", ".ferry/box.json"],
+      unsavedWork: { checked: 0, projects: [] },
     });
-    expect(boxUninstallLines(plan)).toEqual([
+    expect(boxUninstallLines(plan, "b")).toEqual([
+      "Unsaved work: no projects to check. Add projects to [box.b], or move a project to the box with ferry move.",
       "Stop and remove the user services: ferry-paseo.service. A stopped service stops its agents.",
       "Remove the link ~/.agents/skills/review",
       `Remove the link ~/.claude/CLAUDE.md and move ~/.ferry/backups/${NEW}/claude/CLAUDE.md back`,
@@ -220,8 +222,8 @@ describe("planBoxUninstall", () => {
 
     const plan = await planBoxUninstall(BUILTIN_HARNESSES, box.link);
 
-    expect(plan).toEqual({ home: box.home, services: [], links: [], profileBlock: false, paths: [] });
-    expect(boxUninstallLines(plan)[0]).toBe("The box has no Ferry files.");
+    expect(plan).toEqual({ home: box.home, services: [], links: [], profileBlock: false, paths: [], unsavedWork: { checked: 0, projects: [] } });
+    expect(boxUninstallLines(plan, "b")[1]).toBe("The box has no Ferry files.");
     expect(await commitBoxUninstall(plan, box.link)).toEqual([]);
     expect(box.read(".local/bin/ferry")).toBe("binary\n");
     expect(box.read(".profile")).toBe("export EDITOR=vi\n");
@@ -353,6 +355,29 @@ describe("ferry box remove --uninstall", () => {
     },
   };
 
+  test("prints the projects with unsaved work before it asks, and removes the move record", async () => {
+    const box = await ferryBox();
+    box.file("code/app/notes.txt", "draft\n");
+    box.file("moved/api/notes.txt", "draft\n");
+    Bun.spawnSync(["git", "init", "-q", "-b", "main", join(box.home, "code/app")]);
+    Bun.spawnSync(["git", "init", "-q", "-b", "main", join(box.home, "moved/api")]);
+    box.file(".ferry/projects", "moved/api\n");
+    const config = CONFIG.replace('destination = "user@box.example"\n', 'destination = "user@box.example"\nprojects = ["code/app"]\n');
+    const { deps, lines, questions } = operator(box, { confirmName: async (message) => (lines.push(`question: ${message}`), "b") }, config);
+
+    const result = await runBoxUninstall({ name: "b", yes: false, dryRun: false }, deps);
+
+    const asked = lines.indexOf("question: Type b to remove Ferry from the box.");
+    const heading = lines.indexOf("Unsaved work: 2 of 2 projects, only on the box");
+    expect(heading).toBeGreaterThan(-1);
+    expect(heading).toBeLessThan(asked);
+    expect(lines.slice(heading + 1, heading + 3)).toEqual(["  ~/code/app (main): 1 changed file", "  ~/moved/api (main): 1 changed file"]);
+    expect(questions).toEqual([]);
+    expect(result?.uninstall.plan.unsavedWork?.projects.map((project) => project.path)).toEqual(["code/app", "moved/api"]);
+    expect(box.exists(".ferry/projects")).toBe(false);
+    expect(box.exists("code/app/notes.txt")).toBe(true);
+  });
+
   test("asks for the box name after the plan, removes Ferry from the box, then removes the box from the config", async () => {
     const box = await ferryBox();
     const progress = recordProgress();
@@ -478,8 +503,9 @@ describe("ferry box remove --uninstall", () => {
 
       await runBoxUninstall({ name: "b", yes: false, dryRun: false }, observed);
 
-      // The plan command, the question, and the removal command: each sync stops before its publish and its box steps.
+      // The plan commands, the question, and the removal command: each sync stops before its publish and its box steps.
       expect(during).toEqual([
+        "box command: sync-busy",
         "box command: sync-busy",
         "question: sync-busy",
         "box command: sync-busy",
@@ -614,7 +640,7 @@ describe("ferry box remove --uninstall", () => {
     expect(lines).toContain("Remove ~/.ferry/store");
     expect(lines.at(-1)).toBe("Dry run: Ferry made no changes.");
     expect(questions).toEqual([]);
-    expect(box.commands).toHaveLength(2);
+    expect(box.commands).toHaveLength(3);
     expect(box.exists(".ferry/store")).toBe(true);
     expect(box.isLink("AGENTS.md")).toBe(true);
     expect(text()).toBe(CONFIG);
