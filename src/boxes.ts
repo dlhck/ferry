@@ -24,6 +24,8 @@ export type ResolvedBox = {
   readonly host: OperatorHostConfig;
   /** `git_auth` of the box, or `"agent"`. */
   readonly gitAuth: GitAuth;
+  /** `projects` of the box, or none. */
+  readonly projects: readonly string[];
   /** `[integrations]`, with the keys of `[box.<name>.integrations]` on top. */
   readonly integrations: IntegrationsConfig;
   /**
@@ -106,6 +108,7 @@ function resolveBox(config: PartialOperatorConfig, box: BoxConfig): ResolvedBox 
     name: box.name,
     host: box.host,
     gitAuth: box.gitAuth ?? "agent",
+    projects: box.projects ?? [],
     integrations: { ...config.integrations, ...box.integrations },
     tools,
   };

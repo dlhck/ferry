@@ -46,6 +46,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, posix, relative, resolve } from "node:path";
+import { BOX_PROJECTS_RECORD } from "./box-work.ts";
 import { BoxRequiredError, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import { ConfigMissingError, readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
 import { hasBoxPart, INTEGRATIONS, operatorIntegrations, type Integration } from "./integrations/index.ts";
@@ -477,6 +478,15 @@ export async function runMove(input: MoveInput, overrides: Partial<MoveDependenc
           );
         }
       });
+    }
+
+    // `ferry status` reads the record for the unsaved work of the box.
+    if (destinationBox !== null) {
+      const record = `"$HOME"/${BOX_PROJECTS_RECORD}`;
+      const recorded = await destination.run(
+        `mkdir -p "$HOME"/.ferry && { grep -qxF -- ${quoteShell(rel)} ${record} 2>/dev/null || printf '%s\\n' ${quoteShell(rel)} >> ${record}; }`,
+      );
+      if (!recorded.ok) warnings.push(`WARNING: Ferry could not add ~/${rel} to ~/${BOX_PROJECTS_RECORD} on ${destination.label}: ${recorded.message}. ferry status does not check it.`);
     }
 
     let moved: MovedSession[] = [];

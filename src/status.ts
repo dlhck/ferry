@@ -3,6 +3,7 @@ import type { ApplyAction, ApplyPlan } from "./apply.ts";
 import type { AuthProviderStatus, AuthStatusReport, McpLoginStatus } from "./auth-start.ts";
 import type { BoxMcpIssue } from "./box-mcp.ts";
 import type { BoxResources, ResourceLimits } from "./box-resources.ts";
+import type { BoxWork, ProjectWork } from "./box-work.ts";
 import type { GitAuth } from "./config.ts";
 import { parseGitIdentity, type GitIdentity } from "./git-identity.ts";
 import type { UncarriedHookPath } from "./hook-paths.ts";
@@ -64,6 +65,10 @@ export type BoxStatusDependencies = {
     list(): Promise<readonly BoxSkill[]>;
   };
   readonly secrets?: { read(): Promise<SecretsStatus> };
+  /** The git projects on the box with unsaved work. Only the full status reads them. */
+  readonly unsavedWork?: {
+    read(): Promise<BoxWork>;
+  };
   /** The disk, memory, and load that the probe read, and the limits. Only the brief check reads them. */
   readonly resources?: {
     read(): BoxResources | null;
@@ -162,6 +167,14 @@ export type BoxStatus = {
   };
   /** Box-local file presence and names only, or null when the inspection failed. */
   readonly secrets?: SecretsStatus | null;
+  /** The git projects with changes that are not committed, or with commits that no remote has. */
+  readonly unsavedWork?: {
+    /** The number of git projects that Ferry checked. `null` when Ferry could not read them, or the box is offline. */
+    readonly checked: number | null;
+    /** Only the projects with unsaved work. `null` when `checked` is null. */
+    readonly projects: readonly ProjectWork[] | null;
+    readonly error: StatusDependencyError | null;
+  };
   /** Present only when at least one integration is enabled for this box. */
   readonly integrations?: Readonly<Partial<Record<IntegrationId, IntegrationStatus>>>;
   /** The errors of this box. */
@@ -526,7 +539,7 @@ export async function composeStatus(dependencies: StatusDependencies): Promise<S
       operatorIntegrations.length +
       dependencies.boxes.reduce(
         (total, box) =>
-          total + BOX_STEPS + (box.tools ? 1 : 0) + (box.boxSkills ? 1 : 0) + (box.secrets ? 1 : 0) + (box.integrations?.length ?? 0),
+          total + BOX_STEPS + (box.tools ? 1 : 0) + (box.boxSkills ? 1 : 0) + (box.secrets ? 1 : 0) + (box.unsavedWork ? 1 : 0) + (box.integrations?.length ?? 0),
         0,
       ),
   );
@@ -748,6 +761,27 @@ async function composeBoxStatus(
     }
   }
 
+  let unsavedWork: BoxStatus["unsavedWork"];
+  if (dependencies.unsavedWork) {
+    const name = "Reading unsaved work on the box";
+    if (online) {
+      const work = dependencies.unsavedWork;
+      try {
+        const { checked, projects } = await step(progress, name, () => work.read(), undefined, (result) =>
+          result.projects.length > 0 ? plural(result.projects.length, "project") : undefined,
+        );
+        unsavedWork = { checked, projects, error: null };
+      } catch (cause) {
+        const error = dependencyError("box", cause);
+        errors.push(error);
+        unsavedWork = { checked: null, projects: null, error };
+      }
+    } else {
+      progress.skip(name, OFFLINE);
+      unsavedWork = { checked: null, projects: null, error: null };
+    }
+  }
+
   let authError: StatusDependencyError | null = null;
   let providers: readonly AuthProviderStatus[] = [];
   if (online) {
@@ -844,6 +878,7 @@ async function composeBoxStatus(
     mcpLogins: { loginRequired: mcpLoginRequired, error: mcpError },
     ...(tools ? { tools } : {}),
     ...(boxOnlySkills ? { boxOnlySkills } : {}),
+    ...(unsavedWork ? { unsavedWork } : {}),
     ...(enabledIntegrations.length > 0 ? { integrations } : {}),
     errors,
   };
