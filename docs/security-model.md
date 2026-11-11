@@ -98,10 +98,18 @@ Ferry never installs a command. `ferry status --brief` names each missing env ke
 - The token is not in the config, the snapshot, a plan, the output, a JSON result, or an error. Ferry puts `[token]` in its place in each error text. The config parser refuses a `token` key in `[provider.hetzner]`.
 - The token never goes to a box. Only the operator machine calls the Hetzner Cloud API.
 
-### SSH login
+### SSH login and sudo
 
-- The machine gets one SSH user, `ferry`, with your public key. Password login and root login are off, and the user has no password.
-- The `ferry` user has `sudo` without a password, because `ferry install` runs `apt` and the user has no password. So an agent on the box can get root. Use the box only for the agents that you trust with it.
+- The machine gets one SSH user, `ferry`, with your public key. Password login is off, and the user has no password.
+- Ferry connects as root with your key for the root steps: the host key, Tailscale, the gh apt source and gh, and linger for `ferry`. Then it writes the sudoers rule, adds `PermitRootLogin no` to `/etc/ssh/sshd_config.d/10-ferry.conf`, removes the root SSH keys, and reloads `sshd`. Ferry does all other steps as `ferry`.
+- `/etc/sudoers.d/ferry` has mode `0440`, and `visudo -cf` checks it before it takes effect. It has this rule only:
+
+  ```
+  ferry ALL=(root) NOPASSWD: /usr/bin/true, /usr/bin/apt update, /usr/bin/apt install gh -y, /usr/bin/apt install jq -y, /usr/bin/apt install nodejs npm -y
+  ```
+
+- Each command has fixed arguments and no wildcard. `apt install` installs only these packages from the configured sources. So agents on a created box cannot get root through the `ferry` user. `/usr/bin/true` is the sudo check of `ferry status`, and the apt lines are the commands of the gh, jq, and Node recipes of `ferry install` and `ferry update`.
+- Tailscale runs with `--operator=ferry`, so `ferry` can run `tailscale logout` without sudo.
 
 ### The SSH host key
 
@@ -118,7 +126,7 @@ Ferry never accepts an unknown host key and never turns off host-key checks. It 
 ### Tailscale
 
 - The cloud-init user data has no Tailscale auth key.
-- Ferry installs Tailscale over the pinned SSH connection. With an auth key in `FERRY_TAILSCALE_AUTHKEY`, or in the keychain or Secret Service entry with the account `tailscale`, Ferry sends the key on the standard input of `tailscale up`. The key is not in a command line, a file on the box, the output, or at the provider. Without a key, Ferry prints the login URL of Tailscale.
+- Ferry installs Tailscale over the pinned root SSH connection. With an auth key in `FERRY_TAILSCALE_AUTHKEY`, or in the keychain or Secret Service entry with the account `tailscale`, Ferry sends the key on the standard input of `tailscale up`. The key is not in a command line, a file on the box, the output, or at the provider. Without a key, Ferry prints the login URL of Tailscale.
 - Ferry pins the same host key for the Tailscale name and the Tailscale addresses of the box. The box table in the config uses the Tailscale name.
 
 ### The public SSH port

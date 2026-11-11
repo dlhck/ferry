@@ -9,8 +9,9 @@ export const HETZNER_API = "https://api.hetzner.cloud/v1";
  * The defaults of `[provider.hetzner]`. CAX21 is a shared Arm server with 4
  * vCPU, 8 GB memory, and 80 GB disk. Agent CLIs need more than the 4 GB of
  * the smallest types, and the shared x86 types cost more than twice as much.
+ * Ubuntu 26.04 has Node 22 in apt, which the Node bootstrap of pi needs.
  */
-export const HETZNER_DEFAULTS = { serverType: "cax21", image: "ubuntu-24.04", location: "fsn1" } as const;
+export const HETZNER_DEFAULTS = { serverType: "cax21", image: "ubuntu-26.04", location: "fsn1" } as const;
 
 export type Fetch = (url: string, init: { method: string; headers: Record<string, string>; body?: string }) => Promise<Response>;
 

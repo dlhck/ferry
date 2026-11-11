@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { removeFromOperator, type BoxRemoveDependencies, type BoxRemoveResult } from "./box.ts";
 import { hasNoBox, resolveBoxes, type ResolvedBox } from "./boxes.ts";
 import { boxWorkLines, readBoxWork, type BoxWork } from "./box-work.ts";
-import { isBoxName, type OperatorHostConfig, type PartialOperatorConfig } from "./config.ts";
+import { isBoxName, withBoxes, type BoxesOperatorConfig, type OperatorHostConfig, type PartialOperatorConfig } from "./config.ts";
 import { FerryError } from "./errors.ts";
 import { keyOf, pinHostKey, unpinBox } from "./known-hosts.ts";
 import type { LinkOptions, LinkResult, RunOptions } from "./link.ts";
@@ -17,6 +17,7 @@ import { step, type Progress } from "./progress.ts";
 import { HETZNER_TOKEN, secretSources, TAILSCALE_AUTH_KEY, type Secret, type SecretName } from "./providers/credentials.ts";
 import { HETZNER_DEFAULTS, MachineError, redact } from "./providers/hetzner.ts";
 import type { Machine, MachineType, Provider } from "./providers/types.ts";
+import { BUILTIN_TOOLS } from "./registry/builtin.ts";
 import { acquireBoxLock } from "./sync.ts";
 
 /** The SSH user that cloud-init makes on a new box. */
@@ -43,6 +44,8 @@ export type BoxCreateInput = {
 export type BoxCreateDependencies = {
   readonly home: string;
   readonly readConfig: () => PartialOperatorConfig | null;
+  /** Writes gh = "latest" for the new box after box add. */
+  readonly writeConfig: (config: BoxesOperatorConfig) => void;
   /** The provider for the token. */
   readonly provider: (token: string) => Provider;
   readonly readSecret: (name: SecretName) => Promise<Secret | null>;
@@ -128,7 +131,8 @@ export async function runBoxCreate(input: BoxCreateInput, dependencies: BoxCreat
   write(`  Machine: ferry-${name}, ${settings.serverType}${type ? ` (${type.cores} vCPU ${type.architecture}, ${type.memoryGb} GB memory, ${type.diskGb} GB disk)` : ""}, ${settings.image}, ${settings.location}`);
   write(`  Price: ${type?.monthlyPrice ? `${type.currency} ${type.monthlyPrice} per month with VAT, the list price of Hetzner Cloud. The machine costs money until ferry box destroy ${name}.` : "Ferry needs the token to read the price."}`);
   write(`  Token: ${token ? `from the ${token.source}` : `not found. Ferry reads ${secretSources(HETZNER_TOKEN, dependencies.platform).join(", then ")}.`}`);
-  write(`  SSH: user ${BOX_USER} with your key ${settings.sshKeyPath} (${sha256Fingerprint(sshPublicKey)}). No password login, no root login.`);
+  write(`  SSH: user ${BOX_USER} with your key ${settings.sshKeyPath} (${sha256Fingerprint(sshPublicKey)}). No password login. Ferry does the root steps as root with your key, then turns off root login.`);
+  write(`  Sudo: ${SUDOERS_RULE.replace(`${BOX_USER} ALL=(root) NOPASSWD: `, "")} only.`);
   write("  Firewall: inbound TCP port 22 only.");
   write("  Host key: Ferry makes the first host key, pins it in ~/.ssh/known_hosts, and replaces it on the box after the first connection.");
   write(
@@ -187,6 +191,7 @@ export async function runBoxCreate(input: BoxCreateInput, dependencies: BoxCreat
     const tailscale = await setUpMachine(name, machine, hostKey, authKey, dependencies);
     const host: OperatorHostConfig = { tailscale, sshUser: BOX_USER };
     if ((await dependencies.addBox(host)) === null) throw new Error("box add was cancelled");
+    setGhLatest(name, dependencies);
     if ((await dependencies.install(name)) === null) throw new Error("install was cancelled");
     await dependencies.sync(name);
     write(`Box ${name} is ready. Run ferry status --box ${name} to check it.`);
@@ -196,7 +201,12 @@ export async function runBoxCreate(input: BoxCreateInput, dependencies: BoxCreat
   }
 }
 
-/** Pin the host key, replace it on the box, and join the box to the tailnet. Returns the Tailscale DNS name of the box. */
+/**
+ * Pin the host key, then do each root step over the pinned root session:
+ * replace the host key, join the tailnet, install gh, and write the sudoers
+ * rule. Then turn off root login and check the box as the ferry user.
+ * Returns the Tailscale DNS name of the box.
+ */
 async function setUpMachine(
   name: string,
   machine: Machine,
@@ -210,9 +220,9 @@ async function setUpMachine(
   if (machine.ipv4 === null) throw new Error("the machine has no public IPv4 address");
   const ip = machine.ipv4;
   pinHostKey(home, name, [ip], hostKey.publicKey);
-  const direct = dependencies.createLink({ destination: `${BOX_USER}@${ip}` });
-  const run = async (command: string, options: RunOptions = {}): Promise<string> => {
-    const result = await direct.run(command, options);
+  const root = dependencies.createLink({ destination: `root@${ip}` });
+  const asRoot = async (command: string, options: RunOptions = {}): Promise<string> => {
+    const result = await root.run(command, options);
     if (!result.ok) throw new Error(result.error.message);
     return result.stdout;
   };
@@ -220,7 +230,7 @@ async function setUpMachine(
   await step(progress, "Waiting for SSH on the machine", async () => {
     const deadline = now() + SSH_WAIT_MS;
     for (;;) {
-      const result = await direct.run("true");
+      const result = await root.run("true");
       if (result.ok) return;
       // A wrong host key is never a reason to try again.
       if (/host key verification failed|identification has changed/i.test(result.error.message)) {
@@ -232,35 +242,36 @@ async function setUpMachine(
   });
 
   const rotated = await step(progress, "Replacing the host key", async () => {
-    const output = await run(ROTATE_HOST_KEY, { timeoutMs: LONG_COMMAND_MS });
+    const output = await asRoot(ROTATE_HOST_KEY, { timeoutMs: LONG_COMMAND_MS });
     const key = output.trim().split("\n").at(-1) ?? "";
     if (!/^ssh-ed25519 [A-Za-z0-9+/]+=*(\s|$)/.test(key)) throw new Error("the box did not print a new ed25519 host key");
     if (keyOf(key) === keyOf(hostKey.publicKey)) throw new Error("the box kept the first host key");
     // The first key is in the user data at the provider, so Ferry stops to trust it.
     unpinBox(home, name);
     pinHostKey(home, name, [ip], key);
-    await run("true");
+    await asRoot("true");
     return key;
   });
 
-  await step(progress, "Installing Tailscale", () => run(INSTALL_TAILSCALE, { timeoutMs: LONG_COMMAND_MS }));
+  await step(progress, "Installing Tailscale", () => asRoot(INSTALL_TAILSCALE, { timeoutMs: LONG_COMMAND_MS }));
   const self = await step(progress, "Joining the tailnet", async () => {
-    const hostname = `ferry-${name}`;
+    // --operator lets the ferry user run tailscale without sudo, for example tailscale logout in ferry box destroy.
+    const up = `tailscale up --hostname=ferry-${name} --operator=${BOX_USER}`;
     if (authKey !== null) {
       // The auth key goes on stdin only: not in the argv, not in a file on the box, not at the provider.
-      await run(`sudo -n tailscale up --hostname=${hostname} --auth-key=file:/dev/stdin`, {
+      await asRoot(`${up} --auth-key=file:/dev/stdin`, {
         input: new TextEncoder().encode(authKey.value),
         timeoutMs: LONG_COMMAND_MS,
       }).catch((cause) => {
         throw new Error(`tailscale up failed: ${redact(messageOf(cause), authKey.value)}`);
       });
     } else {
-      await run(`sudo -n sh -c 'nohup tailscale up --hostname=${hostname} </dev/null >/dev/null 2>&1 &'`);
+      await asRoot(`sh -c 'nohup ${up} </dev/null >/dev/null 2>&1 &'`);
     }
     const deadline = now() + TAILSCALE_LOGIN_WAIT_MS;
     let shown = "";
     for (;;) {
-      const status = parseStatus(await run("tailscale status --json"));
+      const status = parseStatus(await asRoot("tailscale status --json"));
       if (status.BackendState === "Running" && status.Self?.DNSName) return status.Self;
       if (status.AuthURL && status.AuthURL !== shown) {
         shown = status.AuthURL;
@@ -270,6 +281,18 @@ async function setUpMachine(
       if (now() > deadline) throw new Error(`the box did not join the tailnet in ${TAILSCALE_LOGIN_WAIT_MS / 60_000} minutes`);
       await sleep(POLL_MS);
     }
+  });
+
+  // The gh apt source needs root beyond the sudoers rule. Later installs and updates of gh need only the rule.
+  await step(progress, "Installing gh", () => asRoot(GH_INSTALL, { timeoutMs: LONG_COMMAND_MS }));
+  // Linger keeps the user services of the box, such as Paseo, running. The ferry user cannot turn it on without sudo.
+  await step(progress, "Turning on linger for the ferry user", () => asRoot(`loginctl enable-linger ${BOX_USER}`));
+  await step(progress, "Writing the sudoers rule", () => asRoot(WRITE_SUDOERS));
+  await step(progress, "Turning off root login", () => asRoot(CLOSE_ROOT_LOGIN));
+  await step(progress, "Checking the ferry user", async () => {
+    const user = dependencies.createLink({ destination: `${BOX_USER}@${ip}` });
+    const result = await user.run("sudo -n /usr/bin/true");
+    if (!result.ok) throw new Error(`the ferry user cannot run sudo -n /usr/bin/true: ${result.error.message}`);
   });
 
   const dnsName = (self.DNSName ?? "").replace(/\.$/, "");
@@ -286,6 +309,18 @@ async function setUpMachine(
     }
   });
   return dnsName;
+}
+
+/**
+ * Write gh = "latest" in [box.<name>.tools]. The sudoers rule allows only
+ * apt install gh -y, so the box cannot install an exact gh version.
+ */
+function setGhLatest(name: string, dependencies: BoxCreateDependencies): void {
+  const config = dependencies.readConfig();
+  const boxes = config?.boxes;
+  if (!boxes?.some((box) => box.name === name)) throw new Error(`box ${name} is not in the config after box add`);
+  const updated = boxes.map((box) => (box.name === name ? { ...box, tools: { ...box.tools, gh: "latest" } } : box));
+  dependencies.writeConfig(withBoxes(config, updated, config?.defaultBox));
 }
 
 /** The error for a failure after the machine exists. It names the machine and the command that removes it. */
@@ -387,7 +422,7 @@ export async function runBoxDestroy(input: BoxDestroyInput, dependencies: BoxDes
     if (box !== null) {
       const logout = await dependencies
         .createLink(linkOptionsOf(box.host))
-        .run("sudo -n tailscale logout", { timeoutMs: 30_000 })
+        .run("tailscale logout", { timeoutMs: 30_000 })
         .catch((cause: unknown) => ({ ok: false as const, error: { message: messageOf(cause) } }));
       if (!logout.ok) {
         const warning = `Warning: Ferry could not log box ${name} out of the tailnet: ${logout.error.message}. Remove the machine in the Tailscale admin console.`;
@@ -485,19 +520,49 @@ function parseStatus(text: string): TailscaleSelfStatus {
 }
 
 /**
- * Wait for cloud-init, make a new ed25519 host key, remove the other host
- * keys, and reload sshd. The open connection stays. It prints the new public key.
+ * As root: wait for cloud-init, make a new ed25519 host key, remove the other
+ * host keys, and reload sshd. The open connection stays. It prints the new public key.
  */
 const ROTATE_HOST_KEY = [
   "cloud-init status --wait >/dev/null 2>&1 || true",
-  "sudo -n rm -f /etc/ssh/ssh_host_*",
-  "sudo -n ssh-keygen -q -t ed25519 -N '' -C '' -f /etc/ssh/ssh_host_ed25519_key",
-  "{ sudo -n systemctl reload ssh 2>/dev/null || sudo -n systemctl reload sshd; }",
+  "rm -f /etc/ssh/ssh_host_*",
+  "ssh-keygen -q -t ed25519 -N '' -C '' -f /etc/ssh/ssh_host_ed25519_key",
+  "{ systemctl reload ssh 2>/dev/null || systemctl reload sshd; }",
   "cat /etc/ssh/ssh_host_ed25519_key.pub",
 ].join(" && ");
 
-/** The install script of Tailscale, when the box has no tailscale. */
-const INSTALL_TAILSCALE = "command -v tailscale >/dev/null || { curl -fsSL https://tailscale.com/install.sh | sudo -n sh; }";
+/** As root: the install script of Tailscale, when the box has no tailscale. */
+const INSTALL_TAILSCALE = "command -v tailscale >/dev/null || { curl -fsSL https://tailscale.com/install.sh | sh; }";
+
+/** As root: the install of gh with the "latest" policy, from the registry. It adds the GitHub CLI apt source. */
+const GH_INSTALL = (() => {
+  const command = BUILTIN_TOOLS.find((tool) => tool.id === "gh")?.install?.command;
+  if (command === undefined) throw new Error("the registry has no gh install command");
+  return command;
+})();
+
+/**
+ * The sudoers rule of the ferry user. Each command has fixed arguments and no
+ * wildcard, so an agent on the box cannot get root through it. They are the
+ * apt commands of the gh, jq, and Node recipes, and the check of ferry status.
+ */
+export const SUDOERS_RULE = `${BOX_USER} ALL=(root) NOPASSWD: /usr/bin/true, /usr/bin/apt update, /usr/bin/apt install gh -y, /usr/bin/apt install jq -y, /usr/bin/apt install nodejs npm -y`;
+
+/** As root: write the rule with mode 0440 and check it with visudo before it takes effect. sudo skips a file name with a dot. */
+const WRITE_SUDOERS = [
+  `printf '%s\\n' '${SUDOERS_RULE}' > /etc/sudoers.d/ferry.new`,
+  "chmod 0440 /etc/sudoers.d/ferry.new",
+  "visudo -cf /etc/sudoers.d/ferry.new >/dev/null",
+  "mv /etc/sudoers.d/ferry.new /etc/sudoers.d/ferry",
+].join(" && ");
+
+/** As root: turn off root login over SSH, remove the root keys, and reload sshd. The open connection stays. */
+const CLOSE_ROOT_LOGIN = [
+  "printf 'PermitRootLogin no\\n' > /etc/ssh/sshd_config.d/10-ferry.conf",
+  "rm -f /root/.ssh/authorized_keys",
+  "sshd -t",
+  "{ systemctl reload ssh 2>/dev/null || systemctl reload sshd; }",
+].join(" && ");
 
 export type HostKeyPair = {
   /** The private key in the OpenSSH format. It goes only into the user data of the new machine. */
@@ -546,7 +611,8 @@ export function cloudConfig(operatorKey: string, hostKey: HostKeyPair): string {
   return [
     "#cloud-config",
     "ssh_pwauth: false",
-    "disable_root: true",
+    // Ferry does the root steps over a root SSH session with the operator key, then turns off root login.
+    "disable_root: false",
     "ssh_deletekeys: true",
     "ssh_genkeytypes: []",
     "ssh_keys:",
@@ -555,9 +621,7 @@ export function cloudConfig(operatorKey: string, hostKey: HostKeyPair): string {
     `  ed25519_public: ${JSON.stringify(hostKey.publicKey)}`,
     "users:",
     `  - name: ${BOX_USER}`,
-    "    groups: [sudo]",
     "    shell: /bin/bash",
-    '    sudo: "ALL=(ALL) NOPASSWD:ALL"',
     "    lock_passwd: true",
     "    ssh_authorized_keys:",
     `      - ${JSON.stringify(operatorKey)}`,

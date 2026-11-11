@@ -58,10 +58,13 @@ ferry box create b
 
 Ferry does these steps:
 
-1. It creates the machine `ferry-<name>` with the label `ferry-box=<name>` and a firewall that allows inbound TCP port 22 only. The machine gets the SSH user `ferry` with your public key and `sudo` without a password. It has no password login and no root login.
-2. It pins the SSH host key of the machine in `~/.ssh/known_hosts`, connects, and replaces the host key on the box. See [the security model](security-model.md#the-ssh-host-key).
-3. It installs Tailscale on the box and joins your tailnet with the host name `ferry-<name>`.
-4. It runs `ferry box add <name>` with the Tailscale name, `ferry install --box <name>`, and `ferry sync --box <name>`. Then `ferry status` shows the box.
+1. It creates the machine `ferry-<name>` with the label `ferry-box=<name>` and a firewall that allows inbound TCP port 22 only. The machine gets the SSH user `ferry` with your public key. It has no password login.
+2. It pins the SSH host key of the machine in `~/.ssh/known_hosts`, connects as root with your key, and replaces the host key on the box. See [the security model](security-model.md#the-ssh-host-key).
+3. As root, it installs Tailscale, joins your tailnet with the host name `ferry-<name>`, installs gh with its apt source, and turns on linger for `ferry`.
+4. It writes the sudoers rule of the `ferry` user and turns off root login. See [the security model](security-model.md#ssh-login-and-sudo).
+5. As `ferry`, it runs `ferry box add <name>` with the Tailscale name, `ferry install --box <name>`, and `ferry sync --box <name>`. Then `ferry status` shows the box, with `Box sudo: PASSWORDLESS`.
+
+The box gets `gh = "latest"` in `[box.<name>.tools]`, because the sudoers rule allows `apt install gh -y` only, and no exact gh version. Do not change that policy for the box.
 
 `--yes` skips the questions of create, of a `[host]` config change, and of the install. `--accept-host-keys` trusts the host keys of the snapshot host on the box, as for `ferry box add`.
 
@@ -92,14 +95,14 @@ The `[provider.hetzner]` table of `~/.ferry/config.toml` sets the machine:
 ```toml
 [provider.hetzner]
 server_type = "cax21"            # the default
-image = "ubuntu-24.04"           # the default
+image = "ubuntu-26.04"           # the default
 location = "fsn1"                # the default
 ssh_public_key = "~/.ssh/id_ed25519.pub"
 ```
 
 - The default `cax21` is a shared Arm server with 4 vCPU, 8 GB memory, and 80 GB disk. The agent CLIs need more than the 4 GB of the smallest types. `--dry-run` shows the price of the type in the location.
 - Without `ssh_public_key`, Ferry uses `~/.ssh/id_ed25519.pub`, then `id_ecdsa.pub`, then `id_rsa.pub`.
-- Debian or Ubuntu is the tested target of `ferry install`.
+- Debian or Ubuntu is the tested target of `ferry install`. The pi recipe needs Node 22.19 or later from apt. Ubuntu 26.04 has it, and Ubuntu 24.04 does not.
 
 ### Destroy a box
 

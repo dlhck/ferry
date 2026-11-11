@@ -1532,25 +1532,33 @@ lookup service ferry account hetzner). The token stays on this machine. It
 is not in the config, the output, the snapshot, or on the box.
 
 The [provider.hetzner] table of ~/.ferry/config.toml sets the machine:
-server_type (default cax21), image (default ubuntu-24.04), location
+server_type (default cax21), image (default ubuntu-26.04), location
 (default fsn1), and ssh_public_key (default ~/.ssh/id_ed25519.pub, then
 id_ecdsa.pub, then id_rsa.pub).
 
 Ferry does these steps:
 
   1. It creates the machine with a firewall that allows inbound TCP port 22
-     only. The machine gets the SSH user ferry with your public key and
-     sudo without a password. It has no password login and no root login.
+     only. The machine gets the SSH user ferry with your public key. It has
+     no password login.
   2. It makes the first SSH host key on this machine and puts it in the
      cloud-init user data. It pins the key in ~/.ssh/known_hosts. After the
      first connection, it makes a new host key on the box and pins that key.
      Ferry never accepts an unknown host key.
-  3. It installs Tailscale on the box and joins your tailnet. With an auth
-     key in FERRY_TAILSCALE_AUTHKEY, or in the keychain or Secret Service
-     entry with the account tailscale, Ferry sends the key on SSH stdin.
-     Else Ferry prints a login URL.
-  4. It runs ferry box add, ferry install --box <name>, and ferry sync
-     --box <name>.
+  3. As root, with your key: it installs Tailscale and joins your tailnet,
+     and installs gh with its apt source. With an auth key in
+     FERRY_TAILSCALE_AUTHKEY, or in the keychain or Secret Service entry
+     with the account tailscale, Ferry sends the key on SSH stdin. Else
+     Ferry prints a login URL.
+  4. It writes /etc/sudoers.d/ferry with this rule only, and turns off root
+     login:
+       ferry ALL=(root) NOPASSWD: /usr/bin/true, /usr/bin/apt update,
+         /usr/bin/apt install gh -y, /usr/bin/apt install jq -y,
+         /usr/bin/apt install nodejs npm -y
+     So agents on the box cannot get root through the ferry user.
+  5. As the ferry user, it runs ferry box add, ferry install --box <name>,
+     and ferry sync --box <name>. The box gets gh = "latest" in
+     [box.<name>.tools], because the rule allows no exact gh version.
 
 When ~/.ssh/known_hosts has another key for the address of the new machine,
 Ferry stops. Remove the old key with ssh-keygen -R <address>. When a step

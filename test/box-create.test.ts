@@ -3,7 +3,16 @@ import { createPrivateKey, createPublicKey } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { cloudConfig, generateHostKey, runBoxCreate, runBoxDestroy, type BoxCreateDependencies, type BoxDestroyDependencies } from "../src/box-create.ts";
+import {
+  cloudConfig,
+  generateHostKey,
+  runBoxCreate,
+  runBoxDestroy,
+  SUDOERS_RULE,
+  type BoxCreateDependencies,
+  type BoxDestroyDependencies,
+} from "../src/box-create.ts";
+import { BUILTIN_TOOLS, nodeBootstrap } from "../src/registry/builtin.ts";
 import { readConfig, withBoxes, writeConfig, type BoxesOperatorConfig, type OperatorHostConfig } from "../src/config.ts";
 import type { LinkOptions, LinkResult, RunOptions } from "../src/link.ts";
 import { noProgress } from "../src/progress.ts";
@@ -107,6 +116,7 @@ function createDependencies(home: string, overrides: Partial<BoxCreateDependenci
   const dependencies: BoxCreateDependencies = {
     home,
     readConfig: () => readConfig(home),
+    writeConfig: (config) => writeConfig(config, home),
     provider: provider.factory,
     readSecret: async (name: SecretName) => (secrets[name.env] ? { value: secrets[name.env]!, source: `environment variable ${name.env}` } : null),
     platform: "linux",
@@ -140,7 +150,7 @@ describe("ferry box create", () => {
     const { dependencies, lines, calls, provider, link } = createDependencies(home);
     const result = await runBoxCreate({ name: "b", dryRun: false, yes: true }, dependencies);
 
-    expect(result).toMatchObject({ name: "b", dryRun: false, serverType: "cax21", image: "ubuntu-24.04", location: "fsn1", monthlyPrice: "8.99", tailscale: DNS_NAME });
+    expect(result).toMatchObject({ name: "b", dryRun: false, serverType: "cax21", image: "ubuntu-26.04", location: "fsn1", monthlyPrice: "8.99", tailscale: DNS_NAME });
     expect(provider.created).toHaveLength(1);
     expect(provider.created[0]).toMatchObject({ box: "b", sshPublicKey: OPERATOR_KEY });
     expect(provider.created[0]?.userData).toBe(cloudConfig(OPERATOR_KEY, FIRST_KEY));
@@ -150,8 +160,28 @@ describe("ferry box create", () => {
     const hosts = knownHosts(home);
     expect(hosts).not.toContain(FIRST_KEY.publicKey);
     expect(hosts).toBe(`203.0.113.10 ${NEW_KEY} ferry:b\n${DNS_NAME},100.64.0.10,fd7a:115c:a1e0::a ${NEW_KEY} ferry:b\n`);
-    expect(link.commands[0]?.options).toEqual({ destination: "ferry@203.0.113.10" });
-    expect(link.commands.at(-1)?.options).toEqual({ host: DNS_NAME, user: "ferry" });
+    // Each root step runs over the root session. Then root login goes off, and the rest runs as the ferry user.
+    const steps = link.commands.map((entry) => [
+      "destination" in entry.options ? entry.options.destination : `${entry.options.user}@${entry.options.host}`,
+      entry.command.split(" ")[0],
+    ]);
+    const closed = link.commands.findIndex((entry) => entry.command.includes("PermitRootLogin no"));
+    expect(closed).toBeGreaterThan(0);
+    expect(link.commands.slice(0, closed + 1).every((entry) => "destination" in entry.options && entry.options.destination === "root@203.0.113.10")).toBe(true);
+    expect(steps.slice(closed + 1)).toEqual([
+      ["ferry@203.0.113.10", "sudo"],
+      [`ferry@${DNS_NAME}`, "true"],
+    ]);
+    const root = link.commands.slice(0, closed + 1).map((entry) => entry.command);
+    expect(root.findIndex((command) => command.includes("ssh-keygen"))).toBeLessThan(root.findIndex((command) => command.includes("tailscale up")));
+    expect(root).toContain("sh -c 'nohup tailscale up --hostname=ferry-b --operator=ferry </dev/null >/dev/null 2>&1 &'");
+    expect(root).toContain(BUILTIN_TOOLS.find((tool) => tool.id === "gh")!.install!.command);
+    expect(root).toContain("loginctl enable-linger ferry");
+    const sudoers = root.find((command) => command.includes("/etc/sudoers.d/ferry"))!;
+    expect(sudoers).toContain(`printf '%s\\n' '${SUDOERS_RULE}' > /etc/sudoers.d/ferry.new`);
+    expect(sudoers).toContain("chmod 0440 /etc/sudoers.d/ferry.new && visudo -cf /etc/sudoers.d/ferry.new");
+    expect(root.join("\n")).not.toMatch(/NOPASSWD: ?ALL/);
+    expect(readConfig(home)?.boxes?.find((box) => box.name === "b")?.tools).toEqual({ gh: "latest" });
     expect(lines).toContain("Open this URL to add box b to your tailnet: https://login.tailscale.com/a/example");
     expect(readConfig(home)?.boxes?.map((box) => box.name)).toEqual(["a", "b"]);
   });
@@ -163,7 +193,8 @@ describe("ferry box create", () => {
     const result = await runBoxCreate({ name: "b", dryRun: false, yes: true }, dependencies);
 
     const up = link.commands.find((entry) => entry.command.includes("tailscale up"))!;
-    expect(up.command).toBe("sudo -n tailscale up --hostname=ferry-b --auth-key=file:/dev/stdin");
+    expect(up.command).toBe("tailscale up --hostname=ferry-b --operator=ferry --auth-key=file:/dev/stdin");
+    expect(up.options).toEqual({ destination: "root@203.0.113.10" });
     expect(new TextDecoder().decode(up.run.input)).toBe(AUTH_KEY);
     expect(provider.tokens).toEqual([TOKEN]);
     const visible = [
@@ -187,7 +218,8 @@ describe("ferry box create", () => {
     expect(provider.created).toEqual([]);
     expect(calls).toEqual([]);
     expect(existsSync(join(home, ".ssh/known_hosts"))).toBe(false);
-    expect(lines.join("\n")).toContain("cax21 (4 vCPU arm, 8 GB memory, 80 GB disk), ubuntu-24.04, fsn1");
+    expect(lines.join("\n")).toContain("cax21 (4 vCPU arm, 8 GB memory, 80 GB disk), ubuntu-26.04, fsn1");
+    expect(lines.join("\n")).toContain(`Sudo: ${SUDOERS_RULE.replace("ferry ALL=(root) NOPASSWD: ", "")} only.`);
     expect(lines.join("\n")).toContain("EUR 8.99 per month");
     expect(lines.join("\n")).toContain("Firewall: inbound TCP port 22 only.");
     expect(lines.join("\n")).not.toContain(TOKEN);
@@ -299,6 +331,30 @@ describe("ferry box create", () => {
   });
 });
 
+describe("the sudoers rule", () => {
+  const allowed = SUDOERS_RULE.replace("ferry ALL=(root) NOPASSWD: ", "").split(", ");
+
+  test("has fixed arguments only: no wildcard and no ALL command", () => {
+    expect(SUDOERS_RULE).toBe(
+      "ferry ALL=(root) NOPASSWD: /usr/bin/true, /usr/bin/apt update, /usr/bin/apt install gh -y, /usr/bin/apt install jq -y, /usr/bin/apt install nodejs npm -y",
+    );
+    expect(SUDOERS_RULE).not.toMatch(/[*?[\]\\]/);
+    expect(allowed.every((command) => command.startsWith("/usr/bin/"))).toBe(true);
+  });
+
+  test("allows each sudo command of the gh update, the jq recipes, the Node bootstrap, and the gh install on a box with the apt source", () => {
+    const gh = BUILTIN_TOOLS.find((tool) => tool.id === "gh")!;
+    const jq = BUILTIN_TOOLS.find((tool) => tool.id === "jq")!;
+    // The branch for a box that has the source. The other branch adds the source as root, which box create does.
+    const ghInstall = gh.install!.command.split("\nelse\n")[0]! + gh.install!.command.slice(gh.install!.command.indexOf("\nfi"));
+    const sudo = [gh.update!.command, ghInstall, jq.install!.command, jq.update!.command, nodeBootstrap(22, 19)].flatMap((command) =>
+      [...command.matchAll(/sudo ([^&|()\\\n]+)/g)].map((match) => `/usr/bin/${match[1]!.trim()}`),
+    );
+    expect(new Set(sudo)).toEqual(new Set(["/usr/bin/apt update", "/usr/bin/apt install gh -y", "/usr/bin/apt install jq -y", "/usr/bin/apt install nodejs npm -y"]));
+    for (const command of sudo) expect(allowed).toContain(command);
+  });
+});
+
 describe("host key and user data", () => {
   test("generateHostKey writes an OpenSSH private key whose ed25519 seed gives the public key", () => {
     const pair = generateHostKey();
@@ -316,12 +372,15 @@ describe("host key and user data", () => {
     expect(body.subarray(seedAt + 32, seedAt + 64)).toEqual(publicRaw);
   });
 
-  test("the user data has no password login, no root login, and only the ferry user with the operator key", () => {
+  test("the user data has no password login, and the ferry user has the operator key and no sudo", () => {
     const data = cloudConfig(OPERATOR_KEY, FIRST_KEY);
     expect(data.startsWith("#cloud-config\n")).toBe(true);
     expect(data).toContain("ssh_pwauth: false");
-    expect(data).toContain("disable_root: true");
+    // Ferry turns off root login itself, after the root steps.
+    expect(data).toContain("disable_root: false");
     expect(data).toContain("lock_passwd: true");
+    expect(data).not.toContain("sudo");
+    expect(data).not.toMatch(/NOPASSWD/);
     expect(data).toContain("ssh_genkeytypes: []");
     expect(data).toContain(`      - ${JSON.stringify(OPERATOR_KEY)}`);
     expect(data).toContain("    -----BEGIN OPENSSH PRIVATE KEY-----\n    example\n");
@@ -366,7 +425,7 @@ describe("ferry box destroy", () => {
     expect(provider.destroyed).toEqual([MACHINE]);
     expect(link.commands.map((entry) => entry.options)).toEqual([{ host: DNS_NAME, user: "ferry" }, { host: DNS_NAME, user: "ferry" }]);
     expect(link.commands[0]?.command).toStartWith("sh -c ");
-    expect(link.commands[1]?.command).toBe("sudo -n tailscale logout");
+    expect(link.commands[1]?.command).toBe("tailscale logout");
     expect(readConfig(home)?.boxes?.map((box) => box.name)).toEqual(["a"]);
     expect(knownHosts(home)).toBe(`keep.example ${NEW_KEY}\n`);
     expect(lines.join("\n")).not.toContain(TOKEN);
