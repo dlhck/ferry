@@ -111,12 +111,12 @@ Open Ferry in the menu opens a window with a table of the boxes. A second click 
 
 The table has one row for each box of `~/.ferry/status.json`, then one row for each box that has only a tunnel file. The columns are:
 
-- the box name,
-- Online or Offline,
-- the free disk of the box home,
-- the available memory,
-- the count of items that need action. An offline box counts as one item, and so does a disconnected tunnel of an online box.
-- the ports of its running `ferry tunnel --follow`.
+- Box: the box name.
+- State: Online or Offline.
+- Free disk: the free space of the file system of the box home.
+- Free memory: the available memory.
+- Needs action: the count of items that need action. An offline box counts as one item, and so does a disconnected tunnel of an online box.
+- Ports: the ports of its running `ferry tunnel --follow`.
 
 Select a row to see the items of the box with the full message, the fix command, and Copy. Click a fix command to run it in Terminal. Click a port to open it in the browser. Sync now and Refresh now do the same as in the menu.
 
