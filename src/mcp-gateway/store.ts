@@ -20,6 +20,9 @@ import { dirname, join } from "node:path";
 import type { OAuthDiscoveryState, StoredOAuthClientInformation, StoredOAuthTokens } from "@modelcontextprotocol/client";
 import { redactTokens, redactUrlCredentials } from "../manifest.ts";
 
+/** The port of the gateway when `ferry mcp serve` gets no `--port`. */
+export const DEFAULT_GATEWAY_PORT = 47820;
+
 /** A server name is also a file name and a URL path segment. It does not start with a dot. */
 export const SERVER_NAME = /^[A-Za-z0-9_:-][A-Za-z0-9._:-]*$/;
 

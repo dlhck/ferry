@@ -33,9 +33,6 @@ import {
   type GatewayServer,
 } from "./store.ts";
 
-/** The port of the gateway when `ferry mcp serve` gets no `--port`. */
-export const DEFAULT_GATEWAY_PORT = 47820;
-
 export type GatewayInput = {
   readonly home: string;
   readonly port: number;

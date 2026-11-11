@@ -93,9 +93,7 @@ import { failedChecks, formatDoctor, runDoctor, type DoctorDependencies, type Do
 import { runToolsCommand, toolsLines, type ToolsCommandDependencies, type ToolsReport } from "./tools/command.ts";
 import { psLines, runPs } from "./ps.ts";
 import { countUsage } from "./usage-count.ts";
-import { DEFAULT_GATEWAY_PORT, startGateway } from "./mcp-gateway/gateway.ts";
-import { gatewayListLines, listGateway, loginServer } from "./mcp-gateway/login.ts";
-import { knownSecrets, readServers, scrub } from "./mcp-gateway/store.ts";
+import { DEFAULT_GATEWAY_PORT, knownSecrets, readServers, scrub } from "./mcp-gateway/store.ts";
 import { parseSince, runUsage, usageLines } from "./usage.ts";
 import { boxPathDirs } from "./tools/path.ts";
 import { runWatch, type WatchDependencies, type WatchInput } from "./watch.ts";
@@ -1845,6 +1843,7 @@ of Ferry on the box.`)
     });
 
   // The MCP gateway of a box. The output and each error go through scrub, so that no token or client key leaves the gateway.
+  // The actions load the gateway modules when they run, so that no other command loads the MCP SDK.
   const gatewayHome = () => (dependencies.home ?? homedir)();
   const gatewayAction =
     <A extends unknown[]>(run: (...args: A) => Promise<void> | void) =>
@@ -1869,6 +1868,7 @@ of Ferry on the box.`)
       gatewayAction(async (options: { port: string }) => {
         const port = Number(options.port);
         if (!Number.isInteger(port) || port < 0 || port > 65535) throw new FerryError("usage", `invalid port ${options.port}`);
+        const { startGateway } = await import("./mcp-gateway/gateway.ts");
         const home = gatewayHome();
         const box = whoami({ home, boxMode: true, harnesses: [] }).box;
         const gateway = startGateway({ home, port, box, log: writeError });
@@ -1882,7 +1882,8 @@ of Ferry on the box.`)
     .command("list")
     .description("Print the state of the MCP gateway and the login state of each server: ready or login-required. Prints no URL, token, or key")
     .action(
-      gatewayAction(() => {
+      gatewayAction(async () => {
+        const { gatewayListLines, listGateway } = await import("./mcp-gateway/login.ts");
         report(listGateway(gatewayHome()), (result) => gatewayListLines(result).forEach((line) => writeLine(line)));
       }),
     );
@@ -1891,6 +1892,7 @@ of Ferry on the box.`)
     .description("Log the MCP gateway in to a server: print the authorize URL, then wait for the callback on a loopback port and write the token file")
     .action(
       gatewayAction(async (server: string) => {
+        const { loginServer } = await import("./mcp-gateway/login.ts");
         await loginServer({ home: gatewayHome(), server, print: writeLine });
       }),
     );
