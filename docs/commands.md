@@ -42,6 +42,7 @@ The `ferry sherlock` commands exist only when the Sherlock integration is on and
     - [`ferry sherlock add`](#ferry-sherlock-add)
   - [`ferry tools`](#ferry-tools)
   - [`ferry ps`](#ferry-ps)
+  - [`ferry usage`](#ferry-usage)
   - [`ferry watch`](#ferry-watch)
     - [`ferry watch install`](#ferry-watch-install)
   - [`ferry menubar`](#ferry-menubar)
@@ -129,6 +130,8 @@ Commands:
                                        versions on this machine
   ps                                   List the agent processes on each box,
                                        with their memory and CPU
+  usage [options]                      Show the tokens of the agents on each
+                                       box, for each harness and project
   watch                                Watch the portable set and sync accepted
                                        changes
   menubar                              Install or remove the macOS menu bar app
@@ -1188,6 +1191,36 @@ Options:
   -h, --help  display help for command
 
 With --json: { boxes: [{ name, online, error, agents: [{ harness, pid, project, startedAt, memoryKiB, cpuPercent, children }] }] }.
+```
+
+## ferry usage
+
+```text
+Usage: ferry usage [options]
+
+Show the tokens of the agents on each box, for each harness and project.
+
+The Ferry on each box reads the session files of the harnesses and adds the
+token counts for each harness, project, and day. Input is the input tokens
+that are not a cache read. The days are UTC days. --since <date> counts from
+that day on, in the form YYYY-MM-DD. Without it, Ferry counts all days. The
+JSON result has the count of each day.
+
+Ferry counts what the session files hold now. A session that a harness or
+you deleted is not counted. A harness that records no token counts, such as
+Cursor Agent, shows as not available. Ferry shows tokens, not money.
+
+Only the harness ids, the project paths, the days, and the numbers leave the
+box. Ferry replaces a token or a URL credential in a project path. An offline
+box, or a box without the Ferry of a release, gets one line with the reason,
+and Ferry continues with the other boxes. Ferry changes nothing on the box.
+This machine is not in the report.
+
+Options:
+  --since <date>  count from this UTC day on, in the form YYYY-MM-DD
+  -h, --help      display help for command
+
+With --json: { since, boxes: [{ name, online, error, harnesses: [{ id, available, total, projects: [{ path, total, days: [{ day, input, output, cacheRead, cacheWrite }] }] }] }] }. total is { input, output, cacheRead, cacheWrite }, or null when available is false.
 ```
 
 ## ferry watch

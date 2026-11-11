@@ -88,6 +88,8 @@ import type { BriefStatusReport, StatusReport } from "./status.ts";
 import { failedChecks, formatDoctor, runDoctor, type DoctorDependencies, type DoctorInput, type DoctorReport } from "./doctor.ts";
 import { runToolsCommand, toolsLines, type ToolsCommandDependencies, type ToolsReport } from "./tools/command.ts";
 import { psLines, runPs } from "./ps.ts";
+import { countUsage } from "./usage-count.ts";
+import { parseSince, runUsage, usageLines } from "./usage.ts";
 import { boxPathDirs } from "./tools/path.ts";
 import { runWatch, type WatchDependencies, type WatchInput } from "./watch.ts";
 import {
@@ -230,6 +232,7 @@ type CliDependencies = {
     dependencies: Pick<ToolsCommandDependencies, "tools"> & Partial<ToolsCommandDependencies>,
   ) => Promise<ToolsReport>;
   readonly runPs?: typeof runPs;
+  readonly runUsage?: typeof runUsage;
   readonly runProcess?: RunProcess;
   readonly readConfig?: () => PartialOperatorConfig | null;
   readonly integrations?: readonly Integration[];
@@ -253,8 +256,8 @@ type CliDependencies = {
 /** The commands that stay running and print one event for each line with --json. */
 const STREAM_COMMANDS = new Set(["watch", "tunnel", "expose"]);
 
-/** The commands that a box install runs. `scan` and `redact` are hidden: the operator machine runs them over Link. */
-const BOX_INSTALL_COMMANDS = new Set(["expose", "whoami", "scan", "redact"]);
+/** The commands that a box install runs. `scan`, `redact`, and `usage-count` are hidden: the operator machine runs them over Link. */
+const BOX_INSTALL_COMMANDS = new Set(["expose", "whoami", "scan", "redact", "usage-count"]);
 
 const JSON_HELP = `JSON output (--json):
   stdout has only JSON. Progress and the text lines go to stderr. Ferry
@@ -323,6 +326,8 @@ const JSON_RESULTS: Record<string, string> = {
   "integrations disable": "{ integration, action, dryRun, plan, output, enabled, connectSteps }",
   tools: "{ tools: [{ id, name, kind, install, policy: { policy, default }, boxes, operatorVersion }] }",
   ps: "{ boxes: [{ name, online, error, agents: [{ harness, pid, project, startedAt, memoryKiB, cpuPercent, children }] }] }",
+  usage:
+    "{ since, boxes: [{ name, online, error, harnesses: [{ id, available, total, projects: [{ path, total, days: [{ day, input, output, cacheRead, cacheWrite }] }] }] }] }. total is { input, output, cacheRead, cacheWrite }, or null when available is false",
   watch:
     "events watch-started, synced, sync-failed, sync-refused, content-refused, config-error, update-started, update-failed, status-failed, watch-stopped",
   "watch install": "{ manager, path }",
@@ -1566,6 +1571,36 @@ the box.`)
     });
   boxCommands.add(ps);
 
+  const usage = program
+    .command("usage")
+    .summary("Show the tokens of the agents on each box, for each harness and project")
+    .description(`Show the tokens of the agents on each box, for each harness and project.
+
+The Ferry on each box reads the session files of the harnesses and adds the
+token counts for each harness, project, and day. Input is the input tokens
+that are not a cache read. The days are UTC days. --since <date> counts from
+that day on, in the form YYYY-MM-DD. Without it, Ferry counts all days. The
+JSON result has the count of each day.
+
+Ferry counts what the session files hold now. A session that a harness or
+you deleted is not counted. A harness that records no token counts, such as
+Cursor Agent, shows as not available. Ferry shows tokens, not money.
+
+Only the harness ids, the project paths, the days, and the numbers leave the
+box. Ferry replaces a token or a URL credential in a project path. An offline
+box, or a box without the Ferry of a release, gets one line with the reason,
+and Ferry continues with the other boxes. Ferry changes nothing on the box.
+This machine is not in the report.`)
+    .option("--since <date>", "count from this UTC day on, in the form YYYY-MM-DD")
+    .action(async (options: { since?: string }) => {
+      const since = parseSince(options.since);
+      const result = await (dependencies.runUsage ?? runUsage)(boxNames(), since, { createLink, readConfig: config });
+      report(result, (result) => {
+        for (const line of usageLines(result)) writeLine(line);
+      });
+    });
+  boxCommands.add(usage);
+
   const watch = program
     .command("watch")
     .summary("Watch the portable set and sync accepted changes")
@@ -1739,6 +1774,17 @@ of Ferry on the box.`)
         const result = runScan(request, home);
         await writeBoxLine(redactPackLine(JSON.stringify(json() ? successEnvelope(active ?? "scan", result, warnings) : result)));
       }
+    });
+
+  // ferry usage runs this command of the Ferry on the box, so that no session text leaves the box.
+  program
+    .command("usage-count", { hidden: true })
+    .description("Add the token counts of the session files of this machine for each harness, project, and day. Prints only harness ids, project paths, days, and numbers")
+    .option("--since <date>", "count from this UTC day on, in the form YYYY-MM-DD")
+    .action(async (options: { since?: string }) => {
+      const result = await countUsage(registry().harnesses, (dependencies.home ?? homedir)(), parseSince(options.since));
+      const text = JSON.stringify(json() ? successEnvelope(active ?? "usage-count", result, warnings) : result);
+      await writeBoxLine(redactUrlCredentials(redactTokens(text)));
     });
 
   // move --from-box sends the output of each box command through this filter, so that a name with a token stays on the box.
