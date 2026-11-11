@@ -128,6 +128,7 @@ At the start, every 5 minutes, and after each sync, the watch writes the report 
 - Click an item with a Ferry command to run it in Terminal.
 - The app shows the ports of each running `ferry tunnel --follow`. Click a port to open it in the browser.
 - The app sends a macOS notification when a box goes offline, a login or MCP login needs a login, or a tool has drift. Turn off Notifications in the menu to stop them.
+- With [agent notifications](#agent-notifications) on, the app also sends a notification when an agent on a box ends its turn or waits for input.
 - Sync now runs `ferry sync`.
 
 The app needs macOS 26 or later.
@@ -150,6 +151,53 @@ The table has one row for each box of `~/.ferry/status.json`, then one row for e
 Select a row to see the items of the box with the full message, the fix command, and Copy. Click a fix command to run it in Terminal. Click a port to open it in the browser. Sync now and Refresh now do the same as in the menu.
 
 The window reads the same files as the menu. It updates when `~/.ferry/status.json` or a tunnel file changes. When the status file is missing, or `ferry watch` did not write it in the last 15 minutes, the window shows the same message as the menu.
+
+### Agent notifications
+
+The menu bar app can send a notification when Claude on a box ends its turn or waits for input. The notification names the box, the harness, and the last folder of the project. It has no prompt text and no agent output. The feature is off by default.
+
+To turn it on:
+
+1. Add this table to `~/.ferry/config.toml` on the operator machine:
+
+   ```toml
+   [notifications]
+   agents = true
+   ```
+
+2. Run `ferry sync`. Ferry adds a Claude `Stop` hook and a `Notification` hook to `~/.claude/settings.json` on each box. The hooks run `ferry notify` of the box install. Ferry does not change the Claude settings of the operator machine.
+3. Run `ferry tunnel install --box <name>` for each box, so `ferry tunnel --follow` runs as a user service. It carries the events within seconds.
+4. Install the menu bar app with `ferry menubar install`.
+
+Ferry adds the hooks only to a box that has Claude on and when `~/.claude/settings.json` is on the operator machine. Else sync prints a warning. Remove the table, or set `agents = false`, and run `ferry sync` to remove the hooks from the boxes.
+
+The `Notification` hook takes a permission prompt and a question from an MCP server. It does not take the reminder that Claude sends after 60 seconds of idle time.
+
+#### The event files
+
+`ferry notify <harness> <kind>` writes one event to `~/.ferry/events/<id>.json` on the box. The kind is `turn-ended` or `waiting-for-input`. Ferry reads only the `cwd` field of the hook input on stdin, and the project is that path with tokens and URL credentials replaced. The box keeps the newest 20 events of the last hour.
+
+`ferry tunnel --follow` reads the events of the box and writes the new ones to `~/.ferry/tunnels/<box>.events.json` on the operator machine, with a write and a rename. The file stays when the tunnel stops, so a restart gives no event again. It keeps the newest 20 events, oldest first:
+
+```json
+{
+  "schemaVersion": 1,
+  "box": "lab",
+  "updatedAt": "2026-11-11T10:00:01.000Z",
+  "events": [
+    {
+      "id": "1794045600000-4242",
+      "harness": "claude",
+      "kind": "turn-ended",
+      "project": "/home/user/app",
+      "at": "2026-11-11T10:00:00.000Z",
+      "receivedAt": "2026-11-11T10:00:01.000Z"
+    }
+  ]
+}
+```
+
+`id` is unique for each box. `at` is the time on the box, and `receivedAt` is the time on the operator machine. The app sends one notification for each `id` that it did not read before, when `receivedAt` is after the start of the app. With Notifications off in the menu, the app sends none.
 
 ## Linux
 
