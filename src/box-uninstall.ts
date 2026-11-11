@@ -4,12 +4,14 @@
  * command stops the Ferry user services, removes the harness links into the
  * Ferry checkout, moves the backups of `ferry sync --force` back, and removes
  * the Ferry files. The box keeps its logins, its projects, the installed
- * tools, and the values that sync merged into its config files.
+ * tools, and the values that sync merged into its config files. Before the
+ * question, Ferry prints the projects on the box with unsaved work.
  */
 
 import { posix } from "node:path";
 import { BOX_MARKER } from "./box-ferry.ts";
 import { BOX_DIRECTORY, BOX_INSTRUCTIONS } from "./box-identity.ts";
+import { BOX_PROJECTS_RECORD, boxWorkLines, readBoxWork, type BoxWork } from "./box-work.ts";
 import { quoteShell } from "./box-settings.ts";
 import { FerryError, linkFailure } from "./errors.ts";
 import { EXPOSED_DIR } from "./expose.ts";
@@ -23,7 +25,7 @@ const OPERATOR_CONFIG = ".ferry/config.toml";
 const BINARY = ".local/bin/ferry";
 const UNIT_DIRECTORY = ".config/systemd/user";
 /** The Ferry files and directories of a box, in the order of removal. The marker goes last, so a failed run leaves a box install. */
-const FERRY_PATHS = [BOX_DIRECTORY, EXPOSED_DIR, STORE, BINARY, BOX_MARKER];
+const FERRY_PATHS = [BOX_DIRECTORY, EXPOSED_DIR, STORE, BOX_PROJECTS_RECORD, BINARY, BOX_MARKER];
 
 /** What Ferry removes from a box. Each path is relative to the box home. */
 export type BoxUninstallPlan = {
@@ -40,6 +42,8 @@ export type BoxUninstallPlan = {
   readonly profileBlock: boolean;
   /** The Ferry files and directories that are on the box, in the order of removal. */
   readonly paths: readonly string[];
+  /** The projects on the box with unsaved work, or null when Ferry could not read them. Ferry removes no project. */
+  readonly unsavedWork: BoxWork | null;
 };
 
 type UninstallLink = Pick<Link, "run">;
@@ -90,6 +94,7 @@ fi
 export async function planBoxUninstall(
   harnesses: readonly HarnessDescriptor[],
   link: UninstallLink,
+  projects: readonly string[] = [],
 ): Promise<BoxUninstallPlan> {
   const roots = unique(harnesses.map((harness) => harness.skillRoot));
   const direct = unique(harnesses.flatMap((harness) => [harness.instructionFile, ...(harness.extraRoots ?? [])]));
@@ -151,11 +156,12 @@ export async function planBoxUninstall(
     .sort((a, b) => compare(a.path, b.path));
   // Without the marker, the binary is not a box install of Ferry, so it stays.
   const paths = FERRY_PATHS.filter((path) => present.has(path) && (path !== BINARY || present.has(BOX_MARKER)));
-  return { home, services: services.sort(compare), links, profileBlock, paths };
+  const unsavedWork = await readBoxWork(link, projects).catch(() => null);
+  return { home, services: services.sort(compare), links, profileBlock, paths, unsavedWork };
 }
 
-/** The plan as lines. Ferry prints them before it asks. */
-export function boxUninstallLines(plan: BoxUninstallPlan): string[] {
+/** The plan as lines. Ferry prints them before it asks. `box` is the box name. */
+export function boxUninstallLines(plan: BoxUninstallPlan, box: string): string[] {
   const lines = [
     ...(plan.services.length > 0
       ? [`Stop and remove the user services: ${plan.services.join(", ")}. A stopped service stops its agents.`]
@@ -167,6 +173,7 @@ export function boxUninstallLines(plan: BoxUninstallPlan): string[] {
     ...plan.paths.map((path) => `Remove ~/${path}`),
   ];
   return [
+    ...(plan.unsavedWork === null ? ["Unsaved work: unavailable"] : boxWorkLines(plan.unsavedWork, box)),
     ...(lines.length > 0 ? lines : ["The box has no Ferry files."]),
     "Ferry keeps the logins and credentials, the project directories, the installed tools, ~/.paseo, and the values that ferry sync merged into the config files of the box.",
   ];

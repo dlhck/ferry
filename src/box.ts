@@ -259,14 +259,14 @@ async function uninstallBox(
   const link = dependencies.createLink(resolveLinkOptions(box.host));
   const keep = `To remove the box from the config only, run ferry box remove ${name}.`;
   dependencies.writeLine(`Remove Ferry from box ${name}: ${transport(box.host)} ${destination(box.host)}`);
-  const plan = await step(dependencies.progress, "Reading the box", () => planBoxUninstall(dependencies.harnesses, link)).catch(
+  const plan = await step(dependencies.progress, "Reading the box", () => planBoxUninstall(dependencies.harnesses, link, box.projects)).catch(
     (cause) => {
       // A refusal of the plan has its own message and hint.
       if (cause instanceof FerryError) throw cause;
       throw new Error(`Ferry could not read box ${name}: ${messageOf(cause)}. Ferry changed nothing. ${keep}`, { cause });
     },
   );
-  for (const line of boxUninstallLines(plan)) dependencies.writeLine(line);
+  for (const line of boxUninstallLines(plan, name)) dependencies.writeLine(line);
   const service = tunnelServiceOf(dependencies.home, name);
   if (service !== null) dependencies.writeLine(`On this machine: stop and remove the tunnel service ${service}`);
   if (input.dryRun) {

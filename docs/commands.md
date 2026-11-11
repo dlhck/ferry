@@ -41,6 +41,7 @@ The `ferry sherlock` commands exist only when the Sherlock integration is on and
   - [`ferry sherlock`](#ferry-sherlock)
     - [`ferry sherlock add`](#ferry-sherlock-add)
   - [`ferry tools`](#ferry-tools)
+  - [`ferry ps`](#ferry-ps)
   - [`ferry watch`](#ferry-watch)
     - [`ferry watch install`](#ferry-watch-install)
   - [`ferry menubar`](#ferry-menubar)
@@ -128,6 +129,8 @@ Commands:
   tools                                List the tools, the version policy of
                                        each one and of each box, and the
                                        versions on this machine
+  ps                                   List the agent processes on each box,
+                                       with their memory and CPU
   watch                                Watch the portable set and sync accepted
                                        changes
   menubar                              Install or remove the macOS menu bar app
@@ -881,7 +884,12 @@ unknown, Ferry cannot read the box version. Box-only skills lists the skills
 on each box that the snapshot does not have. ferry adopt --from-box copies one
 to this machine. Skipped MCP servers lists each stdio MCP server of this
 machine that Ferry does not carry, with its harness, its name, the reason, and
-what to change. It never prints a command or an argument of a server. With
+what to change. It never prints a command or an argument of a server.
+
+Unsaved work lists each git project on the box with changes that are not
+committed, or with a local branch that has commits that no remote has. Ferry
+checks the projects of [box.<name>] and the destinations of earlier ferry
+move commands. It shows only the path, the branch, and the counts. With
 --json, result is the status report, schema version 2, and its skippedMcp has
 that list. The ferry agent skill describes its fields.
 Install the skill with ferry skills add dlhck/ferry --skill ferry.
@@ -1156,6 +1164,32 @@ Options:
   -h, --help  display help for command
 
 With --json: { tools: [{ id, name, kind, install, policy: { policy, default }, boxes, operatorVersion }] }.
+```
+
+## ferry ps
+
+```text
+Usage: ferry ps [options]
+
+List the agent processes on each box, with their memory and CPU.
+
+Ferry reads the processes of the box user in one SSH command and compares
+their program names with the harnesses of the registry. An agent is a matched
+process whose parent processes do not match. Its memory is the resident
+memory of the process and all its child processes. Its CPU is the sum of the
+CPU percent that ps gives for each of these processes, which is the average
+since the start of the process. 100% is one CPU. The project is the working
+directory of the agent process. The start time is in UTC.
+
+The command line of a process does not leave the box. Ferry replaces a token
+or a URL credential in a project path. An offline box gets one line with the
+reason, and Ferry continues with the other boxes. Ferry changes nothing on
+the box.
+
+Options:
+  -h, --help  display help for command
+
+With --json: { boxes: [{ name, online, error, agents: [{ harness, pid, project, startedAt, memoryKiB, cpuPercent, children }] }] }.
 ```
 
 ## ferry watch
@@ -1477,7 +1511,7 @@ Options:
   --dry-run    with --uninstall, print the plan and change nothing
   -h, --help   display help for command
 
-With --json: { name, defaultBoxRemoved, tunnelService, instructionFile }. tunnelService is the file of the tunnel user service that Ferry removed from this machine, or null. instructionFile is the per-box instruction file that stays on this machine, or null. With --uninstall, also uninstall: { dryRun, plan: { home, services, links: [{ path, link, backup }], profileBlock, paths }, remaining }, or null when cancelled. The plan paths are relative to the box home. backup is the file that Ferry moves back to path, or null. remaining has the names that stay in ~/.ferry on the box. A dry run changes nothing.
+With --json: { name, defaultBoxRemoved, tunnelService, instructionFile }. tunnelService is the file of the tunnel user service that Ferry removed from this machine, or null. instructionFile is the per-box instruction file that stays on this machine, or null. With --uninstall, also uninstall: { dryRun, plan: { home, services, links: [{ path, link, backup }], profileBlock, paths, unsavedWork }, remaining }, or null when cancelled. unsavedWork is { checked, projects } as in ferry status, or null when Ferry could not read it. The plan paths are relative to the box home. backup is the file that Ferry moves back to path, or null. remaining has the names that stay in ~/.ferry on the box. A dry run changes nothing.
 ```
 
 ### ferry box create

@@ -33,6 +33,19 @@ By default, Ferry forwards your SSH agent to the box for the git commands that r
 
 To change an existing box, set `git_auth = "box"` in its `[box.<name>]` table and run `ferry init --box <name>`.
 
+### Projects on a box
+
+`projects` in `[box.<name>]` lists the git project directories on the box, relative to the box home:
+
+```toml
+[box.b]
+transport = "ssh"
+destination = "user@box-b.example"
+projects = ["code/app", "work/api"]
+```
+
+`ferry status` reports the [unsaved work](status.md#unsaved-work) of each project. A path must be below the box home, with no `~` and no `..`. You do not need to add a project that `ferry move` moved to the box, because the box records it.
+
 ## Create a box at Hetzner Cloud
 
 `ferry box create <name>` creates a machine in your Hetzner Cloud project, with your API token. Ferry does not host machines. The machine costs money until you run `ferry box destroy <name>`.
@@ -201,12 +214,12 @@ On the box, `ferry expose -- <command>` runs a dev server and announces its port
 
 `ferry box remove <name>` removes a box from the config. It does not connect to the box, and it refuses the last box.
 
-`ferry box remove <name> --uninstall` removes Ferry from the box first. Run it with `--dry-run` to see the plan. Ferry connects to the box, prints the plan, and asks you to type the box name. Then it does these steps on the box:
+`ferry box remove <name> --uninstall` removes Ferry from the box first. Run it with `--dry-run` to see the plan. Ferry connects to the box, prints the projects with [unsaved work](status.md#unsaved-work) and the plan, and asks you to type the box name. Then it does these steps on the box:
 
 1. It stops and removes each `ferry-*.service` user service, such as `ferry-paseo.service`. A stopped service stops its agents.
 2. It removes each skill link, instruction file link, and root link that points into the Ferry checkout or to `~/.ferry/box/AGENTS.md`. When `ferry sync --force` moved a file of yours to `~/.ferry/backups`, Ferry moves the newest backup of that path back.
 3. It removes the ferry PATH block of `~/.profile`.
-4. It removes `~/.ferry/box`, `~/.ferry/exposed`, the checkout `~/.ferry/store`, the Ferry binary `~/.local/bin/ferry`, and the marker `~/.ferry/box.json`.
+4. It removes `~/.ferry/box`, `~/.ferry/exposed`, the checkout `~/.ferry/store`, the move record `~/.ferry/projects`, the Ferry binary `~/.local/bin/ferry`, and the marker `~/.ferry/box.json`.
 
 Then Ferry removes the box from the config.
 

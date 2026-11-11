@@ -35,6 +35,8 @@ export type BoxConfig = {
   readonly host: OperatorHostConfig;
   /** How the box git reads the snapshot remote. A missing key means `"agent"`. */
   readonly gitAuth?: GitAuth;
+  /** The git project directories on the box, relative to the box home. `ferry status` reports their unsaved work. */
+  readonly projects?: readonly string[];
   readonly integrations?: IntegrationsConfig;
   /**
    * Policies by tool id. A policy replaces the `[tools]` policy or the `version` of a `[tools.<id>]` table.
@@ -448,6 +450,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       name: entry.name,
       host,
       ...(entry.gitAuth ? { gitAuth: entry.gitAuth } : {}),
+      ...(entry.projects ? { projects: entry.projects } : {}),
       ...(entry.integrations ? { integrations: entry.integrations } : {}),
       ...(entry.tools ? { tools: entry.tools } : {}),
     };
@@ -467,6 +470,7 @@ type ParsedBox = {
   name: string;
   host: { transport?: "tailscale" | "ssh"; tailscale?: string; sshUser?: string; destination?: string };
   gitAuth?: GitAuth;
+  projects?: string[];
   integrations?: Record<string, boolean>;
   tools?: Record<string, ToolPolicy>;
 };
@@ -484,6 +488,14 @@ function readBoxKey(entry: ParsedBox, part: BoxPart, key: string, encoded: strin
     entry.gitAuth = value;
     return;
   }
+  if (part === "host" && key === "projects") {
+    const list = parseJson(encoded);
+    if (!Array.isArray(list) || !list.every(isHomeRelative)) {
+      throw new ConfigError(`invalid projects in ${section} of ${path}. Use a list of paths relative to the box home, such as ["code/app"].`);
+    }
+    entry.projects = list;
+    return;
+  }
   if (!SECTION_KEYS[part === "host" ? "[host]" : "[integrations]"]?.includes(key)) {
     throw new ConfigError(`unknown key ${key} in ${section} of ${path}`);
   }
@@ -499,6 +511,18 @@ function readBoxKey(entry: ParsedBox, part: BoxPart, key: string, encoded: strin
   } else if (key === "ssh_user") entry.host.sshUser = value;
   else if (key === "tailscale") entry.host.tailscale = value;
   else entry.host.destination = value;
+}
+
+/** A path below the home: not empty, not absolute, no `~`, no `..`, and no control character. */
+function isHomeRelative(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value !== "" &&
+    !value.startsWith("/") &&
+    !value.startsWith("~") &&
+    !value.split("/").includes("..") &&
+    !/[\u0000-\u001f]/.test(value)
+  );
 }
 
 /** Read one key of a `[tools.<id>]` table. Each error names the table and the key. */
@@ -615,6 +639,7 @@ function boxLines(box: BoxConfig): string[] {
     `[box.${box.name}]`,
     ...hostLines(box.host),
     ...(box.gitAuth !== undefined ? [`git_auth = ${JSON.stringify(box.gitAuth)}`] : []),
+    ...(box.projects !== undefined ? [`projects = ${JSON.stringify(box.projects)}`] : []),
     "",
     ...integrationLines(box.integrations, `box.${box.name}.integrations`),
     ...(tools.length > 0

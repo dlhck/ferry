@@ -47,6 +47,13 @@ export type HarnessDescriptor = {
   readonly mcp?: { readonly file: string; readonly format: "json" | "toml"; readonly key: string };
   /** Where the harness keeps its sessions. `ferry move` carries the sessions of the project. Only a builtin descriptor sets this. */
   readonly sessions?: SessionStore;
+  /**
+   * The program names of the agent process, such as `claude`. `ferry ps`
+   * compares them with the file name of the first argument of each box
+   * process, or of the second argument after `node` or `bun`. Only a builtin
+   * descriptor sets this.
+   */
+  readonly processNames?: readonly string[];
 };
 
 /**
