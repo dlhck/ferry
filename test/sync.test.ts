@@ -1453,6 +1453,8 @@ describe("sync with the Paseo integration", () => {
                 : !command.includes(`want='${line}'`) ? "updated\n"
                 : unit.includes("\nOOMPolicy=") ? "unchanged\n" : "policy\n";
             }
+            // The memory limit check of a box without a limit writes nothing.
+            else if (command.includes("MemoryMax=")) stdout = "";
             else if (command.includes(".paseo/config.json")) stdout = "W\n";
             return { ok: true as const, address: "box", stdout, stderr: "" };
           },
@@ -1496,7 +1498,7 @@ describe("sync with the Paseo integration", () => {
     expect(sync.lines).toContain(
       "Warning: Paseo agent profile Pilot was not carried: provider copilot is not available on the box.",
     );
-    const write = sync.commands.find((command) => command.includes(".paseo/config.json") && command.includes(" mv "));
+    const write = sync.commands.find((command) => command.includes(".paseo/config.json") && command.includes(" mv ") && !command.includes("MemoryMax="));
     expect(write).toContain('"name":"Reviewer"');
     expect(write).not.toContain("Pilot");
     expect(write).not.toContain("providers");
@@ -1508,7 +1510,26 @@ describe("sync with the Paseo integration", () => {
     await sync.result;
 
     expect(sync.events.slice(-6, -4)).toEqual(["start:Carrying Paseo agent profiles", "done:no profiles"]);
-    expect(sync.commands.some((command) => command.includes("paseo daemon") || command.includes(".paseo/"))).toBe(false);
+    // Only the memory limit check reads the box Paseo config. It finds no Ferry prefix, so it writes nothing.
+    expect(sync.commands.filter((command) => command.includes("paseo daemon") || command.includes(".paseo/")))
+      .toEqual([expect.stringContaining("MemoryMax=")]);
+  });
+
+  test("applies agent_memory_max of the box after the provider carry", async () => {
+    const { host: _host, ...rest } = paseoConfig;
+    const limited = { ...rest, boxes: [{ name: "a", host: { tailscale: "box", sshUser: "ferry" }, agentMemoryMax: "6G" }] };
+    const sync = run(paseoHome([reviewer]), { config: limited as unknown as OperatorConfig & RegistryConfig });
+    await sync.result;
+
+    expect(sync.events).toContain("plan:14");
+    const index = sync.events.indexOf("start:Applying the agent memory limit");
+    expect(sync.events[index + 1]).toBe("done:MemoryMax=6G for 0 providers, 1 warning, no changes");
+    expect(index).toBeLessThan(sync.events.indexOf("start:Carrying Paseo agent profiles"));
+    expect(sync.commands.some((command) => command.includes("paseo provider ls --json"))).toBe(true);
+    // The fake box has no systemd-run, so Ferry wraps nothing.
+    expect(sync.lines).toContain(
+      "Warning: The agents on the box have no memory limit: systemd-run is not on the PATH of ferry-paseo.service.",
+    );
   });
 
   test("warns and completes the sync when the box cannot take the profiles", async () => {

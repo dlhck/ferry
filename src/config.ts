@@ -38,6 +38,8 @@ export type BoxConfig = {
   readonly gitAuth?: GitAuth;
   /** The git project directories on the box, relative to the box home. `ferry status` reports their unsaved work. */
   readonly projects?: readonly string[];
+  /** The systemd `MemoryMax` of each agent that the Paseo daemon starts on the box. A missing key means no limit. */
+  readonly agentMemoryMax?: string;
   readonly integrations?: IntegrationsConfig;
   /**
    * Policies by tool id. A policy replaces the `[tools]` policy or the `version` of a `[tools.<id>]` table.
@@ -55,6 +57,13 @@ export type GitAuth = "agent" | "box";
 
 /** A box name goes into flags, lock file names, JSON, and output prefixes, so the characters stay few. */
 const BOX_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+/**
+ * A systemd memory size for `MemoryMax`: bytes with an optional K, M, G, T,
+ * P, or E suffix (base 1024), or a percentage of the physical memory. Zero and
+ * `infinity` are not limits, so the key does not accept them.
+ */
+const MEMORY_SIZE = /^(?:[1-9]\d*(?:\.\d+)?[KMGTPE]?|(?:[1-9]\d?(?:\.\d+)?|100)%)$/;
 
 /** True for a name that a `[box.<name>]` table can use. The name `all` is reserved. */
 export function isBoxName(name: string): boolean {
@@ -463,6 +472,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       host,
       ...(entry.gitAuth ? { gitAuth: entry.gitAuth } : {}),
       ...(entry.projects ? { projects: entry.projects } : {}),
+      ...(entry.agentMemoryMax ? { agentMemoryMax: entry.agentMemoryMax } : {}),
       ...(entry.integrations ? { integrations: entry.integrations } : {}),
       ...(entry.tools ? { tools: entry.tools } : {}),
     };
@@ -483,6 +493,7 @@ type ParsedBox = {
   host: { transport?: "tailscale" | "ssh"; tailscale?: string; sshUser?: string; destination?: string };
   gitAuth?: GitAuth;
   projects?: string[];
+  agentMemoryMax?: string;
   integrations?: Record<string, boolean>;
   tools?: Record<string, ToolPolicy>;
 };
@@ -506,6 +517,14 @@ function readBoxKey(entry: ParsedBox, part: BoxPart, key: string, encoded: strin
       throw new ConfigError(`invalid projects in ${section} of ${path}. Use a list of paths relative to the box home, such as ["code/app"].`);
     }
     entry.projects = list;
+    return;
+  }
+  if (part === "host" && key === "agent_memory_max") {
+    const value = tomlString(encoded);
+    if (value === undefined || !MEMORY_SIZE.test(value)) {
+      throw new ConfigError(`invalid agent_memory_max in ${section} of ${path}. Use a systemd memory size, such as "6G", "512M", or "50%".`);
+    }
+    entry.agentMemoryMax = value;
     return;
   }
   if (!SECTION_KEYS[part === "host" ? "[host]" : "[integrations]"]?.includes(key)) {
@@ -653,6 +672,7 @@ function boxLines(box: BoxConfig): string[] {
     ...hostLines(box.host),
     ...(box.gitAuth !== undefined ? [`git_auth = ${JSON.stringify(box.gitAuth)}`] : []),
     ...(box.projects !== undefined ? [`projects = ${JSON.stringify(box.projects)}`] : []),
+    ...(box.agentMemoryMax !== undefined ? [`agent_memory_max = ${JSON.stringify(box.agentMemoryMax)}`] : []),
     "",
     ...integrationLines(box.integrations, `box.${box.name}.integrations`),
     ...(tools.length > 0

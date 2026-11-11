@@ -26,6 +26,8 @@ export type ResolvedBox = {
   readonly gitAuth: GitAuth;
   /** `projects` of the box, or none. */
   readonly projects: readonly string[];
+  /** `agent_memory_max` of the box, or null for no limit. */
+  readonly agentMemoryMax: string | null;
   /** `[integrations]`, with the keys of `[box.<name>.integrations]` on top. */
   readonly integrations: IntegrationsConfig;
   /**
@@ -109,6 +111,7 @@ function resolveBox(config: PartialOperatorConfig, box: BoxConfig): ResolvedBox 
     host: box.host,
     gitAuth: box.gitAuth ?? "agent",
     projects: box.projects ?? [],
+    agentMemoryMax: box.agentMemoryMax ?? null,
     integrations: { ...config.integrations, ...box.integrations },
     tools,
   };

@@ -35,6 +35,8 @@ export type PsReport = {
     readonly online: boolean;
     /** Why Ferry could not read the box, or null. */
     readonly error: string | null;
+    /** `agent_memory_max` of the box config, or null. */
+    readonly agentMemoryMax?: string | null;
     readonly agents: readonly AgentProcess[];
   }[];
 };
@@ -136,8 +138,9 @@ export async function runPs(
     boxes: await Promise.all(
       boxes.map(async (box) => {
         const result = await resolved.createLink(resolveLinkOptions(box.host)).run(command);
-        if (!result.ok) return { name: box.name, online: false, error: result.error.message, agents: [] };
-        return { name: box.name, online: true, error: null, agents: parsePs(result.stdout, resolved.now()) };
+        const agentMemoryMax = box.agentMemoryMax;
+        if (!result.ok) return { name: box.name, online: false, error: result.error.message, agentMemoryMax, agents: [] };
+        return { name: box.name, online: true, error: null, agentMemoryMax, agents: parsePs(result.stdout, resolved.now()) };
       }),
     ),
   };
@@ -151,11 +154,12 @@ export function psLines(report: PsReport): string[] {
       lines.push(`${box.name}: offline (${box.error ?? "unknown error"})`);
       continue;
     }
+    const name = !box.agentMemoryMax ? box.name : `${box.name} (agent memory limit ${box.agentMemoryMax})`;
     if (box.agents.length === 0) {
-      lines.push(`${box.name}: no agents`);
+      lines.push(`${name}: no agents`);
       continue;
     }
-    lines.push(`${box.name}:`);
+    lines.push(`${name}:`);
     const rows = [
       ["HARNESS", "PID", "STARTED UTC", "MEMORY", "CPU", "PROJECT"],
       ...box.agents.map((agent) => [
