@@ -145,6 +145,15 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
     mcp: { file: ".claude.json", format: "json", key: "mcpServers" },
     sessions: { layout: "project-directory", root: ".claude/projects", memory: "memory" },
     processNames: ["claude"],
+    // One API message can be on several lines, and a resumed session copies lines into a new file.
+    usage: {
+      root: ".claude/projects",
+      files: "*.jsonl",
+      records: ["message.usage"],
+      fields: { input: "input_tokens", output: "output_tokens", cacheRead: "cache_read_input_tokens", cacheWrite: "cache_creation_input_tokens" },
+      project: "cwd",
+      once: { path: "message.id", scope: "harness" },
+    },
   },
   {
     id: "codex",
@@ -170,6 +179,16 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
     mcp: { file: ".codex/config.toml", format: "toml", key: "mcp_servers" },
     sessions: { layout: "first-line-cwd", root: ".codex/sessions", files: "rollout-*.jsonl" },
     processNames: ["codex"],
+    // Codex can write a token event two times. The session total grows with each new event.
+    usage: {
+      root: ".codex/sessions",
+      files: "rollout-*.jsonl",
+      records: ["payload.info.last_token_usage"],
+      fields: { input: "input_tokens", output: "output_tokens", cacheRead: "cached_input_tokens", cacheWrite: "cache_write_input_tokens" },
+      inputIncludesCacheRead: true,
+      project: "payload.cwd",
+      once: { path: "payload.info.total_token_usage.total_tokens", scope: "file" },
+    },
   },
   {
     id: "pi",
@@ -194,6 +213,14 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
       ],
     },
     processNames: ["pi"],
+    // An assistant message has its usage in message. A usage, compaction, or branch summary entry has it at the top.
+    usage: {
+      root: ".pi/agent/sessions",
+      files: "*.jsonl",
+      records: ["message.usage", "usage"],
+      fields: { input: "input", output: "output", cacheRead: "cacheRead", cacheWrite: "cacheWrite" },
+      project: "cwd",
+    },
   },
   {
     id: "cursor",
@@ -210,6 +237,7 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
     },
     mcp: { file: ".cursor/mcp.json", format: "json", key: "mcpServers" },
     processNames: ["cursor-agent"],
+    // Cursor Agent records no token counts in its session store, so it has no usage.
   },
 ];
 
