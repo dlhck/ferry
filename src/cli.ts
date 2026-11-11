@@ -134,6 +134,7 @@ import {
   type AdoptFromBoxResult,
 } from "./adopt-box.ts";
 import { runExpose, type ExposeDependencies, type ExposeInput } from "./expose.ts";
+import { runNotify, type NotifyDependencies, type NotifyInput } from "./notify.ts";
 import { runTunnel, type Listener, type TunnelDependencies, type TunnelInput } from "./tunnel.ts";
 import {
   installTunnelService,
@@ -202,6 +203,7 @@ type CliDependencies = {
   /** Reads the provider token and the Tailscale auth key. The default is `findSecret` on this machine. */
   readonly readSecret?: (name: SecretName) => Promise<Secret | null>;
   readonly runExpose?: (input: ExposeInput, dependencies?: Partial<ExposeDependencies>) => Promise<number>;
+  readonly runNotify?: (input: NotifyInput, dependencies?: Partial<NotifyDependencies>) => Promise<unknown>;
   /** True when this is a box install. The default is `isBoxMode`. */
   readonly isBoxMode?: () => boolean;
   /** The home that `ferry whoami` and `ferry box add` use. The default is the user home. */
@@ -267,7 +269,7 @@ type CliDependencies = {
 const STREAM_COMMANDS = new Set(["watch", "tunnel", "expose"]);
 
 /** The commands that a box install runs. `scan`, `redact`, and `usage-count` are hidden: the operator machine runs them over Link. */
-const BOX_INSTALL_COMMANDS = new Set(["expose", "whoami", "scan", "redact", "usage-count"]);
+const BOX_INSTALL_COMMANDS = new Set(["expose", "notify", "whoami", "scan", "redact", "usage-count"]);
 
 const JSON_HELP = `JSON output (--json):
   stdout has only JSON. Progress and the text lines go to stderr. Ferry
@@ -327,6 +329,7 @@ const JSON_RESULTS: Record<string, string> = {
   "tunnel install": "{ manager, path }",
   "tunnel uninstall": "{ manager, path, removed }",
   expose: "events exposed and exited. The output of the command goes to stderr",
+  notify: "{ id, harness, kind, project, at }",
   status:
     "the status report, schema version 2. With --brief, { schemaVersion: 1, checkedAt, boxes: [{ name, host, online, error, summary, issues: [{ kind, name, state, summary, message, command }], resources: { disk, memory, load } }] }",
   doctor:
@@ -493,7 +496,7 @@ function createProgram(dependencies: CliDependencies): { program: Command; state
     if (action !== program && !BOX_INSTALL_COMMANDS.has(active) && boxMode) {
       throw new FerryError(
         "usage",
-        `This is a box install of Ferry (~/${BOX_MARKER}). Only ferry expose and ferry whoami run here. Run ferry ${commandPath(action)} on the operator machine.`,
+        `This is a box install of Ferry (~/${BOX_MARKER}). Only ferry expose, ferry notify, and ferry whoami run here. Run ferry ${commandPath(action)} on the operator machine.`,
       );
     }
     const names = boxNames();
@@ -653,7 +656,7 @@ Add a custom harness in ~/.ferry/config.toml. A repeat init keeps it:
 Ferry prints the plan for each tool and asks before it runs a command on the
 box. gh and jq come from apt, so Debian or Ubuntu is the tested target. Ferry on the
 box is the version of this machine. It is a box install that runs only
-ferry expose and ferry whoami. Run ferry tools --help for the tool config.`)
+ferry expose, ferry notify, and ferry whoami. Run ferry tools --help for the tool config.`)
     .option("--yes", "run without a confirmation prompt")
     .action(async (options: { yes?: boolean }) => {
       const result = await withProgress((progress, writeLine) =>
@@ -1187,7 +1190,12 @@ after each change, and when the connection drops. The menu bar app reads the
 file. Fields: schemaVersion (1), box, pid, connected (false after a drop, with
 no forwards), updatedAt, and forwards: [{ name, cwd, boxPort, localPort }].
 name and cwd are missing when the entry of ferry expose has none. Ferry
-removes the file when --follow stops on Ctrl-C or SIGTERM.`)
+removes the file when --follow stops on Ctrl-C or SIGTERM.
+
+--follow also copies the new events of ferry notify on the box to
+~/.ferry/tunnels/<box>.events.json, and keeps the newest 20. The file stays
+when --follow stops. Fields: schemaVersion (1), box, updatedAt, and events:
+[{ id, harness, kind, project, at, receivedAt }].`)
     .argument(
       "[ports...]",
       "box port, box:local to pick another local port, or host:port[:local] for a host that the box can reach, such as 3000, 3000:4000, or db.example:5432",
@@ -1287,6 +1295,35 @@ For example, a service script in paseo.json on the box:
         json() ? { ...events(), stdout: "stderr" } : {},
       );
       (dependencies.setExitCode ?? setExitCode)(code);
+    });
+
+  program
+    .command("notify")
+    .summary("Record an agent event on the box for the menu bar app of the operator machine")
+    .description(`Record an agent event on the box for the menu bar app of the operator machine.
+
+A harness hook runs this command on the box. Ferry writes one event to
+~/.ferry/events/<id>.json with the harness, the kind, the project, and the
+time. The project is the cwd field of the JSON on stdin, else the current
+directory. Ferry reads no other field, and writes no prompt text and no
+agent output. Ferry keeps the newest 20 events of the last hour.
+
+ferry tunnel --follow on the operator machine copies the new events to
+~/.ferry/tunnels/<box>.events.json, and the menu bar app posts one
+notification for each new event.
+
+With [notifications] agents = true in the config of the operator machine,
+ferry sync adds the Claude Stop and Notification hooks that run this command
+to ~/.claude/settings.json on each box. The kinds are turn-ended and
+waiting-for-input.`)
+    .argument("<harness>", "the harness id, such as claude")
+    .argument("<kind>", "turn-ended or waiting-for-input")
+    .action(async (harness: string, kind: string) => {
+      const event = await (dependencies.runNotify ?? runNotify)(
+        { harness, kind },
+        dependencies.readStdin ? { readStdin: dependencies.readStdin } : {},
+      );
+      report(event);
     });
 
   program

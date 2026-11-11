@@ -21,6 +21,7 @@ export type OperatorConfig = {
   readonly integrations?: IntegrationsConfig;
   readonly tools?: ToolsConfig;
   readonly provider?: ProviderConfig;
+  readonly notifications?: NotificationsConfig;
 };
 
 /** A complete config with `[box.<name>]` tables instead of `[host]`. */
@@ -139,6 +140,13 @@ const HETZNER_KEYS = {
   ssh_public_key: "sshPublicKey",
 } as const;
 
+/**
+ * `[notifications]`. With `agents = true`, sync puts the Claude `Stop` and
+ * `Notification` hooks that run `ferry notify` into the Claude settings of
+ * each box. The settings of this machine do not change.
+ */
+export type NotificationsConfig = { readonly agents?: boolean };
+
 /** `watch` turns on the daily tool update in `ferry watch`. */
 export type UpdateConfig = { readonly watch?: boolean };
 
@@ -192,6 +200,7 @@ export type PartialOperatorConfig = {
   readonly integrations?: IntegrationsConfig;
   readonly tools?: ToolsConfig;
   readonly provider?: ProviderConfig;
+  readonly notifications?: NotificationsConfig;
 };
 
 /** TOML key to parsed property for each `[[harness]]` entry. */
@@ -211,6 +220,7 @@ const SECTION_KEYS: Record<string, readonly string[]> = {
   "[integrations]": ["paseo", "paseo_relay", "paseo_auto_archive", "sherlock"],
   "[tools]": BUILTIN_TOOLS.map((tool) => tool.id),
   "[provider.hetzner]": Object.keys(HETZNER_KEYS),
+  "[notifications]": ["agents"],
 };
 
 /** The keys of a `[tools.<id>]` table, in the order that writeConfig writes them. */
@@ -268,6 +278,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     integrations?: IntegrationsConfig;
     tools?: Record<string, ToolPolicy | Record<string, unknown>>;
     provider?: { hetzner?: Record<string, string> };
+    notifications?: NotificationsConfig;
   } = { host: {}, harness: [] };
   let section = "";
   let harness: Record<string, string> | null = null;
@@ -289,7 +300,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       hasHost = true;
       continue;
     }
-    if (line === "[update]" || line === "[status]" || line === "[integrations]" || line === "[tools]" || line === "[provider.hetzner]") {
+    if (line === "[update]" || line === "[status]" || line === "[integrations]" || line === "[tools]" || line === "[provider.hetzner]" || line === "[notifications]") {
       section = line;
       harness = null;
       tool = null;
@@ -375,11 +386,12 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       config.status = { ...config.status, [STATUS_KEYS[key as keyof typeof STATUS_KEYS]]: value };
       continue;
     }
-    if (section === "[update]" || section === "[integrations]") {
+    if (section === "[update]" || section === "[integrations]" || section === "[notifications]") {
       if (encoded !== "true" && encoded !== "false") {
         throw new ConfigError(`invalid boolean for ${key} in ${section} of ${path}`);
       }
       if (section === "[update]") config.update = { watch: encoded === "true" };
+      else if (section === "[notifications]") config.notifications = { agents: encoded === "true" };
       else config.integrations = { ...config.integrations, [key]: encoded === "true" };
       continue;
     }
@@ -619,6 +631,7 @@ export function writeConfig(config: OperatorConfig | BoxesOperatorConfig, home =
       ...integrationLines(config.integrations, "integrations"),
       ...toolLines(config.tools ?? {}),
       ...hetznerLines(config.provider?.hetzner),
+      ...(config.notifications?.agents !== undefined ? ["[notifications]", `agents = ${config.notifications.agents}`, ""] : []),
       ...("boxes" in config ? config.boxes.flatMap(boxLines) : []),
     ].join("\n"),
     { mode: 0o600 },

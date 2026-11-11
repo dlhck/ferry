@@ -37,6 +37,7 @@ import type { HarnessDescriptor } from "./registry/types.ts";
 import { openStore as openSnapshotStore, skillChanged, type PublishResult } from "./store.ts";
 import { adoptPublishedSkills } from "./adopt.ts";
 import { installBoxPlugins, mergeBoxSettings } from "./box-settings.ts";
+import { withNotifyHooks } from "./notify.ts";
 import { registerBoxMcp } from "./box-mcp.ts";
 import {
   carryAgentProfiles,
@@ -633,13 +634,18 @@ async function applyOnBox(context: {
       (warnings) => (warnings.length > 0 ? plural(warnings.length, "warning") : undefined),
     );
     for (const warning of warnings) warn(`Box plugins: ${warning}`);
+    // Only the box gets the hooks of `ferry notify`. Without the key, the box hooks are the hooks of the operator again.
+    const notifying = config.notifications?.agents === true ? withNotifyHooks(settings, harnesses) : settings;
+    if (notifying === null) {
+      warn("Agent notifications: Ferry adds the Claude hooks only when Claude is on for the box and ~/.claude/settings.json is on this machine.");
+    }
     const merged = await boxStep(
       "Merging settings on the box",
       () =>
         mergeBoxSettings({
           remoteHome: required(plan.remoteHome),
           harnesses,
-          settings,
+          settings: notifying ?? settings,
           link,
         }),
       (result) => (result.warnings.length > 0 ? plural(result.warnings.length, "warning") : undefined),
@@ -1610,7 +1616,7 @@ function pathDirsOf(registry: Registry): readonly string[] {
 }
 
 /** The shared part of the config. Each box has its own host, integrations, and tools. */
-type SyncOperatorConfig = Pick<OperatorConfig, "version" | "publisher" | "snapshotUrl">;
+type SyncOperatorConfig = Pick<OperatorConfig, "version" | "publisher" | "snapshotUrl" | "notifications">;
 
 function completeConfig(config: PartialOperatorConfig | null): SyncOperatorConfig {
   // A config without a box passes. `resolveBoxes` refuses it with the message for it.
@@ -1619,7 +1625,12 @@ function completeConfig(config: PartialOperatorConfig | null): SyncOperatorConfi
       cause: new ConfigMissingError("Ferry config is incomplete."),
     });
   }
-  return { version: 1, publisher: config.publisher, snapshotUrl: config.snapshotUrl };
+  return {
+    version: 1,
+    publisher: config.publisher,
+    snapshotUrl: config.snapshotUrl,
+    ...(config.notifications ? { notifications: config.notifications } : {}),
+  };
 }
 
 function targetLabel(host: OperatorHostConfig): string {

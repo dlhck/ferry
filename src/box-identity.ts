@@ -234,7 +234,7 @@ export function whoamiLines(report: WhoamiReport): string[] {
       ? [
           `This machine is the Ferry box ${report.box ?? "(no sync yet)"}.`,
           "The operator machine is the source of truth. Change Ferry-managed files there.",
-          "Only ferry expose and ferry whoami run here.",
+          "Only ferry expose, ferry notify, and ferry whoami run here.",
         ]
       : [
           "This machine is the Ferry operator machine. It is the source of truth.",
