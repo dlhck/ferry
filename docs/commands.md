@@ -54,6 +54,8 @@ The `ferry sherlock` commands exist only when the Sherlock integration is on and
     - [`ferry box list`](#ferry-box-list)
     - [`ferry box add`](#ferry-box-add)
     - [`ferry box remove`](#ferry-box-remove)
+    - [`ferry box create`](#ferry-box-create)
+    - [`ferry box destroy`](#ferry-box-destroy)
     - [`ferry box default`](#ferry-box-default)
   - [`ferry skills`](#ferry-skills)
     - [`ferry skills add`](#ferry-skills-add)
@@ -1406,18 +1408,23 @@ Usage: ferry box [options] [command]
 List, add, and remove the boxes of the config
 
 Options:
-  -h, --help               display help for command
+  -h, --help                display help for command
 
 Commands:
-  list                     List the boxes, their transport and destination, and
-                           the default box
-  add [options] <name>     Check a new box like ferry init, then add it to the
-                           config
-  remove [options] <name>  Remove a box from the config. With --uninstall,
-                           remove Ferry from the box first
-  default <name>           Set default_box, the box of install, auth, move,
-                           tunnel, and integrations enable|disable without --box
-  help [command]           display help for command
+  list                      List the boxes, their transport and destination, and
+                            the default box
+  add [options] <name>      Check a new box like ferry init, then add it to the
+                            config
+  remove [options] <name>   Remove a box from the config. With --uninstall,
+                            remove Ferry from the box first
+  create [options] <name>   Create a machine at Hetzner Cloud, then add it as a
+                            box, install the tools, and sync
+  destroy [options] <name>  Remove the machine of a box at Hetzner Cloud, then
+                            remove the box from the config
+  default <name>            Set default_box, the box of install, auth, move,
+                            tunnel, and integrations enable|disable without
+                            --box
+  help [command]            display help for command
 ```
 
 ### ferry box list
@@ -1538,6 +1545,114 @@ Options:
   -h, --help   display help for command
 
 With --json: { name, defaultBoxRemoved, tunnelService, instructionFile }. tunnelService is the file of the tunnel user service that Ferry removed from this machine, or null. instructionFile is the per-box instruction file that stays on this machine, or null. With --uninstall, also uninstall: { dryRun, plan: { home, services, links: [{ path, link, backup }], profileBlock, paths, unsavedWork }, remaining }, or null when cancelled. unsavedWork is { checked, projects } as in ferry status, or null when Ferry could not read it. The plan paths are relative to the box home. backup is the file that Ferry moves back to path, or null. remaining has the names that stay in ~/.ferry on the box. A dry run changes nothing.
+```
+
+### ferry box create
+
+```text
+Usage: ferry box create [options] <name>
+
+Create a machine at Hetzner Cloud, then add it as a box, install the tools, and
+sync.
+
+The machine is in your Hetzner Cloud project and costs money until you run
+ferry box destroy <name>. Ferry does not host machines.
+
+Ferry reads the Hetzner Cloud token from the environment variable
+HCLOUD_TOKEN, then from the macOS keychain (security find-generic-password
+-s ferry -a hetzner -w), then from the Secret Service on Linux (secret-tool
+lookup service ferry account hetzner). The token stays on this machine. It
+is not in the config, the output, the snapshot, or on the box.
+
+The [provider.hetzner] table of ~/.ferry/config.toml sets the machine:
+server_type (default cax21), image (default ubuntu-26.04), location
+(default fsn1), and ssh_public_key (default ~/.ssh/id_ed25519.pub, then
+id_ecdsa.pub, then id_rsa.pub).
+
+Ferry does these steps:
+
+  1. It creates the machine with a firewall that allows inbound TCP port 22
+     only. The machine gets the SSH user ferry with your public key. It has
+     no password login.
+  2. It makes the first SSH host key on this machine and puts it in the
+     cloud-init user data. It pins the key in ~/.ssh/known_hosts. After the
+     first connection, it makes a new host key on the box and pins that key.
+     Ferry never accepts an unknown host key.
+  3. As root, with your key: it installs Tailscale and joins your tailnet,
+     and installs gh with its apt source. With an auth key in
+     FERRY_TAILSCALE_AUTHKEY, or in the keychain or Secret Service entry
+     with the account tailscale, Ferry sends the key on SSH stdin. Else
+     Ferry prints a login URL.
+  4. It writes /etc/sudoers.d/ferry with this rule only, and turns off root
+     login:
+       ferry ALL=(root) NOPASSWD: /usr/bin/true, /usr/bin/apt update,
+         /usr/bin/apt update --error-on=any, /usr/bin/apt install gh -y,
+         /usr/bin/apt install jq -y, /usr/bin/apt install nodejs npm -y
+     So agents on the box cannot get root through the ferry user.
+  5. As the ferry user, it runs ferry box add, ferry install --box <name>,
+     and ferry sync --box <name>. The box gets gh = "latest" in
+     [box.<name>.tools], because the rule allows no exact gh version.
+
+When ~/.ssh/known_hosts has another key for the address of the new machine,
+Ferry stops. Remove the old key with ssh-keygen -R <address>. When a step
+fails after the machine exists, the error names the machine. Run ferry box
+destroy <name> to remove it.
+
+--dry-run prints the plan and the price, and creates nothing.
+
+Arguments:
+  name                box name: 1 to 32 characters from a-z, 0-9, and -
+
+Options:
+  --dry-run           print the plan and the price, and create nothing
+  --yes               do not ask before Ferry creates the machine, changes a
+                      [host] config, or installs the tools
+  --accept-host-keys  trust the SSH host keys of the snapshot host on the box
+                      without a confirmation prompt
+  -h, --help          display help for command
+
+With --json: { name, dryRun, provider, serverType, image, location, monthlyPrice, currency, machine: { id, name, box, ipv4, ipv6, serverType, location }, tailscale }, or null when cancelled. machine and tailscale are null with --dry-run. A failure after the machine exists has error.details.machine.
+```
+
+### ferry box destroy
+
+```text
+Usage: ferry box destroy [options] <name>
+
+Remove the machine of a box at Hetzner Cloud, then remove the box from the
+config.
+
+Ferry finds the machine by its label ferry-box=<name>, which ferry box create
+sets. It prints the plan and the projects on the box with unsaved work, as
+ferry box remove --uninstall does, and asks you to type the box name. When
+Ferry cannot reach the box, it says so in one line and continues. Then it
+does these steps:
+
+  1. It runs tailscale logout on the box, so the box leaves the tailnet.
+     When that fails, Ferry warns, and you remove the machine in the
+     Tailscale admin console.
+  2. It removes the machine and its firewall at Hetzner Cloud. The data on
+     the machine is lost.
+  3. It removes the lines of the box from ~/.ssh/known_hosts. Ferry removes
+     only the lines that it added.
+  4. It does what ferry box remove <name> does on this machine. It also
+     removes the last box.
+
+A box that is not in the config, for example after a failed ferry box
+create, loses only its machine. When the removal at Hetzner Cloud fails, the
+box stays in the config. Ferry reads the token as ferry box create does.
+
+--dry-run prints the plan and changes nothing.
+
+Arguments:
+  name        box name
+
+Options:
+  --dry-run   print the plan and change nothing
+  --yes       do not ask for the box name
+  -h, --help  display help for command
+
+With --json: { name, dryRun, machine, removed, knownHosts, unsavedWork }, or null when cancelled. removed is the box remove result, or null when the box was not in the config or with --dry-run. knownHosts is the number of removed known_hosts lines. unsavedWork is { checked, projects: [{ path, branch, changes, unpushed: [{ branch, commits }] }] }, or null when the box is not in the config or Ferry could not reach it.
 ```
 
 ### ferry box default

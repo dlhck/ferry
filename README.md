@@ -55,6 +55,7 @@ Use `--host <tailscale host> --ssh-user <user>` instead of `--ssh-destination` f
 | --- | --- |
 | `ferry init` | Record the first box and the snapshot URL, seed the snapshot, and link this machine. |
 | `ferry box list\|add\|remove\|default` | Manage several boxes and the default box. `ferry box remove <name> --uninstall` removes Ferry from the box first. `--dry-run` shows the plan. |
+| `ferry box create\|destroy <name>` | Create a machine at Hetzner Cloud with your API token, pin its SSH host key, join it to your tailnet, then add the box, install the tools, and sync. `destroy` removes the machine and the box. `--dry-run` shows the plan and the price. See [Boxes](docs/boxes.md#create-a-box-at-hetzner-cloud). |
 | `ferry install` | Install gh, jq, the agent CLIs, the tools of the config, and Ferry on a box. |
 | `ferry sync` | Publish the snapshot and apply it on all boxes, or on the boxes of `--box`. |
 | `ferry history` | List the last 20 snapshot commits and the paths each one changed. |
@@ -100,6 +101,7 @@ Add `--json` to any command for scripts and agents: stdout then has only JSON, a
 - A name with the form of a token stays on its machine. Ferry refuses a file or a directory with such a name, and the message names only the directory above it. The Ferry on a source box filters the output of each command that Ferry runs there, so a file name, a branch name, or a commit subject with a token reaches your machine as `[token]`. A secret key with such a name shows as `a key`. The check on a box looks at a name before it opens the file, and a file that it cannot read is a hit with its path, so no error text of the box system reaches your machine. Each result and each error of the check also goes through the token filter on the box.
 - A credential in the origin URL of a project stays on its machine. `ferry move` takes the user and the password, a token in the place of the user, and each secret query parameter out of the URL before the URL leaves the source. The destination clones from the URL without them, so it needs its own login for the clone. A login name stays, as in `ssh://git@host` and `git@host:path`. The output of git on a source box goes through the same filter, so an error text with the URL shows `[credential]`.
 - Ferry opens no public port and never turns off SSH host-key checks. It runs commands with your SSH user, so use a box and a user that you trust with the agents that run there.
+- `ferry box create` reads the Hetzner Cloud token on your machine only, from `HCLOUD_TOKEN`, the macOS keychain, or the Secret Service. The token is not in the config, the output, the snapshot, or on the box. The new machine keeps SSH port 22 open for your key only, with no password login. Ferry pins its host key and never accepts an unknown host key. The `ferry` user on the box gets a sudoers rule for `/usr/bin/true` and five fixed `apt` commands only, so agents on the box cannot get root through it. See [the security model](docs/security-model.md#boxes-that-ferry-creates).
 
 ## Features
 

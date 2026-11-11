@@ -326,7 +326,7 @@ function instructionFileOf(home: string, name: string): string | null {
  * is the text of the operator. Without the last box, the config has no
  * `[host]` table and no box table, and the rest of the config stays.
  */
-async function removeFromOperator(
+export async function removeFromOperator(
   config: PartialOperatorConfig,
   name: string,
   dependencies: BoxRemoveDependencies,

@@ -1,6 +1,6 @@
 ---
 title: Boxes
-description: Add a box, install and update its tools, write instructions for one box, open its ports, and remove Ferry from it.
+description: Add or create a box, install and update its tools, write instructions for one box, open its ports, and remove Ferry from it.
 ---
 
 # Boxes
@@ -45,6 +45,77 @@ projects = ["code/app", "work/api"]
 ```
 
 `ferry status` reports the [unsaved work](status.md#unsaved-work) of each project. A path must be below the box home, with no `~` and no `..`. You do not need to add a project that `ferry move` moved to the box, because the box records it.
+
+## Create a box at Hetzner Cloud
+
+`ferry box create <name>` creates a machine in your Hetzner Cloud project, with your API token. Ferry does not host machines. The machine costs money until you run `ferry box destroy <name>`.
+
+```sh
+export HCLOUD_TOKEN=...          # or a keychain entry, see below
+ferry box create b --dry-run     # the plan and the monthly price
+ferry box create b
+```
+
+Ferry does these steps:
+
+1. It creates the machine `ferry-<name>` with the label `ferry-box=<name>` and a firewall that allows inbound TCP port 22 only. The machine gets the SSH user `ferry` with your public key. It has no password login.
+2. It pins the SSH host key of the machine in `~/.ssh/known_hosts`, connects as root with your key, and replaces the host key on the box. See [the security model](security-model.md#the-ssh-host-key).
+3. As root, it installs Tailscale, joins your tailnet with the host name `ferry-<name>`, installs gh with its apt source, and turns on linger for `ferry`.
+4. It writes the sudoers rule of the `ferry` user and turns off root login. See [the security model](security-model.md#ssh-login-and-sudo).
+5. As `ferry`, it runs `ferry box add <name>` with the Tailscale name, `ferry install --box <name>`, and `ferry sync --box <name>`. Then `ferry status` shows the box, with `Box sudo: PASSWORDLESS`.
+
+The box gets `gh = "latest"` in `[box.<name>.tools]`, because the sudoers rule allows `apt install gh -y` only, and no exact gh version. Do not change that policy for the box.
+
+Before it installs gh, `ferry install` runs `sudo apt update --error-on=any`. When this command fails, Ferry adds the GitHub CLI apt source and key again, so a box gets a new key after GitHub changes it. On a created box, the sudoers rule does not allow that setup. So a warning from any apt source, for example a mirror that does not answer, stops `ferry install` with the apt warning. Run `ferry install --box <name>` again when the source answers.
+
+`--yes` skips the questions of create, of a `[host]` config change, and of the install. `--accept-host-keys` trusts the host keys of the snapshot host on the box, as for `ferry box add`.
+
+When a step fails after the machine exists, the error names the machine and its id. Run `ferry box destroy <name>` to remove it.
+
+### The token and the Tailscale auth key
+
+Ferry reads each secret on this machine only, in this order:
+
+| Secret | Environment variable | macOS keychain | Linux Secret Service |
+| --- | --- | --- | --- |
+| Hetzner Cloud token | `HCLOUD_TOKEN` | service `ferry`, account `hetzner` | `service ferry account hetzner` |
+| Tailscale auth key | `FERRY_TAILSCALE_AUTHKEY` | service `ferry`, account `tailscale` | `service ferry account tailscale` |
+
+Ferry reads the Secret Service only when `secret-tool` is on the `PATH`. To store the token:
+
+```sh
+security add-generic-password -s ferry -a hetzner -w            # macOS, asks for the token
+secret-tool store --label=ferry service ferry account hetzner   # Linux, asks for the token
+```
+
+Create the token in the Hetzner Cloud console, in the project of the box, with read and write access. Without a Tailscale auth key, Ferry prints a login URL. Open it to add the box to your tailnet. A one-use auth key from the Tailscale admin console skips that step.
+
+### Machine settings
+
+The `[provider.hetzner]` table of `~/.ferry/config.toml` sets the machine:
+
+```toml
+[provider.hetzner]
+server_type = "cax21"            # the default
+image = "ubuntu-26.04"           # the default
+location = "fsn1"                # the default
+ssh_public_key = "~/.ssh/id_ed25519.pub"
+```
+
+- The default `cax21` is a shared Arm server with 4 vCPU, 8 GB memory, and 80 GB disk. The agent CLIs need more than the 4 GB of the smallest types. `--dry-run` shows the price of the type in the location.
+- Without `ssh_public_key`, Ferry uses `~/.ssh/id_ed25519.pub`, then `id_ecdsa.pub`, then `id_rsa.pub`.
+- Debian or Ubuntu is the tested target of `ferry install`. The pi recipe needs Node 22.19 or later from apt. Ubuntu 26.04 has it, and Ubuntu 24.04 does not.
+
+### Destroy a box
+
+`ferry box destroy <name>` finds the machine with the label `ferry-box=<name>`, prints the plan, and prints the projects on the box with [unsaved work](status.md#unsaved-work), as `ferry box remove --uninstall` does. When Ferry cannot reach the box, it says so in one line and continues. Then it asks you to type the box name, and does these steps:
+
+1. It runs `tailscale logout` on the box, so the box leaves the tailnet. When that fails, Ferry warns. Then remove the machine in the Tailscale admin console.
+2. It removes the machine and its firewall at Hetzner Cloud. The data on the machine is lost.
+3. It removes the lines of the box from `~/.ssh/known_hosts`. Ferry removes only the lines that it added.
+4. It does what `ferry box remove <name>` does on this machine. It also removes the last box.
+
+A box that is not in the config, for example after a failed create, loses only its machine. When the removal at Hetzner Cloud fails, the box stays in the config. `--dry-run` prints the plan and changes nothing. `--yes` skips the question. Move the projects that you need with `ferry move` first.
 
 ## Install and update tools
 

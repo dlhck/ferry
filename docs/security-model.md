@@ -88,6 +88,55 @@ Ferry never installs a command. `ferry status --brief` names each missing env ke
 - A box with `git_auth = "box"` gets no agent. It reads the snapshot with its own read-only deploy key. See [Boxes](boxes.md#a-box-without-your-ssh-agent).
 - Boxes do not trust each other. Ferry connects to each box from the operator machine. `ferry move` between two boxes goes through the operator machine, with the same deny rules.
 
+## Boxes that Ferry creates
+
+`ferry box create` creates a machine at Hetzner Cloud with an API token of the operator. `ferry box destroy` removes it. See [Boxes](boxes.md#create-a-box-at-hetzner-cloud).
+
+### The provider token
+
+- Ferry reads the token on the operator machine only: from `HCLOUD_TOKEN`, then from the macOS keychain, then from the Secret Service on Linux.
+- The token is not in the config, the snapshot, a plan, the output, a JSON result, or an error. Ferry puts `[token]` in its place in each error text. The config parser refuses a `token` key in `[provider.hetzner]`.
+- The token never goes to a box. Only the operator machine calls the Hetzner Cloud API.
+
+### SSH login and sudo
+
+- The machine gets one SSH user, `ferry`, with your public key. Password login is off, and the user has no password.
+- Ferry connects as root with your key for the root steps: the host key, Tailscale, the gh apt source and gh, and linger for `ferry`. Then it writes the sudoers rule, adds `PermitRootLogin no` to `/etc/ssh/sshd_config.d/10-ferry.conf`, removes the root SSH keys, and reloads `sshd`. Ferry does all other steps as `ferry`.
+- `/etc/sudoers.d/ferry` has mode `0440`, and `visudo -cf` checks it before it takes effect. It has this rule only:
+
+  ```
+  ferry ALL=(root) NOPASSWD: /usr/bin/true, /usr/bin/apt update, /usr/bin/apt update --error-on=any, /usr/bin/apt install gh -y, /usr/bin/apt install jq -y, /usr/bin/apt install nodejs npm -y
+  ```
+
+- Each command has fixed arguments and no wildcard. `apt install` installs only these packages from the configured sources. So agents on a created box cannot get root through the `ferry` user. `/usr/bin/true` is the sudo check of `ferry status`, and the apt lines are the commands of the gh, jq, and Node recipes of `ferry install` and `ferry update`.
+- Tailscale runs with `--operator=ferry`, so `ferry` can run `tailscale logout` without sudo.
+
+### The SSH host key
+
+Hetzner Cloud has no API that gives the console output of a new machine. So Ferry makes the first host key itself:
+
+1. Ferry makes an ed25519 host key pair on the operator machine. It puts the key pair in the cloud-init user data of the machine, and it pins the public key for the IP address in `~/.ssh/known_hosts`.
+2. Ferry connects with normal host-key checks. A key that is not the pinned key stops the command at once.
+3. On that connection, Ferry makes a new host key on the box, removes the other host keys, and reloads `sshd`. Then it removes the first key from `known_hosts`, pins the new key, and connects again with it.
+
+Hetzner Cloud keeps the user data for the life of the machine, and its API cannot delete it. After step 3, the first key in the user data has no use, because the box has no copy of it. Between the creation and step 3, about one to two minutes, a person with read access to your Hetzner Cloud project can read the first key.
+
+Ferry never accepts an unknown host key and never turns off host-key checks. It only appends lines with the comment `ferry:<box>` to `~/.ssh/known_hosts`, and it removes only those lines. When the file has another key for the address of the new machine, Ferry stops and changes nothing in the file. A provider can give the address of an old server to a new one. Remove the old key with `ssh-keygen -R <address>`, then create the box again.
+
+### Tailscale
+
+- The cloud-init user data has no Tailscale auth key.
+- Ferry installs Tailscale over the pinned root SSH connection. With an auth key in `FERRY_TAILSCALE_AUTHKEY`, or in the keychain or Secret Service entry with the account `tailscale`, Ferry sends the key on the standard input of `tailscale up`. The key is not in a command line, a file on the box, the output, or at the provider. Without a key, Ferry prints the login URL of Tailscale.
+- Ferry pins the same host key for the Tailscale name and the Tailscale addresses of the box. The box table in the config uses the Tailscale name.
+
+### The public SSH port
+
+The firewall of the machine allows inbound TCP port 22 only. The port stays open after the Tailscale join. The machine has no password login, so the console of Hetzner Cloud cannot log in. With port 22 closed, a failed Tailscale would leave only the rescue system of Hetzner Cloud as a way in. Port 22 accepts only your SSH key.
+
+### Destroy
+
+`ferry box destroy` runs `tailscale logout` on the box, removes the machine and its firewall at Hetzner Cloud, removes the `known_hosts` lines of the box, and then removes the box from the config. The SSH key that Ferry added to the Hetzner Cloud project stays, because other machines can use it.
+
 ## Files that leave a box
 
 `ferry move --from-box` and `ferry adopt --from-box` copy files from a box. For a skill or a project that leaves a machine, that machine checks and copies in one step:

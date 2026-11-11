@@ -20,6 +20,7 @@ export type OperatorConfig = {
   readonly status?: StatusLimitsConfig;
   readonly integrations?: IntegrationsConfig;
   readonly tools?: ToolsConfig;
+  readonly provider?: ProviderConfig;
 };
 
 /** A complete config with `[box.<name>]` tables instead of `[host]`. */
@@ -104,6 +105,31 @@ export type IntegrationsConfig = {
   readonly sherlock?: boolean;
 };
 
+/**
+ * The `[provider.<id>]` tables of `ferry box create`. A missing key uses the
+ * default of the provider. The provider token is never in the config.
+ */
+export type ProviderConfig = { readonly hetzner?: HetznerConfig };
+
+/**
+ * `[provider.hetzner]`: the server type, image, and location of a new box,
+ * and the path of the public SSH key that Ferry puts on the box.
+ */
+export type HetznerConfig = {
+  readonly serverType?: string;
+  readonly image?: string;
+  readonly location?: string;
+  readonly sshPublicKey?: string;
+};
+
+/** TOML key to parsed property for the `[provider.hetzner]` table. */
+const HETZNER_KEYS = {
+  server_type: "serverType",
+  image: "image",
+  location: "location",
+  ssh_public_key: "sshPublicKey",
+} as const;
+
 /** `watch` turns on the daily tool update in `ferry watch`. */
 export type UpdateConfig = { readonly watch?: boolean };
 
@@ -156,6 +182,7 @@ export type PartialOperatorConfig = {
   readonly status?: StatusLimitsConfig;
   readonly integrations?: IntegrationsConfig;
   readonly tools?: ToolsConfig;
+  readonly provider?: ProviderConfig;
 };
 
 /** TOML key to parsed property for each `[[harness]]` entry. */
@@ -174,6 +201,7 @@ const SECTION_KEYS: Record<string, readonly string[]> = {
   "[status]": Object.keys(STATUS_KEYS),
   "[integrations]": ["paseo", "paseo_relay", "paseo_auto_archive", "sherlock"],
   "[tools]": BUILTIN_TOOLS.map((tool) => tool.id),
+  "[provider.hetzner]": Object.keys(HETZNER_KEYS),
 };
 
 /** The keys of a `[tools.<id>]` table, in the order that writeConfig writes them. */
@@ -230,6 +258,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     status?: Record<string, number>;
     integrations?: IntegrationsConfig;
     tools?: Record<string, ToolPolicy | Record<string, unknown>>;
+    provider?: { hetzner?: Record<string, string> };
   } = { host: {}, harness: [] };
   let section = "";
   let harness: Record<string, string> | null = null;
@@ -251,7 +280,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       hasHost = true;
       continue;
     }
-    if (line === "[update]" || line === "[status]" || line === "[integrations]" || line === "[tools]") {
+    if (line === "[update]" || line === "[status]" || line === "[integrations]" || line === "[tools]" || line === "[provider.hetzner]") {
       section = line;
       harness = null;
       tool = null;
@@ -353,6 +382,12 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     }
 
     const value = parseString(encoded, path);
+    if (section === "[provider.hetzner]") {
+      if (value.trim() === "") throw new ConfigError(`empty value for ${key} in [provider.hetzner] of ${path}`);
+      const property = HETZNER_KEYS[key as keyof typeof HETZNER_KEYS];
+      config.provider = { hetzner: { ...config.provider?.hetzner, [property]: value } };
+      continue;
+    }
     if (section === "" && key === "publisher") config.publisher = value;
     else if (section === "" && key === "snapshot_url") config.snapshotUrl = value;
     else if (section === "" && key === "default_box") config.defaultBox = value;
@@ -564,6 +599,7 @@ export function writeConfig(config: OperatorConfig | BoxesOperatorConfig, home =
       ...statusLines(config.status),
       ...integrationLines(config.integrations, "integrations"),
       ...toolLines(config.tools ?? {}),
+      ...hetznerLines(config.provider?.hetzner),
       ...("boxes" in config ? config.boxes.flatMap(boxLines) : []),
     ].join("\n"),
     { mode: 0o600 },
@@ -576,6 +612,13 @@ function statusLines(config: StatusLimitsConfig | undefined): string[] {
     config?.[property] === undefined ? [] : [`${key} = ${config[property]}`],
   );
   return lines.length === 0 ? [] : ["[status]", ...lines, ""];
+}
+
+function hetznerLines(config: HetznerConfig | undefined): string[] {
+  const lines = Object.entries(HETZNER_KEYS).flatMap(([key, property]) =>
+    config?.[property] === undefined ? [] : [`${key} = ${JSON.stringify(config[property])}`],
+  );
+  return lines.length === 0 ? [] : ["[provider.hetzner]", ...lines, ""];
 }
 
 function integrationLines(config: IntegrationsConfig | undefined, table: string): string[] {
