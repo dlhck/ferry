@@ -549,6 +549,26 @@ describe("box tables", () => {
     expect(readConfig(home)).toEqual(config);
   });
 
+  test("reads and writes mcp_gateway of a box, and the box is off without the key", () => {
+    const home = homeWithConfig([...TOP, "", ...BOX_A, "mcp_gateway = true", "", ...BOX_B, "mcp_gateway = false"]);
+    const config = readConfig(home);
+
+    expect(config?.boxes?.map((box) => box.mcpGateway)).toEqual([true, undefined]);
+    expect(resolveBoxes(config!).map((box) => box.mcpGateway)).toEqual([true, false]);
+    writeConfig({ version: 1, publisher: "operator", snapshotUrl: "snapshot.git", boxes: config?.boxes ?? [] }, home);
+    const written = readFileSync(configPath(home), "utf8");
+    expect(written.match(/mcp_gateway/g)).toEqual(["mcp_gateway"]);
+    expect(written).toContain("mcp_gateway = true\n");
+    expect(readConfig(home)).toEqual(config);
+  });
+
+  test("refuses an mcp_gateway that is not a boolean", () => {
+    for (const value of ['"true"', "1", "yes"]) {
+      const home = homeWithConfig([...TOP, "", ...BOX_A, `mcp_gateway = ${value}`]);
+      expect(() => readConfig(home)).toThrow("invalid mcp_gateway in [box.a]");
+    }
+  });
+
   test("accepts systemd memory sizes for agent_memory_max and refuses other values", () => {
     for (const value of ["6G", "512M", "1.5G", "4294967296", "50%", "100%"]) {
       const home = homeWithConfig([...TOP, "", ...BOX_A, `agent_memory_max = "${value}"`]);
