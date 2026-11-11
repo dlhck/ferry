@@ -16,7 +16,7 @@ import {
 import { createPaseo } from "../src/integrations/paseo.ts";
 import { EXAMPLE_ID, operatorIntegration } from "./fake-integration.ts";
 import { denyRules } from "../src/manifest.ts";
-import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
+import { BUILTIN_HARNESSES, BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 import { runToolsCommand } from "../src/tools/command.ts";
 import { Link } from "../src/link.ts";
 import type { PartialOperatorConfig } from "../src/config.ts";
@@ -293,6 +293,28 @@ describe("ferry --help", () => {
     await program.parseAsync(["tools"], { from: "user" });
 
     expect(received).toEqual([BUILTIN_TOOLS.map((tool) => tool.id)]);
+  });
+
+  test("wires ferry ps to the --box selection and the registry harnesses, and prints the report with --json", async () => {
+    const received: unknown[] = [];
+    const lines: string[] = [];
+    const program = buildProgram({
+      readConfig: () => null,
+      writeLine: (line) => lines.push(line),
+      runPs: async (selection, dependencies) => {
+        received.push([selection, dependencies.harnesses.map((harness) => harness.id)]);
+        return { boxes: [{ name: "a", online: false, error: "the host is offline", agents: [] }] };
+      },
+    });
+
+    await program.parseAsync(["--box", "a", "--json", "ps"], { from: "user" });
+
+    expect(received).toEqual([[["a"], BUILTIN_HARNESSES.map((harness) => harness.id)]]);
+    expect(JSON.parse(lines.join("\n"))).toMatchObject({
+      command: "ps",
+      ok: true,
+      result: { boxes: [{ name: "a", online: false, error: "the host is offline", agents: [] }] },
+    });
   });
 
   test("wires integrations enable and disable with their flags", async () => {

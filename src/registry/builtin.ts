@@ -131,6 +131,7 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
     // The same file holds account and OAuth state. Only mcpServers is read.
     mcp: { file: ".claude.json", format: "json", key: "mcpServers" },
     sessions: { layout: "project-directory", root: ".claude/projects", memory: "memory" },
+    processNames: ["claude"],
   },
   {
     id: "codex",
@@ -155,6 +156,7 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
     },
     mcp: { file: ".codex/config.toml", format: "toml", key: "mcp_servers" },
     sessions: { layout: "first-line-cwd", root: ".codex/sessions", files: "rollout-*.jsonl" },
+    processNames: ["codex"],
   },
   {
     id: "pi",
@@ -178,6 +180,7 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
         "enableSkillCommands",
       ],
     },
+    processNames: ["pi"],
   },
   {
     id: "cursor",
@@ -193,6 +196,7 @@ export const BUILTIN_HARNESSES: readonly HarnessDescriptor[] = [
       keys: ["model", "maxMode", "hasChangedDefaultModel", "attribution"],
     },
     mcp: { file: ".cursor/mcp.json", format: "json", key: "mcpServers" },
+    processNames: ["cursor-agent"],
   },
 ];
 
