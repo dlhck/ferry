@@ -37,6 +37,7 @@ import type { HarnessDescriptor } from "./registry/types.ts";
 import { openStore as openSnapshotStore, skillChanged, type PublishResult } from "./store.ts";
 import { adoptPublishedSkills } from "./adopt.ts";
 import { installBoxPlugins, mergeBoxSettings } from "./box-settings.ts";
+import { withNotifyHooks } from "./notify.ts";
 import { registerBoxMcp } from "./box-mcp.ts";
 import {
   carryAgentProfiles,
@@ -53,6 +54,7 @@ import {
 } from "./integrations/paseo.ts";
 import { carryPaseoPlugins, readPaseoPlugins, type PaseoPlugins } from "./integrations/paseo-plugins.ts";
 import { carryPaseoProviders, readPaseoProviders, type PaseoProviders } from "./integrations/paseo-providers.ts";
+import { applyAgentMemoryLimit } from "./integrations/paseo-memory-limit.ts";
 import {
   carryPaseoTerminalProfiles,
   readPaseoTerminalProfiles,
@@ -321,7 +323,7 @@ export async function runSync(
         const pluginStep = plugins && (plugins.plugins.length > 0 || plugins.warnings.length > 0) ? 1 : 0;
         return total + BOX_STEPS + (box.profiles === null ? 0 : 2) + pluginStep +
           (hasProviders(box.providers) ? 1 : 0) + (hasPreferences(box.preferences) ? 1 : 0) +
-          (hasTerminals(box.terminals) ? 1 : 0);
+          (hasTerminals(box.terminals) ? 1 : 0) + (box.profiles !== null && box.agentMemoryMax !== null ? 1 : 0);
       }, operatorSteps);
   if (planned !== (input.dryRun ? 1 : operatorSteps + BOX_STEPS)) progress.plan(planned);
   for (const leftover of seed.leftovers) {
@@ -632,13 +634,18 @@ async function applyOnBox(context: {
       (warnings) => (warnings.length > 0 ? plural(warnings.length, "warning") : undefined),
     );
     for (const warning of warnings) warn(`Box plugins: ${warning}`);
+    // Only the box gets the hooks of `ferry notify`. Without the key, the box hooks are the hooks of the operator again.
+    const notifying = config.notifications?.agents === true ? withNotifyHooks(settings, harnesses) : settings;
+    if (notifying === null) {
+      warn("Agent notifications: Ferry adds the Claude hooks only when Claude is on for the box and ~/.claude/settings.json is on this machine.");
+    }
     const merged = await boxStep(
       "Merging settings on the box",
       () =>
         mergeBoxSettings({
           remoteHome: required(plan.remoteHome),
           harnesses,
-          settings,
+          settings: notifying ?? settings,
           link,
         }),
       (result) => (result.warnings.length > 0 ? plural(result.warnings.length, "warning") : undefined),
@@ -725,6 +732,26 @@ async function applyOnBox(context: {
       } catch (cause) {
         warn(`Warning: Ferry could not carry the Paseo providers: ${messageOf(cause)}. The core sync is complete.`);
       }
+    }
+    // The limit goes after the provider carry, so a provider that the carry creates gets it too.
+    const max = box.agentMemoryMax;
+    try {
+      if (max !== null) {
+        const limit = await boxStep(
+          "Applying the agent memory limit",
+          () => applyAgentMemoryLimit(link, max, pathDirs),
+          (limit) => [
+            `MemoryMax=${max} for ${plural(limit.wrapped.length, "provider")}`,
+            limit.warnings.length > 0 && plural(limit.warnings.length, "warning"),
+            !limit.changed && "no changes",
+          ].filter(Boolean).join(", "),
+        );
+        for (const warning of limit.warnings) warn(`Warning: ${warning}`);
+      } else if ((await applyAgentMemoryLimit(link, null, pathDirs)).changed) {
+        warn("Removed the agent memory limit from the Paseo providers on the box.");
+      }
+    } catch (cause) {
+      warn(`Warning: Ferry could not apply the agent memory limit: ${messageOf(cause)}. The core sync is complete.`);
     }
     try {
       const carry = await boxStep(
@@ -1589,7 +1616,7 @@ function pathDirsOf(registry: Registry): readonly string[] {
 }
 
 /** The shared part of the config. Each box has its own host, integrations, and tools. */
-type SyncOperatorConfig = Pick<OperatorConfig, "version" | "publisher" | "snapshotUrl">;
+type SyncOperatorConfig = Pick<OperatorConfig, "version" | "publisher" | "snapshotUrl" | "notifications">;
 
 function completeConfig(config: PartialOperatorConfig | null): SyncOperatorConfig {
   // A config without a box passes. `resolveBoxes` refuses it with the message for it.
@@ -1598,7 +1625,12 @@ function completeConfig(config: PartialOperatorConfig | null): SyncOperatorConfi
       cause: new ConfigMissingError("Ferry config is incomplete."),
     });
   }
-  return { version: 1, publisher: config.publisher, snapshotUrl: config.snapshotUrl };
+  return {
+    version: 1,
+    publisher: config.publisher,
+    snapshotUrl: config.snapshotUrl,
+    ...(config.notifications ? { notifications: config.notifications } : {}),
+  };
 }
 
 function targetLabel(host: OperatorHostConfig): string {

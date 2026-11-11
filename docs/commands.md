@@ -33,6 +33,7 @@ The `ferry sherlock` commands exist only when the Sherlock integration is on and
     - [`ferry tunnel install`](#ferry-tunnel-install)
     - [`ferry tunnel uninstall`](#ferry-tunnel-uninstall)
   - [`ferry expose`](#ferry-expose)
+  - [`ferry notify`](#ferry-notify)
   - [`ferry status`](#ferry-status)
   - [`ferry doctor`](#ferry-doctor)
   - [`ferry integrations`](#ferry-integrations)
@@ -117,6 +118,8 @@ Commands:
                                        box, or follow the ports of ferry expose
   expose [options] <command...>        Run a command on the box and announce its
                                        port to ferry tunnel --follow
+  notify <harness> <kind>              Record an agent event on the box for the
+                                       menu bar app of the operator machine
   status [options]                     Inspect link, snapshot, managed paths,
                                        and box logins without writing
   doctor                               Check SSH, Tailscale, snapshot access,
@@ -292,7 +295,8 @@ Ferry prints the plan for each tool and asks before it runs a command on the
 box. gh and jq come from apt, so Debian or Ubuntu is the tested target. Ferry on
 the
 box is the version of this machine. It is a box install that runs only
-ferry expose and ferry whoami. Run ferry tools --help for the tool config.
+ferry expose, ferry notify, and ferry whoami. Run ferry tools --help for the
+tool config.
 
 Options:
   --yes       run without a confirmation prompt
@@ -778,6 +782,11 @@ no forwards), updatedAt, and forwards: [{ name, cwd, boxPort, localPort }].
 name and cwd are missing when the entry of ferry expose has none. Ferry
 removes the file when --follow stops on Ctrl-C or SIGTERM.
 
+--follow also copies the new events of ferry notify on the box to
+~/.ferry/tunnels/<box>.events.json, and keeps the newest 20. The file stays
+when --follow stops. Fields: schemaVersion (1), box, updatedAt, and events:
+[{ id, harness, kind, project, at, receivedAt }].
+
 Arguments:
   ports       box port, box:local to pick another local port, or
               host:port[:local] for a host that the box can reach, such as 3000,
@@ -871,6 +880,38 @@ Options:
   -h, --help  display help for command
 
 With --json: events exposed and exited. The output of the command goes to stderr.
+```
+
+## ferry notify
+
+```text
+Usage: ferry notify [options] <harness> <kind>
+
+Record an agent event on the box for the menu bar app of the operator machine.
+
+A harness hook runs this command on the box. Ferry writes one event to
+~/.ferry/events/<id>.json with the harness, the kind, the project, and the
+time. The project is the cwd field of the JSON on stdin, else the current
+directory. Ferry reads no other field, and writes no prompt text and no
+agent output. Ferry keeps the newest 20 events of the last hour.
+
+ferry tunnel --follow on the operator machine copies the new events to
+~/.ferry/tunnels/<box>.events.json, and the menu bar app posts one
+notification for each new event.
+
+With [notifications] agents = true in the config of the operator machine,
+ferry sync adds the Claude Stop and Notification hooks that run this command
+to ~/.claude/settings.json on each box. The kinds are turn-ended and
+waiting-for-input.
+
+Arguments:
+  harness     the harness id, such as claude
+  kind        turn-ended or waiting-for-input
+
+Options:
+  -h, --help  display help for command
+
+With --json: { id, harness, kind, project, at }.
 ```
 
 ## ferry status

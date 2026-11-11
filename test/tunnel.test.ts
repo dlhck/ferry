@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { quoteShell } from "../src/box-settings.ts";
+import type { AgentEvent, EventsFile } from "../src/notify.ts";
 import type { OutputEvent } from "../src/output.ts";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -71,6 +72,7 @@ function harness(link: FakeLink, overrides: Partial<TunnelDependencies> = {}) {
   const links: LinkOptions[] = [];
   const files: TunnelFile[] = [];
   const removed: string[] = [];
+  const eventFiles: EventsFile[] = [];
   let interrupt: (() => void) | undefined;
   const dependencies: TunnelDependencies = {
     createLink: (options) => {
@@ -90,9 +92,11 @@ function harness(link: FakeLink, overrides: Partial<TunnelDependencies> = {}) {
     emit: (event) => events.push(event),
     writeTunnelFile: (file) => files.push(file),
     removeTunnelFile: (box) => removed.push(box),
+    readEventsFile: () => eventFiles.at(-1) ?? null,
+    writeEventsFile: (file) => eventFiles.push(file),
     ...overrides,
   };
-  return { dependencies, lines, events, links, files, removed, interrupt: () => interrupt?.() };
+  return { dependencies, lines, events, links, files, removed, eventFiles, interrupt: () => interrupt?.() };
 }
 
 const stopped: ForwardResult = { ok: true, stopped: true, address: "dev@lab.example", stdout: "", stderr: "" };
@@ -524,6 +528,15 @@ async function waitFor(check: () => boolean): Promise<void> {
 const entry = (pid: number, port: number, name: string, cwd = "/home/dev/app") =>
   `${pid}\t${JSON.stringify({ port, name, cwd, startedAt: "2026-09-28T10:00:00.000Z" })}\n`;
 
+const agentEvent = (id: string, kind: AgentEvent["kind"] = "turn-ended"): AgentEvent => ({
+  id,
+  harness: "claude",
+  kind,
+  project: "/home/user/app",
+  at: new Date(Number(id.split("-")[0])).toISOString(),
+});
+const eventLine = (event: AgentEvent) => `event\t${JSON.stringify(event)}\n`;
+
 describe("ferry tunnel --follow", () => {
   const followInput: TunnelInput = { ports: [], list: false, follow: true, box: BOX };
 
@@ -687,6 +700,39 @@ describe("ferry tunnel --follow", () => {
     await expect(runTunnel(followInput, dependencies)).rejects.toThrow("Could not connect to lab: no route to host");
   });
 
+  test("writes each new agent event to the events file once, also after a reconnect", async () => {
+    const masters = [new FakeMaster(), new FakeMaster()];
+    let index = 0;
+    const { dependencies, lines, eventFiles, interrupt } = harness(new FollowLink(() => masters[index++]!));
+    const first = agentEvent("1789000000000-41");
+    const second = agentEvent("1789000060000-42", "waiting-for-input");
+
+    const running = runTunnel(followInput, dependencies);
+    await waitFor(() => lines.length > 0);
+    masters[0]!.write(`${eventLine(first)}.\n`);
+    await waitFor(() => eventFiles.length === 1);
+    // A change of the entries sends the same events again.
+    masters[0]!.write(`${entry(11, 3000, "web")}${eventLine(first)}.\n`);
+    await waitFor(() => masters[0]!.calls.length === 1);
+    masters[0]!.drop("Connection reset by peer");
+    await waitFor(() => lines.some((line) => line.startsWith("Connected again.")));
+    masters[1]!.write(`${eventLine(first)}${eventLine(second)}.\n`);
+    await waitFor(() => eventFiles.length === 2);
+    interrupt();
+    await running;
+
+    expect(eventFiles).toHaveLength(2);
+    expect(eventFiles[1]).toEqual({
+      schemaVersion: 1,
+      box: "lab",
+      updatedAt: expect.any(String),
+      events: [
+        { ...first, receivedAt: eventFiles[0]!.updatedAt },
+        { ...second, receivedAt: eventFiles[1]!.updatedAt },
+      ],
+    });
+  });
+
   test("--follow does not take ports or --list", async () => {
     const { dependencies } = harness(new FollowLink(() => new FakeMaster()));
     await expect(runTunnel({ ...followInput, ports: ["3000"] }, dependencies)).rejects.toThrow("not more than one");
@@ -739,7 +785,47 @@ describe("snapshotReader", () => {
   });
 });
 
+describe("snapshotReader events", () => {
+  test("reads the event lines of each snapshot, and ignores events that are not valid", () => {
+    const snapshots: AgentEvent[][] = [];
+    const read = snapshotReader(() => {}, (_entries, events) => snapshots.push(events));
+    const event = agentEvent("1789000000000-41");
+
+    read(`${eventLine(event)}event\tnot json\nevent\t${JSON.stringify({ ...event, kind: "prompt" })}\n.\n.\n`);
+
+    expect(snapshots).toEqual([[event], []]);
+  });
+});
+
 describe("FOLLOW_COMMAND", () => {
+  test("prints the agent events, and a new snapshot after a new event", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ferry-follow-"));
+    const dir = join(home, ".ferry", "events");
+    mkdirSync(dir, { recursive: true });
+    const first = agentEvent("1789000000000-41");
+    writeFileSync(join(dir, `${first.id}.json`), `${JSON.stringify(first)}\n`);
+    const box = Bun.spawn(["sh", "-c", FOLLOW_COMMAND], { env: { ...process.env, HOME: home }, stdout: "pipe" });
+    const snapshots: AgentEvent[][] = [];
+    const read = snapshotReader(() => {}, (_entries, events) => snapshots.push(events));
+    const reading = (async () => {
+      const decoder = new TextDecoder();
+      for await (const chunk of box.stdout) read(decoder.decode(chunk, { stream: true }));
+    })();
+    try {
+      await waitFor(() => snapshots.length === 1);
+      expect(snapshots[0]).toEqual([first]);
+
+      const second = agentEvent("1789000060000-42");
+      writeFileSync(join(dir, `${second.id}.json`), `${JSON.stringify(second)}\n`);
+      for (let tries = 0; snapshots.length < 2 && tries < 60; tries += 1) await Bun.sleep(50);
+      expect(snapshots[1]).toEqual([first, second]);
+    } finally {
+      box.kill();
+      await reading;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("prints the entries whose pid runs, and a new snapshot after a change", async () => {
     const home = mkdtempSync(join(tmpdir(), "ferry-follow-"));
     const dir = join(home, ".ferry", "exposed");

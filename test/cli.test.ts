@@ -1533,6 +1533,28 @@ describe("ferry expose", () => {
   });
 });
 
+describe("ferry notify", () => {
+  test("runs on a box install, passes the harness, the kind, and the hook input, and prints nothing without --json", async () => {
+    let received: unknown;
+    let stdin: string | undefined;
+    const output: string[] = [];
+    await buildProgram({
+      runNotify: async (input, dependencies) => {
+        received = input;
+        stdin = await dependencies?.readStdin?.();
+        return { id: "1789000000000-41" };
+      },
+      readStdin: async () => '{"cwd":"/home/user/app"}',
+      writeLine: (line) => output.push(line),
+      isBoxMode: () => true,
+    }).parseAsync(["notify", "claude", "turn-ended"], { from: "user" });
+
+    expect(received).toEqual({ harness: "claude", kind: "turn-ended" });
+    expect(stdin).toBe('{"cwd":"/home/user/app"}');
+    expect(output).toEqual([]);
+  });
+});
+
 describe("ferry menubar", () => {
   const APP = "/Users/me/Applications/Ferry Menu Bar.app";
   const PLIST = "/Users/me/Library/LaunchAgents/dev.ferry.menubar.plist";
@@ -1601,7 +1623,7 @@ describe("box mode", () => {
         { renderError: (message) => errors.push(message), setExitCode: () => {} },
       );
       expect(errors).toEqual([
-        `This is a box install of Ferry (~/.ferry/box.json). Only ferry expose and ferry whoami run here. Run ferry ${args[0] === "box" || args[0] === "watch" || args[1] === "install" ? args.join(" ") : args[0]} on the operator machine.`,
+        `This is a box install of Ferry (~/.ferry/box.json). Only ferry expose, ferry notify, and ferry whoami run here. Run ferry ${args[0] === "box" || args[0] === "watch" || args[1] === "install" ? args.join(" ") : args[0]} on the operator machine.`,
       ]);
     }
   });

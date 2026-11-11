@@ -21,6 +21,7 @@ export type OperatorConfig = {
   readonly integrations?: IntegrationsConfig;
   readonly tools?: ToolsConfig;
   readonly provider?: ProviderConfig;
+  readonly notifications?: NotificationsConfig;
 };
 
 /** A complete config with `[box.<name>]` tables instead of `[host]`. */
@@ -37,6 +38,8 @@ export type BoxConfig = {
   readonly gitAuth?: GitAuth;
   /** The git project directories on the box, relative to the box home. `ferry status` reports their unsaved work. */
   readonly projects?: readonly string[];
+  /** The systemd `MemoryMax` of each agent that the Paseo daemon starts on the box. A missing key means no limit. */
+  readonly agentMemoryMax?: string;
   readonly integrations?: IntegrationsConfig;
   /**
    * Policies by tool id. A policy replaces the `[tools]` policy or the `version` of a `[tools.<id>]` table.
@@ -54,6 +57,13 @@ export type GitAuth = "agent" | "box";
 
 /** A box name goes into flags, lock file names, JSON, and output prefixes, so the characters stay few. */
 const BOX_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+/**
+ * A systemd memory size for `MemoryMax`: bytes with an optional K, M, G, T,
+ * P, or E suffix (base 1024), or a percentage of the physical memory. Zero and
+ * `infinity` are not limits, so the key does not accept them.
+ */
+const MEMORY_SIZE = /^(?:[1-9]\d*(?:\.\d+)?[KMGTPE]?|(?:[1-9]\d?(?:\.\d+)?|100)%)$/;
 
 /** True for a name that a `[box.<name>]` table can use. The name `all` is reserved. */
 export function isBoxName(name: string): boolean {
@@ -130,6 +140,13 @@ const HETZNER_KEYS = {
   ssh_public_key: "sshPublicKey",
 } as const;
 
+/**
+ * `[notifications]`. With `agents = true`, sync puts the Claude `Stop` and
+ * `Notification` hooks that run `ferry notify` into the Claude settings of
+ * each box. The settings of this machine do not change.
+ */
+export type NotificationsConfig = { readonly agents?: boolean };
+
 /** `watch` turns on the daily tool update in `ferry watch`. */
 export type UpdateConfig = { readonly watch?: boolean };
 
@@ -183,6 +200,7 @@ export type PartialOperatorConfig = {
   readonly integrations?: IntegrationsConfig;
   readonly tools?: ToolsConfig;
   readonly provider?: ProviderConfig;
+  readonly notifications?: NotificationsConfig;
 };
 
 /** TOML key to parsed property for each `[[harness]]` entry. */
@@ -202,6 +220,7 @@ const SECTION_KEYS: Record<string, readonly string[]> = {
   "[integrations]": ["paseo", "paseo_relay", "paseo_auto_archive", "sherlock"],
   "[tools]": BUILTIN_TOOLS.map((tool) => tool.id),
   "[provider.hetzner]": Object.keys(HETZNER_KEYS),
+  "[notifications]": ["agents"],
 };
 
 /** The keys of a `[tools.<id>]` table, in the order that writeConfig writes them. */
@@ -259,6 +278,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     integrations?: IntegrationsConfig;
     tools?: Record<string, ToolPolicy | Record<string, unknown>>;
     provider?: { hetzner?: Record<string, string> };
+    notifications?: NotificationsConfig;
   } = { host: {}, harness: [] };
   let section = "";
   let harness: Record<string, string> | null = null;
@@ -280,7 +300,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       hasHost = true;
       continue;
     }
-    if (line === "[update]" || line === "[status]" || line === "[integrations]" || line === "[tools]" || line === "[provider.hetzner]") {
+    if (line === "[update]" || line === "[status]" || line === "[integrations]" || line === "[tools]" || line === "[provider.hetzner]" || line === "[notifications]") {
       section = line;
       harness = null;
       tool = null;
@@ -366,11 +386,12 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       config.status = { ...config.status, [STATUS_KEYS[key as keyof typeof STATUS_KEYS]]: value };
       continue;
     }
-    if (section === "[update]" || section === "[integrations]") {
+    if (section === "[update]" || section === "[integrations]" || section === "[notifications]") {
       if (encoded !== "true" && encoded !== "false") {
         throw new ConfigError(`invalid boolean for ${key} in ${section} of ${path}`);
       }
       if (section === "[update]") config.update = { watch: encoded === "true" };
+      else if (section === "[notifications]") config.notifications = { agents: encoded === "true" };
       else config.integrations = { ...config.integrations, [key]: encoded === "true" };
       continue;
     }
@@ -451,6 +472,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       host,
       ...(entry.gitAuth ? { gitAuth: entry.gitAuth } : {}),
       ...(entry.projects ? { projects: entry.projects } : {}),
+      ...(entry.agentMemoryMax ? { agentMemoryMax: entry.agentMemoryMax } : {}),
       ...(entry.integrations ? { integrations: entry.integrations } : {}),
       ...(entry.tools ? { tools: entry.tools } : {}),
     };
@@ -471,6 +493,7 @@ type ParsedBox = {
   host: { transport?: "tailscale" | "ssh"; tailscale?: string; sshUser?: string; destination?: string };
   gitAuth?: GitAuth;
   projects?: string[];
+  agentMemoryMax?: string;
   integrations?: Record<string, boolean>;
   tools?: Record<string, ToolPolicy>;
 };
@@ -494,6 +517,14 @@ function readBoxKey(entry: ParsedBox, part: BoxPart, key: string, encoded: strin
       throw new ConfigError(`invalid projects in ${section} of ${path}. Use a list of paths relative to the box home, such as ["code/app"].`);
     }
     entry.projects = list;
+    return;
+  }
+  if (part === "host" && key === "agent_memory_max") {
+    const value = tomlString(encoded);
+    if (value === undefined || !MEMORY_SIZE.test(value)) {
+      throw new ConfigError(`invalid agent_memory_max in ${section} of ${path}. Use a systemd memory size, such as "6G", "512M", or "50%".`);
+    }
+    entry.agentMemoryMax = value;
     return;
   }
   if (!SECTION_KEYS[part === "host" ? "[host]" : "[integrations]"]?.includes(key)) {
@@ -600,6 +631,7 @@ export function writeConfig(config: OperatorConfig | BoxesOperatorConfig, home =
       ...integrationLines(config.integrations, "integrations"),
       ...toolLines(config.tools ?? {}),
       ...hetznerLines(config.provider?.hetzner),
+      ...(config.notifications?.agents !== undefined ? ["[notifications]", `agents = ${config.notifications.agents}`, ""] : []),
       ...("boxes" in config ? config.boxes.flatMap(boxLines) : []),
     ].join("\n"),
     { mode: 0o600 },
@@ -640,6 +672,7 @@ function boxLines(box: BoxConfig): string[] {
     ...hostLines(box.host),
     ...(box.gitAuth !== undefined ? [`git_auth = ${JSON.stringify(box.gitAuth)}`] : []),
     ...(box.projects !== undefined ? [`projects = ${JSON.stringify(box.projects)}`] : []),
+    ...(box.agentMemoryMax !== undefined ? [`agent_memory_max = ${JSON.stringify(box.agentMemoryMax)}`] : []),
     "",
     ...integrationLines(box.integrations, `box.${box.name}.integrations`),
     ...(tools.length > 0

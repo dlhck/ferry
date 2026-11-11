@@ -89,6 +89,16 @@ describe("operator config", () => {
     expect(readConfig(homeWithConfig(BASE))?.update).toBeUndefined();
   });
 
+  test("reads [notifications] agents, refuses a value that is not a boolean, and keeps it when it writes the config", () => {
+    const home = homeWithConfig([...BASE, "", "[notifications]", "agents = true"]);
+    expect(readConfig(home)?.notifications).toEqual({ agents: true });
+    expect(readConfig(homeWithConfig(BASE))?.notifications).toBeUndefined();
+    expect(() => readConfig(homeWithConfig([...BASE, "", "[notifications]", 'agents = "yes"']))).toThrow("invalid boolean");
+
+    setIntegration("paseo", true, home);
+    expect(readConfig(home)?.notifications).toEqual({ agents: true });
+  });
+
   test("refuses a watch update value that is not a boolean", () => {
     const home = homeWithConfig([...BASE, "", "[update]", 'watch = "yes"']);
 
@@ -525,6 +535,28 @@ describe("box tables", () => {
     for (const value of ['["/home/user/app"]', '["~/app"]', '["code/../../app"]', '[""]', '"code/app"']) {
       const home = homeWithConfig([...TOP, "", ...BOX_A, `projects = ${value}`]);
       expect(() => readConfig(home)).toThrow("invalid projects in [box.a]");
+    }
+  });
+
+  test("reads and writes agent_memory_max of a box", () => {
+    const home = homeWithConfig([...TOP, "", ...BOX_A, 'agent_memory_max = "6G"', "", ...BOX_B]);
+    const config = readConfig(home);
+
+    expect(config?.boxes?.[0]?.agentMemoryMax).toBe("6G");
+    expect(resolveBoxes(config!).map((box) => box.agentMemoryMax)).toEqual(["6G", null]);
+    writeConfig({ version: 1, publisher: "operator", snapshotUrl: "snapshot.git", boxes: config?.boxes ?? [] }, home);
+    expect(readFileSync(configPath(home), "utf8")).toContain('agent_memory_max = "6G"\n');
+    expect(readConfig(home)).toEqual(config);
+  });
+
+  test("accepts systemd memory sizes for agent_memory_max and refuses other values", () => {
+    for (const value of ["6G", "512M", "1.5G", "4294967296", "50%", "100%"]) {
+      const home = homeWithConfig([...TOP, "", ...BOX_A, `agent_memory_max = "${value}"`]);
+      expect(readConfig(home)?.boxes?.[0]?.agentMemoryMax).toBe(value);
+    }
+    for (const value of ['"6GB"', '"0"', '"infinity"', '"-1G"', '"150%"', '"6 G"', '""', "6"]) {
+      const home = homeWithConfig([...TOP, "", ...BOX_A, `agent_memory_max = ${value}`]);
+      expect(() => readConfig(home)).toThrow("invalid agent_memory_max in [box.a]");
     }
   });
 

@@ -31,11 +31,31 @@ Each agent of the Paseo daemon runs in the cgroup of `ferry-paseo.service`. The 
 - When the kernel OOM killer kills a process of an agent, only that process ends. systemd logs the event, and the daemon and the other agents continue. The agent that lost the process can fail its turn.
 - Without the line, systemd uses its default `stop`. Then one killed process stops the whole service with the result `oom-kill`, and each agent on the box loses its turn.
 - When the OOM killer kills the daemon process itself, `Restart=on-failure` starts the daemon again after 5 seconds. The agents stop.
-- Ferry sets no `MemoryMax`. A fixed limit does not fit all boxes.
+- Ferry sets no `MemoryMax` on the service. A fixed limit does not fit all boxes. For a limit on each agent, see [Agent memory limit](#agent-memory-limit).
 
 A box that you enabled before Ferry wrote this line gets it from the next `ferry sync`, or from `ferry integrations enable paseo`. The two commands run `systemctl --user daemon-reload` and do not restart the daemon for this line. systemd reads the policy of a service at the time of the OOM event, so the reload applies the line to the running daemon. This was tested with systemd 259: a running service with the default policy got the line and a reload, kept its main process, and stayed active after an OOM kill in its cgroup. `systemctl --user show ferry-paseo.service -p OOMPolicy` shows the value in use.
 
 A sync adds the line only to a unit that has no `OOMPolicy` line, so a value that you set in the unit stays until the next enable. A value in a drop-in file has priority over the unit, and Ferry does not change a drop-in file. To keep the systemd default, put `OOMPolicy=stop` in a drop-in file, then run `systemctl --user daemon-reload` on the box.
+
+## Agent memory limit
+
+With `agent_memory_max` in `[box.<name>]` (see [A memory limit for each agent](boxes.md#a-memory-limit-for-each-agent)), each agent that Paseo starts on the box runs in its own systemd scope with that `MemoryMax`. Paseo uses `agents.providers.<id>.command` in the box `~/.paseo/config.json` as the start of the command line of an agent, and adds its own arguments after it. Ferry puts `systemd-run --user --scope -p MemoryMax=<value> --` in front of that command:
+
+```json
+{ "agents": { "providers": { "claude": { "command": ["systemd-run", "--user", "--scope", "-p", "MemoryMax=6G", "--", "claude"] } } } }
+```
+
+- Ferry changes only the box value. It does not carry a provider command from the operator machine.
+- Ferry wraps each provider that `paseo provider ls --json` shows as available and enabled. The base command is the `command` of the box entry, or the default executable of a built-in provider: `claude`, `codex`, `copilot`, `opencode`, `pi`, or `omp`. The other fields of the entry, such as `env`, stay as they are.
+- Before it wraps a provider, Ferry checks that `systemd-run` and the base command are on the PATH of `ferry-paseo.service`. This is the PATH that the daemon uses, not the PATH of your SSH login. When a command is not on that PATH, Ferry does not wrap the provider and warns. The agents of that provider start without a limit. A limit never stops an agent from starting.
+- Ferry also warns for an available provider without a known command, such as a plugin provider without `command`, and for an entry in the legacy provider format.
+- A new value replaces the old prefix on the next `ferry sync`. When you remove the key, the next sync removes the prefix. An entry that Ferry added only for the prefix goes away too.
+- Without the key, and without a Ferry prefix on the box, Ferry does not write the box config.
+- Ferry writes the file and runs `paseo daemon reload` only when the commands change. The new commands apply to the agents that Paseo starts after the reload. A running agent keeps its old limit, or no limit, until it starts again.
+- OpenCode runs one server process for all its agents, so all OpenCode agents of the box share one limit.
+- A box that is offline during the sync gets the change from the next sync that reaches it.
+- Agents of Paseo terminal profiles and agents that you start from a shell do not get the limit. Start them with `systemd-run --user --scope -p MemoryMax=6G -- <command>`.
+- `ferry watch` does not detect a change of the key. Run `ferry sync`.
 
 ## Paseo output stays on the box
 
