@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import { closeSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { join, posix, relative, sep } from "node:path";
+import { GATEWAY_URL_PREFIX } from "./mcp-gateway/url.ts";
 import { ownsSkills, type HarnessDescriptor } from "./registry/types.ts";
 
 /** The one instruction file of the seed, relative to the source home. */
@@ -1085,7 +1086,9 @@ export function readMcpSources(home: string, harnesses: readonly HarnessDescript
  * stdio server that refers to a path in a macOS app bundle or in the home, or
  * runs an inline script, is noted in `leftovers`. A remote server with headers, environment values,
  * arguments, or a credential, and a stdio server with a token, a secret, or a
- * URL credential in its command or arguments, refuse the seed.
+ * URL credential in its command or arguments, refuse the seed. An entry whose
+ * URL starts with `GATEWAY_URL_PREFIX` points at the MCP gateway of a box, and
+ * Ferry skips it.
  */
 function readMcp(
   home: string,
@@ -1116,6 +1119,8 @@ function readMcp(
   const declared = parsed[mcp.key];
   const entries = isRecord(declared) ? Object.entries(declared) : [];
   for (const [name, declaration] of entries.sort(([a], [b]) => compare(a, b))) {
+    // An entry of the MCP gateway on a box. Sync writes it from a carried server, and it has the client key of the box.
+    if (isRecord(declaration) && typeof declaration.url === "string" && declaration.url.startsWith(GATEWAY_URL_PREFIX)) continue;
     const remote = isRecord(declaration) ? remoteServer(declaration) : null;
     const stdio = isRecord(declaration) && !remote ? stdioServer(declaration) : null;
     if (!remote && !stdio) {
