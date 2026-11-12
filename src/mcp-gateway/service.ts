@@ -21,6 +21,7 @@ import { quoteShell } from "../box-settings.ts";
 import type { LinkResult, RunOptions } from "../link.ts";
 import type { RemoteMcpServer, SeedMcp } from "../manifest.ts";
 import type { ToolDescriptor } from "../registry/types.ts";
+import { linkPathDirs, unitPath } from "../tools/path.ts";
 import { systemdService, type UserService } from "../watch-service.ts";
 import type { GatewayServerState } from "./login.ts";
 import { SERVER_NAME } from "./store.ts";
@@ -124,9 +125,13 @@ export function gatewayServers(
   return { servers: sorted, envKeys, warnings };
 }
 
-/** The unit file of the gateway on a box with the home `remoteHome`. */
-export function gatewayUnit(remoteHome: string): string {
-  return systemdService(MCP_GATEWAY_SERVICE, [`${remoteHome}/.local/bin/ferry`], "/usr/local/bin:/usr/bin:/bin", undefined);
+/**
+ * The unit file of the gateway on a box with the home `remoteHome`. It gets
+ * the box PATH directories `pathDirs` in front of the system PATH, as the
+ * Paseo unit, so a shared stdio server finds the same commands as an agent.
+ */
+export function gatewayUnit(remoteHome: string, pathDirs: readonly string[]): string {
+  return systemdService(MCP_GATEWAY_SERVICE, [`${remoteHome}/.local/bin/ferry`], unitPath(pathDirs), undefined);
 }
 
 /**
@@ -262,7 +267,7 @@ export async function enableGateway(
 ): Promise<GatewaySyncResult> {
   const direct = Object.fromEntries(Object.entries(servers).filter(([, server]) => "url" in server));
   const full = Object.keys(shared.envKeys).length > 0 ? { servers, envKeys: shared.envKeys } : { servers: direct };
-  const result = await link.run(enableGatewayCommand(gatewayUnit(remoteHome), shared.cleanup, shared.envScript), {
+  const result = await link.run(enableGatewayCommand(gatewayUnit(remoteHome, linkPathDirs(link)), shared.cleanup, shared.envScript), {
     input: new TextEncoder().encode(`${JSON.stringify({ servers: direct })}\n${JSON.stringify(full)}\n`),
   });
   if (!result.ok) throw new Error(`${result.error.origin}/${result.error.code}: ${result.error.message}`);

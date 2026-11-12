@@ -124,7 +124,7 @@ Share a server only when one process can serve all agents. These are the risks:
 
 - The process keeps its state for all agents. A server that keeps a session, a cache, a login, or a selected project for one agent gives that state to the other agents.
 - The working directory of the process is the home of the box user, not the project of the agent. A server that reads files relative to its working directory reads them from the home.
-- The service has the `PATH` `/usr/local/bin:/usr/bin:/bin`. A command in `~/.local/bin` or in a version manager such as nvm is not found. Use an absolute command path outside the home, or install the command in `/usr/local/bin`.
+- The service has the same `PATH` as a Ferry box command and the Paseo unit: the box PATH directories in the home, such as `~/.local/bin`, then the system directories. A command in another directory, such as a version manager like nvm, is not found. Use an absolute command path outside the home, or install the command in one of these directories.
 - The gateway connects to the server with no client capabilities. When the server sends a request to the client, such as `roots/list` or sampling, the gateway answers with an error. Then `ferry mcp list` and `ferry status` show the server in the state `cannot-share`, and `ferry status --brief` shows a `gateway/<server>` item. To fix it, remove the server from `mcp_gateway_shared`, then run `ferry sync --box <name>`.
 
 Limits:

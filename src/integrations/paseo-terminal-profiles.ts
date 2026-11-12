@@ -6,7 +6,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { quoteShell } from "../box-settings.ts";
 import { carriedContentHits, SCRIPT_RUNNERS } from "../manifest.ts";
-import { CONFIG_FILE, editBoxConfig, jqObjects, noJqWarning, PaseoError, SYSTEM_PATH } from "./paseo.ts";
+import { CONFIG_FILE, editBoxConfig, jqObjects, noJqWarning, PaseoError } from "./paseo.ts";
+import { SYSTEM_PATH } from "../tools/path.ts";
 import type { IntegrationLink } from "./types.ts";
 
 /** The fields that Ferry carries. Paseo 0.10.1 reloads `daemon.terminalProfiles` without a restart. */

@@ -205,6 +205,10 @@ describe("sync with mcp_gateway", () => {
     expect(mode(join(box1.gateway, "servers.json"))).toBe(0o600);
     expect(mode(join(box1.gateway, "client-key"))).toBe(0o600);
     expect(readFileSync(box1.unit, "utf8")).toContain(`ExecStart="${box1.boxHome}/.local/bin/ferry" mcp serve\nRestart=on-failure\n`);
+    // The box PATH directories come in front of the system PATH, as in the Paseo unit.
+    expect(readFileSync(box1.unit, "utf8")).toContain(
+      'Environment="PATH=%h/.local/bin:%h/.pi/agent/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n',
+    );
     expect(box1.systemctl()).toEqual([
       "--user daemon-reload",
       "--user enable ferry-mcp-gateway.service",

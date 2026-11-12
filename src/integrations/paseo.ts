@@ -7,11 +7,11 @@ import type { IntegrationsConfig } from "../config.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { jqEditScript, quoteShell } from "../box-settings.ts";
-import { BunHostAdapter, type HostAdapter, type Link } from "../link.ts";
+import { BunHostAdapter, type HostAdapter } from "../link.ts";
 import { carriedContentHits } from "../manifest.ts";
 import { step, type Progress } from "../progress.ts";
 import { nodeBootstrap } from "../registry/builtin.ts";
-import { BUILTIN_BOX_PATH_DIRS } from "../tools/path.ts";
+import { BUILTIN_BOX_PATH_DIRS, linkPathDirs, unitPath } from "../tools/path.ts";
 import { SECRETS_UNIT_LINE } from "../secrets.ts";
 import type {
   BoxIntegration,
@@ -56,8 +56,6 @@ const UNIT_PATH = `.config/systemd/user/${UNIT}`;
 /** A unit that the operator wrote by hand before Ferry managed Paseo. */
 const OLD_UNIT = "paseo.service";
 const LISTEN = "127.0.0.1:6767";
-/** The system directories at the end of the PATH of ferry-paseo.service. */
-export const SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const INSTALL_TIMEOUT_MS = 10 * 60 * 1_000;
 /**
  * Each agent of the daemon runs in the cgroup of the unit. With the systemd
@@ -100,12 +98,7 @@ export function unitFile(pathDirs: readonly string[], relay = false): string {
 }
 
 function unitPathLine(pathDirs: readonly string[]): string {
-  return `Environment=PATH=${[...pathDirs.map((dir) => `%h/${dir}`), SYSTEM_PATH].join(":")}`;
-}
-
-/** A Link knows the box PATH directories. A link without them gets the directories of the built-in tools. */
-function linkPathDirs(link: IntegrationLink): readonly string[] {
-  return (link as Partial<Pick<Link, "pathDirs">>).pathDirs ?? BUILTIN_BOX_PATH_DIRS;
+  return `Environment=PATH=${unitPath(pathDirs)}`;
 }
 
 const NODE_COMMAND = nodeBootstrap(NODE_MAJOR, 0);
