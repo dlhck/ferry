@@ -13,6 +13,7 @@ import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./co
 import { FerryError } from "./errors.ts";
 import type { LinkOptions, LinkResult, RunOptions } from "./link.ts";
 import { holdsToken, redactTokens, redactUrlCredentials } from "./manifest.ts";
+import { replaceControlCharacters } from "./progress.ts";
 import type { DayCounts, TokenCounts } from "./usage-count.ts";
 
 export type HarnessUsage = {
@@ -94,7 +95,7 @@ export function readAnswer(stdout: string): HarnessUsage[] | string {
   }
   if (isRecord(envelope) && envelope.ok === false && isRecord(envelope.error) && envelope.error.code !== "usage") {
     const text = String(envelope.error.message);
-    return holdsToken(text) ? "the Ferry on the box failed with an error text that has the form of a token" : `the Ferry on the box failed: ${text}`;
+    return holdsToken(text) ? "the Ferry on the box failed with an error text that has the form of a token" : `the Ferry on the box failed: ${replaceControlCharacters(text)}`;
   }
   // An older Ferry has no usage-count, and fails with a usage error.
   if (!isRecord(envelope) || envelope.ok !== true || !isRecord(envelope.result)) return `the Ferry on the box cannot count tokens. ${update}`;

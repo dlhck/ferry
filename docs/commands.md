@@ -935,9 +935,11 @@ machine that Ferry does not carry, with its harness, its name, the reason, and
 what to change. It never prints a command or an argument of a server.
 
 Unsaved work lists each git project on the box with changes that are not
-committed, or with a local branch that has commits that no remote has. Ferry
-checks the projects of [box.<name>] and the destinations of earlier ferry
-move commands. It shows only the path, the branch, and the counts. With
+committed, or with a local branch or a detached HEAD that has commits that no
+remote has. Ferry checks the projects of [box.<name>], the destinations of
+earlier ferry move commands, and the linked worktrees of both. It shows only
+the path, the branch, and the counts. A project where git fails shows
+could not check. With
 --json, result is the status report, schema version 2, and its skippedMcp has
 that list. The ferry agent skill describes its fields.
 Install the skill with ferry skills add dlhck/ferry --skill ferry.
@@ -1593,7 +1595,7 @@ Options:
   --dry-run    with --uninstall, print the plan and change nothing
   -h, --help   display help for command
 
-With --json: { name, defaultBoxRemoved, tunnelService, instructionFile }. tunnelService is the file of the tunnel user service that Ferry removed from this machine, or null. instructionFile is the per-box instruction file that stays on this machine, or null. With --uninstall, also uninstall: { dryRun, plan: { home, services, links: [{ path, link, backup }], notifyHooks, profileBlock, paths, unsavedWork }, remaining }, or null when cancelled. notifyHooks has the settings files with the hooks of ferry notify. unsavedWork is { checked, projects } as in ferry status, or null when Ferry could not read it. The plan paths are relative to the box home. backup is the file that Ferry moves back to path, or null. remaining has the names that stay in ~/.ferry on the box. A dry run changes nothing.
+With --json: { name, defaultBoxRemoved, tunnelService, instructionFile }. tunnelService is the file of the tunnel user service that Ferry removed from this machine, or null. instructionFile is the per-box instruction file that stays on this machine, or null. With --uninstall, also uninstall: { dryRun, plan: { home, services, links: [{ path, link, backup }], notifyHooks, profileBlock, paths, unsavedWork }, remaining }, or null when cancelled. notifyHooks has the settings files with the hooks of ferry notify. unsavedWork is { checked, projects, unchecked } as in ferry status, or null when Ferry could not read it. The plan paths are relative to the box home. backup is the file that Ferry moves back to path, or null. remaining has the names that stay in ~/.ferry on the box. A dry run changes nothing.
 ```
 
 ### ferry box create
@@ -1705,7 +1707,7 @@ Options:
   --yes       do not ask for the box name
   -h, --help  display help for command
 
-With --json: { name, dryRun, machine, removed, knownHosts, unsavedWork }, or null when cancelled. removed is the box remove result, or null when the box was not in the config or with --dry-run. knownHosts is the number of removed known_hosts lines. unsavedWork is { checked, projects: [{ path, branch, changes, unpushed: [{ branch, commits }] }] }, or null when the box is not in the config or Ferry could not reach it.
+With --json: { name, dryRun, machine, removed, knownHosts, unsavedWork }, or null when cancelled. removed is the box remove result, or null when the box was not in the config or with --dry-run. knownHosts is the number of removed known_hosts lines. unsavedWork is { checked, projects: [{ path, branch, changes, unpushed: [{ branch, commits }] }], unchecked }, or null when the box is not in the config or Ferry could not reach it.
 ```
 
 ### ferry box default
