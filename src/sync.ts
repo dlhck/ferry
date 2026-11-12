@@ -37,7 +37,7 @@ import type { HarnessDescriptor } from "./registry/types.ts";
 import { openStore as openSnapshotStore, skillChanged, type PublishResult } from "./store.ts";
 import { adoptPublishedSkills } from "./adopt.ts";
 import { installBoxPlugins, mergeBoxSettings } from "./box-settings.ts";
-import { withNotifyHooks } from "./notify.ts";
+import { NOTIFY_PROBE_COMMAND, withNotifyHooks } from "./notify.ts";
 import { gatewayCleanupCommand, gatewayCleanupLines, registerBoxMcp, sharedEnvScript, sharedRestoreCommand } from "./box-mcp.ts";
 import { disableGateway, enableGateway, gatewayServers, MCP_GATEWAY_SERVICE } from "./mcp-gateway/service.ts";
 import { isReleaseVersion, VERSION } from "./version.ts";
@@ -645,6 +645,19 @@ async function applyOnBox(context: {
     const notifying = config.notifications?.agents === true ? withNotifyHooks(settings, harnesses) : settings;
     if (notifying === null) {
       warn("Agent notifications: Ferry adds the Claude hooks only when Claude is on for the box and ~/.claude/settings.json is on this machine.");
+    } else if (notifying !== settings) {
+      // The hooks do nothing without a Ferry that has the notify command. A failed check gives no warning.
+      const probe = await link.run(NOTIFY_PROBE_COMMAND);
+      const state = probe.ok ? probe.stdout.trim() : "";
+      if (state === "missing") {
+        warn(
+          `Agent notifications: the box has no Ferry, so the Claude hooks do nothing. ${
+            isReleaseVersion(context.ferryVersion) ? "Run ferry install." : "This Ferry is a development build, so it puts no Ferry on the box."
+          }`,
+        );
+      } else if (state === "old") {
+        warn("Agent notifications: the Ferry on the box has no notify command, so the Claude hooks do nothing. Run ferry update.");
+      }
     }
     const merged = await boxStep(
       "Merging settings on the box",

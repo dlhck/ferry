@@ -389,6 +389,7 @@ describe("ferry status command", () => {
     expect(report.boxes[0]!.unsavedWork).toEqual({
       checked: 2,
       projects: [{ path: "code/app", branch: "main", changes: 2, unpushed: [{ branch: "main", commits: 3 }] }],
+      unchecked: [],
       error: null,
     });
     expect(stack.output[0]).toContain(
@@ -402,7 +403,7 @@ describe("ferry status command", () => {
 
     const report = await status(stack);
 
-    expect(report.boxes[0]!.unsavedWork).toEqual({ checked: null, projects: null, error: null });
+    expect(report.boxes[0]!.unsavedWork).toEqual({ checked: null, projects: null, unchecked: null, error: null });
     expect(stack.output[0]).toContain("Unsaved work: unavailable while host is offline");
   });
 

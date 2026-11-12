@@ -279,6 +279,18 @@ export function plural(count: number, noun: string, nouns = `${noun}s`): string 
   return `${count} ${count === 1 ? noun : nouns}`;
 }
 
+/** A C0 control character or DEL. In text from a box, such a character can move the cursor or change the terminal. */
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
+
+export function hasControlCharacter(text: string): boolean {
+  return CONTROL_CHARACTER.test(text);
+}
+
+/** Replace each control character with `?`, so that text from a box cannot change the terminal. */
+export function replaceControlCharacters(text: string): string {
+  return text.replace(new RegExp(CONTROL_CHARACTER.source, "g"), "?");
+}
+
 const MARKS = { done: "✔", failed: "✖", skipped: "–", running: "…" } as const;
 const COLORS = { done: 32, failed: 31, skipped: 2, running: 2 } as const;
 const RESULT_WIDTH = "– skipped".length;

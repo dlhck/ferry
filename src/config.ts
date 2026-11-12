@@ -44,6 +44,8 @@ export type BoxConfig = {
   readonly mcpGateway?: true;
   /** The carried stdio MCP servers that the gateway runs as one process for all agents of the box (`mcp_gateway_shared`). */
   readonly mcpGatewayShared?: readonly string[];
+  /** The id of the machine at the provider, for a box of `ferry box create` (`provider_id`). */
+  readonly providerId?: string;
   readonly integrations?: IntegrationsConfig;
   /**
    * Policies by tool id. A policy replaces the `[tools]` policy or the `version` of a `[tools.<id>]` table.
@@ -63,11 +65,22 @@ export type GitAuth = "agent" | "box";
 const BOX_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 /**
- * A systemd memory size for `MemoryMax`: bytes with an optional K, M, G, T,
- * P, or E suffix (base 1024), or a percentage of the physical memory. Zero and
- * `infinity` are not limits, so the key does not accept them.
+ * A systemd memory size for `MemoryMax`: a number with a K, M, G, T, P, or E
+ * suffix (base 1024), or a percentage of the physical memory. A number without
+ * a suffix is bytes for systemd, so the key does not accept it. Zero and
+ * `infinity` are not limits, so the key does not accept them either.
  */
-const MEMORY_SIZE = /^(?:[1-9]\d*(?:\.\d+)?[KMGTPE]?|(?:[1-9]\d?(?:\.\d+)?|100)%)$/;
+const MEMORY_SIZE = /^(?:[1-9]\d*(?:\.\d+)?[KMGTPE]|(?:[1-9]\d?(?:\.\d+)?|100)%)$/;
+/** The smallest size with a suffix. An agent does not start with less memory. */
+const MIN_MEMORY_MIB = 256;
+
+/** True for a size of MEMORY_SIZE that is at least MIN_MEMORY_MIB, or a percentage. */
+function isMemoryLimit(value: string): boolean {
+  if (!MEMORY_SIZE.test(value)) return false;
+  if (value.endsWith("%")) return true;
+  const mib = Number.parseFloat(value) * 1024 ** ("KMGTPE".indexOf(value.at(-1)!) - 1);
+  return mib >= MIN_MEMORY_MIB;
+}
 
 /** True for a name that a `[box.<name>]` table can use. The name `all` is reserved. */
 export function isBoxName(name: string): boolean {
@@ -479,6 +492,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       ...(entry.agentMemoryMax ? { agentMemoryMax: entry.agentMemoryMax } : {}),
       ...(entry.mcpGateway ? { mcpGateway: true as const } : {}),
       ...(entry.mcpGatewayShared ? { mcpGatewayShared: entry.mcpGatewayShared } : {}),
+      ...(entry.providerId ? { providerId: entry.providerId } : {}),
       ...(entry.integrations ? { integrations: entry.integrations } : {}),
       ...(entry.tools ? { tools: entry.tools } : {}),
     };
@@ -502,6 +516,7 @@ type ParsedBox = {
   agentMemoryMax?: string;
   mcpGateway?: boolean;
   mcpGatewayShared?: string[];
+  providerId?: string;
   integrations?: Record<string, boolean>;
   tools?: Record<string, ToolPolicy>;
 };
@@ -529,8 +544,10 @@ function readBoxKey(entry: ParsedBox, part: BoxPart, key: string, encoded: strin
   }
   if (part === "host" && key === "agent_memory_max") {
     const value = tomlString(encoded);
-    if (value === undefined || !MEMORY_SIZE.test(value)) {
-      throw new ConfigError(`invalid agent_memory_max in ${section} of ${path}. Use a systemd memory size, such as "6G", "512M", or "50%".`);
+    if (value === undefined || !isMemoryLimit(value)) {
+      throw new ConfigError(
+        `invalid agent_memory_max in ${section} of ${path}. Use a systemd memory size with a K, M, G, or T suffix of at least ${MIN_MEMORY_MIB}M, such as "6G" or "512M", or a percentage, such as "50%".`,
+      );
     }
     entry.agentMemoryMax = value;
     return;
@@ -546,6 +563,12 @@ function readBoxKey(entry: ParsedBox, part: BoxPart, key: string, encoded: strin
       throw new ConfigError(`invalid mcp_gateway_shared in ${section} of ${path}. Use a list of stdio MCP server names, such as ["context7"].`);
     }
     entry.mcpGatewayShared = list;
+    return;
+  }
+  if (part === "host" && key === "provider_id") {
+    const value = tomlString(encoded);
+    if (value === undefined || value === "") throw new ConfigError(`invalid provider_id in ${section} of ${path}. Use the machine id as a string.`);
+    entry.providerId = value;
     return;
   }
   if (!SECTION_KEYS[part === "host" ? "[host]" : "[integrations]"]?.includes(key)) {
@@ -696,6 +719,7 @@ function boxLines(box: BoxConfig): string[] {
     ...(box.agentMemoryMax !== undefined ? [`agent_memory_max = ${JSON.stringify(box.agentMemoryMax)}`] : []),
     ...(box.mcpGateway ? ["mcp_gateway = true"] : []),
     ...(box.mcpGatewayShared !== undefined ? [`mcp_gateway_shared = ${JSON.stringify(box.mcpGatewayShared)}`] : []),
+    ...(box.providerId !== undefined ? [`provider_id = ${JSON.stringify(box.providerId)}`] : []),
     "",
     ...integrationLines(box.integrations, `box.${box.name}.integrations`),
     ...(tools.length > 0

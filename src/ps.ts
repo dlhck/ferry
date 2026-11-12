@@ -12,6 +12,7 @@ import { resolveBoxes } from "./boxes.ts";
 import { readConfig, resolveLinkOptions, type PartialOperatorConfig } from "./config.ts";
 import type { LinkOptions, LinkResult } from "./link.ts";
 import { redactTokens, redactUrlCredentials } from "./manifest.ts";
+import { replaceControlCharacters } from "./progress.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
 
 /** One agent: a matched process with no matched ancestor. Memory and CPU include all its descendants. */
@@ -117,7 +118,7 @@ export function parsePs(stdout: string, now: Date): AgentProcess[] {
       return {
         harness: row.harness!,
         pid: row.pid,
-        project: row.cwd === null ? null : redactUrlCredentials(redactTokens(row.cwd)),
+        project: row.cwd === null ? null : replaceControlCharacters(redactUrlCredentials(redactTokens(row.cwd))),
         startedAt: new Date(Math.floor(now.getTime() / 1000 - row.age) * 1000).toISOString(),
         memoryKiB: tree.reduce((sum, entry) => sum + entry.rss, 0),
         cpuPercent: Number(tree.reduce((sum, entry) => sum + entry.cpu, 0).toFixed(1)),

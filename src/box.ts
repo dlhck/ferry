@@ -1,6 +1,6 @@
 /** `ferry box list`, `ferry box add`, `ferry box remove`, and `ferry box default`. */
 
-import { boxUninstallLines, commitBoxUninstall, hasMcpGateway, planBoxUninstall, type BoxUninstallPlan } from "./box-uninstall.ts";
+import { boxUninstallLines, commitBoxUninstall, hasMcpGateway, planBoxUninstall, removeNotifyHooks, type BoxUninstallPlan } from "./box-uninstall.ts";
 import { gatewayCleanupFailed, gatewayCleanupLines, uninstallCleanupCommand } from "./box-mcp.ts";
 import { hasNoBox, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import {
@@ -309,6 +309,10 @@ async function uninstallBox(
         `Ferry could not change all MCP entries of the gateway on box ${name} back. Ferry did not remove Ferry from the box. The box stays in the config. Correct the problem, then run the command again. ${keep}`,
       );
     }
+  }
+  if (plan.notifyHooks.length > 0) {
+    const lines = await step(dependencies.progress, "Removing the hooks of ferry notify", () => removeNotifyHooks(plan, link));
+    for (const line of lines) dependencies.writeLine(line);
   }
   const remaining = await step(dependencies.progress, "Removing Ferry from the box", () => commitBoxUninstall(plan, link)).catch(
     (cause) => {

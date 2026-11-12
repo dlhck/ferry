@@ -551,11 +551,11 @@ function boxSkillLines(box: BoxStatus): string[] {
 /** The projects on the box with work that is not committed or not pushed. */
 function unsavedWorkLines(box: BoxStatus): string[] {
   if (box.unsavedWork === undefined) return [];
-  const { checked, projects } = box.unsavedWork;
-  if (checked === null || projects === null) {
+  const { checked, projects, unchecked } = box.unsavedWork;
+  if (checked === null || projects === null || unchecked === null) {
     return ["", `Unsaved work: unavailable${box.link.online ? "" : " while host is offline"}`];
   }
-  return ["", ...boxWorkLines({ checked, projects }, box.name)];
+  return ["", ...boxWorkLines({ checked, projects, unchecked }, box.name)];
 }
 
 /** One row for each tool, then one warning for each tool to fix. */

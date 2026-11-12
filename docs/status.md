@@ -41,12 +41,14 @@ The block shows only the name and the reason, never a command or an argument of 
 
 ### Unsaved work
 
-The block `Unsaved work` of each box names each git project on the box that has work that is only on the box:
+The block `Unsaved work` of each box names each git project and each linked worktree on the box that has work that is only on the box, and each one that Ferry could not check:
 
 ```
-Unsaved work: 2 of 3 projects, only on the box
+Unsaved work: 3 of 5 projects, only on the box
   ~/code/app (main): 3 changed files, main has 2 commits that no remote has
   ~/code/api (detached HEAD): feature has 1 commit that no remote has
+  ~/.paseo/worktrees/x/app (detached HEAD): HEAD has 1 commit that no remote has
+  ~/code/web: could not check
 ```
 
 Ferry checks two lists of projects:
@@ -54,10 +56,15 @@ Ferry checks two lists of projects:
 - The `projects` key of `[box.<name>]` in `~/.ferry/config.toml`. See [Boxes](boxes.md#projects-on-a-box).
 - The destinations of earlier `ferry move` commands to the box. The box records each destination in `~/.ferry/projects`.
 
+Ferry also checks each linked worktree of these projects, from `git worktree list`, such as the Paseo worktrees in `~/.paseo/worktrees`. A worktree appears with its own path. The path is relative to the box home, or absolute when the worktree is outside the home. The count of projects includes the worktrees.
+
 A project appears when it has one of these:
 
 - A changed tracked file or an untracked file. An ignored file does not count.
 - A local branch with commits that no remote-tracking branch has. A branch without a remote counts all its commits. Ferry does not fetch, so the counts use the remote-tracking branches of the last fetch on the box.
+- A detached HEAD with commits that no local branch and no remote-tracking branch has. It shows as `HEAD`. A commit that a local branch has shows under that branch.
+
+When a git command fails in a project or a worktree, for example because git refuses a repository with dubious ownership, the line shows `could not check`. Ferry does not know the work there, so the block never says `none` for it. A directory with `.git` that git cannot read is such a project.
 
 A stash does not count. A clean project that is fully pushed does not appear. A path that is not a git project is skipped.
 
@@ -169,7 +176,9 @@ To turn it on:
 3. Run `ferry tunnel install --box <name>` for each box, so `ferry tunnel --follow` runs as a user service. It carries the events within seconds.
 4. Install the menu bar app with `ferry menubar install`.
 
-Ferry adds the hooks only to a box that has Claude on and when `~/.claude/settings.json` is on the operator machine. Else sync prints a warning. Remove the table, or set `agents = false`, and run `ferry sync` to remove the hooks from the boxes.
+Ferry adds the hooks only to a box that has Claude on and when `~/.claude/settings.json` is on the operator machine. Else sync prints a warning. Remove the table, or set `agents = false`, and run `ferry sync` to remove the hooks from the boxes. `ferry box remove <name> --uninstall` removes the hooks and `~/.ferry/events` too, and keeps the other hooks.
+
+The hooks do nothing when the box has no Ferry, or a Ferry without `ferry notify`. Sync then prints a warning that names `ferry install` or `ferry update`.
 
 The `Notification` hook takes a permission prompt and a question from an MCP server. It does not take the reminder that Claude sends after 60 seconds of idle time.
 
@@ -197,7 +206,7 @@ The `Notification` hook takes a permission prompt and a question from an MCP ser
 }
 ```
 
-`id` is unique for each box. `at` is the time on the box, and `receivedAt` is the time on the operator machine. The app sends one notification for each `id` that it did not read before, when `receivedAt` is after the start of the app. With Notifications off in the menu, the app sends none.
+`id` is unique for each box. `at` is the time on the box, and `receivedAt` is the time on the operator machine. When the file is not there, the read is the first read of the box. Then Ferry writes the file with no events, and puts the IDs of the events on the box in `seen`. These events are older than the follow, so Ferry never shows them. The app sends one notification for each `id` that it did not read before, when `receivedAt` is after the start of the app. With Notifications off in the menu, the app sends none.
 
 ## Linux
 
@@ -205,4 +214,4 @@ The menu bar app runs only on macOS. On Linux, a waybar custom module can show t
 
 ## Scripts and agents
 
-`ferry status --json` prints the status report with `schemaVersion: 2`. Its `skippedMcp` field has the skipped stdio MCP servers as `{ harness, name, reason }`. The `unsavedWork` field of each box has `{ checked, projects, error }`, and each project is `{ path, branch, changes, unpushed: [{ branch, commits }] }`. `ferry status --brief --json` prints `{ schemaVersion: 1, checkedAt, boxes }`. Each item has a `summary` of at most 60 characters and the full `message`. The [Ferry agent skill](https://github.com/dlhck/ferry/blob/main/skills/ferry/SKILL.md) describes each field.
+`ferry status --json` prints the status report with `schemaVersion: 2`. Its `skippedMcp` field has the skipped stdio MCP servers as `{ harness, name, reason }`. The `unsavedWork` field of each box has `{ checked, projects, unchecked, error }`. `unchecked` has the paths that Ferry could not check. Each project is `{ path, branch, changes, unpushed: [{ branch, commits }] }`. `ferry status --brief --json` prints `{ schemaVersion: 1, checkedAt, boxes }`. Each item has a `summary` of at most 60 characters and the full `message`. The [Ferry agent skill](https://github.com/dlhck/ferry/blob/main/skills/ferry/SKILL.md) describes each field.

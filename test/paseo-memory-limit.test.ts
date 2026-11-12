@@ -1,4 +1,4 @@
-import { afterEach, describe, expect } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { applyAgentMemoryLimit } from "../src/integrations/paseo-memory-limit.ts";
@@ -41,6 +41,22 @@ describe("agent memory limit", () => {
       expect(start === null ? b.config() : b.text()).toEqual(start === null ? undefined : before!);
       expect(b.log()).toEqual([]);
     }
+  });
+
+  test("with no limit, a box command that fails gives no warning, but a failed reload after a write does", async () => {
+    const failed = { ok: false, error: { origin: "box", code: "command-failed", message: "timed out" } } as const;
+    const quiet = { run: async () => failed };
+    expect(await applyAgentMemoryLimit(quiet, null, PATH_DIRS)).toEqual({ wrapped: [], warnings: [], changed: false });
+
+    // The box wrote the file to remove a Ferry prefix, so the limit was there before.
+    const commands: string[] = [];
+    const written = {
+      run: async (command: string) => {
+        commands.push(command);
+        return commands.length === 1 ? ({ ok: true, address: "box", stdout: "W\n", stderr: "" } as const) : failed;
+      },
+    };
+    await expect(applyAgentMemoryLimit(written, null, PATH_DIRS)).rejects.toThrow("paseo daemon reload failed");
   });
 
   jqTest("wraps the available providers and keeps their box fields", async () => {

@@ -58,13 +58,21 @@ export async function countUsage(
 
 async function countHarness(usage: UsageRecords, home: string, since: string | null): Promise<HarnessCount["projects"]> {
   const totals = new Map<string | null, Map<string, Record<(typeof FIELDS)[number], number>>>();
-  const seen = new Set<string>();
+  // The last line of each `once` value counts. A harness can write a record again with larger counts.
+  const last = new Map<string, { path: string | null; day: string; counts: Record<(typeof FIELDS)[number], number> }>();
+  const add = (path: string | null, day: string, counts: Record<(typeof FIELDS)[number], number>) => {
+    if (FIELDS.every((field) => counts[field] === 0)) return;
+    const days = totals.get(path) ?? new Map();
+    totals.set(path, days);
+    const sum = days.get(day) ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    for (const field of FIELDS) sum[field] += counts[field];
+    days.set(day, sum);
+  };
   // A file with no change since the first day has no record of that day or later.
   const notBefore = since === null ? null : Date.parse(`${since}T00:00:00Z`);
   // Ferry parses the first line and each line that has the last key of a record path.
   const keys = usage.records.map((path) => `"${path.split(".").at(-1)}"`);
   for (const file of sessionFiles(join(home, usage.root), new Bun.Glob(usage.files), notBefore)) {
-    const seenInFile = new Set<string>();
     let first = true;
     let fileProject: string | null = null;
     try {
@@ -87,11 +95,6 @@ async function countHarness(usage: UsageRecords, home: string, since: string | n
         const day = new Date(time).toISOString().slice(0, 10);
         if (since !== null && day < since) continue;
         const once = usage.once ? valueAt(value, usage.once.path) : undefined;
-        if (usage.once && (typeof once === "string" || typeof once === "number")) {
-          const set = usage.once.scope === "file" ? seenInFile : seen;
-          if (set.has(String(once))) continue;
-          set.add(String(once));
-        }
         const count = (key: string) => {
           const number = record[key];
           return typeof number === "number" && Number.isSafeInteger(number) && number > 0 ? number : 0;
@@ -104,19 +107,17 @@ async function countHarness(usage: UsageRecords, home: string, since: string | n
           cacheRead,
           cacheWrite: count(usage.fields.cacheWrite),
         };
-        if (FIELDS.every((field) => counts[field] === 0)) continue;
         const raw = typeof project === "string" ? project : fileProject;
         const path = raw === null ? null : redactUrlCredentials(redactTokens(raw));
-        const days = totals.get(path) ?? new Map();
-        totals.set(path, days);
-        const sum = days.get(day) ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-        for (const field of FIELDS) sum[field] += counts[field];
-        days.set(day, sum);
+        if (usage.once && (typeof once === "string" || typeof once === "number")) {
+          last.set(usage.once.scope === "file" ? `${file}\0${once}` : String(once), { path, day, counts });
+        } else add(path, day, counts);
       }
     } catch {
       // A file that Ferry cannot read is not counted.
     }
   }
+  for (const { path, day, counts } of last.values()) add(path, day, counts);
   return [...totals]
     .sort(([a], [b]) => (a ?? "").localeCompare(b ?? ""))
     .map(([path, days]) => ({
