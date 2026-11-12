@@ -25,12 +25,16 @@ struct BriefBox: Decodable, Sendable {
 struct GatewayStatus: Decodable, Sendable {
     struct Server: Decodable, Sendable {
         let name: String
+        /// `ready`, `login-required`, `cannot-share`, or another state.
         let state: String
+
+        /// `Ready`, or another state as it is.
+        var title: String { state == "ready" ? "Ready" : state }
     }
 
     /// `running`, `stopped`, `unavailable`, or `off`.
     let state: String
-    /// Why the gateway is stopped or unavailable.
+    /// Why the gateway is unavailable.
     let reason: String?
     let servers: [Server]
 
@@ -64,6 +68,8 @@ struct ConfigReport: Decodable, Sendable {
 
     let notifications: Notifications
     let boxes: [Box]
+    /// Present only when Ferry could not read the MCP servers of this machine. Then `stdioServers` is empty.
+    let warnings: [String]?
 }
 
 /// The part of the `ferry config set|unset --json` result that the app uses.
@@ -73,11 +79,13 @@ struct ConfigChange: Decodable, Sendable {
     let syncNeeded: Bool
 }
 
-/// The arguments of `ferry config set <key> <values...> --box <box>`, or of `ferry config unset <key> --box <box>` when `values` is nil.
-/// runFerry adds `--json`. The arguments go to the process as an array, never through a shell.
+/// The arguments of `ferry config set <key> --box <box> -- <values...>`, or of `ferry config unset <key> --box <box>` when `values` is nil.
+/// After `--`, each argument is a value, also when it starts with `-`. runFerry adds `--json` before `--`.
+/// The arguments go to the process as an array, never through a shell.
 func configArguments(key: String, values: [String]?, box: String?) -> [String] {
-    let command = values.map { ["config", "set", key] + $0 } ?? ["config", "unset", key]
-    return command + (box.map { ["--box", $0] } ?? [])
+    let boxArguments = box.map { ["--box", $0] } ?? []
+    guard let values else { return ["config", "unset", key] + boxArguments }
+    return ["config", "set", key] + boxArguments + ["--"] + values
 }
 
 /// The arguments that write a list key. An empty list unsets the key.
@@ -193,8 +201,11 @@ private struct Envelope<Value: Decodable>: Decodable {
     struct Failure: Decodable {
         let code: String?
         let message: String
+        let hint: String?
     }
 
+    /// The command path, such as `config get`. Empty when the CLI did not know the command.
+    let command: String?
     let ok: Bool
     let result: Value?
     let error: Failure?
@@ -383,8 +394,8 @@ final class StatusModel: ObservableObject {
                     self.configLoadError = nil
                 case let .failure(error):
                     self.config = nil
-                    // A Ferry without `ferry config` fails with a usage error. `ferry config get` has no other usage error.
-                    self.configLoadError = error.code == "usage" ? "This Ferry has no settings command. Run ferry self-update." : error.message
+                    // A Ferry without `ferry config` fails with a usage error and an empty command path. A Ferry with it gives `config get`.
+                    self.configLoadError = error.code == "usage" && (error.command ?? "").isEmpty ? "This Ferry has no settings command. Run ferry self-update." : error.message
                 }
             }
         }
@@ -542,19 +553,24 @@ final class StatusModel: ObservableObject {
     private struct RunError: Error {
         /// The error code of the envelope, or nil when ferry gave no envelope.
         var code: String? = nil
+        /// The command path of the envelope.
+        var command: String? = nil
         let message: String
     }
 
     /// Run ferry with the arguments and --json, and decode the result of its envelope.
     private nonisolated static func runFerry<Value: Decodable>(_ arguments: [String], as _: Value.Type) -> Result<Value, RunError> {
         let process = Process()
+        // After `--`, ferry reads each argument as a value, so --json goes before it.
+        var jsonArguments = arguments
+        jsonArguments.insert("--json", at: arguments.firstIndex(of: "--") ?? arguments.endIndex)
         // The launchd agent sets FERRY_PATH to the path of ferry. A GUI app does not get the PATH of the shell.
         if let ferry = ProcessInfo.processInfo.environment["FERRY_PATH"], !ferry.isEmpty {
             process.executableURL = URL(fileURLWithPath: ferry)
-            process.arguments = arguments + ["--json"]
+            process.arguments = jsonArguments
         } else {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = ["ferry"] + arguments + ["--json"]
+            process.arguments = ["ferry"] + jsonArguments
         }
         let command = "ferry \(arguments.joined(separator: " "))"
         let stdout = Pipe()
@@ -581,7 +597,8 @@ final class StatusModel: ObservableObject {
             return .failure(RunError(message: lastLine ?? "\(command) --json printed no valid JSON."))
         }
         if envelope.ok, let result = envelope.result { return .success(result) }
-        return .failure(RunError(code: envelope.error?.code, message: envelope.error?.message ?? "\(command) failed."))
+        let message = envelope.error.map { error in error.hint.map { "\(error.message) \($0)" } ?? error.message }
+        return .failure(RunError(code: envelope.error?.code, command: envelope.command, message: message ?? "\(command) failed."))
     }
 
     private static func age(_ date: Date) -> String {

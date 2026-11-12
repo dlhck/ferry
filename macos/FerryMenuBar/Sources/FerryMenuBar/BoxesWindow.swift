@@ -173,7 +173,7 @@ private struct BoxDetail: View {
             Text(reason).textSelection(.enabled)
         }
         ForEach(Array(gateway.servers.enumerated()), id: \.offset) { _, server in
-            Text("\(server.name): \(server.state)").textSelection(.enabled)
+            Text("\(server.name): \(server.title)").textSelection(.enabled)
         }
     }
 
@@ -199,6 +199,9 @@ private struct BoxDetail: View {
             .toggleStyle(.switch)
 
             Text("Shared stdio servers").bold()
+            if let warnings = model.config?.warnings, !warnings.isEmpty {
+                Text(warnings.joined(separator: " ")).foregroundStyle(.secondary).textSelection(.enabled)
+            }
             if box.stdioServers.isEmpty {
                 Text("Ferry carries no stdio MCP server for this box.").foregroundStyle(.secondary)
             }
