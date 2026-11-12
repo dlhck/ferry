@@ -307,6 +307,28 @@ describe("AuthStart MCP logins", () => {
     ]);
   });
 
+  test("gives no login item for an entry of the MCP gateway, because the gateway never asks a harness for a login", async () => {
+    const gateway = "http://127.0.0.1:47820/mcp/linear";
+    const link = new FakeLink([
+      success(`Checking MCP server health…\n\nlinear: ${gateway} (HTTP) - ✓ Connected\n`),
+      success(
+        [
+          "Name    Url                                Bearer Token Env Var  Status   Auth",
+          `linear  ${gateway}  -                     enabled  Bearer token`,
+        ].join("\n"),
+      ),
+      success("linear: ready\n"),
+    ]);
+
+    const statuses = await new AuthStart(link, BUILTIN_TOOLS).mcpStatus();
+
+    expect(statuses).toEqual([
+      { tool: "claude", loginRequired: [] },
+      { tool: "codex", loginRequired: [] },
+      { tool: "cursor", loginRequired: [] },
+    ]);
+  });
+
   test("reports a tool whose list the box could not run", async () => {
     const failure: LinkResult = { ok: false, error: { code: "command-timeout", origin: "box", message: "raw" } };
     const link = new FakeLink([failure, success(""), success("")]);

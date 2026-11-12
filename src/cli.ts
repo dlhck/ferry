@@ -2069,6 +2069,7 @@ you add a box with ferry box add <name>. ferry init adds a box too.`)
             ...configDependencies,
             createLink,
             harnesses: registry().harnesses,
+            tools: registry().tools,
             confirmName: json()
               ? (message) => refuse(message)()
               : (dependencies.confirmName ?? ((message) => prompts.text({ message }))),

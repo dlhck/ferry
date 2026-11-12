@@ -1389,6 +1389,23 @@ describe("carried MCP server declarations", () => {
     expect(JSON.stringify(seed.mcp)).not.toContain("p.example");
   });
 
+  test("skips an entry of the MCP gateway with no leftover and no refusal", () => {
+    const home = makeHome();
+    const header = { Authorization: `Bearer ${"a".repeat(64)}` };
+    const gateway = "http://127.0.0.1:47820/mcp/linear";
+    write(home, ".claude.json", JSON.stringify({ mcpServers: { linear: { type: "http", url: gateway, headers: header }, docs: { type: "http", url: "https://docs.example/mcp" } } }));
+    write(home, ".codex/config.toml", ["[mcp_servers.linear]", `url = "${gateway}"`, "[mcp_servers.linear.http_headers]", `Authorization = "${header.Authorization}"`].join("\n"));
+    write(home, ".cursor/mcp.json", JSON.stringify({ mcpServers: { linear: { url: gateway, headers: header } } }));
+
+    const seed = seedOf(home);
+
+    expect(seed.mcp).toEqual([{ harness: "claude", servers: [{ name: "docs", type: "http", url: "https://docs.example/mcp" }] }]);
+    expect(seed.leftovers).toEqual([]);
+    expect(readMcpSources(home, BUILTIN_HARNESSES)).toEqual([
+      { harness: "claude", servers: [{ name: "docs", type: "http", url: "https://docs.example/mcp" }], nonPortable: [] },
+    ]);
+  });
+
   test("a home without MCP files carries no MCP servers", () => {
     expect(seedOf(makeHome()).mcp).toEqual([]);
   });

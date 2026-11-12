@@ -162,9 +162,17 @@ export async function planBoxUninstall(
   return { home, services: services.sort(compare), links, profileBlock, paths, unsavedWork };
 }
 
+/** True when the box has the MCP gateway. Then Ferry changes the harness entries of the gateway before it removes the gateway. */
+export function hasMcpGateway(plan: BoxUninstallPlan): boolean {
+  return plan.paths.includes(MCP_GATEWAY);
+}
+
 /** The plan as lines. Ferry prints them before it asks. `box` is the box name. */
 export function boxUninstallLines(plan: BoxUninstallPlan, box: string): string[] {
   const lines = [
+    ...(hasMcpGateway(plan)
+      ? ["Change each harness entry of the MCP gateway back to its direct entry, or remove it when the gateway does not have the server"]
+      : []),
     ...(plan.services.length > 0
       ? [`Stop and remove the user services: ${plan.services.join(", ")}. A stopped service stops its agents.`]
       : []),

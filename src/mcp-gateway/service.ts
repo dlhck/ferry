@@ -124,20 +124,32 @@ export function enableGatewayCommand(unit: string): string {
 }
 
 /**
- * Stop and remove the unit and delete the gateway directory, with the tokens
- * and the client key. The command prints `removed` when it removed
- * something, and nothing on a box without the gateway.
+ * Run `cleanup` first, which changes the harness entries of the gateway. Then
+ * stop and remove the unit and delete the gateway directory, with the tokens
+ * and the client key. The command prints the output of `cleanup`, then
+ * `removed` when it removed something. It prints nothing on a box without
+ * the gateway, and then it does not run `cleanup`.
  */
-export const DISABLE_GATEWAY_COMMAND = [
-  `d=${GATEWAY_DIR}`,
-  `u=${UNIT_FILE}`,
-  '[ -e "$u" ] || [ -e "$d" ] || exit 0',
-  `systemctl --user disable --now ${MCP_GATEWAY_SERVICE.unit} >/dev/null 2>&1`,
-  'rm -f "$u" || exit 1',
-  "systemctl --user daemon-reload >/dev/null 2>&1",
-  'rm -rf "$d" || exit 1',
-  "echo removed",
-].join("\n");
+export function disableGatewayCommand(cleanup: string | null): string {
+  return [
+    `d=${GATEWAY_DIR}`,
+    `u=${UNIT_FILE}`,
+    '[ -e "$u" ] || [ -e "$d" ] || exit 0',
+    ...(cleanup === null ? [] : [cleanup]),
+    `systemctl --user disable --now ${MCP_GATEWAY_SERVICE.unit} >/dev/null 2>&1`,
+    'rm -f "$u" || exit 1',
+    "systemctl --user daemon-reload >/dev/null 2>&1",
+    'rm -rf "$d" || exit 1',
+    "echo removed",
+  ].join("\n");
+}
+
+/**
+ * The command that `ferry update` runs after it changes the Ferry binary of a
+ * box with the gateway, so that the gateway runs the new binary. A stopped
+ * service stays stopped, and the next sync starts it.
+ */
+export const RESTART_GATEWAY_COMMAND = `systemctl --user try-restart ${MCP_GATEWAY_SERVICE.unit}`;
 
 export type GatewaySyncResult =
   | { readonly state: "missing" }
@@ -162,11 +174,15 @@ export async function enableGateway(
   };
 }
 
-/** Remove the gateway from the box. True when the box had it. */
-export async function disableGateway(link: GatewayLink): Promise<boolean> {
-  const result = await link.run(DISABLE_GATEWAY_COMMAND);
+/**
+ * Remove the gateway from the box, after `cleanup`. `removed` is true when the
+ * box had the gateway. `output` has the other output lines, from `cleanup`.
+ */
+export async function disableGateway(link: GatewayLink, cleanup: string | null): Promise<{ readonly removed: boolean; readonly output: string }> {
+  const result = await link.run(disableGatewayCommand(cleanup));
   if (!result.ok) throw new Error(`${result.error.origin}/${result.error.code}: ${result.error.message}`);
-  return result.stdout.trim() === "removed";
+  const lines = result.stdout.split("\n");
+  return { removed: lines.includes("removed"), output: lines.filter((line) => line !== "removed").join("\n") };
 }
 
 /**

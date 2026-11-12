@@ -287,6 +287,42 @@ describe("update command", () => {
     expect(latest.box).not.toContain(boxFerryInstallCommand("1.2.3"));
   });
 
+  test("restarts the MCP gateway after the Ferry update only on a box with the gateway", async () => {
+    const { recorder, deps } = dependencies();
+    const inner = deps.createLink!({ destination: "box.example" });
+    const commands = new Map<string, string[]>();
+
+    await runUpdateCommand(
+      { yes: true, dryRun: false },
+      {
+        ...deps,
+        ferryVersion: "1.2.3",
+        readConfig: () => ({
+          version: 1 as const,
+          publisher: "operator",
+          snapshotUrl: "git@example.com:snapshot.git",
+          boxes: [
+            { name: "a", host: { transport: "ssh" as const, destination: "dev@box-a.example" }, mcpGateway: true as const },
+            { name: "b", host: { transport: "ssh" as const, destination: "dev@box-b.example" } },
+          ],
+        }),
+        createLink: (options) => ({
+          run: async (command: string): Promise<LinkResult> => {
+            if (command === BOX_FERRY_VERSION_COMMAND) return { ok: true, address: "100.64.0.1", stdout: "1.2.0\n", stderr: "" };
+            const destination = "destination" in options ? options.destination : "";
+            commands.set(destination, [...(commands.get(destination) ?? []), command]);
+            return inner.run(command);
+          },
+        }),
+      },
+    );
+
+    const install = boxFerryInstallCommand("1.2.3");
+    expect(commands.get("dev@box-a.example")).toContain(`${install} && systemctl --user try-restart ferry-mcp-gateway.service`);
+    expect(commands.get("dev@box-b.example")).toContain(install);
+    expect(recorder.box.filter((command) => command.includes("ferry-mcp-gateway"))).toHaveLength(1);
+  });
+
   test("prints the plan before confirmation and runs nothing without it", async () => {
     let outputAtPrompt: readonly string[] = [];
     const { recorder, deps } = dependencies({

@@ -47,6 +47,17 @@ Ferry merges the carried settings keys and MCP servers into the box files on the
 - When Ferry cannot read a line of the box `config.toml` as TOML, it leaves the file as it is and stops the sync. The error names the file and the line number, never the text.
 - When a Claude plugin command fails on the box, Ferry names the plugin and the command, never the command output. Run the command on the box to see the error.
 
+## The MCP gateway
+
+On a box with `mcp_gateway = true`, the [MCP gateway](boxes.md#an-mcp-gateway-on-the-box) is the OAuth client of each carried remote MCP server. These rules apply:
+
+- The tokens stay on the box, in `~/.ferry/mcp-gateway/tokens/`, with mode 0600. The gateway does not put a token in a tool result or in `ferry mcp list`. The operator machine gets only server names and login states.
+- The gateway listens on `127.0.0.1` only. It refuses a request without the client key, and a request with a wrong `Origin` or `Host` header.
+- Ferry makes the client key on the box, in `~/.ferry/mcp-gateway/client-key`, with mode 0600. The box writes it into the harness entries itself. The key never goes to the operator machine, into the snapshot, into the sync plan, or into an output line. The harness files that hold it have mode 0600.
+- While `claude mcp add-json` runs on the box, the key is in its command line. On a box without `hidepid` for `/proc`, another user of the box can see the key during that time. The other commands read the key from its file.
+- Agents run as the box user. They can read the client key, and that is correct, because they can use the tools. They can also read the token files, because the gateway runs as the same Unix user. File modes cannot stop this. This is the same as before: each harness keeps its MCP tokens in its own files in the same home. Only a gateway that runs as a separate Unix user can keep the tokens from the agents. Ferry does not do this.
+- When Ferry reads the MCP servers of a machine, for `ferry init`, `ferry sync`, or `ferry status`, it skips a harness entry whose URL starts with `http://127.0.0.1:47820/mcp/`. So a gateway entry gives no leftover and no refusal, and Ferry does not read its key.
+
 ## Stdio MCP servers
 
 For a stdio MCP server, Ferry carries the command, the arguments, and the names of the `env` keys, never their values. Set the values in the `env` of the server on the box. Ferry keeps them: the box merges its own entry with jq or the agent CLI, and sends back only a status or key names, never a value.
