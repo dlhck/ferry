@@ -133,6 +133,35 @@ Limits:
 - Cursor Agent keeps a list of approved MCP servers (`cursor-agent mcp enable <server>`, or `--approve-mcps` for one run). Ferry does not approve a server for Cursor Agent, for a gateway entry or a direct entry. The Cursor documentation does not say if a changed entry needs a new approval.
 - `ferry box remove <name> --uninstall` does the same step first: each gateway entry of a server in `~/.ferry/mcp-gateway/servers.json` gets its direct entry back, and Ferry removes each other gateway entry. Then it removes the service and `~/.ferry/mcp-gateway/`. The plan shows this step.
 
+### Change box keys with ferry config
+
+`ferry config` reads and changes some keys of `~/.ferry/config.toml`. The menu bar app uses it for its settings.
+
+```sh
+ferry config get
+ferry config set mcp_gateway true --box dev
+ferry config set mcp_gateway_shared context7 github --box dev
+ferry config set agent_memory_max 6G --box dev
+ferry config set projects code/app work/api --box dev
+ferry config unset agent_memory_max --box dev
+ferry config set notifications.agents true
+```
+
+| Key | Scope | Value |
+| --- | --- | --- |
+| `notifications.agents` | all boxes, no `--box` | `true` or `false` |
+| `mcp_gateway` | one box | `true` or `false`. `false` removes the key. |
+| `mcp_gateway_shared` | one box | zero or more stdio MCP server names |
+| `agent_memory_max` | one box | one size with the rule of [A memory limit for each agent](#a-memory-limit-for-each-agent) |
+| `projects` | one box | zero or more paths relative to the box home |
+
+- A box key changes the box of `--box`, else `default_box`, else the only box. A `[host]` config has no box table, so only `notifications.agents` works there. Run `ferry box add` first.
+- An empty list and `ferry config unset` remove the key.
+- A value that is not valid changes nothing, and the command fails with the code `usage`.
+- `ferry config get` also lists the carried stdio MCP servers of this machine that each box can share. It prints only the names, never a command, an env value, a header, or a URL. When Ferry cannot read the MCP files, the list is empty, and the command prints a warning.
+- A change goes to the box at the next sync. The command prints the sync to run, such as `Run ferry sync --box dev to apply it.` With `--json`, `syncNeeded` is `true` when the value changed.
+- Ferry writes the whole config again, so the comments in `~/.ferry/config.toml` are lost after a change. A command that changes nothing does not write the file.
+
 ## Create a box at Hetzner Cloud
 
 `ferry box create <name>` creates a machine in your Hetzner Cloud project, with your API token. Ferry does not host machines. The machine costs money until you run `ferry box destroy <name>`.

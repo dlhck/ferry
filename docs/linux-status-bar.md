@@ -33,13 +33,14 @@ The module shows the number of items that need action. Its tooltip lists the ite
         "disk": { "totalKiB": 104857600, "freeKiB": 52428800 },
         "memory": { "totalKiB": 16777216, "availableKiB": 8388608 },
         "load": { "one": 0.5, "five": 0.4, "fifteen": 0.3, "cpus": 8 }
-      }
+      },
+      "mcpGateway": { "state": "off", "reason": null, "servers": [] }
     }
   ]
 }
 ```
 
-`summary` is a short title of at most 60 characters, such as `codex/node_repl: 5 env keys missing`. A long name loses its middle, which becomes `…`. `message` is the full text. A status file of Ferry 0.10.0 or earlier has no `summary`. `command` is `null` when a person must act on the box. An offline box has `online: false`, the reason in `error`, the reason in at most 60 characters in `summary`, no issues, and `resources: null`. Low disk or memory is an issue of the kind `resource`, so the script counts it.
+`summary` is a short title of at most 60 characters, such as `codex/node_repl: 5 env keys missing`. A long name loses its middle, which becomes `…`. `message` is the full text. A status file of Ferry 0.10.0 or earlier has no `summary`. `command` is `null` when a person must act on the box. An offline box has `online: false`, the reason in `error`, the reason in at most 60 characters in `summary`, no issues, `resources: null`, and `mcpGateway: null`. [The status file](status.md#the-status-file) describes `mcpGateway`. Low disk or memory is an issue of the kind `resource`, so the script counts it.
 
 ## States
 
