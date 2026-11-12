@@ -102,7 +102,7 @@ export function createHetzner(token: string, dependencies: HetznerDependencies =
   };
 
   const firewalls = async (box: string) =>
-    (await call<{ firewalls: { id: number }[] }>("GET", `/firewalls?label_selector=${encodeURIComponent(`${BOX_LABEL}=${box}`)}`)).firewalls ?? [];
+    (await call<{ firewalls: { id: number; name?: string }[] }>("GET", `/firewalls?label_selector=${encodeURIComponent(`${BOX_LABEL}=${box}`)}`)).firewalls ?? [];
 
   return {
     id: "hetzner",
@@ -165,20 +165,36 @@ export function createHetzner(token: string, dependencies: HetznerDependencies =
       return machine;
     },
 
-    async destroy(machine: Machine): Promise<void> {
+    async destroy(machine: Machine): Promise<string[]> {
       const removed = await call<{ action?: ApiAction }>("DELETE", `/servers/${encodeURIComponent(machine.id)}`);
       await waitFor(removed.action, `remove the server ${machine.name}`);
-      for (const firewall of await firewalls(machine.box)) {
+      // The server is gone, so a firewall that stays is a warning. The operator removes it in the console.
+      const firewallName = `ferry-${machine.box}`;
+      const warning = (what: string, cause: unknown) =>
+        `Warning: Ferry could not remove ${what} at Hetzner Cloud: ${messageOf(cause)}. Remove it in the Hetzner Cloud console.`;
+      let found: { id: number; name?: string }[];
+      try {
+        found = await firewalls(machine.box);
+      } catch (cause) {
+        return [warning(`the firewall ${firewallName}`, cause)];
+      }
+      const warnings: string[] = [];
+      for (const firewall of found) {
         for (let attempt = 1; ; attempt += 1) {
           try {
             await call("DELETE", `/firewalls/${firewall.id}`);
             break;
           } catch (cause) {
-            if (!(cause instanceof HetznerError) || cause.code !== "resource_in_use" || attempt >= FIREWALL_DELETE_TRIES) throw cause;
-            await sleep(ACTION_POLL_MS);
+            if (cause instanceof HetznerError && cause.code === "resource_in_use" && attempt < FIREWALL_DELETE_TRIES) {
+              await sleep(ACTION_POLL_MS);
+              continue;
+            }
+            warnings.push(warning(`the firewall ${firewall.name ?? firewallName} (id ${firewall.id})`, cause));
+            break;
           }
         }
       }
+      return warnings;
     },
 
     async list(): Promise<Machine[]> {

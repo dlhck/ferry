@@ -57,7 +57,7 @@ destination = "user@box-b.example"
 agent_memory_max = "6G"
 ```
 
-The value is a systemd `MemoryMax` size: a number of bytes with an optional `K`, `M`, `G`, `T`, `P`, or `E` suffix (base 1024), or a percentage of the box memory, such as `"50%"`. When an agent uses more memory than the limit, the kernel stops that agent only. The other agents and the Paseo daemon continue.
+The value is a systemd `MemoryMax` size: a number with a `K`, `M`, `G`, `T`, `P`, or `E` suffix (base 1024), or a percentage of the box memory, such as `"50%"`. A size must be at least `256M`. Ferry refuses a number without a suffix, because systemd reads it as bytes, and an agent does not start with that little memory. When an agent uses more memory than the limit, the kernel stops that agent only. The other agents and the Paseo daemon continue.
 
 Ferry does not start the agents. With the [Paseo integration](paseo-sync.md#agent-memory-limit), `ferry sync` applies the limit to each agent that Paseo starts on the box. `ferry ps` shows the limit next to the box name.
 
@@ -146,12 +146,12 @@ ferry box create b
 Ferry does these steps:
 
 1. It creates the machine `ferry-<name>` with the label `ferry-box=<name>` and a firewall that allows inbound TCP port 22 only. The machine gets the SSH user `ferry` with your public key. It has no password login.
-2. It pins the SSH host key of the machine in `~/.ssh/known_hosts`, connects as root with your key, and replaces the host key on the box. See [the security model](security-model.md#the-ssh-host-key).
+2. It pins the SSH host key of the machine in `~/.ssh/known_hosts`, connects as root with your key, and replaces the host key on the box. Each SSH connection of the create uses `StrictHostKeyChecking=yes` with `~/.ssh/known_hosts` as the only user known_hosts file, so a setting in `~/.ssh/config` cannot turn the check off. See [the security model](security-model.md#the-ssh-host-key).
 3. As root, it installs Tailscale, joins your tailnet with the host name `ferry-<name>`, installs gh with its apt source, and turns on linger for `ferry`.
 4. It writes the sudoers rule of the `ferry` user and turns off root login. See [the security model](security-model.md#ssh-login-and-sudo).
 5. As `ferry`, it runs `ferry box add <name>` with the Tailscale name, `ferry install --box <name>`, and `ferry sync --box <name>`. Then `ferry status` shows the box, with `Box sudo: PASSWORDLESS`.
 
-The box gets `gh = "latest"` in `[box.<name>.tools]`, because the sudoers rule allows `apt install gh -y` only, and no exact gh version. Do not change that policy for the box.
+The box table gets `provider_id`, the id of the machine at Hetzner Cloud. `ferry box destroy` uses it to find the box of the machine. Do not change it. The box gets `gh = "latest"` in `[box.<name>.tools]`, because the sudoers rule allows `apt install gh -y` only, and no exact gh version. Do not change that policy for the box.
 
 Before it installs gh, `ferry install` runs `sudo apt update --error-on=any`. When this command fails, Ferry adds the GitHub CLI apt source and key again, so a box gets a new key after GitHub changes it. On a created box, the sudoers rule does not allow that setup. So a warning from any apt source, for example a mirror that does not answer, stops `ferry install` with the apt warning. Run `ferry install --box <name>` again when the source answers.
 
@@ -198,11 +198,11 @@ ssh_public_key = "~/.ssh/id_ed25519.pub"
 `ferry box destroy <name>` finds the machine with the label `ferry-box=<name>`, prints the plan, and prints the projects on the box with [unsaved work](status.md#unsaved-work), as `ferry box remove --uninstall` does. When Ferry cannot reach the box, it says so in one line and continues. Then it asks you to type the box name, and does these steps:
 
 1. It runs `tailscale logout` on the box, so the box leaves the tailnet. When that fails, Ferry warns. Then remove the machine in the Tailscale admin console.
-2. It removes the machine and its firewall at Hetzner Cloud. The data on the machine is lost.
+2. It removes the machine and its firewall at Hetzner Cloud. The data on the machine is lost. When only the removal of the firewall fails, Ferry warns with the name of the firewall and continues. Then remove the firewall in the Hetzner Cloud console.
 3. It removes the lines of the box from `~/.ssh/known_hosts`. Ferry removes only the lines that it added.
 4. It does what `ferry box remove <name>` does on this machine. It also removes the last box.
 
-A box that is not in the config, for example after a failed create, loses only its machine. When the removal at Hetzner Cloud fails, the box stays in the config. `--dry-run` prints the plan and changes nothing. `--yes` skips the question. Move the projects that you need with `ferry move` first.
+Ferry does steps 1 and 4 only when `[box.<name>]` has the `provider_id` of the machine. Otherwise, for example after a failed create, Ferry removes only the machine and the `known_hosts` lines of the box, and keeps the box in the config. So a host that you add later with `ferry box add <name>` does not leave the tailnet and stays in the config. When the removal at Hetzner Cloud fails, the box stays in the config. `--dry-run` prints the plan and changes nothing. `--yes` skips the question. Move the projects that you need with `ferry move` first.
 
 ## Install and update tools
 
@@ -306,10 +306,11 @@ On the box, `ferry expose -- <command>` runs a dev server and announces its port
 
 `ferry box remove <name> --uninstall` removes Ferry from the box first. Run it with `--dry-run` to see the plan. Ferry connects to the box, prints the projects with [unsaved work](status.md#unsaved-work) and the plan, and asks you to type the box name. Then it does these steps on the box:
 
-1. It stops and removes each `ferry-*.service` user service, such as `ferry-paseo.service`. A stopped service stops its agents.
-2. It removes each skill link, instruction file link, and root link that points into the Ferry checkout or to `~/.ferry/box/AGENTS.md`. When `ferry sync --force` moved a file of yours to `~/.ferry/backups`, Ferry moves the newest backup of that path back.
-3. It removes the ferry PATH block of `~/.profile`.
-4. It removes `~/.ferry/box`, `~/.ferry/exposed`, the [MCP gateway](#an-mcp-gateway-on-the-box) files and logins in `~/.ferry/mcp-gateway`, the checkout `~/.ferry/store`, the move record `~/.ferry/projects`, the Ferry binary `~/.local/bin/ferry`, and the marker `~/.ferry/box.json`.
+1. It removes the hooks of [`ferry notify`](status.md#agent-notifications) from `~/.claude/settings.json`. The other hooks stay. Without jq on the box, the hooks stay, and they do nothing without Ferry.
+2. It stops and removes each `ferry-*.service` user service, such as `ferry-paseo.service`. A stopped service stops its agents.
+3. It removes each skill link, instruction file link, and root link that points into the Ferry checkout or to `~/.ferry/box/AGENTS.md`. When `ferry sync --force` moved a file of yours to `~/.ferry/backups`, Ferry moves the newest backup of that path back.
+4. It removes the ferry PATH block of `~/.profile`.
+5. It removes `~/.ferry/box`, `~/.ferry/exposed`, the agent events in `~/.ferry/events`, the [MCP gateway](#an-mcp-gateway-on-the-box) files and logins in `~/.ferry/mcp-gateway`, the checkout `~/.ferry/store`, the move record `~/.ferry/projects`, the Ferry binary `~/.local/bin/ferry`, and the marker `~/.ferry/box.json`.
 
 Then Ferry removes the box from the config.
 

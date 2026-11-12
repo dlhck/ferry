@@ -80,6 +80,11 @@ type LinkTimeouts = {
   readonly commandTimeoutMs?: number;
   /** The box PATH directories from `boxPathDirs`. The default is the directories of the built-in tools. */
   readonly pathDirs?: readonly string[];
+  /**
+   * The only known_hosts file of the link, with StrictHostKeyChecking=yes. The
+   * command-line options win over the SSH config of the operator.
+   */
+  readonly knownHostsFile?: string;
 };
 
 type TailscaleLinkOptions = LinkTimeouts & {
@@ -548,7 +553,11 @@ export class Link {
   private sshOptions(): string[] {
     const connectTimeoutMs = this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     const connectTimeoutSeconds = Math.max(1, Math.ceil(connectTimeoutMs / 1_000));
-    return ["-o", "BatchMode=yes", "-o", `ConnectTimeout=${connectTimeoutSeconds}`];
+    const pinned = this.options.knownHostsFile;
+    return [
+      "-o", "BatchMode=yes", "-o", `ConnectTimeout=${connectTimeoutSeconds}`,
+      ...(pinned === undefined ? [] : ["-o", "StrictHostKeyChecking=yes", "-o", `UserKnownHostsFile="${pinned}"`]),
+    ];
   }
 }
 

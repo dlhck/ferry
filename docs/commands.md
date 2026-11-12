@@ -1547,15 +1547,19 @@ need it.
 With --uninstall, Ferry reads the box, prints the plan, and asks you to type
 the box name. Then it does these steps on the box, in this order:
 
-  1. It stops and removes each ferry-*.service user service, such as
+  1. It removes the hooks of ferry notify from ~/.claude/settings.json. The
+     other hooks stay. Without jq on the box, the hooks stay, and they do
+     nothing without Ferry.
+  2. It stops and removes each ferry-*.service user service, such as
      ferry-paseo.service. A stopped service stops its agents.
-  2. It removes each skill link, instruction file link, and root link that
+  3. It removes each skill link, instruction file link, and root link that
      points into ~/.ferry/store or to ~/.ferry/box/AGENTS.md. When ferry sync
      --force moved a file of yours to ~/.ferry/backups, Ferry moves the
      newest backup of that path back. Else the path stays absent.
-  3. It removes the ferry PATH block of ~/.profile.
-  4. It removes ~/.ferry/box, ~/.ferry/exposed, ~/.ferry/store, the Ferry
-     binary ~/.local/bin/ferry, and the marker ~/.ferry/box.json.
+  4. It removes the ferry PATH block of ~/.profile.
+  5. It removes ~/.ferry/box, ~/.ferry/exposed, the agent events
+     ~/.ferry/events, ~/.ferry/store, the Ferry binary ~/.local/bin/ferry,
+     and the marker ~/.ferry/box.json.
 
 Then Ferry removes the box from the config. Ferry keeps these on the box:
 the logins and credentials, the SSH keys, the project directories,
@@ -1591,7 +1595,7 @@ Options:
   --dry-run    with --uninstall, print the plan and change nothing
   -h, --help   display help for command
 
-With --json: { name, defaultBoxRemoved, tunnelService, instructionFile }. tunnelService is the file of the tunnel user service that Ferry removed from this machine, or null. instructionFile is the per-box instruction file that stays on this machine, or null. With --uninstall, also uninstall: { dryRun, plan: { home, services, links: [{ path, link, backup }], profileBlock, paths, unsavedWork }, remaining }, or null when cancelled. unsavedWork is { checked, projects, unchecked } as in ferry status, or null when Ferry could not read it. The plan paths are relative to the box home. backup is the file that Ferry moves back to path, or null. remaining has the names that stay in ~/.ferry on the box. A dry run changes nothing.
+With --json: { name, defaultBoxRemoved, tunnelService, instructionFile }. tunnelService is the file of the tunnel user service that Ferry removed from this machine, or null. instructionFile is the per-box instruction file that stays on this machine, or null. With --uninstall, also uninstall: { dryRun, plan: { home, services, links: [{ path, link, backup }], notifyHooks, profileBlock, paths, unsavedWork }, remaining }, or null when cancelled. notifyHooks has the settings files with the hooks of ferry notify. unsavedWork is { checked, projects, unchecked } as in ferry status, or null when Ferry could not read it. The plan paths are relative to the box home. backup is the file that Ferry moves back to path, or null. remaining has the names that stay in ~/.ferry on the box. A dry run changes nothing.
 ```
 
 ### ferry box create
@@ -1685,9 +1689,13 @@ does these steps:
   4. It does what ferry box remove <name> does on this machine. It also
      removes the last box.
 
-A box that is not in the config, for example after a failed ferry box
-create, loses only its machine. When the removal at Hetzner Cloud fails, the
-box stays in the config. Ferry reads the token as ferry box create does.
+Ferry does steps 1 and 4 only when [box.<name>] has the provider_id of the
+machine, which ferry box create writes. Otherwise, for example after a
+failed ferry box create, Ferry removes only the machine and its known_hosts
+lines, and keeps the box in the config. When the removal of the machine at
+Hetzner Cloud fails, the box stays in the config. When only the removal of
+the firewall fails, Ferry warns with the firewall name and continues.
+Ferry reads the token as ferry box create does.
 
 --dry-run prints the plan and changes nothing.
 

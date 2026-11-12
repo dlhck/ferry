@@ -206,6 +206,7 @@ export async function runInit(
     integrations: existing?.integrations,
     tools: existing?.tools,
     notifications: existing?.notifications,
+    provider: existing?.provider,
   };
   const config: OperatorConfig | BoxesOperatorConfig = boxes
     ? { ...shared, ...(existing?.defaultBox !== undefined ? { defaultBox: existing.defaultBox } : {}), boxes }

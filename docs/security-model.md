@@ -129,7 +129,7 @@ Ferry never installs a command. `ferry status --brief` names each missing env ke
 Hetzner Cloud has no API that gives the console output of a new machine. So Ferry makes the first host key itself:
 
 1. Ferry makes an ed25519 host key pair on the operator machine. It puts the key pair in the cloud-init user data of the machine, and it pins the public key for the IP address in `~/.ssh/known_hosts`.
-2. Ferry connects with normal host-key checks. A key that is not the pinned key stops the command at once.
+2. Ferry connects with `StrictHostKeyChecking=yes` and `UserKnownHostsFile=~/.ssh/known_hosts` on the command line. These options win over `~/.ssh/config`. A key that is not the pinned key stops the command at once.
 3. On that connection, Ferry makes a new host key on the box, removes the other host keys, and reloads `sshd`. Then it removes the first key from `known_hosts`, pins the new key, and connects again with it.
 
 Hetzner Cloud keeps the user data for the life of the machine, and its API cannot delete it. After step 3, the first key in the user data has no use, because the box has no copy of it. Between the creation and step 3, about one to two minutes, a person with read access to your Hetzner Cloud project can read the first key.
@@ -148,7 +148,7 @@ The firewall of the machine allows inbound TCP port 22 only. The port stays open
 
 ### Destroy
 
-`ferry box destroy` runs `tailscale logout` on the box, removes the machine and its firewall at Hetzner Cloud, removes the `known_hosts` lines of the box, and then removes the box from the config. The SSH key that Ferry added to the Hetzner Cloud project stays, because other machines can use it.
+`ferry box destroy` runs `tailscale logout` on the box, removes the machine and its firewall at Hetzner Cloud, removes the `known_hosts` lines of the box, and then removes the box from the config. It runs `tailscale logout` and removes the box from the config only when the box table has the `provider_id` of the machine, which `ferry box create` writes. A host with the same box name that you added with `ferry box add` keeps its tailnet login and its box table. The SSH key that Ferry added to the Hetzner Cloud project stays, because other machines can use it.
 
 ## Files that leave a box
 

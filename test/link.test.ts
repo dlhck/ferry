@@ -87,6 +87,26 @@ describe("Link", () => {
     ]);
   });
 
+  test("a link with a known_hosts file checks the host key there, whatever the SSH config says", async () => {
+    const host = new FakeHost([result({ stdout: "" })]);
+    const link = new Link({ destination: "root@203.0.113.10", knownHostsFile: "/home/op/.ssh/known_hosts" }, host);
+
+    await link.run("true");
+
+    expect(host.commands[0]?.argv.slice(0, 10)).toEqual([
+      "ssh",
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "ConnectTimeout=10",
+      "-o",
+      "StrictHostKeyChecking=yes",
+      "-o",
+      'UserKnownHostsFile="/home/op/.ssh/known_hosts"',
+      "root@203.0.113.10",
+    ]);
+  });
+
   test("runs a command through an explicit SSH destination without Tailscale", async () => {
     const host = new FakeHost([result({ stdout: "/home/user\n" })]);
     const link = new Link({ destination: "user@box.example" }, host);

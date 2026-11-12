@@ -16,9 +16,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { runBoxUninstall, type BoxUninstallDependencies } from "../src/box.ts";
 import { hasNoBox, resolveBoxes } from "../src/boxes.ts";
-import { boxUninstallLines, commitBoxUninstall, planBoxUninstall } from "../src/box-uninstall.ts";
+import { boxUninstallLines, commitBoxUninstall, planBoxUninstall, removeNotifyHooks } from "../src/box-uninstall.ts";
 import { readConfig, writeConfig, type BoxesOperatorConfig } from "../src/config.ts";
 import type { Seed } from "../src/manifest.ts";
+import { withNotifyHooks } from "../src/notify.ts";
 import { errorInfo } from "../src/output.ts";
 import { noProgress } from "../src/progress.ts";
 import { BUILTIN_HARNESSES, BUILTIN_TOOLS } from "../src/registry/builtin.ts";
@@ -189,6 +190,7 @@ describe("planBoxUninstall", () => {
         { path: ".codex/skills/review", link: "../../.ferry/store/skills/review", backup: null },
         { path: "AGENTS.md", link: join(box.home, ".ferry/box/AGENTS.md"), backup: null },
       ],
+      notifyHooks: [],
       profileBlock: true,
       paths: [".ferry/box", ".ferry/exposed", ".ferry/store", ".local/bin/ferry", ".ferry/box.json"],
       unsavedWork: { checked: 0, projects: [], unchecked: [] },
@@ -222,7 +224,7 @@ describe("planBoxUninstall", () => {
 
     const plan = await planBoxUninstall(BUILTIN_HARNESSES, box.link);
 
-    expect(plan).toEqual({ home: box.home, services: [], links: [], profileBlock: false, paths: [], unsavedWork: { checked: 0, projects: [], unchecked: [] } });
+    expect(plan).toEqual({ home: box.home, services: [], links: [], notifyHooks: [], profileBlock: false, paths: [], unsavedWork: { checked: 0, projects: [], unchecked: [] } });
     expect(boxUninstallLines(plan, "b")[1]).toBe("The box has no Ferry files.");
     expect(await commitBoxUninstall(plan, box.link)).toEqual([]);
     expect(box.read(".local/bin/ferry")).toBe("binary\n");
@@ -237,6 +239,88 @@ describe("planBoxUninstall", () => {
 
     expect(error.message).toContain("The box has a Ferry operator config, ~/.ferry/config.toml");
     expect(errorInfo(error)).toMatchObject({ code: "refused", hint: "Run ferry uninstall on that machine." });
+  });
+});
+
+describe("box uninstall with agent notifications", () => {
+  const userHooks = {
+    Stop: [{ hooks: [{ type: "command", command: "paseo hooks claude stop" }] }],
+    PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "lint-hook" }] }],
+  };
+
+  async function notifyBox() {
+    const box = await ferryBox();
+    const [settings] = withNotifyHooks(
+      [{ harness: "claude", bytes: Buffer.from(JSON.stringify({ model: "opus", hooks: userHooks })) }],
+      BUILTIN_HARNESSES,
+    )!;
+    box.file(".claude/settings.json", `${JSON.stringify(JSON.parse(Buffer.from(settings!.bytes).toString()), null, 2)}\n`);
+    box.file(".ferry/events/1789000000000-41.json", "{}\n");
+    return box;
+  }
+
+  test("removes the hooks of ferry notify and the events, and keeps the other hooks", async () => {
+    const box = await notifyBox();
+
+    const plan = await planBoxUninstall(BUILTIN_HARNESSES, box.link);
+
+    expect(plan.notifyHooks).toEqual([".claude/settings.json"]);
+    expect(plan.paths).toContain(".ferry/events");
+    const lines = boxUninstallLines(plan, "b");
+    expect(lines).toContain("Remove the hooks of ferry notify from ~/.claude/settings.json, and keep the other hooks");
+    expect(lines).toContain("Remove ~/.ferry/events");
+
+    expect(await removeNotifyHooks(plan, box.link)).toEqual([]);
+    await commitBoxUninstall(plan, box.link);
+
+    expect(JSON.parse(box.read(".claude/settings.json"))).toEqual({ model: "opus", hooks: userHooks });
+    expect(box.exists(".ferry/events")).toBe(false);
+  });
+
+  test("removes the Notification event, which has only the hook of Ferry", async () => {
+    const box = await notifyBox();
+    const plan = await planBoxUninstall(BUILTIN_HARNESSES, box.link);
+
+    await removeNotifyHooks(plan, box.link);
+
+    expect(Object.keys(JSON.parse(box.read(".claude/settings.json")).hooks).sort()).toEqual(["PreToolUse", "Stop"]);
+  });
+
+  test("plans no hook removal for settings without the hooks of Ferry", async () => {
+    const box = await ferryBox();
+
+    const plan = await planBoxUninstall(BUILTIN_HARNESSES, box.link);
+
+    expect(plan.notifyHooks).toEqual([]);
+    expect(box.read(".claude/settings.json")).toBe('{"model":"opus"}\n');
+  });
+
+  test("ferry box remove --uninstall removes the hooks before it removes Ferry", async () => {
+    const box = await notifyBox();
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "ferry-box-operator-")));
+    roots.push(home);
+    mkdirSync(join(home, ".ferry"));
+    writeFileSync(join(home, ".ferry/config.toml"), CONFIG);
+
+    await runBoxUninstall(
+      { name: "b", yes: true, dryRun: false },
+      {
+        home,
+        readConfig: () => readConfig(home),
+        writeConfig: (config: BoxesOperatorConfig) => writeConfig(config, home),
+        uninstallTunnelService: async () => {},
+        createLink: () => box.link,
+        harnesses: BUILTIN_HARNESSES,
+        tools: BUILTIN_TOOLS,
+        confirmName: async () => "b",
+        writeLine: () => {},
+        warn: () => {},
+        progress: noProgress,
+      },
+    );
+
+    expect(JSON.parse(box.read(".claude/settings.json")).hooks).toEqual(userHooks);
+    expect(box.exists(".local/bin/ferry")).toBe(false);
   });
 });
 

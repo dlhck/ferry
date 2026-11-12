@@ -20,6 +20,7 @@ import { ApplyError, apply } from "../src/apply.ts";
 import { buildProgram, runCli } from "../src/cli.ts";
 import type { OperatorConfig } from "../src/config.ts";
 import { denyRules, type Seed } from "../src/manifest.ts";
+import { NOTIFY_PROBE_COMMAND } from "../src/notify.ts";
 import { unitFile } from "../src/integrations/paseo.ts";
 import { disableGatewayCommand } from "../src/mcp-gateway/service.ts";
 import { gatewayCleanupCommand } from "../src/box-mcp.ts";
@@ -618,6 +619,47 @@ describe("runSync", () => {
       expect(off).toContain("paseo hooks claude stop");
       expect(off).not.toContain("notify claude");
     }
+  });
+
+  test("with [notifications] agents = true, warns when the Ferry of the box cannot run the hooks", async () => {
+    const warnings = async (probe: string, ferryVersion: string) => {
+      const lines: string[] = [];
+      const link = {
+        run: async (command: string) => ({
+          ok: true as const,
+          address: "box",
+          stdout: command.startsWith("printf") ? "/srv/ferry\n" : command === NOTIFY_PROBE_COMMAND ? probe : "",
+          stderr: "",
+        }),
+      };
+      await runSync(
+        { home: "/operator" },
+        {
+          readConfig: () => ({ ...config, notifications: { agents: true } }),
+          publisher: () => "operator-machine",
+          readSeed: () => ({ ...seed, settings: [{ harness: "claude", bytes: Buffer.from("{}") }] }),
+          createLink: () => link,
+          writePlan: () => {},
+          warn: (line) => lines.push(line),
+          acquireStoreLock: async () => () => {},
+          acquireLock: () => () => {},
+          openStore: async () => ({ path: "/operator/.ferry/store", publish: async () => ({ published: true, tip: "abc123" }) }),
+          apply: async (input) => ({ checkout: input.checkout, targetHome: input.targetHome, actions: [], unmanaged: [], managed: { instructionFiles: [], skillRoots: [], roots: [] } }),
+          adopt: () => {},
+          ferryVersion,
+        },
+      );
+      return lines.filter((line) => line.startsWith("Agent notifications:"));
+    };
+
+    expect(await warnings("old\n", "1.0.0")).toEqual([
+      "Agent notifications: the Ferry on the box has no notify command, so the Claude hooks do nothing. Run ferry update.",
+    ]);
+    expect(await warnings("missing\n", "1.0.0")).toEqual(["Agent notifications: the box has no Ferry, so the Claude hooks do nothing. Run ferry install."]);
+    expect(await warnings("missing\n", "0.0.0-dev")).toEqual([
+      "Agent notifications: the box has no Ferry, so the Claude hooks do nothing. This Ferry is a development build, so it puts no Ferry on the box.",
+    ]);
+    expect(await warnings("", "1.0.0")).toEqual([]);
   });
 
   test("declares the carried MCP servers on the box after the settings, and prints each warning", async () => {

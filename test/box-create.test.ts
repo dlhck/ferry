@@ -70,6 +70,7 @@ function fakeProvider(overrides: Partial<Provider> = {}) {
     },
     destroy: async (machine) => {
       destroyed.push(machine);
+      return [];
     },
     list: async () => machines,
     ...overrides,
@@ -181,7 +182,9 @@ describe("ferry box create", () => {
     expect(sudoers).toContain(`printf '%s\\n' '${SUDOERS_RULE}' > /etc/sudoers.d/ferry.new`);
     expect(sudoers).toContain("chmod 0440 /etc/sudoers.d/ferry.new && visudo -cf /etc/sudoers.d/ferry.new");
     expect(root.join("\n")).not.toMatch(/NOPASSWD: ?ALL/);
-    expect(readConfig(home)?.boxes?.find((box) => box.name === "b")?.tools).toEqual({ gh: "latest" });
+    expect(readConfig(home)?.boxes?.find((box) => box.name === "b")).toMatchObject({ providerId: "42", tools: { gh: "latest" } });
+    // Each link of the create checks the pinned key in known_hosts, also with StrictHostKeyChecking no in the SSH config.
+    expect(link.commands.every((entry) => entry.options.knownHostsFile === join(home, ".ssh/known_hosts"))).toBe(true);
     expect(lines).toContain("Open this URL to add box b to your tailnet: https://login.tailscale.com/a/example");
     expect(readConfig(home)?.boxes?.map((box) => box.name)).toEqual(["a", "b"]);
   });
@@ -194,7 +197,7 @@ describe("ferry box create", () => {
 
     const up = link.commands.find((entry) => entry.command.includes("tailscale up"))!;
     expect(up.command).toBe("tailscale up --hostname=ferry-b --operator=ferry --auth-key=file:/dev/stdin");
-    expect(up.options).toEqual({ destination: "root@203.0.113.10" });
+    expect(up.options).toEqual({ destination: "root@203.0.113.10", knownHostsFile: join(home, ".ssh/known_hosts") });
     expect(new TextDecoder().decode(up.run.input)).toBe(AUTH_KEY);
     expect(provider.tokens).toEqual([TOKEN]);
     const visible = [
@@ -412,7 +415,7 @@ function destroyDependencies(home: string, overrides: Partial<BoxDestroyDependen
   return { dependencies, lines, warnings, provider, link };
 }
 
-const CREATED_CONFIG = `${CONFIG}[box.b]\ntailscale = "${DNS_NAME}"\nssh_user = "ferry"\n`;
+const CREATED_CONFIG = `${CONFIG}[box.b]\ntailscale = "${DNS_NAME}"\nssh_user = "ferry"\nprovider_id = "42"\n`;
 
 describe("ferry box destroy", () => {
   test("logs the box out of the tailnet, removes the machine, its known_hosts lines, and the box table", async () => {
@@ -432,7 +435,7 @@ describe("ferry box destroy", () => {
   });
 
   test("removes the last box too", async () => {
-    const home = makeHome(`version = 1\npublisher = "operator"\nsnapshot_url = "git@github.com:you/ferry-snapshot.git"\n\n[box.b]\ntailscale = "${DNS_NAME}"\nssh_user = "ferry"\n`);
+    const home = makeHome(`version = 1\npublisher = "operator"\nsnapshot_url = "git@github.com:you/ferry-snapshot.git"\n\n[box.b]\ntailscale = "${DNS_NAME}"\nssh_user = "ferry"\nprovider_id = "42"\n`);
     const { dependencies } = destroyDependencies(home);
     await runBoxDestroy({ name: "b", dryRun: false, yes: true }, dependencies);
     expect(readConfig(home)?.boxes).toBeUndefined();
@@ -454,6 +457,38 @@ describe("ferry box destroy", () => {
     expect(failing.lines).toContain("Unsaved work: unavailable. Ferry cannot reach box b: network/ssh-failed: offline");
     expect(failing.warnings[0]).toContain("Remove the machine in the Tailscale admin console");
     expect(failing.provider.destroyed).toEqual([MACHINE]);
+  });
+
+  test("a config box without the provider id of the machine is another host: Ferry removes the machine only and keeps the box", async () => {
+    // After a failed create, the operator added another host as box b with ferry box add.
+    const other = `${CONFIG}[box.b]\ntransport = "ssh"\ndestination = "user@other.example"\n`;
+    for (const config of [other, `${other}provider_id = "7"\n`]) {
+      const home = makeHome(config);
+      writeFileSync(join(home, ".ssh/known_hosts"), `keep.example ${NEW_KEY}\n203.0.113.10 ${NEW_KEY} ferry:b\n`);
+      const { dependencies, provider, link, lines } = destroyDependencies(home);
+      const result = await runBoxDestroy({ name: "b", dryRun: false, yes: true }, dependencies);
+      expect(result).toMatchObject({ removed: null, unsavedWork: null, knownHosts: 1 });
+      expect(provider.destroyed).toEqual([MACHINE]);
+      expect(link.commands).toEqual([]);
+      expect(lines).toContain(
+        '  Box b in the config is not the machine ferry-b (id 42, 203.0.113.10): its table has no provider_id = "42". Ferry removes the machine only and keeps box b in the config.',
+      );
+      expect(readConfig(home)?.boxes?.find((box) => box.name === "b")?.host).toEqual({ transport: "ssh", destination: "user@other.example" });
+      expect(knownHosts(home)).toBe(`keep.example ${NEW_KEY}\n`);
+    }
+  });
+
+  test("a firewall that stays is a warning, and Ferry finishes the cleanup", async () => {
+    const home = makeHome(CREATED_CONFIG);
+    writeFileSync(join(home, ".ssh/known_hosts"), `203.0.113.10 ${NEW_KEY} ferry:b\n`);
+    const fake = fakeProvider({ destroy: async () => [`Warning: Ferry could not remove the firewall ferry-b (id 9) at Hetzner Cloud: denied for ${TOKEN}.`] });
+    fake.machines.push(MACHINE);
+    const { dependencies, warnings, lines } = destroyDependencies(home, { provider: fake.factory });
+    const result = await runBoxDestroy({ name: "b", dryRun: false, yes: true }, dependencies);
+    expect(result).toMatchObject({ removed: { name: "b" }, knownHosts: 1 });
+    expect(warnings.at(-1)).toBe("Warning: Ferry could not remove the firewall ferry-b (id 9) at Hetzner Cloud: denied for [token].");
+    expect(lines.join("\n")).not.toContain(TOKEN);
+    expect(readConfig(home)?.boxes?.map((box) => box.name)).toEqual(["a"]);
   });
 
   test("prints the projects with unsaved work before the question", async () => {

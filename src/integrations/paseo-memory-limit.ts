@@ -114,8 +114,8 @@ export async function applyAgentMemoryLimit(
   };
   const d = quoteShell(JSON.stringify(DEFAULT_COMMANDS));
   // Without a provider to wrap, the edit needs no default executables. So the command names no agent CLI.
-  const edit = async (wrap: readonly string[], prefix: readonly string[]) =>
-    editBoxConfig(run, {
+  const edit = async (wrap: readonly string[], prefix: readonly string[], runEdit = run) =>
+    editBoxConfig(runEdit, {
       args: `--argjson d ${wrap.length === 0 ? "'{}'" : d} --argjson p ${quoteShell(JSON.stringify(prefix))} --argjson w ${quoteShell(JSON.stringify(Object.fromEntries(wrap.map((id) => [id, true]))))}`,
       valid: VALID,
       filter: EDIT,
@@ -123,8 +123,15 @@ export async function applyAgentMemoryLimit(
     });
 
   if (max === null) {
-    // No limit is the default, so a box that Ferry cannot read gets no warning.
-    const status = await edit([], []);
+    // No limit is the default, so a box that Ferry cannot read or reach gets no warning. The box writes and
+    // Ferry reloads the daemon only to remove a Ferry prefix, so a failure after the first command still gives one.
+    let first = true;
+    const status = await edit([], [], async (command, what) => {
+      if (!first) return run(command, what);
+      first = false;
+      const result = await link.run(command, { timeoutMs: BOX_TIMEOUT_MS });
+      return result.ok ? result.stdout : "";
+    });
     return { wrapped: [], warnings: [], changed: status === "written" };
   }
 

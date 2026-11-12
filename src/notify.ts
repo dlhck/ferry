@@ -12,7 +12,7 @@
 import { mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { record } from "./box-settings.ts";
+import { jqEditScript, quoteShell, record } from "./box-settings.ts";
 import { redactTokens, redactUrlCredentials, type SeedSettings } from "./manifest.ts";
 import { hasControlCharacter } from "./progress.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
@@ -47,6 +47,11 @@ export type EventsFile = {
   readonly updatedAt: string;
   /** The newest events, oldest first. */
   readonly events: readonly ReceivedEvent[];
+  /**
+   * The IDs of the events that were on the box at the first read. Ferry
+   * shows none of them, because they are older than the first follow.
+   */
+  readonly seen?: readonly string[];
 };
 
 /** The box keeps this number of events, and the operator file too. */
@@ -156,16 +161,17 @@ export function parseBoxEvent(json: string): AgentEvent | null {
 }
 
 /**
- * Add the events that `known` does not have. Keep the newest MAX_EVENTS,
- * oldest first. Returns null when no event is new, so Ferry does not write
- * the file again.
+ * Add the events that `known` and `seen` do not have. Keep the newest
+ * MAX_EVENTS, oldest first. Returns null when no event is new, so Ferry does
+ * not write the file again.
  */
 export function mergeEvents(
   known: readonly ReceivedEvent[],
   incoming: readonly AgentEvent[],
   receivedAt: string,
+  seen: readonly string[] = [],
 ): ReceivedEvent[] | null {
-  const ids = new Set(known.map((event) => event.id));
+  const ids = new Set([...known.map((event) => event.id), ...seen]);
   const added: ReceivedEvent[] = [];
   for (const event of incoming) {
     if (ids.has(event.id)) continue;
@@ -185,12 +191,18 @@ export function eventsFilePath(box: string, home = homedir()): string {
 /** The Claude harness, whose `Stop` and `Notification` hooks run `ferry notify`. */
 const CLAUDE = "claude";
 
+/** The box install of Ferry. It is in `~/.local/bin`, which can be missing from the PATH of a hook. */
+const BOX_FERRY = '"$HOME/.local/bin/ferry"';
+
+/** The command of the hook for `kind`. Without a box install, or with a Ferry that has no notify command, it does nothing and exits with 0. */
+function notifyCommand(kind: EventKind): string {
+  return `[ -x ${BOX_FERRY} ] && ${BOX_FERRY} notify ${CLAUDE} ${kind} >/dev/null 2>&1 || true`;
+}
+
 /**
  * The hooks that Ferry adds to the Claude settings on the box. The Notification
  * matcher takes a permission prompt and a question of an MCP server, not the
- * reminder after 60 s of idle time, which follows each Stop event. The box
- * install of Ferry is in `~/.local/bin`, which can be missing from the PATH
- * of a hook.
+ * reminder after 60 s of idle time, which follows each Stop event.
  */
 export const NOTIFY_HOOKS: Readonly<Record<string, Record<string, unknown>>> = {
   Stop: { hooks: [notifyHook("turn-ended")] },
@@ -198,7 +210,50 @@ export const NOTIFY_HOOKS: Readonly<Record<string, Record<string, unknown>>> = {
 };
 
 function notifyHook(kind: EventKind): Record<string, unknown> {
-  return { type: "command", command: `"$HOME/.local/bin/ferry" notify ${CLAUDE} ${kind}`, timeout: 10 };
+  return { type: "command", command: notifyCommand(kind), timeout: 10 };
+}
+
+/**
+ * The box command that checks the Ferry of the hooks. It prints `missing`
+ * without a box install, and `old` for a Ferry without the notify command.
+ * It prints nothing for a Ferry that has the command. The harness `-` is not
+ * valid, so the notify command writes no event. A Ferry with the command
+ * gives an envelope for it, and an old Ferry gives a usage error.
+ */
+export const NOTIFY_PROBE_COMMAND = [
+  `if [ ! -x ${BOX_FERRY} ]; then echo missing`,
+  `elif ! ${BOX_FERRY} --json notify - turn-ended </dev/null 2>/dev/null | grep -qF '"command":"notify"'; then echo old; fi`,
+].join("\n");
+
+/** The text of the Stop hook command as JSON writes it. A settings file that has it has the hooks of Ferry. */
+export const NOTIFY_HOOK_TEXT = JSON.stringify(notifyCommand("turn-ended")).slice(1, -1);
+
+/** The Claude settings file of the box that gets NOTIFY_HOOKS, relative to the home, or null without Claude settings. */
+export function notifySettingsFile(harnesses: readonly HarnessDescriptor[]): string | null {
+  return harnesses.find((harness) => harness.id === CLAUDE)?.settings?.file ?? null;
+}
+
+/**
+ * A jq filter: remove each hook of NOTIFY_HOOKS, then each group without a
+ * hook, then each event without a group. Ferry removes only what it made
+ * empty, and keeps all other hooks.
+ */
+const REMOVE_NOTIFY_HOOKS = [
+  'def ferry: type == "object" and (.command as $x | any($c[]; . == $x));',
+  'def group: type == "object" and (.hooks | type) == "array";',
+  'if (.hooks | type) == "object" then .hooks |= with_entries(',
+  'if (.value | type) == "array" and any(.value[]; group and any(.hooks[]; ferry))',
+  "then .value |= map(if group and any(.hooks[]; ferry) then .hooks |= map(select(ferry | not)) | select(.hooks != []) else . end)",
+  "| select(.value != []) else . end) else . end",
+].join(" ");
+
+/**
+ * The box script that removes NOTIFY_HOOKS from the settings file `path`. It
+ * prints the status letters of jqEditScript.
+ */
+export function removeNotifyHooksScript(path: string): string {
+  const commands = Object.values(NOTIFY_HOOKS).flatMap((group) => (group.hooks as { command: string }[]).map((hook) => hook.command));
+  return jqEditScript(path, `--argjson c ${quoteShell(JSON.stringify(commands))}`, 'type == "object"', REMOVE_NOTIFY_HOOKS);
 }
 
 /**
