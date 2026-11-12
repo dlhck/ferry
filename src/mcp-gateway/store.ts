@@ -184,7 +184,23 @@ export function knownSecrets(home: string, servers: readonly string[]): string[]
   return secrets;
 }
 
-/** Take each known secret, each token pattern, and each URL credential out of a text. */
+/**
+ * Replace each known secret in each string of a JSON value, such as a tool
+ * result. The value keeps its other text: a URL with a `token` query
+ * parameter in a tool result is data for the agent, not a secret of the gateway.
+ */
+export function removeSecrets<T>(value: T, secrets: readonly string[]): T {
+  const text = (item: string) => secrets.reduce((clean, secret) => clean.replaceAll(secret, "[token]"), item);
+  const walk = (item: unknown): unknown => {
+    if (typeof item === "string") return text(item);
+    if (Array.isArray(item)) return item.map(walk);
+    if (item !== null && typeof item === "object") return Object.fromEntries(Object.entries(item).map(([key, entry]) => [text(key), walk(entry)]));
+    return item;
+  };
+  return walk(value) as T;
+}
+
+/** Take each known secret, each token pattern, and each URL credential out of a log line. */
 export function scrub(text: string, secrets: readonly string[]): string {
   let clean = text;
   for (const secret of secrets) clean = clean.replaceAll(secret, "[token]");

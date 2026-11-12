@@ -34,6 +34,7 @@ import {
   readServers,
   readTokenFile,
   readToolCache,
+  removeSecrets,
   scrub,
   setCannotShare,
   setLoginRequired,
@@ -141,8 +142,8 @@ function gatewayServer(
   log: (line: string, servers?: readonly string[]) => void,
 ): Server {
   const server = new Server({ name: `ferry-mcp-gateway/${name}`, version: VERSION }, { capabilities: { tools: {} } });
-  // A tool result comes from the remote server. It must not carry a token or the client key.
-  const clean = <T>(value: T): T => JSON.parse(scrub(JSON.stringify(value), knownSecrets(input.home, [name]))) as T;
+  // A tool result comes from the server. It must not carry a token, the client key, or an env value of the server.
+  const clean = <T>(value: T): T => removeSecrets(value, knownSecrets(input.home, [name]));
   server.setRequestHandler("tools/list", async (request) => {
     try {
       const result = await upstream.use((client) => client.listTools(request.params));

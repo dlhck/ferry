@@ -215,6 +215,19 @@ describe("ferry mcp serve", () => {
     await client.close();
   });
 
+  test("a URL with a token query parameter in a tool result reaches the harness as it is", async () => {
+    await login();
+    const client = await connect(serve());
+    const url = "https://raw.githubusercontent.com/o/r/main/f.txt?token=ABCDEFGHIJKLMNOP";
+    const presigned = "https://bucket.s3.amazonaws.com/f?X-Amz-Credential=AKIAEXAMPLE%2F20261112&X-Amz-Signature=abc123";
+
+    const result = await call(client, `${url} ${presigned}`);
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toEqual([{ type: "text", text: `echo ${url} ${presigned}` }]);
+    expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("echo");
+    await client.close();
+  });
+
   test("a token file that is not valid JSON gives a tool error, and no text of the file is in the log", async () => {
     await login();
     const client = await connect(serve());
@@ -242,6 +255,8 @@ describe("ferry mcp serve", () => {
 
 describe("ferry mcp serve with a shared stdio server", () => {
   const TOKEN = `ghp_${"t".repeat(36)}`;
+  // The JSON form of this value is different from the value, so the gateway must take it out of the strings, not of the JSON text.
+  const QUOTED = 'pa"ss\\word-quoted-value';
   let starts: string;
 
   beforeEach(async () => {
@@ -250,11 +265,14 @@ describe("ferry mcp serve with a shared stdio server", () => {
   });
 
   afterEach(() => {
-    for (const line of output) expect(line).not.toContain(TOKEN);
+    for (const line of output) {
+      expect(line).not.toContain(TOKEN);
+      expect(line).not.toContain(JSON.stringify(QUOTED).slice(1, -1));
+    }
   });
 
   async function writeServers(command: string): Promise<void> {
-    const shared = { command, args: [join(import.meta.dir, "mcp-stdio-server.ts"), starts], env: { TEST_TOKEN: TOKEN } };
+    const shared = { command, args: [join(import.meta.dir, "mcp-stdio-server.ts"), starts], env: { TEST_TOKEN: TOKEN, TEST_QUOTED: QUOTED } };
     await writeFile(join(home, ".ferry/mcp-gateway/servers.json"), JSON.stringify({ servers: { remote: { url: remote.mcpUrl }, shared } }));
   }
 
@@ -283,6 +301,13 @@ describe("ferry mcp serve with a shared stdio server", () => {
     ]);
     await first.close();
     await second.close();
+  });
+
+  test("takes an env value with a quote and a backslash out of a tool result", async () => {
+    const client = await connect(serve(), "shared");
+
+    expect(await text(client, "quoted")).toBe("value [token]");
+    await client.close();
   });
 
   test("two concurrent calls with the same JSON-RPC id and progress token get their own answers", async () => {
