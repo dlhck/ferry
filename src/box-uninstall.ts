@@ -24,8 +24,10 @@ const BACKUPS = ".ferry/backups";
 const OPERATOR_CONFIG = ".ferry/config.toml";
 const BINARY = ".local/bin/ferry";
 const UNIT_DIRECTORY = ".config/systemd/user";
+/** The MCP gateway files: servers, client key, and tokens. */
+const MCP_GATEWAY = ".ferry/mcp-gateway";
 /** The Ferry files and directories of a box, in the order of removal. The marker goes last, so a failed run leaves a box install. */
-const FERRY_PATHS = [BOX_DIRECTORY, EXPOSED_DIR, STORE, BOX_PROJECTS_RECORD, BINARY, BOX_MARKER];
+const FERRY_PATHS = [BOX_DIRECTORY, EXPOSED_DIR, MCP_GATEWAY, STORE, BOX_PROJECTS_RECORD, BINARY, BOX_MARKER];
 
 /** What Ferry removes from a box. Each path is relative to the box home. */
 export type BoxUninstallPlan = {
@@ -170,7 +172,7 @@ export function boxUninstallLines(plan: BoxUninstallPlan, box: string): string[]
       entry.backup === null ? `Remove the link ~/${entry.path}` : `Remove the link ~/${entry.path} and move ~/${entry.backup} back`,
     ),
     ...(plan.profileBlock ? ["Remove the ferry PATH block of ~/.profile"] : []),
-    ...plan.paths.map((path) => `Remove ~/${path}`),
+    ...plan.paths.map((path) => `Remove ~/${path}${path === MCP_GATEWAY ? ", with the logins of the MCP gateway" : ""}`),
   ];
   return [
     ...(plan.unsavedWork === null ? ["Unsaved work: unavailable"] : boxWorkLines(plan.unsavedWork, box)),

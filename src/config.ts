@@ -40,6 +40,8 @@ export type BoxConfig = {
   readonly projects?: readonly string[];
   /** The systemd `MemoryMax` of each agent that the Paseo daemon starts on the box. A missing key means no limit. */
   readonly agentMemoryMax?: string;
+  /** True when Ferry runs the MCP gateway on the box (`mcp_gateway = true`). A missing key means no gateway. */
+  readonly mcpGateway?: true;
   readonly integrations?: IntegrationsConfig;
   /**
    * Policies by tool id. A policy replaces the `[tools]` policy or the `version` of a `[tools.<id>]` table.
@@ -473,6 +475,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       ...(entry.gitAuth ? { gitAuth: entry.gitAuth } : {}),
       ...(entry.projects ? { projects: entry.projects } : {}),
       ...(entry.agentMemoryMax ? { agentMemoryMax: entry.agentMemoryMax } : {}),
+      ...(entry.mcpGateway ? { mcpGateway: true as const } : {}),
       ...(entry.integrations ? { integrations: entry.integrations } : {}),
       ...(entry.tools ? { tools: entry.tools } : {}),
     };
@@ -494,6 +497,7 @@ type ParsedBox = {
   gitAuth?: GitAuth;
   projects?: string[];
   agentMemoryMax?: string;
+  mcpGateway?: boolean;
   integrations?: Record<string, boolean>;
   tools?: Record<string, ToolPolicy>;
 };
@@ -525,6 +529,11 @@ function readBoxKey(entry: ParsedBox, part: BoxPart, key: string, encoded: strin
       throw new ConfigError(`invalid agent_memory_max in ${section} of ${path}. Use a systemd memory size, such as "6G", "512M", or "50%".`);
     }
     entry.agentMemoryMax = value;
+    return;
+  }
+  if (part === "host" && key === "mcp_gateway") {
+    if (encoded !== "true" && encoded !== "false") throw new ConfigError(`invalid mcp_gateway in ${section} of ${path}. Use true or false.`);
+    entry.mcpGateway = encoded === "true";
     return;
   }
   if (!SECTION_KEYS[part === "host" ? "[host]" : "[integrations]"]?.includes(key)) {
@@ -673,6 +682,7 @@ function boxLines(box: BoxConfig): string[] {
     ...(box.gitAuth !== undefined ? [`git_auth = ${JSON.stringify(box.gitAuth)}`] : []),
     ...(box.projects !== undefined ? [`projects = ${JSON.stringify(box.projects)}`] : []),
     ...(box.agentMemoryMax !== undefined ? [`agent_memory_max = ${JSON.stringify(box.agentMemoryMax)}`] : []),
+    ...(box.mcpGateway ? ["mcp_gateway = true"] : []),
     "",
     ...integrationLines(box.integrations, `box.${box.name}.integrations`),
     ...(tools.length > 0

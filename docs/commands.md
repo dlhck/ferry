@@ -373,6 +373,10 @@ in ferry auth --mcp codex/linear. Ferry forwards the localhost callback port,
 such as 3118 for Claude, for up to 300 seconds. The port must be free on
 this machine.
 
+On a box with mcp_gateway = true, ferry auth --mcp <server> with no provider
+logs in the MCP gateway of the box, as does --mcp gateway/<server>. The
+gateway keeps the token on the box.
+
 Without a provider, Ferry lists the tools and their login: startable,
 manual SSH flow, or off.
 

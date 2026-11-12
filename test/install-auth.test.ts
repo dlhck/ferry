@@ -1191,6 +1191,8 @@ function authDependencies(overrides: {
   readonly readLoginCode?: AuthCommandDependencies["readLoginCode"];
   readonly onInterrupt?: AuthCommandDependencies["onInterrupt"];
   readonly emit?: AuthCommandDependencies["emit"];
+  readonly mcpGateway?: boolean;
+  readonly ferryVersion?: string;
 } = {}): AuthCommandDependencies {
   return {
     tools: BUILTIN_TOOLS,
@@ -1207,6 +1209,8 @@ function authDependencies(overrides: {
     progress: overrides.progress ?? recordProgress(),
     onInterrupt: overrides.onInterrupt ?? (() => () => {}),
     ...(overrides.emit ? { emit: overrides.emit } : {}),
+    mcpGateway: overrides.mcpGateway ?? false,
+    ferryVersion: overrides.ferryVersion ?? "1.2.3",
   };
 }
 
@@ -1385,6 +1389,69 @@ describe("runAuthCommand with --mcp", () => {
         }),
       ),
     ).rejects.toThrow("operator/invalid-provider");
+  });
+
+  describe("on a box with the MCP gateway", () => {
+    /** An AuthStart that records the tools it gets and the MCP login it starts. */
+    function gatewayAuth(calls: string[]) {
+      return (_link: AuthLink, tools: readonly ToolDescriptor[]) => {
+        calls.push(`tools ${tools.filter((tool) => tool.mcp).map((tool) => tool.id).join(",")}`);
+        return {
+          ...noMcp,
+          start: noMcp.startMcp,
+          startMcp: async (tool: string, server: string) => {
+            calls.push(`${tool} ${server}`);
+            return { kind: "already-done" as const, provider: `${tool}/${server}` };
+          },
+        };
+      };
+    }
+
+    for (const mcp of ["linear", "gateway/linear"]) {
+      test(`--mcp ${mcp} with no provider logs in the gateway`, async () => {
+        const calls: string[] = [];
+
+        await runAuthCommand({ mcp }, authDependencies({ mcpGateway: true, createAuthStart: gatewayAuth(calls) }));
+
+        expect(calls).toEqual(["tools claude,codex,cursor,gateway", "gateway linear"]);
+      });
+    }
+
+    test("a provider still logs in the MCP login of that provider", async () => {
+      const calls: string[] = [];
+
+      await runAuthCommand({ mcp: "codex/linear" }, authDependencies({ mcpGateway: true, createAuthStart: gatewayAuth(calls) }));
+
+      expect(calls.at(-1)).toBe("codex linear");
+    });
+
+    test("a box without the gateway does not take --mcp gateway/<server>", async () => {
+      const error = await runAuthCommand({ mcp: "gateway/linear" }, authDependencies({ createAuthStart: gatewayAuth([]) }))
+        .catch((caught: unknown) => caught);
+
+      expect(errorInfo(error).code).toBe("usage");
+    });
+
+    test("a development build refuses the gateway login before Link or AuthStart", async () => {
+      const output: string[] = [];
+
+      await expect(
+        runAuthCommand(
+          { mcp: "linear" },
+          authDependencies({
+            output,
+            mcpGateway: true,
+            ferryVersion: "0.0.0-dev",
+            createLink: () => {
+              throw new Error("unexpected Link");
+            },
+          }),
+        ),
+      ).rejects.toThrow("operator/gateway-unavailable");
+      expect(output).toEqual([
+        "operator/gateway-unavailable: The MCP gateway is not available, because this Ferry is a development build and the box has no Ferry.",
+      ]);
+    });
   });
 
   test("prints a refused server name and forwards nothing", async () => {

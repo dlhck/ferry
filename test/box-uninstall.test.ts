@@ -240,6 +240,32 @@ describe("planBoxUninstall", () => {
   });
 });
 
+describe("box uninstall with the MCP gateway", () => {
+  test("stops and removes the gateway unit and deletes the gateway directory with its logins", async () => {
+    const box = await ferryBox();
+    box.file(".config/systemd/user/ferry-mcp-gateway.service", "[Unit]\n");
+    box.file(".ferry/mcp-gateway/servers.json", '{"servers":{}}\n');
+    box.file(".ferry/mcp-gateway/client-key", "key\n");
+    box.file(".ferry/mcp-gateway/tokens/linear.json", "{}\n");
+
+    const plan = await planBoxUninstall(BUILTIN_HARNESSES, box.link);
+
+    expect(plan.services).toEqual(["ferry-mcp-gateway.service", "ferry-paseo.service"]);
+    expect(plan.paths).toEqual([".ferry/box", ".ferry/exposed", ".ferry/mcp-gateway", ".ferry/store", ".local/bin/ferry", ".ferry/box.json"]);
+    expect(boxUninstallLines(plan, "b")).toContain("Remove ~/.ferry/mcp-gateway, with the logins of the MCP gateway");
+
+    await commitBoxUninstall(plan, box.link);
+
+    expect(box.systemctl()).toEqual([
+      "--user disable --now ferry-mcp-gateway.service",
+      "--user disable --now ferry-paseo.service",
+      "--user daemon-reload",
+    ]);
+    expect(box.exists(".config/systemd/user/ferry-mcp-gateway.service")).toBe(false);
+    expect(box.exists(".ferry/mcp-gateway")).toBe(false);
+  });
+});
+
 describe("commitBoxUninstall", () => {
   test("removes Ferry and leaves no link into the store, and keeps the files of the box user", async () => {
     const box = await ferryBox();

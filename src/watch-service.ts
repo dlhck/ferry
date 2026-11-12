@@ -211,7 +211,7 @@ function launchdService(
 `;
 }
 
-function systemdService(
+export function systemdService(
   service: UserService,
   command: readonly string[],
   environmentPath: string,

@@ -24,6 +24,7 @@ import {
   type GitIdentity,
 } from "./git-identity.ts";
 import { denyRules, MCP_SKIPS, readMcpSources, type DenyRuleDescription } from "./manifest.ts";
+import { DEVELOPMENT_BUILD_REASON, readGatewayStatus } from "./mcp-gateway/service.ts";
 import { noProgress, type Progress } from "./progress.ts";
 import {
   loadRegistry,
@@ -47,7 +48,7 @@ import { checkTools, type ToolStatus } from "./tools/check.ts";
 import { effectivePolicy } from "./tools/resolve.ts";
 import { RealGitRunner, Store, type TipReport } from "./store.ts";
 import { boxChangesCommand } from "./sync.ts";
-import { VERSION } from "./version.ts";
+import { isReleaseVersion, VERSION } from "./version.ts";
 
 const STORE_RELATIVE_PATH = ".ferry/store";
 /** `sudo -n` fails when sudo asks for a password. Only the answer goes to stdout. */
@@ -218,6 +219,17 @@ function boxDependencies(
         });
       },
     },
+    // A development build puts no Ferry on the box, so the box has no gateway and Ferry does not ask it.
+    ...(box.mcpGateway
+      ? {
+          mcpGateway: {
+            read: async () =>
+              isReleaseVersion(resolved.ferryVersion)
+                ? readGatewayStatus(link)
+                : { state: "unavailable" as const, reason: DEVELOPMENT_BUILD_REASON, port: null, servers: [] },
+          },
+        }
+      : {}),
     tools: {
       check: async (online) => [
         ...(await checkTools(registry.tools, box.tools, local, online ? link : null)),
@@ -342,6 +354,7 @@ function boxLines(box: BoxStatus, operator: GitIdentity | null): string[] {
     "",
     "MCP logins:",
     ...mcpLogins(box),
+    ...gatewayLines(box),
     ...integrationLines("Integrations:", box.integrations),
     ...errorLines(box.errors),
   ];
@@ -477,6 +490,31 @@ function mcpLogins(box: BoxStatus): string[] {
     const [tool, server] = entry.split("/");
     return `  ${entry}: LOGIN REQUIRED, run ferry auth ${tool} --mcp ${server}`;
   });
+}
+
+/** The gateway state, then one line for each server. Only for a box with `mcp_gateway = true`. */
+function gatewayLines(box: BoxStatus): string[] {
+  const gateway = box.mcpGateway;
+  if (gateway === undefined) return [];
+  const flag = `--box ${box.name}`;
+  const state = !box.link.online
+    ? "unavailable while host is offline"
+    : gateway.state === null
+      ? "unavailable"
+      : gateway.state === "running"
+        ? `RUNNING${gateway.port === null ? "" : ` on 127.0.0.1:${gateway.port}`}`
+        : gateway.state === "stopped"
+          ? `STOPPED, run ferry sync ${flag}`
+          : `NOT AVAILABLE, ${gateway.reason}`;
+  return [
+    "",
+    `MCP gateway: ${state}`,
+    ...gateway.servers.map((server) =>
+      server.state === "ready"
+        ? `  ${server.name}: ready`
+        : `  ${server.name}: LOGIN REQUIRED, run ferry auth --mcp ${server.name} ${flag}`,
+    ),
+  ];
 }
 
 function integrationLines(title: string, statuses: BoxStatus["integrations"]): string[] {

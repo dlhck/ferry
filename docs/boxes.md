@@ -67,6 +67,31 @@ To give the same limit to an agent that you start from a shell or from a Paseo t
 systemd-run --user --scope -p MemoryMax=6G -- claude
 ```
 
+### An MCP gateway on the box
+
+`mcp_gateway = true` in `[box.<name>]` runs the Ferry MCP gateway on the box. The key is optional and off by default. Without it, the box does not change.
+
+```toml
+[box.b]
+transport = "ssh"
+destination = "user@box-b.example"
+mcp_gateway = true
+```
+
+The gateway is the only OAuth client of each carried remote MCP server on the box. It keeps one login for each server, in place of one login for each harness. In this version, the harnesses on the box still use their own entries. A later version points them at the gateway.
+
+On each sync of the box, Ferry does these steps:
+
+1. It writes `~/.ferry/mcp-gateway/servers.json` with the name and the URL of each carried remote server. The file gets no header and no `env` value. The gateway supports Streamable HTTP only, so Ferry skips an SSE server and prints a warning.
+2. It makes the client key `~/.ferry/mcp-gateway/client-key` when it is missing. A harness sends this key to the gateway. The key never leaves the box.
+3. It installs and starts the user service `ferry-mcp-gateway.service`, which runs `ferry mcp serve` on `127.0.0.1:47820`.
+
+The gateway runs the Ferry of the box. A development build of Ferry puts no Ferry on the box, so it gets no gateway. Sync prints a warning, and `ferry status` shows `MCP gateway: NOT AVAILABLE`.
+
+Log in the gateway to a server with `ferry auth --mcp <server> --box <name>`. The token stays on the box, in `~/.ferry/mcp-gateway/tokens/`, with mode 0600. `ferry status` shows the gateway state and the login state of each server. `ferry status --brief` shows one `gateway/<server>` item for each server that needs a login, and one `mcp-gateway` item when the service does not run.
+
+When you remove the key, the next sync stops and removes the service and deletes `~/.ferry/mcp-gateway/`, with the tokens.
+
 ## Create a box at Hetzner Cloud
 
 `ferry box create <name>` creates a machine in your Hetzner Cloud project, with your API token. Ferry does not host machines. The machine costs money until you run `ferry box destroy <name>`.
@@ -243,13 +268,13 @@ On the box, `ferry expose -- <command>` runs a dev server and announces its port
 1. It stops and removes each `ferry-*.service` user service, such as `ferry-paseo.service`. A stopped service stops its agents.
 2. It removes each skill link, instruction file link, and root link that points into the Ferry checkout or to `~/.ferry/box/AGENTS.md`. When `ferry sync --force` moved a file of yours to `~/.ferry/backups`, Ferry moves the newest backup of that path back.
 3. It removes the ferry PATH block of `~/.profile`.
-4. It removes `~/.ferry/box`, `~/.ferry/exposed`, the checkout `~/.ferry/store`, the move record `~/.ferry/projects`, the Ferry binary `~/.local/bin/ferry`, and the marker `~/.ferry/box.json`.
+4. It removes `~/.ferry/box`, `~/.ferry/exposed`, the [MCP gateway](#an-mcp-gateway-on-the-box) files and logins in `~/.ferry/mcp-gateway`, the checkout `~/.ferry/store`, the move record `~/.ferry/projects`, the Ferry binary `~/.local/bin/ferry`, and the marker `~/.ferry/box.json`.
 
 Then Ferry removes the box from the config.
 
 ### What stays on the box
 
-- The logins and credentials, and the SSH keys
+- The logins and credentials, except the MCP gateway logins, and the SSH keys
 - The project directories
 - `~/.paseo`
 - The tools that Ferry installed: `gh`, `jq`, the agent CLIs, the Paseo CLI, and the tools of the config

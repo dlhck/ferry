@@ -28,6 +28,8 @@ export type ResolvedBox = {
   readonly projects: readonly string[];
   /** `agent_memory_max` of the box, or null for no limit. */
   readonly agentMemoryMax: string | null;
+  /** True when `mcp_gateway = true` in `[box.<name>]`. */
+  readonly mcpGateway: boolean;
   /** `[integrations]`, with the keys of `[box.<name>.integrations]` on top. */
   readonly integrations: IntegrationsConfig;
   /**
@@ -112,6 +114,7 @@ function resolveBox(config: PartialOperatorConfig, box: BoxConfig): ResolvedBox 
     gitAuth: box.gitAuth ?? "agent",
     projects: box.projects ?? [],
     agentMemoryMax: box.agentMemoryMax ?? null,
+    mcpGateway: box.mcpGateway === true,
     integrations: { ...config.integrations, ...box.integrations },
     tools,
   };

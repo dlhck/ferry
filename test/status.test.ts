@@ -1167,3 +1167,91 @@ describe("brief status", () => {
     ]);
   });
 });
+
+describe("MCP gateway status", () => {
+  const checkedAt = new Date("2026-11-11T10:00:00.000Z");
+  const gateway = (state: "running" | "stopped") => ({
+    read: async () => ({
+      state,
+      reason: null,
+      port: state === "running" ? 47820 : null,
+      servers: [{ name: "linear", state: "login-required" as const }, { name: "docs", state: "ready" as const }],
+    }),
+  });
+
+  test("the brief report has one gateway/<server> item for each server that needs a login, and an mcp-gateway item when the service stops", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const report = await composeBriefStatus([box(calls, { name: "a", mcpGateway: gateway("stopped") })], checkedAt);
+
+    const issues = report.boxes[0]!.issues.filter((issue) => issue.name.startsWith("gateway/") || issue.kind === "mcp-gateway");
+    expect(issues).toEqual([
+      {
+        kind: "mcp-gateway",
+        name: "mcp-gateway",
+        state: "stopped",
+        summary: "mcp-gateway: not running",
+        message:
+          "The MCP gateway service ferry-mcp-gateway.service does not run on the box. A sync starts it. journalctl --user -u ferry-mcp-gateway.service on the box shows why it stopped.",
+        command: "ferry sync --box a",
+      },
+      {
+        kind: "mcp-login",
+        name: "gateway/linear",
+        state: "login-required",
+        summary: "gateway/linear: login needed",
+        message: "The MCP gateway on the box needs a login for linear.",
+        command: "ferry auth --mcp linear --box a",
+      },
+    ]);
+  });
+
+  test("a running gateway gives no mcp-gateway item, and an unavailable gateway gives no item", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const unavailable = { read: async () => ({ state: "unavailable" as const, reason: "this Ferry is a development build, so the box has no Ferry", port: null, servers: [] }) };
+    const report = await composeBriefStatus(
+      [box(calls, { name: "a", mcpGateway: gateway("running") }), box(calls, { name: "b", mcpGateway: unavailable })],
+      checkedAt,
+    );
+
+    expect(report.boxes[0]!.issues.map((issue) => issue.name)).toContain("gateway/linear");
+    expect(report.boxes[0]!.issues.some((issue) => issue.kind === "mcp-gateway")).toBe(false);
+    expect(report.boxes[1]!.issues.some((issue) => issue.kind === "mcp-gateway" || issue.name.startsWith("gateway/"))).toBe(false);
+  });
+
+  test("a failed gateway check is an issue", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const failing = { read: async () => { throw new Error("ferry mcp list on the box gave no valid JSON"); } };
+    const report = await composeBriefStatus([box(calls, { name: "a", mcpGateway: failing })], checkedAt);
+
+    expect(report.boxes[0]!.issues).toContainEqual(expect.objectContaining({ kind: "check-failed", name: "MCP gateway" }));
+  });
+
+  test("the full report has the gateway state and the login state of each server", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const report = await composeStatus(dependencies(calls, { mcpGateway: gateway("running") }));
+
+    expect(report.boxes[0]!.mcpGateway).toEqual({
+      state: "running",
+      reason: null,
+      port: 47820,
+      servers: [{ name: "linear", state: "login-required" }, { name: "docs", state: "ready" }],
+      error: null,
+    });
+  });
+
+  test("an offline box skips the gateway check, and a box without the key has no gateway field", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const reads: string[] = [];
+    const offlineReport = await composeStatus(
+      dependencies(calls, {
+        link: { ...box(calls).link, probe: async () => offline },
+        mcpGateway: { read: async () => { reads.push("gateway"); return gateway("running").read(); } },
+      }),
+    );
+    const plain = await composeStatus(dependencies(calls));
+
+    expect(offlineReport.boxes[0]!.mcpGateway).toEqual({ state: null, reason: null, port: null, servers: [], error: null });
+    expect(reads).toEqual([]);
+    expect("mcpGateway" in plain.boxes[0]!).toBe(false);
+  });
+});
