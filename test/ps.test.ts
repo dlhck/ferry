@@ -48,6 +48,12 @@ describe("ferry ps", () => {
     expect(agents.map((agent) => agent.project)).toEqual(["/home/user/[token]/app", null]);
   });
 
+  test("a project path loses its control characters", () => {
+    const agents = parsePs("10 1 100 0.0 5 claude /home/user/\u001b]0;title\u0007app\n", NOW);
+
+    expect(agents.map((agent) => agent.project)).toEqual(["/home/user/?]0;title?app"]);
+  });
+
   test("the probe matches a program name and an interpreter script, and prints no command line", () => {
     if (!existsSync("/proc/self/cwd")) return;
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "ferry-ps-")));

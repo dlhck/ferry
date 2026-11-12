@@ -217,6 +217,8 @@ describe("ferry usage", () => {
     expect(readAnswer("Usage: ferry [options]")).toStartWith("the Ferry on the box cannot count tokens.");
     const failed = JSON.stringify({ ok: false, error: { code: "internal", message: `read ${TOKEN}` } });
     expect(readAnswer(failed)).not.toContain(TOKEN);
+    const escape = JSON.stringify({ ok: false, error: { code: "internal", message: "read \u001b[2Jfile" } });
+    expect(readAnswer(escape)).toBe("the Ferry on the box failed: read ?[2Jfile");
   });
 
   test("an offline box and a box without Ferry get their reason, and the other boxes still run", async () => {

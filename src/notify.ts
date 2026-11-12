@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { record } from "./box-settings.ts";
 import { redactTokens, redactUrlCredentials, type SeedSettings } from "./manifest.ts";
+import { hasControlCharacter } from "./progress.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
 
 /** The directory of the events on the box, relative to the home. */
@@ -125,7 +126,7 @@ function hookCwd(stdin: string): string | null {
 }
 
 function validProject(value: string): boolean {
-  return value.startsWith("/") && value.length <= MAX_PROJECT_LENGTH && !/[\u0000-\u001f\u007f]/.test(value);
+  return value.startsWith("/") && value.length <= MAX_PROJECT_LENGTH && !hasControlCharacter(value);
 }
 
 function isKind(value: string): value is EventKind {
