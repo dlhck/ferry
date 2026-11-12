@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   EVENTS_DIR,
   mergeEvents,
   NOTIFY_HOOKS,
+  NOTIFY_PROBE_COMMAND,
   NotifyError,
   parseBoxEvent,
   runNotify,
@@ -150,7 +151,7 @@ describe("withNotifyHooks", () => {
         Notification: [NOTIFY_HOOKS.Notification],
       },
     });
-    expect(JSON.stringify(NOTIFY_HOOKS)).toContain('\\"$HOME/.local/bin/ferry\\" notify claude turn-ended');
+    expect(JSON.stringify(NOTIFY_HOOKS)).toContain('\\"$HOME/.local/bin/ferry\\" notify claude turn-ended >/dev/null 2>&1 || true');
     // The settings of the operator stay the same.
     expect(decode(claude.bytes).hooks.Notification).toBeUndefined();
   });
@@ -158,5 +159,45 @@ describe("withNotifyHooks", () => {
   test("returns null without the Claude settings or with Claude off for the box", () => {
     expect(withNotifyHooks([], BUILTIN_HARNESSES)).toBeNull();
     expect(withNotifyHooks([claude], BUILTIN_HARNESSES.filter((harness) => harness.id !== "claude"))).toBeNull();
+  });
+});
+
+describe("the hooks on a box", () => {
+  /** A box home with `~/.local/bin/ferry` as the shell script `script`, or without it. */
+  function box(script: string | null): string {
+    const dir = home();
+    if (script !== null) {
+      mkdirSync(join(dir, ".local/bin"), { recursive: true });
+      writeFileSync(join(dir, ".local/bin/ferry"), `#!/bin/sh\n${script}`);
+      chmodSync(join(dir, ".local/bin/ferry"), 0o755);
+    }
+    return dir;
+  }
+  const sh = (dir: string, command: string) => {
+    const result = Bun.spawnSync(["/bin/sh", "-c", command], { cwd: dir, env: { ...Bun.env, HOME: dir }, stdin: "ignore" });
+    return { exitCode: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+  };
+  const stop = (NOTIFY_HOOKS.Stop!.hooks as { command: string }[])[0]!.command;
+  // An old Ferry has no notify command, so it prints a usage error and exits with 1.
+  const OLD = `echo "error: too many arguments" >&2\nexit 1\n`;
+  const NEW = `echo "$*" >> "$HOME/calls"\necho '{"schemaVersion":1,"command":"notify","ok":false}'\nexit 1\n`;
+
+  test("the hook command runs ferry notify of the box install", () => {
+    const dir = box(NEW);
+    expect(sh(dir, stop)).toEqual({ exitCode: 0, stdout: "", stderr: "" });
+    expect(readFileSync(join(dir, "calls"), "utf8")).toBe("notify claude turn-ended\n");
+  });
+
+  test("the hook command does nothing without Ferry or with a Ferry without the notify command", () => {
+    for (const script of [null, OLD]) expect(sh(box(script), stop)).toEqual({ exitCode: 0, stdout: "", stderr: "" });
+  });
+
+  test("the probe names a missing Ferry and a Ferry without the notify command", () => {
+    expect(sh(box(null), NOTIFY_PROBE_COMMAND).stdout).toBe("missing\n");
+    expect(sh(box(OLD), NOTIFY_PROBE_COMMAND).stdout).toBe("old\n");
+    const dir = box(NEW);
+    expect(sh(dir, NOTIFY_PROBE_COMMAND).stdout).toBe("");
+    // The probe uses a harness that is not valid, so it writes no event.
+    expect(readFileSync(join(dir, "calls"), "utf8")).toBe("--json notify - turn-ended\n");
   });
 });

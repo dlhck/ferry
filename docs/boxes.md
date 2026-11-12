@@ -306,10 +306,11 @@ On the box, `ferry expose -- <command>` runs a dev server and announces its port
 
 `ferry box remove <name> --uninstall` removes Ferry from the box first. Run it with `--dry-run` to see the plan. Ferry connects to the box, prints the projects with [unsaved work](status.md#unsaved-work) and the plan, and asks you to type the box name. Then it does these steps on the box:
 
-1. It stops and removes each `ferry-*.service` user service, such as `ferry-paseo.service`. A stopped service stops its agents.
-2. It removes each skill link, instruction file link, and root link that points into the Ferry checkout or to `~/.ferry/box/AGENTS.md`. When `ferry sync --force` moved a file of yours to `~/.ferry/backups`, Ferry moves the newest backup of that path back.
-3. It removes the ferry PATH block of `~/.profile`.
-4. It removes `~/.ferry/box`, `~/.ferry/exposed`, the [MCP gateway](#an-mcp-gateway-on-the-box) files and logins in `~/.ferry/mcp-gateway`, the checkout `~/.ferry/store`, the move record `~/.ferry/projects`, the Ferry binary `~/.local/bin/ferry`, and the marker `~/.ferry/box.json`.
+1. It removes the hooks of [`ferry notify`](status.md#agent-notifications) from `~/.claude/settings.json`. The other hooks stay. Without jq on the box, the hooks stay, and they do nothing without Ferry.
+2. It stops and removes each `ferry-*.service` user service, such as `ferry-paseo.service`. A stopped service stops its agents.
+3. It removes each skill link, instruction file link, and root link that points into the Ferry checkout or to `~/.ferry/box/AGENTS.md`. When `ferry sync --force` moved a file of yours to `~/.ferry/backups`, Ferry moves the newest backup of that path back.
+4. It removes the ferry PATH block of `~/.profile`.
+5. It removes `~/.ferry/box`, `~/.ferry/exposed`, the agent events in `~/.ferry/events`, the [MCP gateway](#an-mcp-gateway-on-the-box) files and logins in `~/.ferry/mcp-gateway`, the checkout `~/.ferry/store`, the move record `~/.ferry/projects`, the Ferry binary `~/.local/bin/ferry`, and the marker `~/.ferry/box.json`.
 
 Then Ferry removes the box from the config.
 

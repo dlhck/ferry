@@ -1,6 +1,6 @@
 /** `ferry box list`, `ferry box add`, `ferry box remove`, and `ferry box default`. */
 
-import { boxUninstallLines, commitBoxUninstall, hasMcpGateway, planBoxUninstall, type BoxUninstallPlan } from "./box-uninstall.ts";
+import { boxUninstallLines, commitBoxUninstall, hasMcpGateway, planBoxUninstall, removeNotifyHooks, type BoxUninstallPlan } from "./box-uninstall.ts";
 import { gatewayCleanupCommand, gatewayCleanupLines } from "./box-mcp.ts";
 import { hasNoBox, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import {
@@ -303,6 +303,10 @@ async function uninstallBox(
       );
     });
     for (const line of gatewayCleanupLines(output)) dependencies.writeLine(line);
+  }
+  if (plan.notifyHooks.length > 0) {
+    const lines = await step(dependencies.progress, "Removing the hooks of ferry notify", () => removeNotifyHooks(plan, link));
+    for (const line of lines) dependencies.writeLine(line);
   }
   const remaining = await step(dependencies.progress, "Removing Ferry from the box", () => commitBoxUninstall(plan, link)).catch(
     (cause) => {
