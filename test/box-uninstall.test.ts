@@ -537,6 +537,33 @@ describe("ferry box remove --uninstall", () => {
     expect(JSON.stringify({ commands: box.commands, lines })).not.toContain(KEY);
   });
 
+  test("with the MCP gateway, keeps Ferry and the gateway files on the box when a harness entry cannot change back", async () => {
+    const KEY = "k".repeat(64);
+    const SECRET = `ghp_${"s".repeat(36)}`;
+    const box = await ferryBox();
+    const bin = join(dirname(box.home), "bin");
+    // A claude that cannot add the direct entry again, as with a timeout.
+    writeFileSync(join(bin, "claude"), '#!/bin/sh\ncase "$2" in add-json) exit 1;; esac\n', { mode: 0o755 });
+    writeFileSync(join(bin, "codex"), "#!/bin/sh\nprintf '[]\\n'\n", { mode: 0o755 });
+    box.file(".config/systemd/user/ferry-mcp-gateway.service", "[Unit]\n");
+    box.file(".ferry/mcp-gateway/servers.json", JSON.stringify({ servers: { github: { command: "github-mcp", args: [], env: { GITHUB_TOKEN: SECRET } } } }));
+    box.file(".ferry/mcp-gateway/client-key", `${KEY}\n`);
+    const header = { Authorization: `Bearer ${KEY}` };
+    box.file(".claude.json", JSON.stringify({ mcpServers: { github: { type: "http", url: "http://127.0.0.1:47820/mcp/github", headers: header } } }));
+    const { deps, lines, boxes } = operator(box);
+
+    const error = await runBoxUninstall({ name: "b", yes: true, dryRun: false }, deps).catch((cause: Error) => cause);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toStartWith("Ferry could not change all MCP entries of the gateway on box b back. Ferry did not remove Ferry from the box.");
+    expect(lines).toContain("could not change claude MCP server github on the box, which points at the MCP gateway");
+    expect(JSON.parse(box.read(".ferry/mcp-gateway/servers.json")).servers.github.env).toEqual({ GITHUB_TOKEN: SECRET });
+    expect(box.exists(".config/systemd/user/ferry-mcp-gateway.service")).toBe(true);
+    expect(box.exists(".ferry/box.json")).toBe(true);
+    expect(boxes()).toContain("b");
+    for (const secret of [KEY, SECRET]) expect(JSON.stringify({ commands: box.commands, lines, error: String(error) })).not.toContain(secret);
+  });
+
   test("asks for the box name after the plan, removes Ferry from the box, then removes the box from the config", async () => {
     const box = await ferryBox();
     const progress = recordProgress();

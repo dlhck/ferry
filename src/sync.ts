@@ -38,7 +38,7 @@ import { openStore as openSnapshotStore, skillChanged, type PublishResult } from
 import { adoptPublishedSkills } from "./adopt.ts";
 import { installBoxPlugins, mergeBoxSettings } from "./box-settings.ts";
 import { NOTIFY_PROBE_COMMAND, withNotifyHooks } from "./notify.ts";
-import { gatewayCleanupCommand, gatewayCleanupLines, registerBoxMcp, sharedEnvScript } from "./box-mcp.ts";
+import { gatewayCleanupCommand, gatewayCleanupLines, registerBoxMcp, sharedEnvScript, sharedRestoreCommand } from "./box-mcp.ts";
 import { disableGateway, enableGateway, gatewayServers, MCP_GATEWAY_SERVICE } from "./mcp-gateway/service.ts";
 import { isReleaseVersion, VERSION } from "./version.ts";
 import {
@@ -711,12 +711,22 @@ async function applyOnBox(context: {
               // The entries of a server that is no longer shared get their env values back before servers.json changes.
               cleanup: gatewayCleanupCommand(harnesses, tools, remoteHome, seed.mcp, false, shared),
               envScript: sharedEnvScript(harnesses, tools, remoteHome, seed.mcp, shared),
+              // servers.json keeps the env values of a server that is no longer shared until its entries have them.
+              restore: sharedRestoreCommand(harnesses, tools, remoteHome, seed.mcp, shared),
             }),
-          (gateway) => (gateway.state === "missing" ? "no Ferry on the box" : `${plural(gateway.servers, "server")}, ${gateway.state}`),
+          (gateway) =>
+            gateway.state === "missing"
+              ? "no Ferry on the box"
+              : gateway.state === "old"
+                ? "the Ferry of the box has no MCP gateway"
+                : `${plural(gateway.servers, "server")}, ${gateway.state}`,
         );
         if (started.state === "missing") {
           gateway = undefined;
           warn(`Warning: The MCP gateway needs Ferry on the box. Run ferry install --box ${box.name}.`);
+        } else if (started.state === "old") {
+          gateway = undefined;
+          warn(`Warning: The Ferry of the box has no MCP gateway, so the MCP entries stay direct. Run ferry update --box ${box.name}, then ferry sync --box ${box.name}.`);
         } else {
           for (const line of gatewayCleanupLines(started.output)) warn(`Box MCP: ${line}`);
           if (!started.sharing) {
@@ -784,9 +794,20 @@ async function applyOnBox(context: {
   if (!box.mcpGateway) {
     try {
       // No server is shared now, so each gateway entry of a stdio server gets its direct entry and its env values back.
-      const { removed, output } = await disableGateway(link, gatewayCleanupCommand(harnesses, tools, required(plan.remoteHome), seed.mcp, false, []));
+      const remoteHome = required(plan.remoteHome);
+      const { removed, kept, output } = await disableGateway(
+        link,
+        gatewayCleanupCommand(harnesses, tools, remoteHome, seed.mcp, false, []),
+        // An entry that lost its env values in an earlier failed sync gets them back before servers.json goes.
+        sharedRestoreCommand(harnesses, tools, remoteHome, seed.mcp),
+      );
       for (const line of gatewayCleanupLines(output)) warn(`Box MCP: ${line}`);
       if (removed) warn("Removed the MCP gateway, its unit, and its logins from the box.");
+      if (kept) {
+        warn(
+          "Warning: Ferry could not change all MCP entries of the gateway back, so it kept the MCP gateway and ~/.ferry/mcp-gateway on the box. servers.json there has the env values of the shared servers. The next sync tries again.",
+        );
+      }
     } catch (cause) {
       warn(`Warning: Ferry could not remove the MCP gateway: ${messageOf(cause)}. The core sync is complete.`);
     }

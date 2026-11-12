@@ -30,6 +30,8 @@ import { SERVER_NAME } from "./store.ts";
 const BOX_FERRY = '"$HOME/.local/bin/ferry"';
 const GATEWAY_DIR = '"$HOME/.ferry/mcp-gateway"';
 const UNIT_FILE = '"$HOME/.config/systemd/user/ferry-mcp-gateway.service"';
+/** Prints `old` and exits when the Ferry of the box has no gateway. A Ferry before the gateway prints the general help for `mcp serve --help`. */
+const NEEDS_MCP_SERVE = `${BOX_FERRY} mcp serve --help 2>/dev/null | grep -q '^Usage: ferry mcp serve' || { echo old; exit 0; }`;
 
 export const MCP_GATEWAY_SERVICE: UserService = {
   command: "mcp serve",
@@ -141,15 +143,26 @@ export function gatewayUnit(remoteHome: string, pathDirs: readonly string[]): st
  * server keeps the `env` of the old file when it has all keys, else gets the
  * `env` of the first harness entry with all keys, else the first `env` that
  * the box has.
+ *
+ * `$out` is the output of the cleanup and restore scripts. A stdio server of
+ * the old file that Ferry no longer shares stays in the file with
+ * `leaving: true` and its `env`, when `$out` has a failure for it (`F` or
+ * `M`), or when the box could not check the entries (`J` or `S`). The gateway
+ * does not serve such a server. The next sync drops it after its harness
+ * entries have their `env` values.
  */
 const MERGE_SERVERS = [
   "def full($k): type == \"object\" and ([$k[] as $x | .[$x] | type == \"string\" and . != \"\"] | all);",
   "$new[0] as $n | (($old[0] // {}).servers // {}) as $o | [inputs] as $h |",
-  "{servers: ($n.servers | with_entries(if (.value | has(\"command\")) then",
+  "($out | split(\"\\n\") | map(split(\"\\t\"))) as $l | ($l | any(.[0] == \"J\" or .[0] == \"S\")) as $all |",
+  "[$l[] | select(.[0] == \"F\" or .[0] == \"M\") | .[2]] as $failed |",
+  "{servers: (($n.servers | with_entries(if (.value | has(\"command\")) then",
   "  .key as $s | ($n.envKeys[$s] // []) as $k |",
   "  ([($o[$s] | if type == \"object\" and has(\"command\") then .env else null end)] + [$h[] | select(.n == $s) | .env]) as $c |",
   "  .value.env = (([$c[] | select(full($k))] + [$c[] | select(type == \"object\")] + [{}])[0] | with_entries(select(.value | type == \"string\")))",
-  "else . end))}",
+  "else . end)) +",
+  "  ($o | with_entries(select((.value | type == \"object\" and has(\"command\")) and (.key as $s | $n.servers | has($s) | not)",
+  "    and ($all or (.key as $s | $failed | any(. == $s)))) | .value += {leaving: true})))}",
 ].join("\n");
 
 /**
@@ -160,19 +173,23 @@ const MERGE_SERVERS = [
  * Stdin has two lines: `servers.json` without the shared servers, then
  * `servers.json` with them and their env key names. `cleanup` runs first,
  * while the old `servers.json` is there, so that the entries of a server
- * that is no longer shared get their `env` values back. Then jq builds the
+ * that is no longer shared get their `env` values back. `restore` then
+ * checks these entries (see `sharedRestoreCommand`). Then jq builds the
  * new file with the `env` values of the old file and of `envScript`. Without
  * jq, the box writes the first line, but keeps an old file that has a stdio
  * server, and prints `nojq` when Ferry asked to share a server.
  *
- * The command prints `missing` when the box has no Ferry, else the output of
- * `cleanup`, `unit` when the unit changed, then `running` or `stopped`. It
- * never prints the key or an `env` value.
+ * The command prints `missing` when the box has no Ferry, `old` when the
+ * Ferry of the box has no `ferry mcp serve`, else the output of `cleanup`,
+ * `unit` when the unit changed, then `running` or `stopped`. It never prints
+ * the key or an `env` value.
  */
-export function enableGatewayCommand(unit: string, cleanup: string | null = null, envScript = ":"): string {
+export function enableGatewayCommand(unit: string, cleanup: string | null = null, envScript = ":", restore: string | null = null): string {
   const name = MCP_GATEWAY_SERVICE.unit;
+  const scripts = [cleanup, restore].filter((script) => script !== null);
   return [
     `[ -f "$HOME/.ferry/box.json" ] && [ -x ${BOX_FERRY} ] || { echo missing; exit 0; }`,
+    NEEDS_MCP_SERVE,
     `d=${GATEWAY_DIR}`,
     `u=${UNIT_FILE}`,
     'mkdir -p "${u%/*}" || exit 1',
@@ -181,11 +198,11 @@ export function enableGatewayCommand(unit: string, cleanup: string | null = null
     "umask 077",
     'mkdir -p "$d" && chmod 700 "$d" || exit 1',
     'IFS= read -r direct && IFS= read -r shared || exit 1',
-    ...(cleanup === null ? [] : [cleanup]),
+    ...(scripts.length === 0 ? ["o="] : [`o=$(\n${scripts.join("\n")}\n)`, `[ -z "$o" ] || printf '%s\\n' "$o"`]),
     `if command -v jq >/dev/null 2>&1; then`,
     `  printf '%s\\n' "$shared" > "$d/servers.json.new" || exit 1`,
     `  [ -f "$d/servers.json" ] || printf '{}\\n' > "$d/servers.json" || exit 1`,
-    `  { ${envScript}\n} </dev/null | jq -n --slurpfile new "$d/servers.json.new" --slurpfile old "$d/servers.json" ${quoteShell(MERGE_SERVERS)} > "$d/servers.json.tmp" || { rm -f "$d/servers.json.new" "$d/servers.json.tmp"; exit 1; }`,
+    `  { ${envScript}\n} </dev/null | jq -n --slurpfile new "$d/servers.json.new" --slurpfile old "$d/servers.json" --arg out "$o" ${quoteShell(MERGE_SERVERS)} > "$d/servers.json.tmp" || { rm -f "$d/servers.json.new" "$d/servers.json.tmp"; exit 1; }`,
     `  rm -f "$d/servers.json.new"`,
     `else`,
     `  [ "$direct" = "$shared" ] || echo nojq`,
@@ -208,18 +225,33 @@ export function enableGatewayCommand(unit: string, cleanup: string | null = null
 }
 
 /**
- * Run `cleanup` first, which changes the harness entries of the gateway. Then
- * stop and remove the unit and delete the gateway directory, with the tokens
- * and the client key. The command prints the output of `cleanup`, then
+ * Run `cleanup` first, which changes the harness entries of the gateway, then
+ * `restore`, which gives each harness entry of a shared server its `env`
+ * values back when it lacks them (see `sharedRestoreCommand`). Then stop and
+ * remove the unit and delete the gateway directory, with the tokens and the
+ * client key. The command prints the output of `cleanup` and `restore`, then
  * `removed` when it removed something. It prints nothing on a box without
- * the gateway, and then it does not run `cleanup`.
+ * the gateway, and then it does not run `cleanup` or `restore`.
+ *
+ * When `cleanup` or `restore` prints a failure (`F`, `M`, `J`, or `S`), the
+ * command keeps the unit and the directory and prints `kept`. `servers.json`
+ * can be the only copy of the `env` values of a shared server, and an entry
+ * that still points at the gateway needs the running gateway. The next sync
+ * tries again.
  */
-export function disableGatewayCommand(cleanup: string | null): string {
+export function disableGatewayCommand(cleanup: string | null, restore: string | null = null): string {
+  const scripts = [cleanup, restore].filter((script) => script !== null);
   return [
     `d=${GATEWAY_DIR}`,
     `u=${UNIT_FILE}`,
     '[ -e "$u" ] || [ -e "$d" ] || exit 0',
-    ...(cleanup === null ? [] : [cleanup]),
+    ...(scripts.length === 0
+      ? []
+      : [
+          `o=$(\n${scripts.join("\n")}\n)`,
+          `[ -z "$o" ] || printf '%s\\n' "$o"`,
+          `if printf '%s\\n' "$o" | grep -q "$(printf '^[FMJS]\\t')"; then echo kept; exit 0; fi`,
+        ]),
     `systemctl --user disable --now ${MCP_GATEWAY_SERVICE.unit} >/dev/null 2>&1`,
     'rm -f "$u" || exit 1',
     "systemctl --user daemon-reload >/dev/null 2>&1",
@@ -231,9 +263,10 @@ export function disableGatewayCommand(cleanup: string | null): string {
 /**
  * The command that `ferry update` runs after it changes the Ferry binary of a
  * box with the gateway, so that the gateway runs the new binary. A stopped
- * service stays stopped, and the next sync starts it.
+ * service stays stopped, and the next sync starts it. A box without the unit,
+ * such as a box that updates from a Ferry before the gateway, has nothing to restart.
  */
-export const RESTART_GATEWAY_COMMAND = `systemctl --user try-restart ${MCP_GATEWAY_SERVICE.unit}`;
+export const RESTART_GATEWAY_COMMAND = `{ [ ! -f ${UNIT_FILE} ] || systemctl --user try-restart ${MCP_GATEWAY_SERVICE.unit}; }`;
 
 /**
  * `sharing` is false when the box could not copy the `env` values of the
@@ -242,6 +275,7 @@ export const RESTART_GATEWAY_COMMAND = `systemctl --user try-restart ${MCP_GATEW
  */
 export type GatewaySyncResult =
   | { readonly state: "missing" }
+  | { readonly state: "old" }
   | {
       readonly state: "running" | "stopped";
       readonly servers: number;
@@ -252,14 +286,19 @@ export type GatewaySyncResult =
 
 /**
  * Write the gateway files on the box and start the service. `envKeys` has
- * the env key names of each shared stdio server of `servers`. `cleanup` and
- * `envScript` are box scripts: see `enableGatewayCommand`.
+ * the env key names of each shared stdio server of `servers`. `cleanup`,
+ * `envScript`, and `restore` are box scripts: see `enableGatewayCommand`.
  */
 export async function enableGateway(
   link: GatewayLink,
   remoteHome: string,
   servers: Readonly<Record<string, GatewayServerEntry>>,
-  shared: { readonly envKeys: Readonly<Record<string, readonly string[]>>; readonly cleanup: string | null; readonly envScript: string } = {
+  shared: {
+    readonly envKeys: Readonly<Record<string, readonly string[]>>;
+    readonly cleanup: string | null;
+    readonly envScript: string;
+    readonly restore?: string | null;
+  } = {
     envKeys: {},
     cleanup: null,
     envScript: ":",
@@ -267,12 +306,13 @@ export async function enableGateway(
 ): Promise<GatewaySyncResult> {
   const direct = Object.fromEntries(Object.entries(servers).filter(([, server]) => "url" in server));
   const full = Object.keys(shared.envKeys).length > 0 ? { servers, envKeys: shared.envKeys } : { servers: direct };
-  const result = await link.run(enableGatewayCommand(gatewayUnit(remoteHome, linkPathDirs(link)), shared.cleanup, shared.envScript), {
+  const result = await link.run(enableGatewayCommand(gatewayUnit(remoteHome, linkPathDirs(link)), shared.cleanup, shared.envScript, shared.restore ?? null), {
     input: new TextEncoder().encode(`${JSON.stringify({ servers: direct })}\n${JSON.stringify(full)}\n`),
   });
   if (!result.ok) throw new Error(`${result.error.origin}/${result.error.code}: ${result.error.message}`);
   const lines = result.stdout.split("\n").map((line) => line.trim());
   if (lines.includes("missing")) return { state: "missing" };
+  if (lines.includes("old")) return { state: "old" };
   return {
     state: lines.includes("running") ? "running" : "stopped",
     servers: Object.keys(servers).length,
@@ -283,14 +323,24 @@ export async function enableGateway(
 }
 
 /**
- * Remove the gateway from the box, after `cleanup`. `removed` is true when the
- * box had the gateway. `output` has the other output lines, from `cleanup`.
+ * Remove the gateway from the box, after `cleanup` and `restore`. `removed`
+ * is true when the box had the gateway. `kept` is true when `cleanup` or
+ * `restore` failed, so the box keeps the gateway. `output` has the other
+ * output lines, from `cleanup` and `restore`.
  */
-export async function disableGateway(link: GatewayLink, cleanup: string | null): Promise<{ readonly removed: boolean; readonly output: string }> {
-  const result = await link.run(disableGatewayCommand(cleanup));
+export async function disableGateway(
+  link: GatewayLink,
+  cleanup: string | null,
+  restore: string | null = null,
+): Promise<{ readonly removed: boolean; readonly kept: boolean; readonly output: string }> {
+  const result = await link.run(disableGatewayCommand(cleanup, restore));
   if (!result.ok) throw new Error(`${result.error.origin}/${result.error.code}: ${result.error.message}`);
   const lines = result.stdout.split("\n");
-  return { removed: lines.includes("removed"), output: lines.filter((line) => line !== "removed").join("\n") };
+  return {
+    removed: lines.includes("removed"),
+    kept: lines.includes("kept"),
+    output: lines.filter((line) => line !== "removed" && line !== "kept").join("\n"),
+  };
 }
 
 /**
@@ -311,19 +361,22 @@ export function cannotShareText(server: string, box: string): string {
   return `The stdio MCP server ${server} sent a request to the client, so the MCP gateway cannot share it between agents. On the operator machine, remove ${server} from mcp_gateway_shared in [box.${box}] of ~/.ferry/config.toml, then run ferry sync --box ${box}.`;
 }
 
-export const GATEWAY_STATUS_COMMAND = `[ -f "$HOME/.ferry/box.json" ] && [ -x ${BOX_FERRY} ] || { echo missing; exit 0; }\n${BOX_FERRY} --json mcp list`;
+export const GATEWAY_STATUS_COMMAND = `[ -f "$HOME/.ferry/box.json" ] && [ -x ${BOX_FERRY} ] || { echo missing; exit 0; }\n${NEEDS_MCP_SERVE}\n${BOX_FERRY} --json mcp list`;
 
 export const DEVELOPMENT_BUILD_REASON = "this Ferry is a development build, so the box has no Ferry";
 
-/** Read the gateway state of the box. */
-export async function readGatewayStatus(link: GatewayLink): Promise<McpGatewayStatus> {
+/** Read the gateway state of the box `box`. */
+export async function readGatewayStatus(link: GatewayLink, box: string): Promise<McpGatewayStatus> {
   const result = await link.run(GATEWAY_STATUS_COMMAND);
   if (!result.ok) throw new Error(`Ferry could not read the MCP gateway state: ${result.error.origin}/${result.error.code}`);
-  return parseGatewayStatus(result.stdout);
+  return parseGatewayStatus(result.stdout, box);
 }
 
-export function parseGatewayStatus(stdout: string): McpGatewayStatus {
+export function parseGatewayStatus(stdout: string, box: string): McpGatewayStatus {
   if (stdout.trim() === "missing") return { state: "unavailable", reason: "Ferry is not on the box", port: null, servers: [] };
+  if (stdout.trim() === "old") {
+    return { state: "unavailable", reason: `the Ferry of the box has no MCP gateway, run ferry update --box ${box}`, port: null, servers: [] };
+  }
   let envelope: { ok?: unknown; result?: { gateway?: { state?: unknown; port?: unknown }; servers?: unknown } };
   try {
     envelope = JSON.parse(stdout.trim().split("\n").at(-1) ?? "");

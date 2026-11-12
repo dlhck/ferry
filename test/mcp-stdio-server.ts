@@ -5,6 +5,7 @@
  *
  * - `pid`: the pid of the process.
  * - `env`: says if `TEST_TOKEN` is set, without its value.
+ * - `quoted`: returns the value of `TEST_QUOTED`, for the check that the gateway takes it out.
  * - `slow`: answers `text` after `ms` milliseconds, with one progress notice.
  * - `roots`: sends `roots/list` to the client and returns the answer.
  * - `exit`: stops the process.
@@ -17,7 +18,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 const starts = process.argv[2];
 if (starts) appendFileSync(starts, `${process.pid}\n`);
 
-const tools = ["pid", "env", "slow", "roots", "exit"].map((name) => ({ name, inputSchema: { type: "object" as const } }));
+const tools = ["pid", "env", "quoted", "slow", "roots", "exit"].map((name) => ({ name, inputSchema: { type: "object" as const } }));
 const server = new Server({ name: "test-stdio", version: "1.0.0" }, { capabilities: { tools: {} } });
 const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
 
@@ -29,6 +30,8 @@ server.setRequestHandler("tools/call", async (request, ctx) => {
       return text(String(process.pid));
     case "env":
       return text(process.env.TEST_TOKEN ? "TEST_TOKEN is set" : "TEST_TOKEN is not set");
+    case "quoted":
+      return text(`value ${process.env.TEST_QUOTED}`);
     case "slow": {
       const token = request.params._meta?.progressToken;
       if (token !== undefined) await ctx.mcpReq.notify({ method: "notifications/progress", params: { progressToken: token, progress: 1, total: 2 } });

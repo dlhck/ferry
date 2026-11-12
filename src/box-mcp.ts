@@ -727,10 +727,11 @@ export function gatewayCleanupCommand(
 }
 
 /**
- * The lines of the output of `gatewayCleanupCommand`, one for each change or
- * failure. The box prints `R` removed, `D` direct again, `F` the change
- * failed, `J` jq is missing, `S` Ferry cannot read the entries, each with
- * the harness and the server name.
+ * The lines of the output of `gatewayCleanupCommand` and
+ * `sharedRestoreCommand`, one for each change or failure. The box prints `R`
+ * removed, `D` direct again, `F` the change failed, `M` Ferry could not give
+ * an entry its env values back, `J` jq is missing, `S` Ferry cannot read the
+ * entries, each with the harness and the server name.
  */
 export function gatewayCleanupLines(stdout: string): string[] {
   return stdout.split("\n").flatMap((line) => {
@@ -739,10 +740,167 @@ export function gatewayCleanupLines(stdout: string): string[] {
     if (kind === "R") return [`Ferry removed ${harness} MCP server ${name} from the box. It pointed at the MCP gateway, and Ferry does not carry it.`];
     if (kind === "D") return [`Ferry changed ${harness} MCP server ${name} on the box back to its direct entry.`];
     if (kind === "F") return [`could not change ${harness} MCP server ${name} on the box, which points at the MCP gateway`];
+    if (kind === "M") return [`could not give ${harness} MCP server ${name} on the box its env values back from ~/.ferry/mcp-gateway/servers.json`];
     if (kind === "J") return [`jq is not on the box, so Ferry did not check the ${harness} MCP entries of the gateway. Run ferry update to install jq.`];
     if (kind === "S") return [`could not read the ${harness} MCP servers on the box to check the entries of the gateway`];
     return [];
   });
+}
+
+/** True when the output of `gatewayCleanupCommand` or `sharedRestoreCommand` has a failure: `F`, `M`, `J`, or `S`. */
+export function gatewayCleanupFailed(stdout: string): boolean {
+  return stdout.split("\n").some((line) => /^[FMJS]\t/.test(line));
+}
+
+/**
+ * A jq filter on the harness entry `.` of the stdio server `$n`: a direct
+ * entry that sets each `env` key of `$n` in the gateway file `$svs`.
+ */
+const HAS_SHARED_ENV =
+  `${GATEWAY_FILE_VALUE}. as $e | (($sv.servers[$n] // {}).env // {}) as $w | ($e | type) == "object" and ((${IS_GATEWAY}) | not) and ` +
+  '([$w | keys[] as $x | (($e.env // {})[$x] // "") | type == "string" and . != ""] | all)';
+
+/**
+ * One box command that runs after `gatewayCleanupCommand`, before the box
+ * deletes `~/.ferry/mcp-gateway/` or drops a server from `servers.json`. For
+ * each carried stdio server of a harness that is not in `shared`, and that
+ * `servers.json` has with a command, the harness entry must set each `env`
+ * key of `servers.json`. An entry that is missing or lacks a key gets the
+ * direct entry of `servers.json` with its `env` values, as in the cleanup.
+ * The box prints `D` for each such entry, and `M` when it could not write it.
+ * So a failed restore in one sync, and a direct entry without `env` in the
+ * next sync, cannot delete the only copy of the values. `null` when no
+ * harness carries such a server. Read the output with `gatewayCleanupLines`.
+ */
+export function sharedRestoreCommand(
+  harnesses: readonly HarnessDescriptor[],
+  tools: readonly ToolDescriptor[],
+  home: string,
+  mcp: readonly SeedMcp[],
+  shared: readonly string[] = [],
+): string | null {
+  const scripts = harnesses.flatMap((harness) => {
+    const recipe = tools.find((tool) => tool.id === harness.id)?.mcp;
+    const names =
+      mcp
+        .find((entry) => entry.harness === harness.id)
+        ?.servers.filter((server) => server.type === "stdio" && !shared.includes(server.name))
+        .map((server) => server.name) ?? [];
+    const access = recipe && harness.mcp && names.length > 0 ? entryAccess(harness.id, posix.join(home, harness.mcp.file), harness.mcp, recipe) : null;
+    if (access === null) return [];
+    const script = [
+      access.head,
+      `${access.present} || exit 0`,
+      `${HAS_JQ} || { printf 'J\\t%s\\n' "$h"; exit 0; }`,
+      'svf="$HOME/.ferry/mcp-gateway/servers.json"',
+      '[ -f "$svf" ] || exit 0',
+      "umask 077",
+      `for n in ${names.map(quoteShell).join(" ")}; do`,
+      `  ${SHARED_FILE_ENTRY}`,
+      '  [ -n "$e" ] || continue',
+      `  c=$(${access.read})`,
+      '  [ -n "$c" ] || c=null',
+      `  printf '%s' "$c" | jq -e --arg n "$n" --arg p ${quoteShell(GATEWAY_URL_PREFIX)} --slurpfile svs "$svf" ${quoteShell(HAS_SHARED_ENV)} >/dev/null 2>&1`,
+      "  s=$?",
+      '  [ "$s" = 0 ] && continue',
+      `  if [ "$s" = 1 ] && ${access.write}; then ${REPORT("D")}; else ${REPORT("M")}; fi`,
+      "done",
+    ].join("\n");
+    return [`(\n${script}\n)`];
+  });
+  return scripts.length === 0 ? null : `sh -c ${quoteShell(scripts.join("\n"))}`;
+}
+
+/**
+ * The box command of `ferry box remove --uninstall` for the harness entries
+ * of the gateway: `gatewayCleanupCommand` with `restore`, then a check of
+ * `servers.json` itself, because the box does not know the carried servers.
+ * For each stdio server of `servers.json`, at least one harness must have a
+ * direct entry that sets all its `env` keys. If none has, the box writes the
+ * entry of `servers.json` into each harness that is on the box, and prints
+ * `D` or `M` for each. So a failed restore in one run cannot delete the only
+ * copy of the values in the next run. `null` when no harness has an MCP
+ * recipe. Read the output with `gatewayCleanupLines`.
+ */
+export function uninstallCleanupCommand(
+  harnesses: readonly HarnessDescriptor[],
+  tools: readonly ToolDescriptor[],
+  home: string,
+): string | null {
+  const cleanup = gatewayCleanupCommand(harnesses, tools, home, [], true);
+  const access = harnesses.flatMap((harness) => {
+    const recipe = tools.find((tool) => tool.id === harness.id)?.mcp;
+    const found = recipe && harness.mcp ? entryAccess(harness.id, posix.join(home, harness.mcp.file), harness.mcp, recipe) : null;
+    return found === null ? [] : [found];
+  });
+  if (access.length === 0) return cleanup;
+  // Run `body` for each harness that is on the box, with `$h`, `$f`, and `$c`, the entry of `$n` or `null`.
+  const each = (body: string) =>
+    access.flatMap((harness) => [
+      ...harness.head.split("\n").map((line) => `  ${line}`),
+      `  if ${harness.present}; then`,
+      `    c=$(${harness.read})`,
+      '    [ -n "$c" ] || c=null',
+      `    ${body.replaceAll("WRITE", harness.write)}`,
+      "  fi",
+    ]);
+  const names =
+    '.servers // {} | to_entries[] | select((.value | type) == "object" and (.value.command | type) == "string") | .key | select(test("^[A-Za-z0-9._-]+$"))';
+  const check = [
+    `${HAS_JQ} || { printf 'J\\tgateway\\n'; exit 0; }`,
+    'svf="$HOME/.ferry/mcp-gateway/servers.json"',
+    '[ -f "$svf" ] || exit 0',
+    "umask 077",
+    `names=$(jq -r ${quoteShell(names)} "$svf" 2>/dev/null) || { printf 'S\\tgateway\\n'; exit 0; }`,
+    // The names have only the characters of the filter, so the shell splits them safely.
+    "for n in $names; do",
+    `  ${SHARED_FILE_ENTRY}`,
+    '  [ -n "$e" ] || continue',
+    "  ok=0",
+    ...each(`printf '%s' "$c" | jq -e --arg n "$n" --arg p ${quoteShell(GATEWAY_URL_PREFIX)} --slurpfile svs "$svf" ${quoteShell(HAS_SHARED_ENV)} >/dev/null 2>&1 && ok=1`),
+    '  [ "$ok" = 1 ] && continue',
+    ...each(`if WRITE; then ${REPORT("D")}; else ${REPORT("M")}; fi`),
+    "done",
+  ].join("\n");
+  return [cleanup, `sh -c ${quoteShell(check)}`].filter((command) => command !== null).join("\n");
+}
+
+/** A box line that sets `$e` to the direct entry of the stdio server `$n` in the gateway file `$svf`, with its `env`, or to nothing. */
+const SHARED_FILE_ENTRY = `e=$(jq -cn --arg n "$n" --slurpfile svs "$svf" ${quoteShell(`${GATEWAY_FILE_VALUE}${SHARED_ENTRY} | values`)} 2>/dev/null)`;
+
+/** A box command that prints one result line for the harness `$h` and the server `$n`. */
+const REPORT = (kind: string) => `printf '${kind}\\t%s\\t%s\\n' "$h" "$n"`;
+
+/**
+ * The box parts that read and write the entry `$n` of one harness. `head`
+ * sets `$h` and `$f`. `present` is a test for the harness on the box.
+ * `read` prints the entry as JSON, or nothing. `write` writes `$e`, the
+ * direct entry of `servers.json`, in place of the entry `$c`. `null` when
+ * Ferry has no way to read or write the entries.
+ */
+function entryAccess(
+  harness: string,
+  path: string,
+  file: McpFile,
+  recipe: ToolMcp,
+): { readonly head: string; readonly present: string; readonly read: string; readonly write: string } | null {
+  const register = recipe.register;
+  const read =
+    file.format === "json"
+      ? `[ ! -f "$f" ] || jq -c --arg k ${quoteShell(file.key)} --arg n "$n" '.[$k][$n] // null' "$f" 2>/dev/null`
+      : register?.getJson
+        ? `${register.getJson.replaceAll("{name}", '"$n"')} </dev/null 2>/dev/null | jq -c '(.transport // .)' 2>/dev/null`
+        : null;
+  if (read === null || (!register && file.format !== "json")) return null;
+  const write = register
+    ? `{ [ "$c" = null ] || ${register.remove.replaceAll("{name}", '"$n"')} </dev/null >/dev/null 2>&1; } && ${restoreStdio(register, file)}`
+    : `{ jq --arg k ${quoteShell(file.key)} --arg n "$n" --slurpfile svs "$svf" ${quoteShell(`${GATEWAY_FILE_VALUE}.[$k][$n] = (${SHARED_ENTRY})`)} "$f" > "$f.ferry-tmp" 2>/dev/null && mv "$f.ferry-tmp" "$f" || { rm -f "$f.ferry-tmp"; false; }; }`;
+  return {
+    head: `h=${quoteShell(harness)}\nf=${quoteShell(path)}`,
+    present: register ? `command -v ${mcpBinary(recipe)} >/dev/null 2>&1` : '[ -f "$f" ]',
+    read,
+    write,
+  };
 }
 
 /**

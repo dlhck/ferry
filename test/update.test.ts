@@ -8,6 +8,7 @@ import type { BoxIntegration, Integration } from "../src/integrations/types.ts";
 import type { PartialOperatorConfig } from "../src/config.ts";
 import type { HostCommand, HostCommandResult, LinkOptions, LinkResult } from "../src/link.ts";
 import { BOX_FERRY_VERSION_COMMAND, boxFerryInstallCommand } from "../src/box-ferry.ts";
+import { RESTART_GATEWAY_COMMAND } from "../src/mcp-gateway/service.ts";
 import { noProgress } from "../src/progress.ts";
 import { BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 import type { ToolDescriptor } from "../src/registry/types.ts";
@@ -318,7 +319,7 @@ describe("update command", () => {
     );
 
     const install = boxFerryInstallCommand("1.2.3");
-    expect(commands.get("dev@box-a.example")).toContain(`${install} && systemctl --user try-restart ferry-mcp-gateway.service`);
+    expect(commands.get("dev@box-a.example")).toContain(`${install} && ${RESTART_GATEWAY_COMMAND}`);
     expect(commands.get("dev@box-b.example")).toContain(install);
     expect(recorder.box.filter((command) => command.includes("ferry-mcp-gateway"))).toHaveLength(1);
   });

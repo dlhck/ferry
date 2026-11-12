@@ -1,7 +1,7 @@
 /** `ferry box list`, `ferry box add`, `ferry box remove`, and `ferry box default`. */
 
 import { boxUninstallLines, commitBoxUninstall, hasMcpGateway, planBoxUninstall, removeNotifyHooks, type BoxUninstallPlan } from "./box-uninstall.ts";
-import { gatewayCleanupCommand, gatewayCleanupLines } from "./box-mcp.ts";
+import { gatewayCleanupFailed, gatewayCleanupLines, uninstallCleanupCommand } from "./box-mcp.ts";
 import { hasNoBox, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import {
   ConfigError,
@@ -290,7 +290,7 @@ async function uninstallBox(
     }
   }
   // The harness entries go back to direct entries before the gateway files go, because they need servers.json.
-  const cleanup = hasMcpGateway(plan) ? gatewayCleanupCommand(dependencies.harnesses, dependencies.tools, plan.home, [], true) : null;
+  const cleanup = hasMcpGateway(plan) ? uninstallCleanupCommand(dependencies.harnesses, dependencies.tools, plan.home) : null;
   if (cleanup !== null) {
     const output = await step(dependencies.progress, "Changing the MCP entries of the gateway", async () => {
       const result = await link.run(cleanup);
@@ -303,6 +303,12 @@ async function uninstallBox(
       );
     });
     for (const line of gatewayCleanupLines(output)) dependencies.writeLine(line);
+    // servers.json can be the only copy of the env values of a shared server, so the gateway files stay.
+    if (gatewayCleanupFailed(output)) {
+      throw new Error(
+        `Ferry could not change all MCP entries of the gateway on box ${name} back. Ferry did not remove Ferry from the box. The box stays in the config. Correct the problem, then run the command again. ${keep}`,
+      );
+    }
   }
   if (plan.notifyHooks.length > 0) {
     const lines = await step(dependencies.progress, "Removing the hooks of ferry notify", () => removeNotifyHooks(plan, link));

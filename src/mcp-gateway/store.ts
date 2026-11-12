@@ -5,7 +5,9 @@
  *   `ferry mcp serve`. Sync writes it from the carried MCP entries: a remote
  *   server as `{"url":"https://..."}`, and a shared stdio server as
  *   `{"command":"...","args":[...],"env":{...}}`. The box copies the `env`
- *   values from the harness entries. They never leave the box.
+ *   values from the harness entries. They never leave the box. A stdio
+ *   server with `"leaving": true` is no longer shared, and the gateway does
+ *   not serve it.
  * - `client-key`: the key that a harness sends as `Authorization: Bearer <key>`.
  *   Ferry makes it on the box. It never leaves the box.
  * - `tokens/<server>.json`: the OAuth client registration and the tokens of one server.
@@ -70,6 +72,8 @@ export function readServers(home: string): GatewayServer[] {
   const parsed = readJson(path) as { servers?: Record<string, { url?: unknown; command?: unknown; args?: unknown; env?: unknown }> };
   const servers: GatewayServer[] = [];
   for (const [name, entry] of Object.entries(parsed.servers ?? {})) {
+    // Sync keeps the env of a server that is no longer shared until its harness entries have it. The gateway does not serve it.
+    if ((entry as { leaving?: unknown } | null)?.leaving === true) continue;
     if (!SERVER_NAME.test(name)) throw new Error(`servers.json has an invalid server name: ${name}`);
     if (typeof entry?.command === "string") {
       const { command, args = [], env = {} } = entry;
@@ -184,7 +188,23 @@ export function knownSecrets(home: string, servers: readonly string[]): string[]
   return secrets;
 }
 
-/** Take each known secret, each token pattern, and each URL credential out of a text. */
+/**
+ * Replace each known secret in each string of a JSON value, such as a tool
+ * result. The value keeps its other text: a URL with a `token` query
+ * parameter in a tool result is data for the agent, not a secret of the gateway.
+ */
+export function removeSecrets<T>(value: T, secrets: readonly string[]): T {
+  const text = (item: string) => secrets.reduce((clean, secret) => clean.replaceAll(secret, "[token]"), item);
+  const walk = (item: unknown): unknown => {
+    if (typeof item === "string") return text(item);
+    if (Array.isArray(item)) return item.map(walk);
+    if (item !== null && typeof item === "object") return Object.fromEntries(Object.entries(item).map(([key, entry]) => [text(key), walk(entry)]));
+    return item;
+  };
+  return walk(value) as T;
+}
+
+/** Take each known secret, each token pattern, and each URL credential out of a log line. */
 export function scrub(text: string, secrets: readonly string[]): string {
   let clean = text;
   for (const secret of secrets) clean = clean.replaceAll(secret, "[token]");
