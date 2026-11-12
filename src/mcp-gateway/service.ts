@@ -212,25 +212,33 @@ export function enableGatewayCommand(unit: string, cleanup: string | null = null
 }
 
 /**
- * Run `cleanup` first, which changes the harness entries of the gateway. Then
- * stop and remove the unit and delete the gateway directory, with the tokens
- * and the client key. The command prints the output of `cleanup`, then
+ * Run `cleanup` first, which changes the harness entries of the gateway, then
+ * `restore`, which gives each harness entry of a shared server its `env`
+ * values back when it lacks them (see `sharedRestoreCommand`). Then stop and
+ * remove the unit and delete the gateway directory, with the tokens and the
+ * client key. The command prints the output of `cleanup` and `restore`, then
  * `removed` when it removed something. It prints nothing on a box without
- * the gateway, and then it does not run `cleanup`.
+ * the gateway, and then it does not run `cleanup` or `restore`.
  *
- * When `cleanup` prints a failure (`F`, `J`, or `S`), the command keeps the
- * unit and the directory and prints `kept`. `servers.json` can be the only
- * copy of the `env` values of a shared server, and an entry that still
- * points at the gateway needs the running gateway. The next sync tries again.
+ * When `cleanup` or `restore` prints a failure (`F`, `M`, `J`, or `S`), the
+ * command keeps the unit and the directory and prints `kept`. `servers.json`
+ * can be the only copy of the `env` values of a shared server, and an entry
+ * that still points at the gateway needs the running gateway. The next sync
+ * tries again.
  */
-export function disableGatewayCommand(cleanup: string | null): string {
+export function disableGatewayCommand(cleanup: string | null, restore: string | null = null): string {
+  const scripts = [cleanup, restore].filter((script) => script !== null);
   return [
     `d=${GATEWAY_DIR}`,
     `u=${UNIT_FILE}`,
     '[ -e "$u" ] || [ -e "$d" ] || exit 0',
-    ...(cleanup === null
+    ...(scripts.length === 0
       ? []
-      : [`o=$(${cleanup})`, `[ -z "$o" ] || printf '%s\\n' "$o"`, `if printf '%s\\n' "$o" | grep -q "$(printf '^[FJS]\\t')"; then echo kept; exit 0; fi`]),
+      : [
+          `o=$(\n${scripts.join("\n")}\n)`,
+          `[ -z "$o" ] || printf '%s\\n' "$o"`,
+          `if printf '%s\\n' "$o" | grep -q "$(printf '^[FMJS]\\t')"; then echo kept; exit 0; fi`,
+        ]),
     `systemctl --user disable --now ${MCP_GATEWAY_SERVICE.unit} >/dev/null 2>&1`,
     'rm -f "$u" || exit 1',
     "systemctl --user daemon-reload >/dev/null 2>&1",
@@ -297,15 +305,17 @@ export async function enableGateway(
 }
 
 /**
- * Remove the gateway from the box, after `cleanup`. `removed` is true when the
- * box had the gateway. `kept` is true when `cleanup` failed, so the box keeps
- * the gateway. `output` has the other output lines, from `cleanup`.
+ * Remove the gateway from the box, after `cleanup` and `restore`. `removed`
+ * is true when the box had the gateway. `kept` is true when `cleanup` or
+ * `restore` failed, so the box keeps the gateway. `output` has the other
+ * output lines, from `cleanup` and `restore`.
  */
 export async function disableGateway(
   link: GatewayLink,
   cleanup: string | null,
+  restore: string | null = null,
 ): Promise<{ readonly removed: boolean; readonly kept: boolean; readonly output: string }> {
-  const result = await link.run(disableGatewayCommand(cleanup));
+  const result = await link.run(disableGatewayCommand(cleanup, restore));
   if (!result.ok) throw new Error(`${result.error.origin}/${result.error.code}: ${result.error.message}`);
   const lines = result.stdout.split("\n");
   return {

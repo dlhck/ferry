@@ -38,7 +38,7 @@ import { openStore as openSnapshotStore, skillChanged, type PublishResult } from
 import { adoptPublishedSkills } from "./adopt.ts";
 import { installBoxPlugins, mergeBoxSettings } from "./box-settings.ts";
 import { withNotifyHooks } from "./notify.ts";
-import { gatewayCleanupCommand, gatewayCleanupLines, registerBoxMcp, sharedEnvScript } from "./box-mcp.ts";
+import { gatewayCleanupCommand, gatewayCleanupLines, registerBoxMcp, sharedEnvScript, sharedRestoreCommand } from "./box-mcp.ts";
 import { disableGateway, enableGateway, gatewayServers, MCP_GATEWAY_SERVICE } from "./mcp-gateway/service.ts";
 import { isReleaseVersion, VERSION } from "./version.ts";
 import {
@@ -779,7 +779,13 @@ async function applyOnBox(context: {
   if (!box.mcpGateway) {
     try {
       // No server is shared now, so each gateway entry of a stdio server gets its direct entry and its env values back.
-      const { removed, kept, output } = await disableGateway(link, gatewayCleanupCommand(harnesses, tools, required(plan.remoteHome), seed.mcp, false, []));
+      const remoteHome = required(plan.remoteHome);
+      const { removed, kept, output } = await disableGateway(
+        link,
+        gatewayCleanupCommand(harnesses, tools, remoteHome, seed.mcp, false, []),
+        // An entry that lost its env values in an earlier failed sync gets them back before servers.json goes.
+        sharedRestoreCommand(harnesses, tools, remoteHome, seed.mcp),
+      );
       for (const line of gatewayCleanupLines(output)) warn(`Box MCP: ${line}`);
       if (removed) warn("Removed the MCP gateway, its unit, and its logins from the box.");
       if (kept) {

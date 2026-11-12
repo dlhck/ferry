@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkBoxMcp, gatewayCleanupCommand, gatewayCleanupLines, mcpCommand, registerBoxMcp, sharedEnvScript } from "../src/box-mcp.ts";
+import { checkBoxMcp, gatewayCleanupCommand, gatewayCleanupLines, mcpCommand, registerBoxMcp, sharedEnvScript, sharedRestoreCommand } from "../src/box-mcp.ts";
 import { disableGateway, enableGateway, gatewayServers } from "../src/mcp-gateway/service.ts";
 import type { StdioMcpServer } from "../src/manifest.ts";
 import type { LinkResult, RunOptions } from "../src/link.ts";
@@ -1149,7 +1149,11 @@ describe("registerBoxMcp with the MCP gateway", () => {
       /** One sync without the gateway: the direct path first, then the removal of the gateway. */
       const disable = async () => {
         const warnings = await registerBoxMcp({ ...common, remoteHome: box.home, mcp: sharedMcp });
-        const { output } = await disableGateway(box.link, gatewayCleanupCommand(BUILTIN_HARNESSES, BUILTIN_TOOLS, box.home, sharedMcp, false, []));
+        const { output } = await disableGateway(
+          box.link,
+          gatewayCleanupCommand(BUILTIN_HARNESSES, BUILTIN_TOOLS, box.home, sharedMcp, false, []),
+          sharedRestoreCommand(BUILTIN_HARNESSES, BUILTIN_TOOLS, box.home, sharedMcp),
+        );
         return [...warnings, ...gatewayCleanupLines(output)];
       };
       const github = () => {
@@ -1230,6 +1234,36 @@ describe("registerBoxMcp with the MCP gateway", () => {
       expect(JSON.parse(box.read(".ferry/mcp-gateway/servers.json")).servers.github).toEqual(direct(full));
       expect(existsSync(join(box.home, ".config", "systemd", "user", "ferry-mcp-gateway.service"))).toBe(true);
       for (const secret of [SECRET, OTHER, KEY]) expect(box.captured(result)).not.toContain(secret);
+    });
+
+    jqTest("a failed claude mcp add-json, then a sync that writes a direct entry without env, keeps the env values and restores them", async () => {
+      const box = sharedBox();
+      await box.enable(["github"]);
+      const claude = join(box.home, "bin", "claude");
+      const working = readFileSync(claude, "utf8");
+      // Sync 1: claude removes the gateway entry, but cannot add the direct entry, as with a timeout.
+      writeFileSync(claude, working.replace("const name = words[0];", "const name = words[0];\nif (command === 'add-json') process.exit(1);"));
+
+      const first = await box.disable();
+
+      expect(first).toContain("could not change claude MCP server github on the box, which points at the MCP gateway");
+      expect(first).toContain("could not give claude MCP server github on the box its env values back from ~/.ferry/mcp-gateway/servers.json");
+      expect(box.entries().claude.github).toBeUndefined();
+      expect(JSON.parse(box.read(".ferry/mcp-gateway/servers.json")).servers.github).toEqual(direct(full));
+
+      // Sync 2: claude works again. The direct path writes the entry without env, then the gateway goes.
+      // The Codex and Cursor entries lost their env values too, so each restore path runs.
+      writeFileSync(claude, working);
+      box.put(".codex/config.toml", '[mcp_servers.github]\ncommand = "github-mcp"\nargs = ["--org", "example"]\n');
+      box.put(".cursor/mcp.json", JSON.stringify({ mcpServers: { github: { command: "github-mcp", args: ["--org", "example"], env: { GITHUB_ORG: "example" } } } }));
+      const second = await box.disable();
+
+      expect(second.filter((line) => line.includes("github"))).toEqual(
+        ["claude", "codex", "cursor"].map((harness) => `Ferry changed ${harness} MCP server github on the box back to its direct entry.`),
+      );
+      expect(box.github()).toEqual({ claude: { type: "stdio", ...direct(full) }, codex: direct(full), cursor: direct(full) });
+      expect(existsSync(join(box.home, ".ferry", "mcp-gateway"))).toBe(false);
+      for (const secret of [SECRET, OTHER, KEY]) expect(box.captured([first, second])).not.toContain(secret);
     });
 
     jqTest("a server that leaves mcp_gateway_shared gets its direct entry and its env values back", async () => {

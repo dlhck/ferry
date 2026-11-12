@@ -727,10 +727,11 @@ export function gatewayCleanupCommand(
 }
 
 /**
- * The lines of the output of `gatewayCleanupCommand`, one for each change or
- * failure. The box prints `R` removed, `D` direct again, `F` the change
- * failed, `J` jq is missing, `S` Ferry cannot read the entries, each with
- * the harness and the server name.
+ * The lines of the output of `gatewayCleanupCommand` and
+ * `sharedRestoreCommand`, one for each change or failure. The box prints `R`
+ * removed, `D` direct again, `F` the change failed, `M` Ferry could not give
+ * an entry its env values back, `J` jq is missing, `S` Ferry cannot read the
+ * entries, each with the harness and the server name.
  */
 export function gatewayCleanupLines(stdout: string): string[] {
   return stdout.split("\n").flatMap((line) => {
@@ -739,15 +740,88 @@ export function gatewayCleanupLines(stdout: string): string[] {
     if (kind === "R") return [`Ferry removed ${harness} MCP server ${name} from the box. It pointed at the MCP gateway, and Ferry does not carry it.`];
     if (kind === "D") return [`Ferry changed ${harness} MCP server ${name} on the box back to its direct entry.`];
     if (kind === "F") return [`could not change ${harness} MCP server ${name} on the box, which points at the MCP gateway`];
+    if (kind === "M") return [`could not give ${harness} MCP server ${name} on the box its env values back from ~/.ferry/mcp-gateway/servers.json`];
     if (kind === "J") return [`jq is not on the box, so Ferry did not check the ${harness} MCP entries of the gateway. Run ferry update to install jq.`];
     if (kind === "S") return [`could not read the ${harness} MCP servers on the box to check the entries of the gateway`];
     return [];
   });
 }
 
-/** True when the output of `gatewayCleanupCommand` has a failure: `F`, `J`, or `S`. */
+/** True when the output of `gatewayCleanupCommand` or `sharedRestoreCommand` has a failure: `F`, `M`, `J`, or `S`. */
 export function gatewayCleanupFailed(stdout: string): boolean {
-  return stdout.split("\n").some((line) => /^[FJS]\t/.test(line));
+  return stdout.split("\n").some((line) => /^[FMJS]\t/.test(line));
+}
+
+/**
+ * A jq filter on the harness entry `.` of the stdio server `$n`: the gateway
+ * file `$svs` has `env` keys that the entry does not set. A gateway entry is
+ * the work of `gatewayCleanupCommand`, so this filter does not count it.
+ */
+const LACKS_SHARED_ENV =
+  `${GATEWAY_FILE_VALUE}. as $e | (($sv.servers[$n] // {}).env // {}) as $w | if ${IS_GATEWAY} then false else ` +
+  '($e | type) != "object" or ([$w | keys[] as $x | (($e.env // {})[$x] // "") | type == "string" and . != ""] | all | not) end';
+
+/**
+ * One box command that runs after `gatewayCleanupCommand`, before the box
+ * deletes `~/.ferry/mcp-gateway/`. For each carried stdio server of a harness
+ * that `servers.json` has with a command, the harness entry must set each
+ * `env` key of `servers.json`. An entry that is missing or lacks a key gets
+ * the direct entry of `servers.json` with its `env` values, as in the
+ * cleanup. The box prints `D` for each such entry, and `M` when it could not
+ * write it. So a failed restore in one sync, and a direct entry without `env`
+ * in the next sync, cannot delete the only copy of the values. `null` when no
+ * harness carries a stdio server. Read the output with `gatewayCleanupLines`.
+ */
+export function sharedRestoreCommand(
+  harnesses: readonly HarnessDescriptor[],
+  tools: readonly ToolDescriptor[],
+  home: string,
+  mcp: readonly SeedMcp[],
+): string | null {
+  const scripts = harnesses.flatMap((harness) => {
+    const recipe = tools.find((tool) => tool.id === harness.id)?.mcp;
+    const names =
+      mcp.find((entry) => entry.harness === harness.id)?.servers.filter((server) => server.type === "stdio").map((server) => server.name) ?? [];
+    const script = recipe && harness.mcp && names.length > 0 ? sharedRestoreScript(harness.id, posix.join(home, harness.mcp.file), harness.mcp, recipe, names) : null;
+    return script === null ? [] : [`(\n${script}\n)`];
+  });
+  return scripts.length === 0 ? null : `sh -c ${quoteShell(scripts.join("\n"))}`;
+}
+
+/** The box script of one harness for `sharedRestoreCommand`. `null` when Ferry has no way to read or write the entries. */
+function sharedRestoreScript(harness: string, path: string, file: McpFile, recipe: ToolMcp, names: readonly string[]): string | null {
+  const register = recipe.register;
+  const read =
+    file.format === "json"
+      ? `[ ! -f "$f" ] || jq -c --arg k ${quoteShell(file.key)} --arg n "$n" '.[$k][$n] // null' "$f" 2>/dev/null`
+      : register?.getJson
+        ? `${register.getJson.replaceAll("{name}", '"$n"')} </dev/null 2>/dev/null | jq -c '(.transport // .)' 2>/dev/null`
+        : null;
+  if (read === null || (!register && file.format !== "json")) return null;
+  const report = (kind: string) => `printf '${kind}\\t%s\\t%s\\n' "$h" "$n"`;
+  const svs = '--slurpfile svs "$svf"';
+  const write = register
+    ? `{ [ "$c" = null ] || ${register.remove.replaceAll("{name}", '"$n"')} </dev/null >/dev/null 2>&1; } && ${restoreStdio(register, file)}`
+    : `{ jq --arg k ${quoteShell(file.key)} --arg n "$n" ${svs} ${quoteShell(`${GATEWAY_FILE_VALUE}.[$k][$n] = (${SHARED_ENTRY})`)} "$f" > "$f.ferry-tmp" 2>/dev/null && mv "$f.ferry-tmp" "$f" || { rm -f "$f.ferry-tmp"; false; }; }`;
+  return [
+    `h=${quoteShell(harness)}`,
+    `f=${quoteShell(path)}`,
+    register ? `command -v ${mcpBinary(recipe)} >/dev/null 2>&1 || exit 0` : '[ -f "$f" ] || exit 0',
+    `${HAS_JQ} || { printf 'J\\t%s\\n' "$h"; exit 0; }`,
+    'svf="$HOME/.ferry/mcp-gateway/servers.json"',
+    '[ -f "$svf" ] || exit 0',
+    "umask 077",
+    `for n in ${names.map(quoteShell).join(" ")}; do`,
+    `  e=$(jq -cn --arg n "$n" ${svs} ${quoteShell(`${GATEWAY_FILE_VALUE}${SHARED_ENTRY} | values`)} 2>/dev/null)`,
+    '  [ -n "$e" ] || continue',
+    `  c=$(${read})`,
+    '  [ -n "$c" ] || c=null',
+    `  printf '%s' "$c" | jq -e --arg n "$n" --arg p ${quoteShell(GATEWAY_URL_PREFIX)} ${svs} ${quoteShell(LACKS_SHARED_ENV)} >/dev/null 2>&1`,
+    "  s=$?",
+    '  [ "$s" = 1 ] && continue',
+    `  if [ "$s" = 0 ] && ${write}; then ${report("D")}; else ${report("M")}; fi`,
+    "done",
+  ].join("\n");
 }
 
 /**
