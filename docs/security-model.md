@@ -62,7 +62,7 @@ On a box with `mcp_gateway = true`, the [MCP gateway](boxes.md#an-mcp-gateway-on
 
 ## Stdio MCP servers
 
-For a stdio MCP server, Ferry carries the command, the arguments, and the names of the `env` keys, never their values. Set the values in the `env` of the server on the box. Ferry keeps them: the box merges its own entry with jq or the agent CLI, and sends back only a status or key names, never a value.
+For a stdio MCP server, Ferry carries the command, the arguments, and the names of the `env` keys, never their values. Set the values in the `env` of the server on the box. Ferry keeps them: the box merges its own entry with jq or the agent CLI, and sends back only a status or key names, never a value. To keep the values of a Claude entry, the box runs `claude mcp add-json` with the entry, so the values are in its command line while it runs. On a box without `hidepid` for `/proc`, another user of the box can see them during that time.
 
 ### Arguments that stop the sync
 
