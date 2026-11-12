@@ -55,7 +55,7 @@ Ferry reads the MCP servers in `mcpServers` of `~/.claude.json`, `[mcp_servers]`
 
 Ferry carries the name and the HTTPS URL. Sync declares the server on the box. It replaces a box declaration with a different URL. It never removes a box server. Ferry skips a server with a plain `http://` URL. Log in to a server on the box with `ferry auth <tool> --mcp <server>`.
 
-On a box with the [MCP gateway](boxes.md#an-mcp-gateway-on-the-box), the harness entry of a remote server points at the gateway on the box, in place of the server URL. The entry has the client key of the gateway. The box writes the key, and the key and the gateway tokens stay on the box. Ferry skips such an entry when it reads MCP servers, so the key is not carried. Log in the gateway with `ferry auth --mcp <server> --box <box>`. Agents run as the box user, so they can read the key and the tokens. See the [Security model](security-model.md#the-mcp-gateway).
+On a box with the [MCP gateway](boxes.md#an-mcp-gateway-on-the-box), the harness entry of a remote server points at the gateway on the box, in place of the server URL. The entry has the client key of the gateway. The box writes the key, and the key and the gateway tokens stay on the box. Sync removes a gateway entry when Ferry no longer carries its server. Ferry skips such an entry when it reads MCP servers, so the key is not carried. Log in the gateway with `ferry auth --mcp <server> --box <box>`. Agents run as the box user, so they can read the key and the tokens. See the [Security model](security-model.md#the-mcp-gateway).
 
 ### Stdio servers
 
