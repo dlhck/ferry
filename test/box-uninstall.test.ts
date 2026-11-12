@@ -191,7 +191,7 @@ describe("planBoxUninstall", () => {
       ],
       profileBlock: true,
       paths: [".ferry/box", ".ferry/exposed", ".ferry/store", ".local/bin/ferry", ".ferry/box.json"],
-      unsavedWork: { checked: 0, projects: [] },
+      unsavedWork: { checked: 0, projects: [], unchecked: [] },
     });
     expect(boxUninstallLines(plan, "b")).toEqual([
       "Unsaved work: no projects to check. Add projects to [box.b], or move a project to the box with ferry move.",
@@ -222,7 +222,7 @@ describe("planBoxUninstall", () => {
 
     const plan = await planBoxUninstall(BUILTIN_HARNESSES, box.link);
 
-    expect(plan).toEqual({ home: box.home, services: [], links: [], profileBlock: false, paths: [], unsavedWork: { checked: 0, projects: [] } });
+    expect(plan).toEqual({ home: box.home, services: [], links: [], profileBlock: false, paths: [], unsavedWork: { checked: 0, projects: [], unchecked: [] } });
     expect(boxUninstallLines(plan, "b")[1]).toBe("The box has no Ferry files.");
     expect(await commitBoxUninstall(plan, box.link)).toEqual([]);
     expect(box.read(".local/bin/ferry")).toBe("binary\n");

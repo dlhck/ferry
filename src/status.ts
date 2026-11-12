@@ -187,6 +187,8 @@ export type BoxStatus = {
     readonly checked: number | null;
     /** Only the projects with unsaved work. `null` when `checked` is null. */
     readonly projects: readonly ProjectWork[] | null;
+    /** The projects where a git command failed, so their work is not known. `null` when `checked` is null. */
+    readonly unchecked: readonly string[] | null;
     readonly error: StatusDependencyError | null;
   };
   /** Present only when at least one integration is enabled for this box. */
@@ -837,18 +839,18 @@ async function composeBoxStatus(
     if (online) {
       const work = dependencies.unsavedWork;
       try {
-        const { checked, projects } = await step(progress, name, () => work.read(), undefined, (result) =>
+        const { checked, projects, unchecked } = await step(progress, name, () => work.read(), undefined, (result) =>
           result.projects.length > 0 ? plural(result.projects.length, "project") : undefined,
         );
-        unsavedWork = { checked, projects, error: null };
+        unsavedWork = { checked, projects, unchecked, error: null };
       } catch (cause) {
         const error = dependencyError("box", cause);
         errors.push(error);
-        unsavedWork = { checked: null, projects: null, error };
+        unsavedWork = { checked: null, projects: null, unchecked: null, error };
       }
     } else {
       progress.skip(name, OFFLINE);
-      unsavedWork = { checked: null, projects: null, error: null };
+      unsavedWork = { checked: null, projects: null, unchecked: null, error: null };
     }
   }
 

@@ -471,7 +471,7 @@ describe("ferry box destroy", () => {
       { ...run.dependencies, writeLine: (line) => (order.push(line), writeLine(line)) },
     );
     expect(link.commands[0]?.command).toContain("'code/app'");
-    expect(result?.unsavedWork).toEqual({ checked: 1, projects: [{ path: "code/app", branch: "main", changes: 2, unpushed: [{ branch: "main", commits: 1 }] }] });
+    expect(result?.unsavedWork).toEqual({ checked: 1, projects: [{ path: "code/app", branch: "main", changes: 2, unpushed: [{ branch: "main", commits: 1 }] }], unchecked: [] });
     const heading = order.indexOf("Unsaved work: 1 of 1 project, only on the box");
     expect(heading).toBeGreaterThan(-1);
     expect(order[heading + 1]).toBe("  ~/code/app (main): 2 changed files, main has 1 commit that no remote has");

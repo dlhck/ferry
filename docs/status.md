@@ -41,12 +41,14 @@ The block shows only the name and the reason, never a command or an argument of 
 
 ### Unsaved work
 
-The block `Unsaved work` of each box names each git project on the box that has work that is only on the box:
+The block `Unsaved work` of each box names each git project and each linked worktree on the box that has work that is only on the box, and each one that Ferry could not check:
 
 ```
-Unsaved work: 2 of 3 projects, only on the box
+Unsaved work: 3 of 5 projects, only on the box
   ~/code/app (main): 3 changed files, main has 2 commits that no remote has
   ~/code/api (detached HEAD): feature has 1 commit that no remote has
+  ~/.paseo/worktrees/x/app (detached HEAD): HEAD has 1 commit that no remote has
+  ~/code/web: could not check
 ```
 
 Ferry checks two lists of projects:
@@ -54,10 +56,15 @@ Ferry checks two lists of projects:
 - The `projects` key of `[box.<name>]` in `~/.ferry/config.toml`. See [Boxes](boxes.md#projects-on-a-box).
 - The destinations of earlier `ferry move` commands to the box. The box records each destination in `~/.ferry/projects`.
 
+Ferry also checks each linked worktree of these projects, from `git worktree list`, such as the Paseo worktrees in `~/.paseo/worktrees`. A worktree appears with its own path. The path is relative to the box home, or absolute when the worktree is outside the home. The count of projects includes the worktrees.
+
 A project appears when it has one of these:
 
 - A changed tracked file or an untracked file. An ignored file does not count.
 - A local branch with commits that no remote-tracking branch has. A branch without a remote counts all its commits. Ferry does not fetch, so the counts use the remote-tracking branches of the last fetch on the box.
+- A detached HEAD with commits that no remote-tracking branch has. It shows as `HEAD`.
+
+When a git command fails in a project or a worktree, for example because git refuses a repository with dubious ownership, the line shows `could not check`. Ferry does not know the work there, so the block never says `none` for it. A directory with `.git` that git cannot read is such a project.
 
 A stash does not count. A clean project that is fully pushed does not appear. A path that is not a git project is skipped.
 
@@ -205,4 +212,4 @@ The menu bar app runs only on macOS. On Linux, a waybar custom module can show t
 
 ## Scripts and agents
 
-`ferry status --json` prints the status report with `schemaVersion: 2`. Its `skippedMcp` field has the skipped stdio MCP servers as `{ harness, name, reason }`. The `unsavedWork` field of each box has `{ checked, projects, error }`, and each project is `{ path, branch, changes, unpushed: [{ branch, commits }] }`. `ferry status --brief --json` prints `{ schemaVersion: 1, checkedAt, boxes }`. Each item has a `summary` of at most 60 characters and the full `message`. The [Ferry agent skill](https://github.com/dlhck/ferry/blob/main/skills/ferry/SKILL.md) describes each field.
+`ferry status --json` prints the status report with `schemaVersion: 2`. Its `skippedMcp` field has the skipped stdio MCP servers as `{ harness, name, reason }`. The `unsavedWork` field of each box has `{ checked, projects, unchecked, error }`. `unchecked` has the paths that Ferry could not check. Each project is `{ path, branch, changes, unpushed: [{ branch, commits }] }`. `ferry status --brief --json` prints `{ schemaVersion: 1, checkedAt, boxes }`. Each item has a `summary` of at most 60 characters and the full `message`. The [Ferry agent skill](https://github.com/dlhck/ferry/blob/main/skills/ferry/SKILL.md) describes each field.
