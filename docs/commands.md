@@ -1480,7 +1480,8 @@ The keys:
 
 A box key changes the [box.<name>] table of --box, else of default_box, else
 of the only box. An empty list and unset remove the key. A value that is not
-valid changes nothing.
+valid changes nothing. Put -- before the values when a value starts with -,
+as in ferry config set projects --box dev -- -app.
 
 Each change goes to the box at the next ferry sync. When the value changes,
 Ferry prints the sync to run, and syncNeeded is true in the JSON result.
@@ -1500,7 +1501,7 @@ box can share
 Options:
   -h, --help  display help for command
 
-With --json: { schemaVersion: 1, notifications: { agents }, boxes: [{ name, mcpGateway, mcpGatewayShared, agentMemoryMax, projects, stdioServers }] }. stdioServers is [] when Ferry cannot read the MCP servers of this machine, and warnings has the reason.
+With --json: { schemaVersion: 1, notifications: { agents }, boxes: [{ name, mcpGateway, mcpGatewayShared, agentMemoryMax, projects, stdioServers }], warnings }. stdioServers is [] when Ferry cannot read the MCP servers of this machine. Then result.warnings has the reason. Without a warning, result has no warnings key.
 ```
 
 ### ferry config set

@@ -157,6 +157,13 @@ describe("ferry config set and unset", () => {
     expect(file(dir)).toBe(before);
   });
 
+  test("each argument after -- is a value, also one that looks like an option", async () => {
+    const dir = home(BOXES);
+    const result = await ferry(dir, ["config", "set", "projects", "--box", "dev", "--", "-odd/path", "--json"]);
+    expect(result.envelope.result).toEqual({ changed: true, box: "dev", key: "projects", syncNeeded: true });
+    expect(readConfig(dir)?.boxes?.[0]?.projects).toEqual(["-odd/path", "--json"]);
+  });
+
   test("unset takes no value", async () => {
     const dir = home(BOXES);
     const result = await ferry(dir, ["config", "unset", "projects", "code/app", "--box", "dev"]);
@@ -247,8 +254,9 @@ describe("ferry config get", () => {
     const { envelope, text } = await ferry(dir, ["config", "get"]);
     expect(envelope.ok).toBe(true);
     expect(envelope.result.boxes.map((box: { stdioServers: unknown }) => box.stdioServers)).toEqual([[], []]);
-    expect(envelope.warnings).toHaveLength(1);
-    expect(envelope.warnings[0]).toStartWith("Ferry could not read the MCP servers of this machine: ");
+    expect(envelope.warnings).toEqual([]);
+    expect(envelope.result.warnings).toHaveLength(1);
+    expect(envelope.result.warnings[0]).toStartWith("Ferry could not read the MCP servers of this machine: ");
     expect(text).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123456789");
   });
 });

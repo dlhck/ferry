@@ -35,6 +35,8 @@ export type ConfigGetResult = {
   readonly schemaVersion: 1;
   readonly notifications: { readonly agents: boolean };
   readonly boxes: readonly ConfigBoxEntry[];
+  /** Present only when Ferry could not read the MCP servers of this machine. */
+  readonly warnings?: readonly string[];
 };
 
 export type ConfigSetResult = {
@@ -54,15 +56,15 @@ export type ConfigCommandDependencies = {
 /**
  * The keys of each box, and the stdio MCP servers that it can share.
  * `stdioServers` gives the server names of the operator MCP files for the box.
- * When it throws, each box gets no names, and `warn` gets the reason.
+ * When it throws, each box gets no names, and `warnings` has the reason.
  */
 export function runConfigGet(
   dependencies: Pick<ConfigCommandDependencies, "readConfig"> & {
     readonly stdioServers: (box: ResolvedBox) => readonly string[];
-    readonly warn: (line: string) => void;
   },
 ): ConfigGetResult {
   const config = readComplete(dependencies.readConfig);
+  const warnings: string[] = [];
   let failed = false;
   const boxes = resolveBoxes(config).map((box): ConfigBoxEntry => {
     let names: readonly string[] = [];
@@ -71,7 +73,7 @@ export function runConfigGet(
         names = [...new Set(dependencies.stdioServers(box))].sort();
       } catch (cause) {
         failed = true;
-        dependencies.warn(`Ferry could not read the MCP servers of this machine: ${cause instanceof Error ? cause.message : String(cause)}`);
+        warnings.push(`Ferry could not read the MCP servers of this machine: ${cause instanceof Error ? cause.message : String(cause)}`);
       }
     }
     return {
@@ -83,7 +85,12 @@ export function runConfigGet(
       stdioServers: names,
     };
   });
-  return { schemaVersion: 1, notifications: { agents: config.notifications?.agents === true }, boxes };
+  return {
+    schemaVersion: 1,
+    notifications: { agents: config.notifications?.agents === true },
+    boxes,
+    ...(warnings.length > 0 ? { warnings } : {}),
+  };
 }
 
 export function configGetLines(result: ConfigGetResult): string[] {
@@ -99,6 +106,7 @@ export function configGetLines(result: ConfigGetResult): string[] {
       `  projects: ${list(box.projects)}`,
       `  stdio MCP servers: ${list(box.stdioServers)}`,
     ]),
+    ...(result.warnings ?? []).map((warning) => `Warning: ${warning}`),
   ];
 }
 

@@ -356,7 +356,7 @@ const JSON_RESULTS: Record<string, string> = {
   "self-update":
     "{ current, latest, updated, state, services: [{ service, action, message }], skill }. state is updated, up-to-date, or not-ready. not-ready: the release latest does not have its files yet, and Ferry did not start the update. skill is the message of the skill update, or null. The output of the installer goes to stderr",
   "config get":
-    "{ schemaVersion: 1, notifications: { agents }, boxes: [{ name, mcpGateway, mcpGatewayShared, agentMemoryMax, projects, stdioServers }] }. stdioServers is [] when Ferry cannot read the MCP servers of this machine, and warnings has the reason",
+    "{ schemaVersion: 1, notifications: { agents }, boxes: [{ name, mcpGateway, mcpGatewayShared, agentMemoryMax, projects, stdioServers }], warnings }. stdioServers is [] when Ferry cannot read the MCP servers of this machine. Then result.warnings has the reason. Without a warning, result has no warnings key",
   "config set": "{ changed, box, key, syncNeeded }. box is null for notifications.agents",
   "config unset": "{ changed, box, key, syncNeeded }. box is null for notifications.agents",
   "box list": "{ boxes: [{ name, transport, destination, default }] }",
@@ -1942,7 +1942,8 @@ The keys:
 
 A box key changes the [box.<name>] table of --box, else of default_box, else
 of the only box. An empty list and unset remove the key. A value that is not
-valid changes nothing.
+valid changes nothing. Put -- before the values when a value starts with -,
+as in ferry config set projects --box dev -- -app.
 
 Each change goes to the box at the next ferry sync. When the value changes,
 Ferry prints the sync to run, and syncNeeded is true in the JSON result.
@@ -1965,11 +1966,9 @@ lost after a change.`);
           if (forbidden.length > 0) throw new Error(forbidden.map((hit) => `${hit.reason}: ${hit.path}`).join("; "));
           return sources.flatMap((source) => source.servers.flatMap((server) => (server.type === "stdio" ? [server.name] : [])));
         },
-        warn,
       });
       report(result, (result) => {
         for (const line of configGetLines(result)) writeLine(line);
-        for (const line of warnings) writeLine(`Warning: ${line}`);
       });
     });
   for (const unset of [false, true]) {

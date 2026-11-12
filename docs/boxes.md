@@ -157,6 +157,8 @@ ferry config set notifications.agents true
 
 - A box key changes the box of `--box`, else `default_box`, else the only box. A `[host]` config has no box table, so only `notifications.agents` works there. Run `ferry box add` first.
 - An empty list and `ferry config unset` remove the key.
+- `ferry config set` takes each argument after `--` as a value, so a value can start with `-`: `ferry config set projects --box dev -- -app`.
+- With `--json`, the warnings of `ferry config get` are in `result.warnings`. Without a warning, `result` has no `warnings` key.
 - A value that is not valid changes nothing, and the command fails with the code `usage`.
 - `ferry config get` also lists the carried stdio MCP servers of this machine that each box can share. It prints only the names, never a command, an env value, a header, or a URL. When Ferry cannot read the MCP files, the list is empty, and the command prints a warning.
 - A change goes to the box at the next sync. The command prints the sync to run, such as `Run ferry sync --box dev to apply it.` With `--json`, `syncNeeded` is `true` when the value changed.
