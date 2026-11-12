@@ -85,7 +85,7 @@ On each sync of the box, Ferry does these steps:
 1. It writes `~/.ferry/mcp-gateway/servers.json` with the name and the URL of each carried remote server. The file gets no header and no `env` value. The gateway supports Streamable HTTP only, so Ferry skips an SSE server and prints a warning.
 2. It makes the client key `~/.ferry/mcp-gateway/client-key` when it is missing. A harness sends this key to the gateway. The key never leaves the box.
 3. It installs and starts the user service `ferry-mcp-gateway.service`, which runs `ferry mcp serve` on `127.0.0.1:47820`.
-4. It points the entry of each gateway server in each harness at the gateway: the URL `http://127.0.0.1:47820/mcp/<server>` and the header `Authorization: Bearer <client key>`. The box reads the key from its file and writes it only into the harness entries. Ferry adds a Claude entry with `claude mcp add-json` and a Codex entry with `codex mcp add`, and then adds the `http_headers` table to `~/.codex/config.toml` and sets the file mode to 0600. It merges a Cursor entry into `~/.cursor/mcp.json` with jq. Stdio servers and SSE servers keep their direct entries. This step needs jq on the box.
+4. It points the entry of each gateway server in each harness at the gateway: the URL `http://127.0.0.1:47820/mcp/<server>` and the header `Authorization: Bearer <client key>`. The box reads the key from its file and writes it only into the harness entries. Ferry adds a Claude entry with `claude mcp add-json` and a Codex entry with `codex mcp add`, and then adds the `http_headers` table to `~/.codex/config.toml` and sets the file mode to 0600. It merges a Cursor entry into `~/.cursor/mcp.json` with jq. Stdio servers keep their direct entries, except the [shared stdio servers](#shared-stdio-servers). SSE servers keep their direct entries. This step needs jq on the box.
 5. It removes each harness entry whose URL starts with `http://127.0.0.1:47820/mcp/` when Ferry no longer carries its server. For Codex, `codex mcp remove` also removes the `http_headers` table. Ferry does not change an entry without this prefix.
 
 When the gateway service does not run, the harness entries stay on the gateway. Ferry does not change them back to direct entries, so they do not change from one sync to the next. `ferry status --brief` shows the `mcp-gateway` item in the state `stopped`, until a sync starts the service again.
@@ -95,6 +95,37 @@ The gateway runs the Ferry of the box. A development build of Ferry puts no Ferr
 Log in the gateway to a server with `ferry auth --mcp <server> --box <name>`. The token stays on the box, in `~/.ferry/mcp-gateway/tokens/`, with mode 0600. `ferry status` shows the gateway state and the login state of each server. `ferry status --brief` shows one `gateway/<server>` item for each server that needs a login, and one `mcp-gateway` item when the service does not run. A harness entry of the gateway needs no login of its own, because the gateway never asks a harness for a login. So `ferry status` shows no `<tool>/<server>` login item for it.
 
 When you remove the key, the next sync first changes each gateway entry of a carried server back to its direct entry, and removes each other gateway entry. Then it stops and removes the service and deletes `~/.ferry/mcp-gateway/`, with the tokens and the client key. Ferry does not change a box entry whose URL is not on the gateway. The harnesses then have no login for the remote servers, and `ferry status` shows one `mcp-login` item for each harness and server. Log in again with `ferry auth <tool> --mcp <server>`.
+
+#### Shared stdio servers
+
+`mcp_gateway_shared` in `[box.<name>]` names the carried stdio MCP servers that the gateway shares between the agents of the box. The key is optional. Without it, each harness starts its own process of each stdio server, as on a box without the gateway.
+
+```toml
+[box.b]
+transport = "ssh"
+destination = "user@box-b.example"
+mcp_gateway = true
+mcp_gateway_shared = ["context7"]
+```
+
+The gateway starts one process of each shared server for all agents of the box, at `http://127.0.0.1:47820/mcp/<server>`. It starts the process on the first call. When the process stops, the gateway starts it again on the next call, and until then it keeps the last tool list.
+
+On each sync of the box, Ferry does these steps for the shared servers:
+
+1. It writes the command and the arguments of each shared server into `~/.ferry/mcp-gateway/servers.json`.
+2. The box copies the `env` values of the server from the first harness entry that has all the `env` keys into `servers.json`. The file has mode 0600. When `servers.json` has all the keys already, the box keeps its values. The box does this with jq, and it sends back only status letters, never a value.
+3. It points the harness entries of the server at the gateway, as for a remote server.
+
+When you remove a server from `mcp_gateway_shared`, or remove `mcp_gateway`, the box first writes the `env` values from `servers.json` back into each harness entry of the server, with the direct command. Then it removes the server from `servers.json`, or deletes `~/.ferry/mcp-gateway/`. `ferry box remove <name> --uninstall` does the same.
+
+Sync prints a warning and ignores a name in `mcp_gateway_shared` when Ferry carries no stdio server with that name to the box. It also prints a warning when the box has `mcp_gateway_shared` but not `mcp_gateway = true`, and when the box has no jq. Without jq, the shared servers keep their direct entries.
+
+Share a server only when one process can serve all agents. These are the risks:
+
+- The process keeps its state for all agents. A server that keeps a session, a cache, a login, or a selected project for one agent gives that state to the other agents.
+- The working directory of the process is the home of the box user, not the project of the agent. A server that reads files relative to its working directory reads them from the home.
+- The service has the `PATH` `/usr/local/bin:/usr/bin:/bin`. A command in `~/.local/bin` or in a version manager such as nvm is not found. Use an absolute command path outside the home, or install the command in `/usr/local/bin`.
+- The gateway connects to the server with no client capabilities. When the server sends a request to the client, such as `roots/list` or sampling, the gateway answers with an error. Then `ferry mcp list` and `ferry status` show the server in the state `cannot-share`, and `ferry status --brief` shows a `gateway/<server>` item. To fix it, remove the server from `mcp_gateway_shared`, then run `ferry sync --box <name>`.
 
 Limits:
 
