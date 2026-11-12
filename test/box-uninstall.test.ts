@@ -21,7 +21,7 @@ import { readConfig, writeConfig, type BoxesOperatorConfig } from "../src/config
 import type { Seed } from "../src/manifest.ts";
 import { errorInfo } from "../src/output.ts";
 import { noProgress } from "../src/progress.ts";
-import { BUILTIN_HARNESSES } from "../src/registry/builtin.ts";
+import { BUILTIN_HARNESSES, BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 import { acquireBoxLock, runSync } from "../src/sync.ts";
 import { profileBlockCommand } from "../src/tools/path.ts";
 import { tunnelServicePath } from "../src/tunnel-service.ts";
@@ -361,6 +361,7 @@ describe("ferry box remove --uninstall", () => {
         return box.link;
       },
       harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
       confirmName: async (message) => {
         questions.push(message);
         return "b";
@@ -402,6 +403,54 @@ describe("ferry box remove --uninstall", () => {
     expect(result?.uninstall.plan.unsavedWork?.projects.map((project) => project.path)).toEqual(["code/app", "moved/api"]);
     expect(box.exists(".ferry/projects")).toBe(false);
     expect(box.exists("code/app/notes.txt")).toBe(true);
+  });
+
+  test("with the MCP gateway, changes the gateway entries back to direct entries and removes the stale ones before it removes the gateway", async () => {
+    const KEY = "k".repeat(64);
+    const GATEWAY = "http://127.0.0.1:47820/mcp/";
+    const box = await ferryBox();
+    const bin = join(dirname(box.home), "bin");
+    const calls = join(dirname(box.home), "cli.log");
+    // A claude that logs each call, and a codex without servers.
+    writeFileSync(join(bin, "claude"), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(calls)}\n`, { mode: 0o755 });
+    writeFileSync(join(bin, "codex"), "#!/bin/sh\nprintf '[]\\n'\n", { mode: 0o755 });
+    box.file(".config/systemd/user/ferry-mcp-gateway.service", "[Unit]\n");
+    box.file(".ferry/mcp-gateway/servers.json", JSON.stringify({ servers: { linear: { url: "https://mcp.linear.example/mcp" } } }));
+    box.file(".ferry/mcp-gateway/client-key", `${KEY}\n`);
+    const header = { Authorization: `Bearer ${KEY}` };
+    box.file(".claude.json", JSON.stringify({ mcpServers: { linear: { type: "http", url: `${GATEWAY}linear`, headers: header } } }));
+    box.file(
+      ".cursor/mcp.json",
+      JSON.stringify({
+        mcpServers: {
+          linear: { url: `${GATEWAY}linear`, headers: header },
+          old: { url: `${GATEWAY}old`, headers: header },
+          mine: { url: "https://mine.example/mcp" },
+        },
+      }),
+    );
+    const { deps, lines } = operator(box);
+
+    await runBoxUninstall({ name: "b", yes: true, dryRun: false }, deps);
+
+    expect(lines).toContain("Change each harness entry of the MCP gateway back to its direct entry, or remove it when the gateway does not have the server");
+    expect(lines).toContain("Ferry changed claude MCP server linear on the box back to its direct entry.");
+    expect(lines).toContain("Ferry changed cursor MCP server linear on the box back to its direct entry.");
+    expect(lines).toContain("Ferry removed cursor MCP server old from the box. It pointed at the MCP gateway, and Ferry does not carry it.");
+    expect(readFileSync(calls, "utf8").split("\n").filter(Boolean)).toEqual([
+      "mcp remove --scope user linear",
+      "mcp add --transport http --scope user linear https://mcp.linear.example/mcp",
+    ]);
+    expect(JSON.parse(box.read(".cursor/mcp.json"))).toEqual({
+      mcpServers: { linear: { url: "https://mcp.linear.example/mcp" }, mine: { url: "https://mine.example/mcp" } },
+    });
+    // The entries change before the command that removes the gateway directory.
+    const cleanup = box.commands.findIndex((command) => command.includes("127.0.0.1:47820"));
+    const removal = box.commands.findIndex((command) => command.includes("rm -rf '.ferry/mcp-gateway'"));
+    expect(cleanup).toBeGreaterThan(-1);
+    expect(removal).toBeGreaterThan(cleanup);
+    expect(box.exists(".ferry/mcp-gateway")).toBe(false);
+    expect(JSON.stringify({ commands: box.commands, lines })).not.toContain(KEY);
   });
 
   test("asks for the box name after the plan, removes Ferry from the box, then removes the box from the config", async () => {

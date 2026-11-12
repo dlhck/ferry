@@ -1,6 +1,7 @@
 /** `ferry box list`, `ferry box add`, `ferry box remove`, and `ferry box default`. */
 
-import { boxUninstallLines, commitBoxUninstall, planBoxUninstall, type BoxUninstallPlan } from "./box-uninstall.ts";
+import { boxUninstallLines, commitBoxUninstall, hasMcpGateway, planBoxUninstall, type BoxUninstallPlan } from "./box-uninstall.ts";
+import { gatewayCleanupCommand, gatewayCleanupLines } from "./box-mcp.ts";
 import { hasNoBox, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import {
   ConfigError,
@@ -17,11 +18,11 @@ import {
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { boxInstructionsSource } from "./box-identity.ts";
-import { FerryError } from "./errors.ts";
+import { FerryError, linkFailure } from "./errors.ts";
 import { boxCheckSteps, checkBoxAccess, type InitDependencies, type InitLink } from "./init.ts";
 import type { LinkOptions } from "./link.ts";
 import { step, type Progress } from "./progress.ts";
-import type { HarnessDescriptor } from "./registry/types.ts";
+import type { HarnessDescriptor, ToolDescriptor } from "./registry/types.ts";
 import { acquireBoxLock } from "./sync.ts";
 import { tunnelServicePath, type TunnelServiceInput } from "./tunnel-service.ts";
 
@@ -92,6 +93,8 @@ export type BoxRemoveDependencies = Pick<BoxCommandDependencies, "home" | "readC
 export type BoxUninstallDependencies = BoxRemoveDependencies & Pick<BoxCommandDependencies, "createLink" | "progress"> & {
   /** The harnesses of the registry. Ferry reads their skill roots, instruction files, and extra roots on the box. */
   readonly harnesses: readonly HarnessDescriptor[];
+  /** The tools of the registry. Their MCP recipes change the harness entries of the MCP gateway. */
+  readonly tools: readonly ToolDescriptor[];
   /** Asks the operator to type the box name. Returns the text. */
   readonly confirmName: (message: string) => Promise<string | symbol | undefined>;
 };
@@ -285,6 +288,21 @@ async function uninstallBox(
       dependencies.writeLine("Box remove cancelled.");
       return null;
     }
+  }
+  // The harness entries go back to direct entries before the gateway files go, because they need servers.json.
+  const cleanup = hasMcpGateway(plan) ? gatewayCleanupCommand(dependencies.harnesses, dependencies.tools, plan.home, [], true) : null;
+  if (cleanup !== null) {
+    const output = await step(dependencies.progress, "Changing the MCP entries of the gateway", async () => {
+      const result = await link.run(cleanup);
+      if (!result.ok) throw new Error(`${result.error.origin}/${result.error.code}: ${result.error.message}`, { cause: linkFailure(result.error) });
+      return result.stdout;
+    }).catch((cause) => {
+      throw new Error(
+        `Ferry could not change the MCP entries of the gateway on box ${name}: ${messageOf(cause)}. Ferry did not remove Ferry from the box. The box stays in the config. ${keep}`,
+        { cause },
+      );
+    });
+    for (const line of gatewayCleanupLines(output)) dependencies.writeLine(line);
   }
   const remaining = await step(dependencies.progress, "Removing Ferry from the box", () => commitBoxUninstall(plan, link)).catch(
     (cause) => {
