@@ -54,8 +54,11 @@ export interface Provider {
   machineType(serverType: string, location: string): Promise<MachineType>;
   /** Create the machine and return when it runs. */
   create(spec: MachineSpec): Promise<Machine>;
-  /** Remove the machine and the resources that `create` made for it alone. */
-  destroy(machine: Machine): Promise<void>;
+  /**
+   * Remove the machine and the resources that `create` made for it alone. It
+   * throws when the machine stays. It returns a warning for each other resource that stays.
+   */
+  destroy(machine: Machine): Promise<string[]>;
   /** The machines with the `ferry-box` label. */
   list(): Promise<Machine[]>;
 }

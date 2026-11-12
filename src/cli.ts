@@ -2205,9 +2205,13 @@ does these steps:
   4. It does what ferry box remove <name> does on this machine. It also
      removes the last box.
 
-A box that is not in the config, for example after a failed ferry box
-create, loses only its machine. When the removal at Hetzner Cloud fails, the
-box stays in the config. Ferry reads the token as ferry box create does.
+Ferry does steps 1 and 4 only when [box.<name>] has the provider_id of the
+machine, which ferry box create writes. Otherwise, for example after a
+failed ferry box create, Ferry removes only the machine and its known_hosts
+lines, and keeps the box in the config. When the removal of the machine at
+Hetzner Cloud fails, the box stays in the config. When only the removal of
+the firewall fails, Ferry warns with the firewall name and continues.
+Ferry reads the token as ferry box create does.
 
 --dry-run prints the plan and changes nothing.`)
     .argument("<name>", "box name")
