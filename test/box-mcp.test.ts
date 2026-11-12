@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkBoxMcp, mcpCommand, registerBoxMcp } from "../src/box-mcp.ts";
+import { checkBoxMcp, gatewayCleanupCommand, gatewayCleanupLines, mcpCommand, registerBoxMcp } from "../src/box-mcp.ts";
 import type { StdioMcpServer } from "../src/manifest.ts";
 import type { LinkResult, RunOptions } from "../src/link.ts";
 import { BUILTIN_HARNESSES, BUILTIN_TOOLS } from "../src/registry/builtin.ts";
@@ -862,6 +862,8 @@ function stubStatefulClis(home: string): void {
       "  const entry = servers[name];",
       "  if (!entry) process.exit(1);",
       "  console.log(JSON.stringify({ name, transport: entry.url ? { type: 'streamable_http', url: entry.url, http_headers: entry.http_headers ?? null } : { type: 'stdio', ...entry } }));",
+      "} else if (command === 'list') {",
+      "  console.log(JSON.stringify(Object.entries(servers).map(([name, entry]) => ({ name, transport: entry.url ? { type: 'streamable_http', url: entry.url, http_headers: entry.http_headers ?? null } : { type: 'stdio', ...entry } }))));",
       "} else if (command === 'remove') { delete servers[name]; save(); }",
       "else if (command === 'add') {",
       "  const separator = rest.indexOf('--');",
@@ -1018,6 +1020,86 @@ describe("registerBoxMcp with the MCP gateway", () => {
     });
 
     expect(JSON.parse(box.read(".cursor/mcp.json")).mcpServers.events).toEqual({ type: "sse", url: events.url });
+  });
+
+  /** Add the entries of the gateway server `old`, which Ferry no longer carries, and of the box server `mine`, to each harness. */
+  async function withStaleEntries(box: ReturnType<typeof gatewayBox>) {
+    const header = { Authorization: `Bearer ${KEY}` };
+    const old = "http://127.0.0.1:47820/mcp/old";
+    const claude = JSON.parse(box.read(".claude.json"));
+    claude.mcpServers = { ...claude.mcpServers, old: { type: "http", url: old, headers: header }, mine: { type: "http", url: "https://mine.example/mcp" } };
+    box.put(".claude.json", JSON.stringify(claude));
+    box.put(
+      ".codex/config.toml",
+      `${box.read(".codex/config.toml")}\n[mcp_servers.old]\nurl = "${old}"\n\n[mcp_servers.old.http_headers]\nAuthorization = "${header.Authorization}"\n\n[mcp_servers.mine]\nurl = "https://mine.example/mcp"\n`,
+    );
+    const cursor = JSON.parse(box.read(".cursor/mcp.json"));
+    cursor.mcpServers = { ...cursor.mcpServers, old: { url: old, headers: header }, mine: { url: "https://mine.example/mcp" } };
+    box.put(".cursor/mcp.json", JSON.stringify(cursor));
+  }
+
+  jqTest("removes a gateway entry of a server that Ferry no longer carries, and leaves an entry without the gateway prefix", async () => {
+    const box = gatewayBox();
+    await box.register(["linear"]);
+    await withStaleEntries(box);
+
+    const warnings = await box.register(["linear"]);
+
+    const removed = (harness: string) => `Ferry removed ${harness} MCP server old from the box. It pointed at the MCP gateway, and Ferry does not carry it.`;
+    expect(warnings).toEqual([removed("claude"), removed("codex"), removed("cursor")]);
+    const entries = box.entries();
+    for (const harness of ["claude", "codex", "cursor"] as const) {
+      expect(Object.keys(entries[harness]).sort()).toEqual(["github", "linear", "mine"]);
+      expect((entries[harness] as Record<string, { url: string }>).mine?.url).toBe("https://mine.example/mcp");
+    }
+    // The Codex file is valid TOML without the header table of old.
+    expect(box.read(".codex/config.toml")).not.toContain("old");
+    expect(JSON.stringify({ runs: box.link.runs, outputs: box.outputs, warnings })).not.toContain(KEY);
+  });
+
+  jqTest("the cleanup of a sync without the gateway removes the gateway entries that the direct path left", async () => {
+    const box = gatewayBox();
+    await box.register(["linear"]);
+    await withStaleEntries(box);
+
+    // The sync without the gateway: the direct path first, then the cleanup in the command that removes the gateway.
+    const warnings = await box.register();
+    const result = await box.link.run(gatewayCleanupCommand(BUILTIN_HARNESSES, BUILTIN_TOOLS, box.home, mcp, false)!);
+    const stdout = result.ok ? result.stdout : "";
+
+    expect(warnings).toEqual([]);
+    expect(gatewayCleanupLines(stdout)).toHaveLength(3);
+    const entries = box.entries();
+    for (const harness of ["claude", "codex", "cursor"] as const) {
+      expect(Object.keys(entries[harness]).sort()).toEqual(["github", "linear", "mine"]);
+    }
+    expect(JSON.stringify(entries)).not.toContain("127.0.0.1");
+    expect(JSON.stringify({ runs: box.link.runs, outputs: box.outputs })).not.toContain(KEY);
+  });
+
+  jqTest("the cleanup of the uninstall gives a direct entry back from servers.json and removes the other gateway entries", async () => {
+    const box = gatewayBox();
+    await box.register(["linear"]);
+    await withStaleEntries(box);
+    box.put(".ferry/mcp-gateway/servers.json", JSON.stringify({ servers: { linear: { url: linear.url } } }));
+
+    const command = gatewayCleanupCommand(BUILTIN_HARNESSES, BUILTIN_TOOLS, box.home, [], true)!;
+    const result = await box.link.run(command);
+    const stdout = result.ok ? result.stdout : "";
+
+    const lines = gatewayCleanupLines(stdout);
+    expect(lines.filter((line) => line.includes("linear"))).toEqual(
+      ["claude", "codex", "cursor"].map((harness) => `Ferry changed ${harness} MCP server linear on the box back to its direct entry.`),
+    );
+    expect(lines.filter((line) => line.includes(" old "))).toHaveLength(3);
+    const direct = { command: "github-mcp", args: ["--org", "example"] };
+    const mine = "https://mine.example/mcp";
+    expect(box.entries()).toEqual({
+      claude: { linear: { type: "http", url: linear.url }, github: { type: "stdio", ...direct }, mine: { type: "http", url: mine } },
+      codex: { linear: { url: linear.url }, github: direct, mine: { url: mine } },
+      cursor: { linear: { url: linear.url }, github: direct, mine: { url: mine } },
+    });
+    expect(JSON.stringify({ runs: box.link.runs, outputs: box.outputs, lines })).not.toContain(KEY);
   });
 
   test("a box without the gateway gets no command that reads the client key", async () => {

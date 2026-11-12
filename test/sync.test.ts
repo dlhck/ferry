@@ -21,7 +21,9 @@ import { buildProgram, runCli } from "../src/cli.ts";
 import type { OperatorConfig } from "../src/config.ts";
 import { denyRules, type Seed } from "../src/manifest.ts";
 import { unitFile } from "../src/integrations/paseo.ts";
-import { DISABLE_GATEWAY_COMMAND } from "../src/mcp-gateway/service.ts";
+import { disableGatewayCommand } from "../src/mcp-gateway/service.ts";
+import { gatewayCleanupCommand } from "../src/box-mcp.ts";
+import { BUILTIN_HARNESSES, BUILTIN_TOOLS } from "../src/registry/builtin.ts";
 import { loadRegistry, type RegistryConfig } from "../src/registry/load.ts";
 import type { LinkResult } from "../src/link.ts";
 import type { HarnessDescriptor } from "../src/registry/types.ts";
@@ -501,7 +503,8 @@ describe("runSync", () => {
         options: undefined,
       },
       { command: profileBlockCommand(BUILTIN_BOX_PATH_DIRS), options: undefined },
-      { command: DISABLE_GATEWAY_COMMAND, options: undefined },
+      // The removal command checks for the gateway first, so a box without it runs no harness command.
+      { command: disableGatewayCommand(gatewayCleanupCommand(BUILTIN_HARNESSES, BUILTIN_TOOLS, "/srv/ferry", seed.mcp, false)), options: undefined },
     ]);
     expect(applyInput).toMatchObject({
       checkout: "/srv/ferry/.ferry/store",
@@ -2145,8 +2148,9 @@ describe("sync with more than one box", () => {
       },
     });
 
-    // The removal check of the MCP gateway names no harness.
-    expect(commands.some((command) => /claude|cursor|settings\.json|mcp(?!-gateway)/.test(command))).toBe(false);
+    // Only the removal check of the MCP gateway names an MCP command, and only for codex, the agent that is on.
+    expect(commands.some((command) => /claude|cursor|settings\.json/.test(command))).toBe(false);
+    expect(commands.filter((command) => /mcp(?!-gateway)/.test(command)).every((command) => command.startsWith('d="$HOME/.ferry/mcp-gateway"'))).toBe(true);
     expect(lines.join("\n")).toContain("\nMCP servers: declare on the box, and keep the other box servers: none\n");
   });
 

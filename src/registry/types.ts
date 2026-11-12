@@ -208,6 +208,8 @@ export type ToolMcp = {
    * For an entry of the MCP gateway: `addJson` adds the URL and the header.
    * Without `addJson`, `add` adds the URL, and the box appends the header in
    * `headersTable`, a table under the server entry of the TOML MCP file.
+   * `listJson` prints all servers as a JSON array of `{ name, transport }`.
+   * Ferry reads it to find the gateway entries in a TOML MCP file.
    */
   readonly register?: {
     readonly get: string;
@@ -217,6 +219,7 @@ export type ToolMcp = {
     readonly addStdio?: string;
     readonly getJson?: string;
     readonly headersTable?: string;
+    readonly listJson?: string;
   };
   /** Lists the declared servers and their login state. */
   readonly list: string;

@@ -38,7 +38,7 @@ import { openStore as openSnapshotStore, skillChanged, type PublishResult } from
 import { adoptPublishedSkills } from "./adopt.ts";
 import { installBoxPlugins, mergeBoxSettings } from "./box-settings.ts";
 import { withNotifyHooks } from "./notify.ts";
-import { registerBoxMcp } from "./box-mcp.ts";
+import { gatewayCleanupCommand, gatewayCleanupLines, registerBoxMcp } from "./box-mcp.ts";
 import { disableGateway, enableGateway, gatewayServers, MCP_GATEWAY_SERVICE } from "./mcp-gateway/service.ts";
 import { isReleaseVersion, VERSION } from "./version.ts";
 import {
@@ -746,7 +746,9 @@ async function applyOnBox(context: {
   // After the MCP step, so that the harness entries are direct again before the gateway and its client key go.
   if (!box.mcpGateway) {
     try {
-      if (await disableGateway(link)) warn("Removed the MCP gateway, its unit, and its logins from the box.");
+      const { removed, output } = await disableGateway(link, gatewayCleanupCommand(harnesses, tools, required(plan.remoteHome), seed.mcp, false));
+      for (const line of gatewayCleanupLines(output)) warn(`Box MCP: ${line}`);
+      if (removed) warn("Removed the MCP gateway, its unit, and its logins from the box.");
     } catch (cause) {
       warn(`Warning: Ferry could not remove the MCP gateway: ${messageOf(cause)}. The core sync is complete.`);
     }

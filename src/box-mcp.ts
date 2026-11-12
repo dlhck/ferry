@@ -15,7 +15,8 @@
  * its direct entry. The box reads the key from its file and writes it only
  * into the harness entry, so the key never reaches Ferry. When the gateway
  * goes off, the direct path declares the carried URL again, and so replaces
- * each gateway entry of a carried server.
+ * each gateway entry of a carried server. `gatewayCleanupCommand` removes a
+ * gateway entry of a server that Ferry no longer carries.
  */
 
 import { posix } from "node:path";
@@ -28,7 +29,7 @@ import {
 import { APP_BUNDLE_PATH, type McpSource, type NonPortableMcp, type RemoteMcpServer, type SeedMcp, type StdioMcpServer } from "./manifest.ts";
 import type { Progress } from "./progress.ts";
 import type { HarnessDescriptor, ToolDescriptor, ToolMcp } from "./registry/types.ts";
-import { gatewayUrl } from "./mcp-gateway/url.ts";
+import { GATEWAY_URL_PREFIX, gatewayUrl } from "./mcp-gateway/url.ts";
 
 /** Codex waits in `mcp add` for a login callback, so each server gets more time than one command. */
 const REGISTER_TIMEOUT_MS = 600_000;
@@ -55,6 +56,15 @@ const GATEWAY_FILE = `.[$k] = ((.[$k] // {}) + ($s | map_values(. + {headers: {A
 /** A jq filter: the command or an argument of the box entry `$e` is a path in a macOS app bundle. `$r` is `APP_BUNDLE_PATH`. */
 const IN_APP_BUNDLE =
   '($e | type) == "object" and ([$e.command, ($e.args // [])[]?] | any(type == "string" and test($r; "i")))';
+/**
+ * A jq filter on one `{key, value}` item of an MCP map: the value is a gateway
+ * entry, and the name is not in `$keep`. `$p` is `GATEWAY_URL_PREFIX`.
+ */
+const STALE_GATEWAY_ENTRY =
+  '(.value | type) == "object" and ((.value.url // .value.transport.url // "") | type == "string" and startswith($p))' +
+  ' and (.key | test("^[A-Za-z0-9._-]+$")) and (.key as $n | $keep | any(. == $n) | not)';
+/** A jq expression: the direct URL of the server `$n` in the gateway file `$sv`, or null. */
+const DIRECT_URL = '($sv.servers[$n].url // null) as $r | if ($r | type) == "string" and ($r | startswith("https://")) then $r else null end';
 /** A shell test that fails when jq is not on the box. */
 const HAS_JQ = "command -v jq >/dev/null 2>&1";
 
@@ -95,6 +105,10 @@ export async function registerBoxMcp(input: {
     input.progress?.count(current, total);
   };
   const warnings: string[] = [];
+  if (input.gateway) {
+    const command = gatewayCleanupCommand(input.harnesses, input.tools, input.remoteHome, input.mcp, false);
+    if (command !== null) warnings.push(...gatewayCleanupLines((await checked(input.link, command)).stdout));
+  }
   for (const { entry, recipe } of entries) {
     const file = input.harnesses.find((harness) => harness.id === entry.harness)?.mcp;
     const path = file ? posix.join(input.remoteHome, file.file) : null;
@@ -590,6 +604,111 @@ function addStdioScript(register: NonNullable<ToolMcp["register"]>, server: Stdi
     "fi",
     `${mcpCommand(add, server)} </dev/null >/dev/null 2>&1`,
     `${mcpCommand(register.get, server)} >/dev/null 2>&1 || printf 'S\\n'`,
+  ].join("\n");
+}
+
+/**
+ * One box command that cleans the gateway entries of each harness: each entry
+ * whose URL starts with `GATEWAY_URL_PREFIX` and whose server is not in the
+ * carried servers `mcp` of the harness. With `restore`, an entry of a server in
+ * `~/.ferry/mcp-gateway/servers.json` gets the direct URL from that file.
+ * Ferry removes each other such entry. Ferry changes no entry without the
+ * prefix. `null` when no harness has an MCP recipe. Read the output with
+ * `gatewayCleanupLines`. The script never reads the client key.
+ */
+export function gatewayCleanupCommand(
+  harnesses: readonly HarnessDescriptor[],
+  tools: readonly ToolDescriptor[],
+  home: string,
+  mcp: readonly SeedMcp[],
+  restore: boolean,
+): string | null {
+  const keep = (harness: string) => mcp.find((entry) => entry.harness === harness)?.servers.map((server) => server.name) ?? [];
+  const scripts = harnesses.flatMap((harness) => {
+    const recipe = tools.find((tool) => tool.id === harness.id)?.mcp;
+    const script = recipe && harness.mcp ? cleanupScript(harness.id, posix.join(home, harness.mcp.file), harness.mcp, recipe, keep(harness.id), restore) : null;
+    return script === null ? [] : [`(\n${script}\n)`];
+  });
+  return scripts.length === 0 ? null : `sh -c ${quoteShell(scripts.join("\n"))}`;
+}
+
+/**
+ * The lines of the output of `gatewayCleanupCommand`, one for each change or
+ * failure. The box prints `R` removed, `D` direct again, `F` the change
+ * failed, `J` jq is missing, `S` Ferry cannot read the entries, each with
+ * the harness and the server name.
+ */
+export function gatewayCleanupLines(stdout: string): string[] {
+  return stdout.split("\n").flatMap((line) => {
+    const [kind, harness = "", name = ""] = line.split("\t");
+    if (!/^[a-z0-9-]+$/.test(harness) || (name !== "" && !/^[A-Za-z0-9._-]+$/.test(name))) return [];
+    if (kind === "R") return [`Ferry removed ${harness} MCP server ${name} from the box. It pointed at the MCP gateway, and Ferry does not carry it.`];
+    if (kind === "D") return [`Ferry changed ${harness} MCP server ${name} on the box back to its direct entry.`];
+    if (kind === "F") return [`could not change ${harness} MCP server ${name} on the box, which points at the MCP gateway`];
+    if (kind === "J") return [`jq is not on the box, so Ferry did not check the ${harness} MCP entries of the gateway. Run ferry update to install jq.`];
+    if (kind === "S") return [`could not read the ${harness} MCP servers on the box to check the entries of the gateway`];
+    return [];
+  });
+}
+
+/**
+ * The box script of one harness for `gatewayCleanupCommand`. A harness with
+ * `register` changes its entries with the CLI. Else jq changes the JSON MCP
+ * file. Ferry reads a JSON MCP file with jq and a TOML MCP file with
+ * `listJson`. `null` when Ferry has no way to read the entries.
+ */
+function cleanupScript(
+  harness: string,
+  path: string,
+  file: McpFile,
+  recipe: ToolMcp,
+  keep: readonly string[],
+  restore: boolean,
+): string | null {
+  const register = recipe.register;
+  const args = `--arg k ${quoteShell(file.key)} --arg p ${quoteShell(GATEWAY_URL_PREFIX)} --argjson keep ${quoteShell(JSON.stringify(keep))}`;
+  const list =
+    file.format === "json"
+      ? `[ ! -f "$f" ] || jq -r ${args} ${quoteShell(`(.[$k] // {}) | to_entries[] | select(${STALE_GATEWAY_ENTRY}) | .key`)} "$f"`
+      : register?.listJson
+        ? `${register.listJson} 2>/dev/null | jq -r ${args} ${quoteShell(`map({key: .name, value: .})[] | select(${STALE_GATEWAY_ENTRY}) | .key`)}`
+        : null;
+  if (list === null || (!register && file.format !== "json")) return null;
+  const report = (kind: string) => `printf '${kind}\\t%s\\t%s\\n' "$h" "$n"`;
+  const head = [
+    `h=${quoteShell(harness)}`,
+    `f=${quoteShell(path)}`,
+    ...(register ? [`command -v ${mcpBinary(recipe)} >/dev/null 2>&1 || exit 0`] : []),
+    `${HAS_JQ} || { printf 'J\\t%s\\n' "$h"; exit 0; }`,
+    "sv='{}'",
+    ...(restore ? [`[ -f "$HOME/.ferry/mcp-gateway/servers.json" ] && sv=$(cat "$HOME/.ferry/mcp-gateway/servers.json")`] : []),
+    `names=$(${list}) || { printf 'S\\t%s\\n' "$h"; exit 0; }`,
+    '[ -n "$names" ] || exit 0',
+  ];
+  if (register) {
+    const remove = register.remove.replaceAll("{name}", '"$n"');
+    const add = register.add.replaceAll("{name}", '"$n"').replaceAll("{url}", '"$r"').replaceAll("{type}", "http");
+    return [
+      ...head,
+      'printf \'%s\\n\' "$names" | while IFS= read -r n; do',
+      `  ${remove} </dev/null >/dev/null 2>&1 || { ${report("F")}; continue; }`,
+      ...(restore
+        ? [
+            `  r=$(jq -rn --arg n "$n" --argjson sv "$sv" ${quoteShell(`${DIRECT_URL} | values`)} 2>/dev/null)`,
+            `  if [ -n "$r" ]; then ${add} </dev/null >/dev/null 2>&1 && ${report("D")} || ${report("F")}; else ${report("R")}; fi`,
+          ]
+        : [`  ${report("R")}`]),
+      "done",
+    ].join("\n");
+  }
+  const rewrite = `.[$k] |= ((. // {}) | with_entries(if ${STALE_GATEWAY_ENTRY} then (.key as $n | (${DIRECT_URL})) as $r | if $r then .value = {url: $r} else empty end else . end))`;
+  return [
+    ...head,
+    "umask 077",
+    `if jq ${args} --argjson sv "$sv" ${quoteShell(rewrite)} "$f" > "$f.ferry-tmp" 2>/dev/null && mv "$f.ferry-tmp" "$f"; then ok=1; else rm -f "$f.ferry-tmp"; ok=0; fi`,
+    'printf \'%s\\n\' "$names" | while IFS= read -r n; do',
+    `  if [ "$ok" = 0 ]; then ${report("F")}; elif jq -en --arg n "$n" --argjson sv "$sv" ${quoteShell(DIRECT_URL)} >/dev/null 2>&1; then ${report("D")}; else ${report("R")}; fi`,
+    "done",
   ].join("\n");
 }
 

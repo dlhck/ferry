@@ -375,6 +375,7 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
         getJson: "codex mcp get {name} --json",
         // The add command has no header option, so the box appends the header table to config.toml.
         headersTable: "http_headers",
+        listJson: "codex mcp list --json",
       },
       list: "codex mcp list",
       loginRequired: "^(\\S+)\\s+https://\\S+\\s.*\\bNot logged in\\s*$",

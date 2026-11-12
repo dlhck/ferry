@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Seed } from "../src/manifest.ts";
 import {
-  DISABLE_GATEWAY_COMMAND,
+  disableGatewayCommand,
   gatewayServers,
   parseGatewayStatus,
   readGatewayStatus,
@@ -269,7 +269,7 @@ describe("sync with mcp_gateway", () => {
     await runSync({ home: box1.home }, box1.dependencies(true));
 
     const start = box1.commands.findIndex((command) => command.includes("servers.json"));
-    const entries = box1.commands.flatMap((command, index) => (command.includes("http://127.0.0.1:47820/mcp/") ? [index] : []));
+    const entries = box1.commands.flatMap((command, index) => (/127\.0\.0\.1:47820\/mcp\/(linear|docs)/.test(command) ? [index] : []));
     // claude/linear, and codex/linear, after which the fake box reports no codex CLI. The stdio server files and the SSE server events are not on the gateway.
     expect(entries).toHaveLength(2);
     expect(start).toBeGreaterThanOrEqual(0);
@@ -286,11 +286,12 @@ describe("sync with mcp_gateway", () => {
 
     await runSync({ home: box1.home }, box1.dependencies(false));
 
-    const removal = box1.commands.indexOf(DISABLE_GATEWAY_COMMAND);
+    const removal = box1.commands.findIndex((command) => command.startsWith(disableGatewayCommand(null).split("\n").slice(0, 3).join("\n")));
     const direct = box1.commands.findIndex((command) => command.includes("claude mcp add") && command.includes("mcp.linear.example"));
     expect(direct).toBeGreaterThanOrEqual(0);
     expect(removal).toBeGreaterThan(direct);
-    expect(box1.commands.some((command) => command.includes("127.0.0.1:47820"))).toBe(false);
+    // Only the removal command names the gateway URL, to find the entries that are still on the gateway.
+    expect(box1.commands.filter((command) => command.includes("127.0.0.1:47820"))).toEqual([box1.commands[removal]!]);
   });
 
   test("a development build keeps the harness entries direct", async () => {
