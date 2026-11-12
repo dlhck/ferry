@@ -1,7 +1,7 @@
 /** `ferry box list`, `ferry box add`, `ferry box remove`, and `ferry box default`. */
 
 import { boxUninstallLines, commitBoxUninstall, hasMcpGateway, planBoxUninstall, type BoxUninstallPlan } from "./box-uninstall.ts";
-import { gatewayCleanupCommand, gatewayCleanupFailed, gatewayCleanupLines } from "./box-mcp.ts";
+import { gatewayCleanupFailed, gatewayCleanupLines, uninstallCleanupCommand } from "./box-mcp.ts";
 import { hasNoBox, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import {
   ConfigError,
@@ -290,7 +290,7 @@ async function uninstallBox(
     }
   }
   // The harness entries go back to direct entries before the gateway files go, because they need servers.json.
-  const cleanup = hasMcpGateway(plan) ? gatewayCleanupCommand(dependencies.harnesses, dependencies.tools, plan.home, [], true) : null;
+  const cleanup = hasMcpGateway(plan) ? uninstallCleanupCommand(dependencies.harnesses, dependencies.tools, plan.home) : null;
   if (cleanup !== null) {
     const output = await step(dependencies.progress, "Changing the MCP entries of the gateway", async () => {
       const result = await link.run(cleanup);

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkBoxMcp, gatewayCleanupCommand, gatewayCleanupLines, mcpCommand, registerBoxMcp, sharedEnvScript, sharedRestoreCommand } from "../src/box-mcp.ts";
+import { checkBoxMcp, gatewayCleanupCommand, gatewayCleanupFailed, gatewayCleanupLines, mcpCommand, registerBoxMcp, sharedEnvScript, sharedRestoreCommand, uninstallCleanupCommand } from "../src/box-mcp.ts";
 import { disableGateway, enableGateway, gatewayServers } from "../src/mcp-gateway/service.ts";
 import type { StdioMcpServer } from "../src/manifest.ts";
 import type { LinkResult, RunOptions } from "../src/link.ts";
@@ -1264,6 +1264,49 @@ describe("registerBoxMcp with the MCP gateway", () => {
       expect(box.github()).toEqual({ claude: { type: "stdio", ...direct(full) }, codex: direct(full), cursor: direct(full) });
       expect(existsSync(join(box.home, ".ferry", "mcp-gateway"))).toBe(false);
       for (const secret of [SECRET, OTHER, KEY]) expect(box.captured([first, second])).not.toContain(secret);
+    });
+
+    /** Make the add command of the claude and codex stubs fail, as with a timeout, or work again. */
+    function breakAdd(box: { readonly home: string }) {
+      const files = ["claude", "codex"].map((name) => join(box.home, "bin", name));
+      const working = files.map((file) => readFileSync(file, "utf8"));
+      files.forEach((file, index) =>
+        writeFileSync(file, working[index]!.replace("const name = words[0];", "const name = words[0];\nif (command === 'add' || command === 'add-json') process.exit(1);")),
+      );
+      return () => files.forEach((file, index) => writeFileSync(file, working[index]!));
+    }
+
+    jqTest("a second uninstall after a failed add in the first one still has the env values and restores them", async () => {
+      const box = sharedBox();
+      await box.enable(["github"]);
+      rmSync(join(box.home, ".cursor", "mcp.json"));
+      const command = uninstallCleanupCommand(BUILTIN_HARNESSES, BUILTIN_TOOLS, box.home)!;
+      const repair = breakAdd(box);
+
+      const first = await box.link.run(command);
+      const firstOut = first.ok ? first.stdout : "";
+
+      // Cursor is not on this box, so only claude and codex count.
+      const github = () => ({
+        claude: JSON.parse(box.read(".claude.json")).mcpServers.github,
+        codex: (Bun.TOML.parse(box.read(".codex/config.toml")) as { mcp_servers: Record<string, unknown> }).mcp_servers.github,
+      });
+      expect(gatewayCleanupFailed(firstOut)).toBe(true);
+      expect(github()).toEqual({ claude: undefined, codex: undefined });
+      expect(JSON.parse(box.read(".ferry/mcp-gateway/servers.json")).servers.github).toEqual(direct(full));
+
+      // The second uninstall: no harness has an entry of github now, so the check writes it from servers.json.
+      repair();
+      const second = await box.link.run(command);
+      const secondOut = second.ok ? second.stdout : "";
+
+      expect(gatewayCleanupFailed(secondOut)).toBe(false);
+      expect(gatewayCleanupLines(secondOut).filter((line) => line.includes("github"))).toEqual(
+        ["claude", "codex"].map((harness) => `Ferry changed ${harness} MCP server github on the box back to its direct entry.`),
+      );
+      expect(github()).toEqual({ claude: { type: "stdio", ...direct(full) }, codex: direct(full) });
+      for (const secret of [SECRET, OTHER, KEY]) expect(box.captured([firstOut, secondOut])).not.toContain(secret);
+      for (const key of Object.keys(full)) expect(JSON.stringify([firstOut, secondOut])).not.toContain(key);
     });
 
     jqTest("a server that leaves mcp_gateway_shared gets its direct entry and its env values back", async () => {
