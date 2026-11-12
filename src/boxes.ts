@@ -30,6 +30,8 @@ export type ResolvedBox = {
   readonly agentMemoryMax: string | null;
   /** True when `mcp_gateway = true` in `[box.<name>]`. */
   readonly mcpGateway: boolean;
+  /** `mcp_gateway_shared` of the box, or none. */
+  readonly mcpGatewayShared: readonly string[];
   /** `[integrations]`, with the keys of `[box.<name>.integrations]` on top. */
   readonly integrations: IntegrationsConfig;
   /**
@@ -115,6 +117,7 @@ function resolveBox(config: PartialOperatorConfig, box: BoxConfig): ResolvedBox 
     projects: box.projects ?? [],
     agentMemoryMax: box.agentMemoryMax ?? null,
     mcpGateway: box.mcpGateway === true,
+    mcpGatewayShared: box.mcpGatewayShared ?? [],
     integrations: { ...config.integrations, ...box.integrations },
     tools,
   };
