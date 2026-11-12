@@ -699,11 +699,19 @@ async function applyOnBox(context: {
               cleanup: gatewayCleanupCommand(harnesses, tools, remoteHome, seed.mcp, false, shared),
               envScript: sharedEnvScript(harnesses, tools, remoteHome, seed.mcp, shared),
             }),
-          (gateway) => (gateway.state === "missing" ? "no Ferry on the box" : `${plural(gateway.servers, "server")}, ${gateway.state}`),
+          (gateway) =>
+            gateway.state === "missing"
+              ? "no Ferry on the box"
+              : gateway.state === "old"
+                ? "the Ferry of the box has no MCP gateway"
+                : `${plural(gateway.servers, "server")}, ${gateway.state}`,
         );
         if (started.state === "missing") {
           gateway = undefined;
           warn(`Warning: The MCP gateway needs Ferry on the box. Run ferry install --box ${box.name}.`);
+        } else if (started.state === "old") {
+          gateway = undefined;
+          warn(`Warning: The Ferry of the box has no MCP gateway, so the MCP entries stay direct. Run ferry update --box ${box.name}, then ferry sync --box ${box.name}.`);
         } else {
           for (const line of gatewayCleanupLines(started.output)) warn(`Box MCP: ${line}`);
           if (!started.sharing) {

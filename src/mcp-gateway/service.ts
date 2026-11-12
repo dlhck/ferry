@@ -165,14 +165,17 @@ const MERGE_SERVERS = [
  * jq, the box writes the first line, but keeps an old file that has a stdio
  * server, and prints `nojq` when Ferry asked to share a server.
  *
- * The command prints `missing` when the box has no Ferry, else the output of
- * `cleanup`, `unit` when the unit changed, then `running` or `stopped`. It
- * never prints the key or an `env` value.
+ * The command prints `missing` when the box has no Ferry, `old` when the
+ * Ferry of the box has no `ferry mcp serve`, else the output of `cleanup`,
+ * `unit` when the unit changed, then `running` or `stopped`. It never prints
+ * the key or an `env` value.
  */
 export function enableGatewayCommand(unit: string, cleanup: string | null = null, envScript = ":"): string {
   const name = MCP_GATEWAY_SERVICE.unit;
   return [
     `[ -f "$HOME/.ferry/box.json" ] && [ -x ${BOX_FERRY} ] || { echo missing; exit 0; }`,
+    // A Ferry before the gateway prints the general help for `mcp serve --help`.
+    `${BOX_FERRY} mcp serve --help 2>/dev/null | grep -q '^Usage: ferry mcp serve' || { echo old; exit 0; }`,
     `d=${GATEWAY_DIR}`,
     `u=${UNIT_FILE}`,
     'mkdir -p "${u%/*}" || exit 1',
@@ -231,9 +234,10 @@ export function disableGatewayCommand(cleanup: string | null): string {
 /**
  * The command that `ferry update` runs after it changes the Ferry binary of a
  * box with the gateway, so that the gateway runs the new binary. A stopped
- * service stays stopped, and the next sync starts it.
+ * service stays stopped, and the next sync starts it. A box without the unit,
+ * such as a box that updates from a Ferry before the gateway, has nothing to restart.
  */
-export const RESTART_GATEWAY_COMMAND = `systemctl --user try-restart ${MCP_GATEWAY_SERVICE.unit}`;
+export const RESTART_GATEWAY_COMMAND = `{ [ ! -f ${UNIT_FILE} ] || systemctl --user try-restart ${MCP_GATEWAY_SERVICE.unit}; }`;
 
 /**
  * `sharing` is false when the box could not copy the `env` values of the
@@ -242,6 +246,7 @@ export const RESTART_GATEWAY_COMMAND = `systemctl --user try-restart ${MCP_GATEW
  */
 export type GatewaySyncResult =
   | { readonly state: "missing" }
+  | { readonly state: "old" }
   | {
       readonly state: "running" | "stopped";
       readonly servers: number;
@@ -273,6 +278,7 @@ export async function enableGateway(
   if (!result.ok) throw new Error(`${result.error.origin}/${result.error.code}: ${result.error.message}`);
   const lines = result.stdout.split("\n").map((line) => line.trim());
   if (lines.includes("missing")) return { state: "missing" };
+  if (lines.includes("old")) return { state: "old" };
   return {
     state: lines.includes("running") ? "running" : "stopped",
     servers: Object.keys(servers).length,

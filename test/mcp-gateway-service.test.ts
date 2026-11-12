@@ -9,6 +9,7 @@ import {
   parseGatewayStatus,
   readGatewayStatus,
   MCP_GATEWAY_TOOL,
+  RESTART_GATEWAY_COMMAND,
 } from "../src/mcp-gateway/service.ts";
 import { noProgress, type Progress } from "../src/progress.ts";
 import { runSync, type SyncDependencies } from "../src/sync.ts";
@@ -63,7 +64,7 @@ function config(mcpGateway: boolean, mcpGatewayShared?: readonly string[]) {
  * gateway command with `sh`, with a fake `systemctl` that records its
  * arguments. Other box commands only get recorded.
  */
-function box(options: { readonly ferry?: boolean; readonly active?: boolean } = {}) {
+function box(options: { readonly ferry?: boolean | "old"; readonly active?: boolean } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "ferry-gw-service-")));
   roots.push(root);
   const home = join(root, "operator");
@@ -80,7 +81,9 @@ function box(options: { readonly ferry?: boolean; readonly active?: boolean } = 
   chmodSync(join(bin, "systemctl"), 0o755);
   if (options.ferry !== false) {
     mkdirSync(join(boxHome, ".local", "bin"), { recursive: true });
-    writeFileSync(join(boxHome, ".local", "bin", "ferry"), "#!/bin/sh\nexit 0\n");
+    // A Ferry before the gateway prints the general help for `mcp serve --help`.
+    const usage = options.ferry === "old" ? "Usage: ferry [options] [command]" : "Usage: ferry mcp serve [options]";
+    writeFileSync(join(boxHome, ".local", "bin", "ferry"), `#!/bin/sh\n[ "$*" != "mcp serve --help" ] || echo '${usage}'\n`);
     chmodSync(join(boxHome, ".local", "bin", "ferry"), 0o755);
     writeFileSync(join(boxHome, ".ferry", "box.json"), '{"mode":"box"}\n');
   }
@@ -259,6 +262,21 @@ describe("sync with mcp_gateway", () => {
     expect(box1.lines).toContain("Warning: The MCP gateway needs Ferry on the box. Run ferry install --box a.");
   });
 
+  test("keeps the harness entries direct and warns when the Ferry of the box has no MCP gateway", async () => {
+    const box1 = box({ ferry: "old" });
+
+    await runSync({ home: box1.home }, box1.dependencies(true));
+
+    expect(existsSync(box1.gateway)).toBe(false);
+    expect(existsSync(box1.unit)).toBe(false);
+    expect(box1.systemctl()).toEqual([]);
+    expect(box1.commands.some((command) => command.includes("127.0.0.1:47820/mcp/linear"))).toBe(false);
+    expect(box1.commands.some((command) => command.includes("claude mcp add") && command.includes("mcp.linear.example"))).toBe(true);
+    expect(box1.lines).toContain(
+      "Warning: The Ferry of the box has no MCP gateway, so the MCP entries stay direct. Run ferry update --box a, then ferry sync --box a.",
+    );
+  });
+
   test("a development build sends no gateway command to the box", async () => {
     const box1 = box();
 
@@ -368,6 +386,33 @@ describe("sync with mcp_gateway", () => {
     expect(box1.outputs.join("")).toBe("");
     expect(box1.steps.some((step) => step.includes("MCP gateway"))).toBe(false);
     expect(box1.lines.some((line) => line.includes("MCP gateway"))).toBe(false);
+  });
+});
+
+describe("the gateway restart of ferry update", () => {
+  /** Run the restart with a fake `systemctl` that fails as systemd does for a unit that it does not know. */
+  async function restart(withUnit: boolean) {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "ferry-gw-restart-")));
+    roots.push(root);
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    const calls = join(root, "systemctl.log");
+    writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\n[ -f "$HOME/.config/systemd/user/ferry-mcp-gateway.service" ] || exit 5\n`);
+    chmodSync(join(bin, "systemctl"), 0o755);
+    if (withUnit) {
+      mkdirSync(join(root, ".config", "systemd", "user"), { recursive: true });
+      writeFileSync(join(root, ".config", "systemd", "user", "ferry-mcp-gateway.service"), "[Unit]\n");
+    }
+    const child = Bun.spawn(["sh", "-c", `true && ${RESTART_GATEWAY_COMMAND}`], { env: { HOME: root, PATH: `${bin}:/usr/bin:/bin` } });
+    return { status: await child.exited, calls: existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [] };
+  }
+
+  test("an update before the first sync with the gateway, when the box has no unit yet, succeeds and restarts nothing", async () => {
+    expect(await restart(false)).toEqual({ status: 0, calls: [] });
+  });
+
+  test("an update after the sync restarts the gateway", async () => {
+    expect(await restart(true)).toEqual({ status: 0, calls: ["--user try-restart ferry-mcp-gateway.service"] });
   });
 });
 

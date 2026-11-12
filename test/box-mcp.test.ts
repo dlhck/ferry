@@ -1120,7 +1120,7 @@ describe("registerBoxMcp with the MCP gateway", () => {
     function sharedBox() {
       const box = gatewayBox();
       box.put(".ferry/box.json", '{"mode":"box"}\n');
-      box.put(".local/bin/ferry", "#!/bin/sh\nexit 0\n");
+      box.put(".local/bin/ferry", `#!/bin/sh\n[ "$*" != "mcp serve --help" ] || echo 'Usage: ferry mcp serve [options]'\n`);
       chmodSync(join(box.home, ".local", "bin", "ferry"), 0o755);
       writeFileSync(join(box.home, "bin", "systemctl"), "#!/bin/sh\nexit 0\n");
       chmodSync(join(box.home, "bin", "systemctl"), 0o755);
