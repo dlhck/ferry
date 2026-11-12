@@ -74,8 +74,11 @@ const MEMORY_SIZE = /^(?:[1-9]\d*(?:\.\d+)?[KMGTPE]|(?:[1-9]\d?(?:\.\d+)?|100)%)
 /** The smallest size with a suffix. An agent does not start with less memory. */
 const MIN_MEMORY_MIB = 256;
 
+/** The rule of `agent_memory_max`, for an error message. */
+export const MEMORY_LIMIT_RULE = `a systemd memory size with a K, M, G, or T suffix of at least ${MIN_MEMORY_MIB}M, such as "6G" or "512M", or a percentage, such as "50%"`;
+
 /** True for a size of MEMORY_SIZE that is at least MIN_MEMORY_MIB, or a percentage. */
-function isMemoryLimit(value: string): boolean {
+export function isMemoryLimit(value: string): boolean {
   if (!MEMORY_SIZE.test(value)) return false;
   if (value.endsWith("%")) return true;
   const mib = Number.parseFloat(value) * 1024 ** ("KMGTPE".indexOf(value.at(-1)!) - 1);
@@ -546,7 +549,7 @@ function readBoxKey(entry: ParsedBox, part: BoxPart, key: string, encoded: strin
     const value = tomlString(encoded);
     if (value === undefined || !isMemoryLimit(value)) {
       throw new ConfigError(
-        `invalid agent_memory_max in ${section} of ${path}. Use a systemd memory size with a K, M, G, or T suffix of at least ${MIN_MEMORY_MIB}M, such as "6G" or "512M", or a percentage, such as "50%".`,
+        `invalid agent_memory_max in ${section} of ${path}. Use ${MEMORY_LIMIT_RULE}.`,
       );
     }
     entry.agentMemoryMax = value;
@@ -559,7 +562,7 @@ function readBoxKey(entry: ParsedBox, part: BoxPart, key: string, encoded: strin
   }
   if (part === "host" && key === "mcp_gateway_shared") {
     const list = parseJson(encoded);
-    if (!Array.isArray(list) || !list.every((name) => typeof name === "string" && name !== "")) {
+    if (!Array.isArray(list) || !list.every(isServerName)) {
       throw new ConfigError(`invalid mcp_gateway_shared in ${section} of ${path}. Use a list of stdio MCP server names, such as ["context7"].`);
     }
     entry.mcpGatewayShared = list;
@@ -589,7 +592,7 @@ function readBoxKey(entry: ParsedBox, part: BoxPart, key: string, encoded: strin
 }
 
 /** A path below the home: not empty, not absolute, no `~`, no `..`, and no control character. */
-function isHomeRelative(value: unknown): value is string {
+export function isHomeRelative(value: unknown): value is string {
   return (
     typeof value === "string" &&
     value !== "" &&
@@ -598,6 +601,11 @@ function isHomeRelative(value: unknown): value is string {
     !value.split("/").includes("..") &&
     !/[\u0000-\u001f]/.test(value)
   );
+}
+
+/** A name in `mcp_gateway_shared`: a string that is not empty. */
+export function isServerName(value: unknown): value is string {
+  return typeof value === "string" && value !== "";
 }
 
 /** Read one key of a `[tools.<id>]` table. Each error names the table and the key. */
