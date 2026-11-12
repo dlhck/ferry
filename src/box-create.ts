@@ -11,7 +11,7 @@ import { hasNoBox, resolveBoxes, type ResolvedBox } from "./boxes.ts";
 import { boxWorkLines, readBoxWork, type BoxWork } from "./box-work.ts";
 import { isBoxName, withBoxes, type BoxesOperatorConfig, type OperatorHostConfig, type PartialOperatorConfig } from "./config.ts";
 import { FerryError } from "./errors.ts";
-import { keyOf, pinHostKey, unpinBox } from "./known-hosts.ts";
+import { keyOf, knownHostsPath, pinHostKey, unpinBox } from "./known-hosts.ts";
 import type { LinkOptions, LinkResult, RunOptions } from "./link.ts";
 import { step, type Progress } from "./progress.ts";
 import { HETZNER_TOKEN, secretSources, TAILSCALE_AUTH_KEY, type Secret, type SecretName } from "./providers/credentials.ts";
@@ -191,7 +191,7 @@ export async function runBoxCreate(input: BoxCreateInput, dependencies: BoxCreat
     const tailscale = await setUpMachine(name, machine, hostKey, authKey, dependencies);
     const host: OperatorHostConfig = { tailscale, sshUser: BOX_USER };
     if ((await dependencies.addBox(host)) === null) throw new Error("box add was cancelled");
-    setGhLatest(name, dependencies);
+    recordBox(name, machine, dependencies);
     if ((await dependencies.install(name)) === null) throw new Error("install was cancelled");
     await dependencies.sync(name);
     write(`Box ${name} is ready. Run ferry status --box ${name} to check it.`);
@@ -220,7 +220,9 @@ async function setUpMachine(
   if (machine.ipv4 === null) throw new Error("the machine has no public IPv4 address");
   const ip = machine.ipv4;
   pinHostKey(home, name, [ip], hostKey.publicKey);
-  const root = dependencies.createLink({ destination: `root@${ip}` });
+  // Each link checks the pinned key, also when the SSH config of the operator turns the check off.
+  const knownHostsFile = knownHostsPath(home);
+  const root = dependencies.createLink({ destination: `root@${ip}`, knownHostsFile });
   const asRoot = async (command: string, options: RunOptions = {}): Promise<string> => {
     const result = await root.run(command, options);
     if (!result.ok) throw new Error(result.error.message);
@@ -290,7 +292,7 @@ async function setUpMachine(
   await step(progress, "Writing the sudoers rule", () => asRoot(WRITE_SUDOERS));
   await step(progress, "Turning off root login", () => asRoot(CLOSE_ROOT_LOGIN));
   await step(progress, "Checking the ferry user", async () => {
-    const user = dependencies.createLink({ destination: `${BOX_USER}@${ip}` });
+    const user = dependencies.createLink({ destination: `${BOX_USER}@${ip}`, knownHostsFile });
     const result = await user.run("sudo -n /usr/bin/true");
     if (!result.ok) throw new Error(`the ferry user cannot run sudo -n /usr/bin/true: ${result.error.message}`);
   });
@@ -298,7 +300,7 @@ async function setUpMachine(
   const dnsName = (self.DNSName ?? "").replace(/\.$/, "");
   pinHostKey(home, name, [dnsName, ...(self.TailscaleIPs ?? [])], rotated);
   await step(progress, "Waiting for the box in the tailnet", async () => {
-    const tailnet = dependencies.createLink({ host: dnsName, user: BOX_USER });
+    const tailnet = dependencies.createLink({ host: dnsName, user: BOX_USER, knownHostsFile });
     const deadline = now() + TAILNET_WAIT_MS;
     for (;;) {
       const result = await tailnet.run("true");
@@ -312,14 +314,15 @@ async function setUpMachine(
 }
 
 /**
- * Write gh = "latest" in [box.<name>.tools]. The sudoers rule allows only
- * apt install gh -y, so the box cannot install an exact gh version.
+ * Write the provider id of the machine and gh = "latest" in the box table.
+ * `ferry box destroy` uses the id to find the box of the machine. The sudoers
+ * rule allows only apt install gh -y, so the box cannot install an exact gh version.
  */
-function setGhLatest(name: string, dependencies: BoxCreateDependencies): void {
+function recordBox(name: string, machine: Machine, dependencies: BoxCreateDependencies): void {
   const config = dependencies.readConfig();
   const boxes = config?.boxes;
   if (!boxes?.some((box) => box.name === name)) throw new Error(`box ${name} is not in the config after box add`);
-  const updated = boxes.map((box) => (box.name === name ? { ...box, tools: { ...box.tools, gh: "latest" } } : box));
+  const updated = boxes.map((box) => (box.name === name ? { ...box, providerId: machine.id, tools: { ...box.tools, gh: "latest" } } : box));
   dependencies.writeConfig(withBoxes(config, updated, config?.defaultBox));
 }
 
@@ -349,7 +352,7 @@ export type BoxDestroyResult = {
   readonly name: string;
   readonly dryRun: boolean;
   readonly machine: Machine;
-  /** The result of the removal from the config, or null when the box was not in the config or for a dry run. */
+  /** The result of the removal from the config, or null when the config has no box of the machine, or for a dry run. */
   readonly removed: BoxRemoveResult | null;
   /** The number of known_hosts lines of the box that Ferry removed. */
   readonly knownHosts: number;
@@ -359,9 +362,11 @@ export type BoxDestroyResult = {
 
 /**
  * Print the plan, ask for the box name, remove the machine at the provider,
- * and then do what `ferry box remove` does on the operator machine. A box that
- * is not in the config, for example after a failed `ferry box create`, loses
- * only its machine. Returns null when the operator does not type the name.
+ * and then do what `ferry box remove` does on the operator machine. Ferry
+ * does the box steps only when the config box has the provider id of the
+ * machine. Otherwise, for example after a failed `ferry box create`, Ferry
+ * removes only the machine and keeps the config box. Returns null when the
+ * operator does not type the name.
  */
 export async function runBoxDestroy(input: BoxDestroyInput, dependencies: BoxDestroyDependencies): Promise<BoxDestroyResult | null> {
   const { name } = input;
@@ -374,14 +379,14 @@ export async function runBoxDestroy(input: BoxDestroyInput, dependencies: BoxDes
   }
   const clean = (text: string) => redact(text, token.value);
   const provider = dependencies.provider(token.value);
-  const box = configBox(dependencies.readConfig(), name);
+  const named = configBox(dependencies.readConfig(), name);
   const machines = await step(dependencies.progress, "Reading the machines at Hetzner Cloud", () => provider.list()).catch((cause) => {
     throw new FerryError("failed", clean(messageOf(cause)));
   });
   const found = machines.filter((machine) => machine.box === name);
   if (found.length === 0) {
     throw new FerryError("unknown-box", `Hetzner Cloud has no machine with the label ferry-box=${name}.`, {
-      hint: box !== null ? `To remove the box from the config only, run ferry box remove ${name}.` : "Run ferry box list to see the boxes.",
+      hint: named !== null ? `To remove the box from the config only, run ferry box remove ${name}.` : "Run ferry box list to see the boxes.",
     });
   }
   if (found.length > 1) {
@@ -390,11 +395,14 @@ export async function runBoxDestroy(input: BoxDestroyInput, dependencies: BoxDes
     });
   }
   const machine = found[0]!;
+  const box = named !== null && ownsMachine(dependencies.readConfig(), name, machine) ? named : null;
   write(`Destroy box ${name}:`);
   write(`  At Hetzner Cloud: remove ${machineText(machine)} and its firewall. The data on the machine is lost.`);
   if (box !== null) {
     write(`  On the box: tailscale logout, so the box leaves the tailnet.`);
     write(`  On this machine: remove box ${name} from the config and its tunnel service, as ferry box remove ${name} does.`);
+  } else if (named !== null) {
+    write(`  Box ${name} in the config is not ${machineText(machine)}: its table has no provider_id = "${machine.id}". Ferry removes the machine only and keeps box ${name} in the config.`);
   } else write(`  Box ${name} is not in the config. Ferry removes the machine only.`);
   write(`  On this machine: remove the lines of box ${name} from ~/.ssh/known_hosts.`);
   let unsavedWork: BoxWork | null = null;
@@ -430,19 +438,28 @@ export async function runBoxDestroy(input: BoxDestroyInput, dependencies: BoxDes
         write(warning);
       }
     }
-    await step(dependencies.progress, "Removing the machine", () => provider.destroy(machine)).catch((cause) => {
+    const warnings = await step(dependencies.progress, "Removing the machine", () => provider.destroy(machine)).catch((cause) => {
       throw new FerryError("failed", clean(`Ferry could not remove ${machineText(machine)}: ${messageOf(cause)}`), {
         hint: `The box stays in the config. Run ferry box destroy ${name} again, or remove the machine in the Hetzner Cloud console.`,
       });
     });
     write(`Removed ${machineText(machine)}.`);
+    for (const warning of warnings.map(clean)) {
+      dependencies.warn?.(warning);
+      write(warning);
+    }
     const knownHosts = unpinBox(dependencies.home, name);
     const config = dependencies.readConfig();
-    const removed = box !== null && configBox(config, name) !== null ? await removeFromOperator(config!, name, dependencies, "") : null;
+    const removed = box !== null && ownsMachine(config, name, machine) ? await removeFromOperator(config!, name, dependencies, "") : null;
     return { name, dryRun: false, machine, removed, knownHosts, unsavedWork };
   } finally {
     release();
   }
+}
+
+/** True when the config box with this name has the provider id of the machine. */
+function ownsMachine(config: PartialOperatorConfig | null, name: string, machine: Machine): boolean {
+  return config?.boxes?.find((box) => box.name === name)?.providerId === machine.id;
 }
 
 function linkOptionsOf(host: OperatorHostConfig): LinkOptions {
