@@ -6,8 +6,8 @@
  */
 
 import { createHmac } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { FerryError } from "./errors.ts";
 
 export const KNOWN_HOSTS_RELATIVE_PATH = ".ssh/known_hosts";
@@ -70,8 +70,7 @@ export function pinHostKey(home: string, box: string, hosts: readonly string[], 
   if (fresh.length === 0) return;
   mkdirSync(join(home, ".ssh"), { recursive: true, mode: 0o700 });
   const prefix = text === "" || text.endsWith("\n") ? "" : "\n";
-  writeFileSync(path, `${text}${prefix}${fresh.join(",")} ${wanted} ${marker(box)}\n`, { mode: 0o600 });
-  chmodSync(path, 0o600);
+  replaceFile(path, `${text}${prefix}${fresh.join(",")} ${wanted} ${marker(box)}\n`);
 }
 
 /** Remove the lines that Ferry appended for the box. Returns the number of removed lines. */
@@ -80,8 +79,20 @@ export function unpinBox(home: string, box: string): number {
   if (!existsSync(path)) return 0;
   const lines = readFileSync(path, "utf8").split("\n");
   const kept = lines.filter((line) => line.trim().split(/\s+/)[3] !== marker(box));
-  if (kept.length !== lines.length) writeFileSync(path, kept.join("\n"));
+  if (kept.length !== lines.length) replaceFile(path, kept.join("\n"));
   return lines.length - kept.length;
+}
+
+/**
+ * Write the text to a temporary file in the same directory, then rename it,
+ * so that ssh never reads a part of the file. The file keeps its mode. A new file gets mode 0600.
+ */
+function replaceFile(path: string, text: string): void {
+  const mode = existsSync(path) ? statSync(path).mode & 0o777 : 0o600;
+  const temporary = join(dirname(path), `.${basename(path)}.ferry-${process.pid}`);
+  writeFileSync(temporary, text, { mode });
+  chmodSync(temporary, mode);
+  renameSync(temporary, path);
 }
 
 /** `<type> <base64>` of an OpenSSH public key line. */
