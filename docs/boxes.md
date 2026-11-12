@@ -78,19 +78,26 @@ destination = "user@box-b.example"
 mcp_gateway = true
 ```
 
-The gateway is the only OAuth client of each carried remote MCP server on the box. It keeps one login for each server, in place of one login for each harness. In this version, the harnesses on the box still use their own entries. A later version points them at the gateway.
+The gateway is the only OAuth client of each carried remote MCP server on the box. It keeps one login for each server, in place of one login for each harness. Claude Code, Codex, and Cursor Agent on the box connect to the gateway, and the gateway connects to the server.
 
 On each sync of the box, Ferry does these steps:
 
 1. It writes `~/.ferry/mcp-gateway/servers.json` with the name and the URL of each carried remote server. The file gets no header and no `env` value. The gateway supports Streamable HTTP only, so Ferry skips an SSE server and prints a warning.
 2. It makes the client key `~/.ferry/mcp-gateway/client-key` when it is missing. A harness sends this key to the gateway. The key never leaves the box.
 3. It installs and starts the user service `ferry-mcp-gateway.service`, which runs `ferry mcp serve` on `127.0.0.1:47820`.
+4. It points the entry of each gateway server in each harness at the gateway: the URL `http://127.0.0.1:47820/mcp/<server>` and the header `Authorization: Bearer <client key>`. The box reads the key from its file and writes it only into the harness entries. Ferry adds a Claude entry with `claude mcp add-json` and a Codex entry with `codex mcp add`, and then adds the `http_headers` table to `~/.codex/config.toml` and sets the file mode to 0600. It merges a Cursor entry into `~/.cursor/mcp.json` with jq. Stdio servers and SSE servers keep their direct entries. This step needs jq on the box.
 
-The gateway runs the Ferry of the box. A development build of Ferry puts no Ferry on the box, so it gets no gateway. Sync prints a warning, and `ferry status` shows `MCP gateway: NOT AVAILABLE`.
+The gateway runs the Ferry of the box. A development build of Ferry puts no Ferry on the box, so it gets no gateway, and the harness entries stay direct. Sync prints a warning, and `ferry status` shows `MCP gateway: NOT AVAILABLE`. When `ferry update` changes the Ferry of the box, it restarts the gateway service.
 
-Log in the gateway to a server with `ferry auth --mcp <server> --box <name>`. The token stays on the box, in `~/.ferry/mcp-gateway/tokens/`, with mode 0600. `ferry status` shows the gateway state and the login state of each server. `ferry status --brief` shows one `gateway/<server>` item for each server that needs a login, and one `mcp-gateway` item when the service does not run.
+Log in the gateway to a server with `ferry auth --mcp <server> --box <name>`. The token stays on the box, in `~/.ferry/mcp-gateway/tokens/`, with mode 0600. `ferry status` shows the gateway state and the login state of each server. `ferry status --brief` shows one `gateway/<server>` item for each server that needs a login, and one `mcp-gateway` item when the service does not run. A harness entry of the gateway needs no login of its own, because the gateway never asks a harness for a login. So `ferry status` shows no `<tool>/<server>` login item for it.
 
-When you remove the key, the next sync stops and removes the service and deletes `~/.ferry/mcp-gateway/`, with the tokens.
+When you remove the key, the next sync first changes each gateway entry of a carried server back to its direct entry. Then it stops and removes the service and deletes `~/.ferry/mcp-gateway/`, with the tokens and the client key. Ferry does not change a box entry whose URL is not on the gateway. The harnesses then have no login for the remote servers, and `ferry status` shows one `mcp-login` item for each harness and server. Log in again with `ferry auth <tool> --mcp <server>`.
+
+Limits:
+
+- Agents run as the box user, so they can read the client key and the gateway tokens. Other users of the box cannot read them: the files have mode 0600. The [Security model](security-model.md#the-mcp-gateway) has the details.
+- Cursor Agent keeps a list of approved MCP servers (`cursor-agent mcp enable <server>`, or `--approve-mcps` for one run). Ferry does not approve a server for Cursor Agent, for a gateway entry or a direct entry. The Cursor documentation does not say if a changed entry needs a new approval.
+- `ferry box remove <name> --uninstall` deletes `~/.ferry/mcp-gateway/`, but it does not change the harness entries. To get direct entries back, remove `mcp_gateway = true` and sync before you uninstall.
 
 ## Create a box at Hetzner Cloud
 
