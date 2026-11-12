@@ -30,6 +30,8 @@ import { SERVER_NAME } from "./store.ts";
 const BOX_FERRY = '"$HOME/.local/bin/ferry"';
 const GATEWAY_DIR = '"$HOME/.ferry/mcp-gateway"';
 const UNIT_FILE = '"$HOME/.config/systemd/user/ferry-mcp-gateway.service"';
+/** Prints `old` and exits when the Ferry of the box has no gateway. A Ferry before the gateway prints the general help for `mcp serve --help`. */
+const NEEDS_MCP_SERVE = `${BOX_FERRY} mcp serve --help 2>/dev/null | grep -q '^Usage: ferry mcp serve' || { echo old; exit 0; }`;
 
 export const MCP_GATEWAY_SERVICE: UserService = {
   command: "mcp serve",
@@ -174,8 +176,7 @@ export function enableGatewayCommand(unit: string, cleanup: string | null = null
   const name = MCP_GATEWAY_SERVICE.unit;
   return [
     `[ -f "$HOME/.ferry/box.json" ] && [ -x ${BOX_FERRY} ] || { echo missing; exit 0; }`,
-    // A Ferry before the gateway prints the general help for `mcp serve --help`.
-    `${BOX_FERRY} mcp serve --help 2>/dev/null | grep -q '^Usage: ferry mcp serve' || { echo old; exit 0; }`,
+    NEEDS_MCP_SERVE,
     `d=${GATEWAY_DIR}`,
     `u=${UNIT_FILE}`,
     'mkdir -p "${u%/*}" || exit 1',
@@ -332,19 +333,22 @@ export function cannotShareText(server: string, box: string): string {
   return `The stdio MCP server ${server} sent a request to the client, so the MCP gateway cannot share it between agents. On the operator machine, remove ${server} from mcp_gateway_shared in [box.${box}] of ~/.ferry/config.toml, then run ferry sync --box ${box}.`;
 }
 
-export const GATEWAY_STATUS_COMMAND = `[ -f "$HOME/.ferry/box.json" ] && [ -x ${BOX_FERRY} ] || { echo missing; exit 0; }\n${BOX_FERRY} --json mcp list`;
+export const GATEWAY_STATUS_COMMAND = `[ -f "$HOME/.ferry/box.json" ] && [ -x ${BOX_FERRY} ] || { echo missing; exit 0; }\n${NEEDS_MCP_SERVE}\n${BOX_FERRY} --json mcp list`;
 
 export const DEVELOPMENT_BUILD_REASON = "this Ferry is a development build, so the box has no Ferry";
 
-/** Read the gateway state of the box. */
-export async function readGatewayStatus(link: GatewayLink): Promise<McpGatewayStatus> {
+/** Read the gateway state of the box `box`. */
+export async function readGatewayStatus(link: GatewayLink, box: string): Promise<McpGatewayStatus> {
   const result = await link.run(GATEWAY_STATUS_COMMAND);
   if (!result.ok) throw new Error(`Ferry could not read the MCP gateway state: ${result.error.origin}/${result.error.code}`);
-  return parseGatewayStatus(result.stdout);
+  return parseGatewayStatus(result.stdout, box);
 }
 
-export function parseGatewayStatus(stdout: string): McpGatewayStatus {
+export function parseGatewayStatus(stdout: string, box: string): McpGatewayStatus {
   if (stdout.trim() === "missing") return { state: "unavailable", reason: "Ferry is not on the box", port: null, servers: [] };
+  if (stdout.trim() === "old") {
+    return { state: "unavailable", reason: `the Ferry of the box has no MCP gateway, run ferry update --box ${box}`, port: null, servers: [] };
+  }
   let envelope: { ok?: unknown; result?: { gateway?: { state?: unknown; port?: unknown }; servers?: unknown } };
   try {
     envelope = JSON.parse(stdout.trim().split("\n").at(-1) ?? "");

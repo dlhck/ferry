@@ -433,7 +433,7 @@ describe("gateway status", () => {
         commands.push(command);
         return { ok: true, address: "a", stdout: `${stdout}\n`, stderr: "" };
       },
-    });
+    }, "a");
 
     expect(status).toEqual({
       state: "running",
@@ -451,19 +451,43 @@ describe("gateway status", () => {
       result: { gateway: { state: "running", port: 47820, key: secret }, servers: [{ name: "linear", state: "ready", token: secret, url: `https://x.example/?k=${secret}` }] },
     });
 
-    const status = parseGatewayStatus(stdout);
+    const status = parseGatewayStatus(stdout, "a");
 
     expect(status).toEqual({ state: "running", reason: null, port: 47820, servers: [{ name: "linear", state: "ready" }] });
     expect(JSON.stringify(status)).not.toContain(secret);
   });
 
   test("a box without Ferry gives unavailable", () => {
-    expect(parseGatewayStatus("missing\n")).toEqual({ state: "unavailable", reason: "Ferry is not on the box", port: null, servers: [] });
+    expect(parseGatewayStatus("missing\n", "a")).toEqual({ state: "unavailable", reason: "Ferry is not on the box", port: null, servers: [] });
+  });
+
+  test("a box with a Ferry from before the gateway gives unavailable with the update command, not a failed check", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "ferry-gw-status-")));
+    roots.push(root);
+    mkdirSync(join(root, ".ferry"));
+    writeFileSync(join(root, ".ferry", "box.json"), '{"mode":"box"}\n');
+    mkdirSync(join(root, ".local", "bin"), { recursive: true });
+    // Ferry 0.10.4 prints the general help for `mcp serve --help`, and refuses `mcp list` in a box install.
+    writeFileSync(join(root, ".local", "bin", "ferry"), `#!/bin/sh\ncase "$*" in *--help*) echo 'Usage: ferry [options] [command]';; *) exit 1;; esac\n`, { mode: 0o755 });
+    const link = {
+      run: async (command: string) => {
+        const child = Bun.spawn(["sh", "-c", command], { stdout: "pipe", env: { HOME: root, PATH: "/usr/bin:/bin" } });
+        const stdout = await new Response(child.stdout).text();
+        return { ok: true as const, address: "a", stdout, stderr: "" };
+      },
+    };
+
+    expect(await readGatewayStatus(link, "a")).toEqual({
+      state: "unavailable",
+      reason: "the Ferry of the box has no MCP gateway, run ferry update --box a",
+      port: null,
+      servers: [],
+    });
   });
 
   test("refuses output that is not the envelope", () => {
-    expect(() => parseGatewayStatus("Gateway: running\n")).toThrow("no valid JSON");
-    expect(() => parseGatewayStatus('{"ok":false}')).toThrow("unexpected result");
+    expect(() => parseGatewayStatus("Gateway: running\n", "a")).toThrow("no valid JSON");
+    expect(() => parseGatewayStatus('{"ok":false}', "a")).toThrow("unexpected result");
   });
 
   test("the login recipe runs the Ferry of the box", () => {

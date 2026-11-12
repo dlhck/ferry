@@ -227,7 +227,7 @@ function boxDependencies(
           mcpGateway: {
             read: async () =>
               isReleaseVersion(resolved.ferryVersion)
-                ? readGatewayStatus(link)
+                ? readGatewayStatus(link, box.name)
                 : { state: "unavailable" as const, reason: DEVELOPMENT_BUILD_REASON, port: null, servers: [] },
           },
         }
