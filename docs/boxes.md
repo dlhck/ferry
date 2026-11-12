@@ -57,7 +57,7 @@ destination = "user@box-b.example"
 agent_memory_max = "6G"
 ```
 
-The value is a systemd `MemoryMax` size: a number of bytes with an optional `K`, `M`, `G`, `T`, `P`, or `E` suffix (base 1024), or a percentage of the box memory, such as `"50%"`. When an agent uses more memory than the limit, the kernel stops that agent only. The other agents and the Paseo daemon continue.
+The value is a systemd `MemoryMax` size: a number with a `K`, `M`, `G`, `T`, `P`, or `E` suffix (base 1024), or a percentage of the box memory, such as `"50%"`. A size must be at least `256M`. Ferry refuses a number without a suffix, because systemd reads it as bytes, and an agent does not start with that little memory. When an agent uses more memory than the limit, the kernel stops that agent only. The other agents and the Paseo daemon continue.
 
 Ferry does not start the agents. With the [Paseo integration](paseo-sync.md#agent-memory-limit), `ferry sync` applies the limit to each agent that Paseo starts on the box. `ferry ps` shows the limit next to the box name.
 
