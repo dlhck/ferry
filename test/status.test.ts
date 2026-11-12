@@ -754,6 +754,7 @@ describe("brief status", () => {
           error: null,
           summary: null,
           resources: null,
+          mcpGateway: { state: "off", reason: null, servers: [] },
           issues: [
             { kind: "login", name: "codex", state: "login-required", summary: "codex: login needed", message: "codex needs a login.", command: "ferry auth codex --box a" },
             {
@@ -1132,7 +1133,7 @@ describe("brief status", () => {
     );
 
     expect(report.boxes).toEqual([
-      { name: "default", host: "ferry@build-box", online: false, error: "Tailscale host box is offline", summary: "Tailscale host box is offline", issues: [], resources: null },
+      { name: "default", host: "ferry@build-box", online: false, error: "Tailscale host box is offline", summary: "Tailscale host box is offline", issues: [], resources: null, mcpGateway: null },
     ]);
     expect(calls.reads).toEqual(["link.probe"]);
   });
@@ -1218,12 +1219,42 @@ describe("MCP gateway status", () => {
     expect(report.boxes[1]!.issues.some((issue) => issue.kind === "mcp-gateway" || issue.name.startsWith("gateway/"))).toBe(false);
   });
 
-  test("a failed gateway check is an issue", async () => {
+  test("a failed gateway check is an issue, and the brief report has no gateway state", async () => {
     const calls: Calls = { reads: [], mutations: [] };
     const failing = { read: async () => { throw new Error("ferry mcp list on the box gave no valid JSON"); } };
     const report = await composeBriefStatus([box(calls, { name: "a", mcpGateway: failing })], checkedAt);
 
     expect(report.boxes[0]!.issues).toContainEqual(expect.objectContaining({ kind: "check-failed", name: "MCP gateway" }));
+    expect(report.boxes[0]!.mcpGateway).toBeNull();
+  });
+
+  test("the brief report has the gateway state of each box, without the port", async () => {
+    const calls: Calls = { reads: [], mutations: [] };
+    const unavailable = { read: async () => ({ state: "unavailable" as const, reason: "Ferry is not on the box", port: null, servers: [] }) };
+    const offline = box(calls, {
+      name: "e",
+      mcpGateway: gateway("running"),
+      link: { ...box(calls).link, probe: async () => ({ ok: false, error: { code: "host-offline", origin: "network", message: "offline" } }) },
+    });
+    const report = await composeBriefStatus(
+      [
+        box(calls, { name: "a", mcpGateway: gateway("running") }),
+        box(calls, { name: "b", mcpGateway: gateway("stopped") }),
+        box(calls, { name: "c", mcpGateway: unavailable }),
+        box(calls, { name: "d" }),
+        offline,
+      ],
+      checkedAt,
+    );
+
+    const servers = [{ name: "linear", state: "login-required" as const }, { name: "docs", state: "ready" as const }];
+    expect(report.boxes.map((entry) => entry.mcpGateway)).toEqual([
+      { state: "running", reason: null, servers },
+      { state: "stopped", reason: null, servers },
+      { state: "unavailable", reason: "Ferry is not on the box", servers: [] },
+      { state: "off", reason: null, servers: [] },
+      null,
+    ]);
   });
 
   test("the full report has the gateway state and the login state of each server", async () => {
