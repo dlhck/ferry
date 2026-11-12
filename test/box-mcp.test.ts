@@ -1215,6 +1215,23 @@ describe("registerBoxMcp with the MCP gateway", () => {
       expect(box.github()).toEqual({ claude: { type: "stdio", ...direct(full) }, codex: direct(full), cursor: direct(full) });
     });
 
+    jqTest("without the gateway, keeps the gateway directory and the unit when an entry cannot get its env values back", async () => {
+      const box = sharedBox();
+      await box.enable(["github"]);
+      box.put(".config/systemd/user/ferry-mcp-gateway.service", "[Unit]\n");
+      // A codex that cannot add the direct entry again, as with a timeout.
+      const codex = join(box.home, "bin", "codex");
+      writeFileSync(codex, readFileSync(codex, "utf8").replace("const name = words[0];", "const name = words[0];\nif (command === 'add') process.exit(1);"));
+
+      const result = await disableGateway(box.link, gatewayCleanupCommand(BUILTIN_HARNESSES, BUILTIN_TOOLS, box.home, sharedMcp, false, []));
+
+      expect(result).toMatchObject({ removed: false, kept: true });
+      expect(gatewayCleanupLines(result.output)).toContain("could not change codex MCP server github on the box, which points at the MCP gateway");
+      expect(JSON.parse(box.read(".ferry/mcp-gateway/servers.json")).servers.github).toEqual(direct(full));
+      expect(existsSync(join(box.home, ".config", "systemd", "user", "ferry-mcp-gateway.service"))).toBe(true);
+      for (const secret of [SECRET, OTHER, KEY]) expect(box.captured(result)).not.toContain(secret);
+    });
+
     jqTest("a server that leaves mcp_gateway_shared gets its direct entry and its env values back", async () => {
       const box = sharedBox();
       await box.enable(["github"]);

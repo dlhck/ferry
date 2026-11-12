@@ -745,6 +745,11 @@ export function gatewayCleanupLines(stdout: string): string[] {
   });
 }
 
+/** True when the output of `gatewayCleanupCommand` has a failure: `F`, `J`, or `S`. */
+export function gatewayCleanupFailed(stdout: string): boolean {
+  return stdout.split("\n").some((line) => /^[FJS]\t/.test(line));
+}
+
 /**
  * The box script of one harness for `gatewayCleanupCommand`. A harness with
  * `register` changes its entries with the CLI. Else jq changes the JSON MCP

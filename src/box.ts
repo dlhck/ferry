@@ -1,7 +1,7 @@
 /** `ferry box list`, `ferry box add`, `ferry box remove`, and `ferry box default`. */
 
 import { boxUninstallLines, commitBoxUninstall, hasMcpGateway, planBoxUninstall, type BoxUninstallPlan } from "./box-uninstall.ts";
-import { gatewayCleanupCommand, gatewayCleanupLines } from "./box-mcp.ts";
+import { gatewayCleanupCommand, gatewayCleanupFailed, gatewayCleanupLines } from "./box-mcp.ts";
 import { hasNoBox, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import {
   ConfigError,
@@ -303,6 +303,12 @@ async function uninstallBox(
       );
     });
     for (const line of gatewayCleanupLines(output)) dependencies.writeLine(line);
+    // servers.json can be the only copy of the env values of a shared server, so the gateway files stay.
+    if (gatewayCleanupFailed(output)) {
+      throw new Error(
+        `Ferry could not change all MCP entries of the gateway on box ${name} back. Ferry did not remove Ferry from the box. The box stays in the config. Correct the problem, then run the command again. ${keep}`,
+      );
+    }
   }
   const remaining = await step(dependencies.progress, "Removing Ferry from the box", () => commitBoxUninstall(plan, link)).catch(
     (cause) => {

@@ -216,13 +216,20 @@ export function enableGatewayCommand(unit: string, cleanup: string | null = null
  * and the client key. The command prints the output of `cleanup`, then
  * `removed` when it removed something. It prints nothing on a box without
  * the gateway, and then it does not run `cleanup`.
+ *
+ * When `cleanup` prints a failure (`F`, `J`, or `S`), the command keeps the
+ * unit and the directory and prints `kept`. `servers.json` can be the only
+ * copy of the `env` values of a shared server, and an entry that still
+ * points at the gateway needs the running gateway. The next sync tries again.
  */
 export function disableGatewayCommand(cleanup: string | null): string {
   return [
     `d=${GATEWAY_DIR}`,
     `u=${UNIT_FILE}`,
     '[ -e "$u" ] || [ -e "$d" ] || exit 0',
-    ...(cleanup === null ? [] : [cleanup]),
+    ...(cleanup === null
+      ? []
+      : [`o=$(${cleanup})`, `[ -z "$o" ] || printf '%s\\n' "$o"`, `if printf '%s\\n' "$o" | grep -q "$(printf '^[FJS]\\t')"; then echo kept; exit 0; fi`]),
     `systemctl --user disable --now ${MCP_GATEWAY_SERVICE.unit} >/dev/null 2>&1`,
     'rm -f "$u" || exit 1',
     "systemctl --user daemon-reload >/dev/null 2>&1",
@@ -290,13 +297,21 @@ export async function enableGateway(
 
 /**
  * Remove the gateway from the box, after `cleanup`. `removed` is true when the
- * box had the gateway. `output` has the other output lines, from `cleanup`.
+ * box had the gateway. `kept` is true when `cleanup` failed, so the box keeps
+ * the gateway. `output` has the other output lines, from `cleanup`.
  */
-export async function disableGateway(link: GatewayLink, cleanup: string | null): Promise<{ readonly removed: boolean; readonly output: string }> {
+export async function disableGateway(
+  link: GatewayLink,
+  cleanup: string | null,
+): Promise<{ readonly removed: boolean; readonly kept: boolean; readonly output: string }> {
   const result = await link.run(disableGatewayCommand(cleanup));
   if (!result.ok) throw new Error(`${result.error.origin}/${result.error.code}: ${result.error.message}`);
   const lines = result.stdout.split("\n");
-  return { removed: lines.includes("removed"), output: lines.filter((line) => line !== "removed").join("\n") };
+  return {
+    removed: lines.includes("removed"),
+    kept: lines.includes("kept"),
+    output: lines.filter((line) => line !== "removed" && line !== "kept").join("\n"),
+  };
 }
 
 /**

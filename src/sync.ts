@@ -779,9 +779,14 @@ async function applyOnBox(context: {
   if (!box.mcpGateway) {
     try {
       // No server is shared now, so each gateway entry of a stdio server gets its direct entry and its env values back.
-      const { removed, output } = await disableGateway(link, gatewayCleanupCommand(harnesses, tools, required(plan.remoteHome), seed.mcp, false, []));
+      const { removed, kept, output } = await disableGateway(link, gatewayCleanupCommand(harnesses, tools, required(plan.remoteHome), seed.mcp, false, []));
       for (const line of gatewayCleanupLines(output)) warn(`Box MCP: ${line}`);
       if (removed) warn("Removed the MCP gateway, its unit, and its logins from the box.");
+      if (kept) {
+        warn(
+          "Warning: Ferry could not change all MCP entries of the gateway back, so it kept the MCP gateway and ~/.ferry/mcp-gateway on the box. servers.json there has the env values of the shared servers. The next sync tries again.",
+        );
+      }
     } catch (cause) {
       warn(`Warning: Ferry could not remove the MCP gateway: ${messageOf(cause)}. The core sync is complete.`);
     }
