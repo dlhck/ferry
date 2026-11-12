@@ -376,6 +376,17 @@ describe("ferry mcp list", () => {
     expect(lines).toEqual(["Gateway: stopped", "remote login-required"]);
     expect(listGateway(home)).toEqual({ gateway: { state: "stopped", port: null }, servers: [{ name: "remote", state: "login-required" }] });
   });
+
+  test("does not list or serve a stdio server that is leaving", async () => {
+    const leaving = { command: "files-mcp", args: [], env: { FILES_TOKEN: "leaving-secret-value" }, leaving: true };
+    await writeFile(join(home, ".ferry/mcp-gateway/servers.json"), JSON.stringify({ servers: { remote: { url: remote.mcpUrl }, files: leaving } }));
+    const running = serve();
+
+    expect(listGateway(home).servers).toEqual([{ name: "remote", state: "login-required" }]);
+    const response = await post(running, await key(), { jsonrpc: "2.0", id: 1, method: "tools/list" }, {}, "files");
+    output.push(await response.text());
+    expect(response.status).toBe(404);
+  });
 });
 
 function post(running: RunningGateway, key: string | null, body: unknown, headers: Record<string, string> = {}, server = "remote"): Promise<Response> {

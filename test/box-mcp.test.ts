@@ -1142,6 +1142,7 @@ describe("registerBoxMcp with the MCP gateway", () => {
           envKeys,
           cleanup: gatewayCleanupCommand(BUILTIN_HARNESSES, BUILTIN_TOOLS, box.home, sharedMcp, false, list),
           envScript: sharedEnvScript(BUILTIN_HARNESSES, BUILTIN_TOOLS, box.home, sharedMcp, list),
+          restore: sharedRestoreCommand(BUILTIN_HARNESSES, BUILTIN_TOOLS, box.home, sharedMcp, list),
         });
         const warnings = await registerBoxMcp({ ...common, remoteHome: box.home, mcp: sharedMcp, gateway: Object.keys(servers), shared: list });
         return { started, warnings };
@@ -1307,6 +1308,29 @@ describe("registerBoxMcp with the MCP gateway", () => {
       expect(github()).toEqual({ claude: { type: "stdio", ...direct(full) }, codex: direct(full) });
       for (const secret of [SECRET, OTHER, KEY]) expect(box.captured([firstOut, secondOut])).not.toContain(secret);
       for (const key of Object.keys(full)) expect(JSON.stringify([firstOut, secondOut])).not.toContain(key);
+    });
+
+    jqTest("a server that leaves mcp_gateway_shared after a failed restore keeps its env in servers.json until the next sync restores it", async () => {
+      const box = sharedBox();
+      await box.enable(["github"]);
+      const repair = breakAdd(box);
+
+      const first = await box.enable([]);
+
+      const file = () => JSON.parse(box.read(".ferry/mcp-gateway/servers.json")).servers;
+      expect(file().github).toEqual({ ...direct(full), leaving: true });
+      expect(gatewayCleanupLines(first.started.state === "running" ? first.started.output : "")).toContain(
+        "could not give claude MCP server github on the box its env values back from ~/.ferry/mcp-gateway/servers.json",
+      );
+
+      repair();
+      const second = await box.enable([]);
+
+      expect(file().github).toBeUndefined();
+      expect(box.github()).toEqual({ claude: { type: "stdio", ...direct(full) }, codex: direct(full), cursor: direct(full) });
+      const outputs = [first, second].map(({ started }) => (started.state === "running" ? started.output : ""));
+      for (const secret of [SECRET, OTHER, KEY]) expect(box.captured({ outputs, warnings: [first.warnings, second.warnings] })).not.toContain(secret);
+      for (const key of Object.keys(full)) expect(JSON.stringify(outputs)).not.toContain(key);
     });
 
     jqTest("a server that leaves mcp_gateway_shared gets its direct entry and its env values back", async () => {

@@ -698,6 +698,8 @@ async function applyOnBox(context: {
               // The entries of a server that is no longer shared get their env values back before servers.json changes.
               cleanup: gatewayCleanupCommand(harnesses, tools, remoteHome, seed.mcp, false, shared),
               envScript: sharedEnvScript(harnesses, tools, remoteHome, seed.mcp, shared),
+              // servers.json keeps the env values of a server that is no longer shared until its entries have them.
+              restore: sharedRestoreCommand(harnesses, tools, remoteHome, seed.mcp, shared),
             }),
           (gateway) =>
             gateway.state === "missing"

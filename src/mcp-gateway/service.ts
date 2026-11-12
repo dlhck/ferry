@@ -143,15 +143,26 @@ export function gatewayUnit(remoteHome: string, pathDirs: readonly string[]): st
  * server keeps the `env` of the old file when it has all keys, else gets the
  * `env` of the first harness entry with all keys, else the first `env` that
  * the box has.
+ *
+ * `$out` is the output of the cleanup and restore scripts. A stdio server of
+ * the old file that Ferry no longer shares stays in the file with
+ * `leaving: true` and its `env`, when `$out` has a failure for it (`F` or
+ * `M`), or when the box could not check the entries (`J` or `S`). The gateway
+ * does not serve such a server. The next sync drops it after its harness
+ * entries have their `env` values.
  */
 const MERGE_SERVERS = [
   "def full($k): type == \"object\" and ([$k[] as $x | .[$x] | type == \"string\" and . != \"\"] | all);",
   "$new[0] as $n | (($old[0] // {}).servers // {}) as $o | [inputs] as $h |",
-  "{servers: ($n.servers | with_entries(if (.value | has(\"command\")) then",
+  "($out | split(\"\\n\") | map(split(\"\\t\"))) as $l | ($l | any(.[0] == \"J\" or .[0] == \"S\")) as $all |",
+  "[$l[] | select(.[0] == \"F\" or .[0] == \"M\") | .[2]] as $failed |",
+  "{servers: (($n.servers | with_entries(if (.value | has(\"command\")) then",
   "  .key as $s | ($n.envKeys[$s] // []) as $k |",
   "  ([($o[$s] | if type == \"object\" and has(\"command\") then .env else null end)] + [$h[] | select(.n == $s) | .env]) as $c |",
   "  .value.env = (([$c[] | select(full($k))] + [$c[] | select(type == \"object\")] + [{}])[0] | with_entries(select(.value | type == \"string\")))",
-  "else . end))}",
+  "else . end)) +",
+  "  ($o | with_entries(select((.value | type == \"object\" and has(\"command\")) and (.key as $s | $n.servers | has($s) | not)",
+  "    and ($all or (.key as $s | $failed | any(. == $s)))) | .value += {leaving: true})))}",
 ].join("\n");
 
 /**
@@ -162,7 +173,8 @@ const MERGE_SERVERS = [
  * Stdin has two lines: `servers.json` without the shared servers, then
  * `servers.json` with them and their env key names. `cleanup` runs first,
  * while the old `servers.json` is there, so that the entries of a server
- * that is no longer shared get their `env` values back. Then jq builds the
+ * that is no longer shared get their `env` values back. `restore` then
+ * checks these entries (see `sharedRestoreCommand`). Then jq builds the
  * new file with the `env` values of the old file and of `envScript`. Without
  * jq, the box writes the first line, but keeps an old file that has a stdio
  * server, and prints `nojq` when Ferry asked to share a server.
@@ -172,8 +184,9 @@ const MERGE_SERVERS = [
  * `unit` when the unit changed, then `running` or `stopped`. It never prints
  * the key or an `env` value.
  */
-export function enableGatewayCommand(unit: string, cleanup: string | null = null, envScript = ":"): string {
+export function enableGatewayCommand(unit: string, cleanup: string | null = null, envScript = ":", restore: string | null = null): string {
   const name = MCP_GATEWAY_SERVICE.unit;
+  const scripts = [cleanup, restore].filter((script) => script !== null);
   return [
     `[ -f "$HOME/.ferry/box.json" ] && [ -x ${BOX_FERRY} ] || { echo missing; exit 0; }`,
     NEEDS_MCP_SERVE,
@@ -185,11 +198,11 @@ export function enableGatewayCommand(unit: string, cleanup: string | null = null
     "umask 077",
     'mkdir -p "$d" && chmod 700 "$d" || exit 1',
     'IFS= read -r direct && IFS= read -r shared || exit 1',
-    ...(cleanup === null ? [] : [cleanup]),
+    ...(scripts.length === 0 ? ["o="] : [`o=$(\n${scripts.join("\n")}\n)`, `[ -z "$o" ] || printf '%s\\n' "$o"`]),
     `if command -v jq >/dev/null 2>&1; then`,
     `  printf '%s\\n' "$shared" > "$d/servers.json.new" || exit 1`,
     `  [ -f "$d/servers.json" ] || printf '{}\\n' > "$d/servers.json" || exit 1`,
-    `  { ${envScript}\n} </dev/null | jq -n --slurpfile new "$d/servers.json.new" --slurpfile old "$d/servers.json" ${quoteShell(MERGE_SERVERS)} > "$d/servers.json.tmp" || { rm -f "$d/servers.json.new" "$d/servers.json.tmp"; exit 1; }`,
+    `  { ${envScript}\n} </dev/null | jq -n --slurpfile new "$d/servers.json.new" --slurpfile old "$d/servers.json" --arg out "$o" ${quoteShell(MERGE_SERVERS)} > "$d/servers.json.tmp" || { rm -f "$d/servers.json.new" "$d/servers.json.tmp"; exit 1; }`,
     `  rm -f "$d/servers.json.new"`,
     `else`,
     `  [ "$direct" = "$shared" ] || echo nojq`,
@@ -273,14 +286,19 @@ export type GatewaySyncResult =
 
 /**
  * Write the gateway files on the box and start the service. `envKeys` has
- * the env key names of each shared stdio server of `servers`. `cleanup` and
- * `envScript` are box scripts: see `enableGatewayCommand`.
+ * the env key names of each shared stdio server of `servers`. `cleanup`,
+ * `envScript`, and `restore` are box scripts: see `enableGatewayCommand`.
  */
 export async function enableGateway(
   link: GatewayLink,
   remoteHome: string,
   servers: Readonly<Record<string, GatewayServerEntry>>,
-  shared: { readonly envKeys: Readonly<Record<string, readonly string[]>>; readonly cleanup: string | null; readonly envScript: string } = {
+  shared: {
+    readonly envKeys: Readonly<Record<string, readonly string[]>>;
+    readonly cleanup: string | null;
+    readonly envScript: string;
+    readonly restore?: string | null;
+  } = {
     envKeys: {},
     cleanup: null,
     envScript: ":",
@@ -288,7 +306,7 @@ export async function enableGateway(
 ): Promise<GatewaySyncResult> {
   const direct = Object.fromEntries(Object.entries(servers).filter(([, server]) => "url" in server));
   const full = Object.keys(shared.envKeys).length > 0 ? { servers, envKeys: shared.envKeys } : { servers: direct };
-  const result = await link.run(enableGatewayCommand(gatewayUnit(remoteHome, linkPathDirs(link)), shared.cleanup, shared.envScript), {
+  const result = await link.run(enableGatewayCommand(gatewayUnit(remoteHome, linkPathDirs(link)), shared.cleanup, shared.envScript, shared.restore ?? null), {
     input: new TextEncoder().encode(`${JSON.stringify({ servers: direct })}\n${JSON.stringify(full)}\n`),
   });
   if (!result.ok) throw new Error(`${result.error.origin}/${result.error.code}: ${result.error.message}`);
