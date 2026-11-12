@@ -588,11 +588,12 @@ describe("box tables", () => {
   });
 
   test("accepts systemd memory sizes for agent_memory_max and refuses other values", () => {
-    for (const value of ["6G", "512M", "1.5G", "4294967296", "50%", "100%"]) {
+    for (const value of ["6G", "512M", "256M", "1.5G", "262144K", "1T", "50%", "100%"]) {
       const home = homeWithConfig([...TOP, "", ...BOX_A, `agent_memory_max = "${value}"`]);
       expect(readConfig(home)?.boxes?.[0]?.agentMemoryMax).toBe(value);
     }
-    for (const value of ['"6GB"', '"0"', '"infinity"', '"-1G"', '"150%"', '"6 G"', '""', "6"]) {
+    // A number without a suffix is bytes for systemd, and an agent does not start with less than 256M.
+    for (const value of ['"6GB"', '"0"', '"1"', '"4096"', '"4294967296"', '"255M"', '"262143K"', '"infinity"', '"-1G"', '"150%"', '"6 G"', '""', "6"]) {
       const home = homeWithConfig([...TOP, "", ...BOX_A, `agent_memory_max = ${value}`]);
       expect(() => readConfig(home)).toThrow("invalid agent_memory_max in [box.a]");
     }

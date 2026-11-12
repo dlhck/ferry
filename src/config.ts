@@ -65,11 +65,22 @@ export type GitAuth = "agent" | "box";
 const BOX_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 /**
- * A systemd memory size for `MemoryMax`: bytes with an optional K, M, G, T,
- * P, or E suffix (base 1024), or a percentage of the physical memory. Zero and
- * `infinity` are not limits, so the key does not accept them.
+ * A systemd memory size for `MemoryMax`: a number with a K, M, G, T, P, or E
+ * suffix (base 1024), or a percentage of the physical memory. A number without
+ * a suffix is bytes for systemd, so the key does not accept it. Zero and
+ * `infinity` are not limits, so the key does not accept them either.
  */
-const MEMORY_SIZE = /^(?:[1-9]\d*(?:\.\d+)?[KMGTPE]?|(?:[1-9]\d?(?:\.\d+)?|100)%)$/;
+const MEMORY_SIZE = /^(?:[1-9]\d*(?:\.\d+)?[KMGTPE]|(?:[1-9]\d?(?:\.\d+)?|100)%)$/;
+/** The smallest size with a suffix. An agent does not start with less memory. */
+const MIN_MEMORY_MIB = 256;
+
+/** True for a size of MEMORY_SIZE that is at least MIN_MEMORY_MIB, or a percentage. */
+function isMemoryLimit(value: string): boolean {
+  if (!MEMORY_SIZE.test(value)) return false;
+  if (value.endsWith("%")) return true;
+  const mib = Number.parseFloat(value) * 1024 ** ("KMGTPE".indexOf(value.at(-1)!) - 1);
+  return mib >= MIN_MEMORY_MIB;
+}
 
 /** True for a name that a `[box.<name>]` table can use. The name `all` is reserved. */
 export function isBoxName(name: string): boolean {
@@ -533,8 +544,10 @@ function readBoxKey(entry: ParsedBox, part: BoxPart, key: string, encoded: strin
   }
   if (part === "host" && key === "agent_memory_max") {
     const value = tomlString(encoded);
-    if (value === undefined || !MEMORY_SIZE.test(value)) {
-      throw new ConfigError(`invalid agent_memory_max in ${section} of ${path}. Use a systemd memory size, such as "6G", "512M", or "50%".`);
+    if (value === undefined || !isMemoryLimit(value)) {
+      throw new ConfigError(
+        `invalid agent_memory_max in ${section} of ${path}. Use a systemd memory size with a K, M, G, or T suffix of at least ${MIN_MEMORY_MIB}M, such as "6G" or "512M", or a percentage, such as "50%".`,
+      );
     }
     entry.agentMemoryMax = value;
     return;

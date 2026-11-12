@@ -292,12 +292,23 @@ async function followSession(
   return { connected: true, reason: ended.ok ? "the SSH connection ended" : ended.error.message };
 }
 
-/** Add the new events of a snapshot to the events file of the box. */
+/**
+ * Add the new events of a snapshot to the events file of the box. Without
+ * the file, this is the first read of the box: Ferry records its events as
+ * seen and shows none of them, because they are older than the follow.
+ */
 function receiveEvents(boxName: string, events: readonly AgentEvent[], resolved: TunnelDependencies): void {
-  if (events.length === 0) return;
   const now = new Date().toISOString();
-  const merged = mergeEvents(resolved.readEventsFile(boxName)?.events ?? [], events, now);
-  if (merged !== null) resolved.writeEventsFile({ schemaVersion: 1, box: boxName, updatedAt: now, events: merged });
+  const file = resolved.readEventsFile(boxName);
+  const ids = events.map((event) => event.id);
+  if (file === null) {
+    resolved.writeEventsFile({ schemaVersion: 1, box: boxName, updatedAt: now, events: [], seen: ids });
+    return;
+  }
+  const merged = mergeEvents(file.events, events, now, file.seen);
+  // The box removes an old event, so a seen ID that the box no longer has does not come back.
+  const seen = (file.seen ?? []).filter((id) => ids.includes(id));
+  if (merged !== null) resolved.writeEventsFile({ schemaVersion: 1, box: boxName, updatedAt: now, events: merged, ...(seen.length > 0 ? { seen } : {}) });
 }
 
 /** Open and close forwards so they match the entries. Each change prints one line. */
@@ -663,7 +674,7 @@ const defaultDependencies: TunnelDependencies = {
   readEventsFile: (box) => {
     try {
       const file = JSON.parse(readFileSync(eventsFilePath(box), "utf8")) as EventsFile;
-      return file.schemaVersion === 1 && Array.isArray(file.events) ? file : null;
+      return file.schemaVersion === 1 && Array.isArray(file.events) && (file.seen === undefined || Array.isArray(file.seen)) ? file : null;
     } catch {
       return null;
     }

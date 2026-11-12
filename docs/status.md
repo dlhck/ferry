@@ -169,7 +169,9 @@ To turn it on:
 3. Run `ferry tunnel install --box <name>` for each box, so `ferry tunnel --follow` runs as a user service. It carries the events within seconds.
 4. Install the menu bar app with `ferry menubar install`.
 
-Ferry adds the hooks only to a box that has Claude on and when `~/.claude/settings.json` is on the operator machine. Else sync prints a warning. Remove the table, or set `agents = false`, and run `ferry sync` to remove the hooks from the boxes.
+Ferry adds the hooks only to a box that has Claude on and when `~/.claude/settings.json` is on the operator machine. Else sync prints a warning. Remove the table, or set `agents = false`, and run `ferry sync` to remove the hooks from the boxes. `ferry box remove <name> --uninstall` removes the hooks and `~/.ferry/events` too, and keeps the other hooks.
+
+The hooks do nothing when the box has no Ferry, or a Ferry without `ferry notify`. Sync then prints a warning that names `ferry install` or `ferry update`.
 
 The `Notification` hook takes a permission prompt and a question from an MCP server. It does not take the reminder that Claude sends after 60 seconds of idle time.
 
@@ -197,7 +199,7 @@ The `Notification` hook takes a permission prompt and a question from an MCP ser
 }
 ```
 
-`id` is unique for each box. `at` is the time on the box, and `receivedAt` is the time on the operator machine. The app sends one notification for each `id` that it did not read before, when `receivedAt` is after the start of the app. With Notifications off in the menu, the app sends none.
+`id` is unique for each box. `at` is the time on the box, and `receivedAt` is the time on the operator machine. When the file is not there, the read is the first read of the box. Then Ferry writes the file with no events, and puts the IDs of the events on the box in `seen`. These events are older than the follow, so Ferry never shows them. The app sends one notification for each `id` that it did not read before, when `receivedAt` is after the start of the app. With Notifications off in the menu, the app sends none.
 
 ## Linux
 
