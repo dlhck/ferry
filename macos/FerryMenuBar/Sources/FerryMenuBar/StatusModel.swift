@@ -17,6 +17,72 @@ struct BriefBox: Decodable, Sendable {
     let issues: [BriefIssue]
     /// The disk and memory of the box. Nil when the box is offline, the check has no resource read, or the file is of an older Ferry.
     let resources: BoxResources?
+    /// The MCP gateway of the box. Nil when the status has no gateway data, for example for an offline box or a file of an older Ferry.
+    let mcpGateway: GatewayStatus?
+}
+
+/// The MCP gateway of one box. The app shows `state` and the server `state` as free text, so a new value does not break the decode.
+struct GatewayStatus: Decodable, Sendable {
+    struct Server: Decodable, Sendable {
+        let name: String
+        let state: String
+    }
+
+    /// `running`, `stopped`, `unavailable`, or `off`.
+    let state: String
+    /// Why the gateway is stopped or unavailable.
+    let reason: String?
+    let servers: [Server]
+
+    /// The table cell: `Running`, `Stopped`, `Unavailable`, `Off`, or an unknown state as it is.
+    var title: String {
+        switch state {
+        case "running": return "Running"
+        case "stopped": return "Stopped"
+        case "unavailable": return "Unavailable"
+        case "off": return "Off"
+        default: return state
+        }
+    }
+}
+
+/// The result of `ferry config get --json`. The app shows these values and changes them only with `ferry config set|unset`.
+struct ConfigReport: Decodable, Sendable {
+    struct Notifications: Decodable, Sendable {
+        let agents: Bool
+    }
+
+    struct Box: Decodable, Sendable {
+        let name: String
+        let mcpGateway: Bool
+        let mcpGatewayShared: [String]
+        let agentMemoryMax: String?
+        let projects: [String]
+        /// The carried stdio MCP servers that the box can share through the gateway.
+        let stdioServers: [String]
+    }
+
+    let notifications: Notifications
+    let boxes: [Box]
+}
+
+/// The part of the `ferry config set|unset --json` result that the app uses.
+struct ConfigChange: Decodable, Sendable {
+    /// Nil for a global key, such as `notifications.agents`.
+    let box: String?
+    let syncNeeded: Bool
+}
+
+/// The arguments of `ferry config set <key> <values...> --box <box>`, or of `ferry config unset <key> --box <box>` when `values` is nil.
+/// runFerry adds `--json`. The arguments go to the process as an array, never through a shell.
+func configArguments(key: String, values: [String]?, box: String?) -> [String] {
+    let command = values.map { ["config", "set", key] + $0 } ?? ["config", "unset", key]
+    return command + (box.map { ["--box", $0] } ?? [])
+}
+
+/// The arguments that write a list key. An empty list unsets the key.
+func listArguments(key: String, values: [String], box: String) -> [String] {
+    configArguments(key: key, values: values.isEmpty ? nil : values, box: box)
 }
 
 struct BoxResources: Decodable, Sendable {
@@ -125,6 +191,7 @@ struct BoxSection: Sendable, Identifiable {
 /// The envelope of `ferry --json`.
 private struct Envelope<Value: Decodable>: Decodable {
     struct Failure: Decodable {
+        let code: String?
         let message: String
     }
 
@@ -163,6 +230,16 @@ final class StatusModel: ObservableObject {
     /// The result of the last "Sync now".
     @Published private(set) var syncMessage: String?
     @Published private(set) var syncing = false
+    /// The values of `ferry config get --json`. Nil before the first read and after a failed read.
+    @Published private(set) var config: ConfigReport?
+    /// Why the app cannot read the settings.
+    @Published private(set) var configLoadError: String?
+    /// The error of the last settings change, and its box. The box is nil for a global key.
+    @Published private(set) var configError: (box: String?, message: String)?
+    /// A settings command runs.
+    @Published private(set) var configBusy = false
+    /// The boxes whose settings changed after their last sync. The app keeps them only in memory.
+    @Published private(set) var syncNeeded = Set<String>()
     /// Why Ferry cannot post notifications.
     @Published private(set) var notificationError: String?
     @Published var notificationsEnabled = UserDefaults.standard.object(forKey: StatusModel.notificationsKey) as? Bool ?? true {
@@ -267,25 +344,72 @@ final class StatusModel: ObservableObject {
         }
     }
 
-    /// Run `ferry sync`, show its result, then refresh the menu.
-    func sync() {
+    /// Run `ferry sync`, or `ferry sync --box <box>`, show its result, then refresh the menu.
+    /// A sync that succeeds removes the "sync to apply" mark of the boxes that it synced.
+    func sync(box: String? = nil) {
         guard !syncing else { return }
         syncing = true
         syncMessage = nil
         Task.detached {
             let message: String
-            switch Self.runFerry(["sync"], as: SyncReport.self) {
+            let synced: [String]
+            switch Self.runFerry(["sync"] + (box.map { ["--box", $0] } ?? []), as: SyncReport.self) {
             case let .success(report):
                 message = "Synced \(report.boxes.count) \(report.boxes.count == 1 ? "box" : "boxes")."
+                synced = report.boxes.map(\.name)
             case let .failure(error):
                 message = error.message
+                synced = []
             }
             await MainActor.run {
                 self.syncing = false
+                self.syncNeeded.subtract(synced)
                 self.syncMessage = message
                 // The menu is closed while the sync runs, so the notification tells the result.
                 if self.notificationsEnabled { self.notifier.post(title: "Ferry sync", body: message) }
                 self.refresh()
+            }
+        }
+    }
+
+    /// Read the settings with `ferry config get --json`.
+    func loadConfig() {
+        Task.detached {
+            let outcome = Self.runFerry(["config", "get"], as: ConfigReport.self)
+            await MainActor.run {
+                switch outcome {
+                case let .success(config):
+                    self.config = config
+                    self.configLoadError = nil
+                case let .failure(error):
+                    self.config = nil
+                    // A Ferry without `ferry config` fails with a usage error. `ferry config get` has no other usage error.
+                    self.configLoadError = error.code == "usage" ? "This Ferry has no settings command. Run ferry self-update." : error.message
+                }
+            }
+        }
+    }
+
+    /// Run one `ferry config set|unset` command, mark the boxes that need a sync, then read the settings again.
+    /// `box` is the box of the change, or nil for a global key. The app never writes config.toml itself.
+    func changeConfig(_ arguments: [String], box: String?) {
+        guard !configBusy else { return }
+        configBusy = true
+        configError = nil
+        Task.detached {
+            let outcome = Self.runFerry(arguments, as: ConfigChange.self)
+            await MainActor.run {
+                self.configBusy = false
+                switch outcome {
+                case let .success(change):
+                    // A global change, such as notifications.agents, needs a sync of each box.
+                    if change.syncNeeded {
+                        self.syncNeeded.formUnion(change.box.map { [$0] } ?? (self.config?.boxes.map(\.name) ?? []))
+                    }
+                case let .failure(error):
+                    self.configError = (box: box, message: error.message)
+                }
+                self.loadConfig()
             }
         }
     }
@@ -416,6 +540,8 @@ final class StatusModel: ObservableObject {
     }
 
     private struct RunError: Error {
+        /// The error code of the envelope, or nil when ferry gave no envelope.
+        var code: String? = nil
         let message: String
     }
 
@@ -433,19 +559,29 @@ final class StatusModel: ObservableObject {
         let command = "ferry \(arguments.joined(separator: " "))"
         let stdout = Pipe()
         process.standardOutput = stdout
-        process.standardError = FileHandle.nullDevice
+        // stderr goes to a file, so that a full stderr pipe cannot block ferry while the app reads stdout.
+        let stderrFile = FileManager.default.temporaryDirectory.appendingPathComponent("ferry-\(UUID().uuidString).stderr")
+        defer { try? FileManager.default.removeItem(at: stderrFile) }
+        FileManager.default.createFile(atPath: stderrFile.path, contents: nil)
+        let stderr = FileHandle(forWritingAtPath: stderrFile.path)
+        process.standardError = stderr ?? FileHandle.nullDevice
         do {
             try process.run()
         } catch {
+            try? stderr?.close()
             return .failure(RunError(message: "Cannot run ferry: \(error.localizedDescription)"))
         }
         let data = stdout.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        try? stderr?.close()
         guard let envelope = try? JSONDecoder().decode(Envelope<Value>.self, from: data) else {
-            return .failure(RunError(message: "\(command) --json printed no valid JSON."))
+            // Without a valid envelope, the last line of stderr tells the cause.
+            let lastLine = ((try? String(contentsOf: stderrFile, encoding: .utf8)) ?? "")
+                .split(whereSeparator: \.isNewline).last.map(String.init)
+            return .failure(RunError(message: lastLine ?? "\(command) --json printed no valid JSON."))
         }
         if envelope.ok, let result = envelope.result { return .success(result) }
-        return .failure(RunError(message: envelope.error?.message ?? "\(command) failed."))
+        return .failure(RunError(code: envelope.error?.code, message: envelope.error?.message ?? "\(command) failed."))
     }
 
     private static func age(_ date: Date) -> String {
