@@ -3,8 +3,11 @@
  * `mcp_gateway = true` in `[box.<name>]`. The operator machine runs this code.
  *
  * - Sync writes `~/.ferry/mcp-gateway/servers.json` from the carried remote
- *   servers, makes the client key on the box when it is missing, and installs
- *   and starts `ferry-mcp-gateway.service`, which runs `ferry mcp serve`.
+ *   servers and the stdio servers of `mcp_gateway_shared`, makes the client
+ *   key on the box when it is missing, and installs and starts
+ *   `ferry-mcp-gateway.service`, which runs `ferry mcp serve`. The box copies
+ *   the `env` values of a shared server from its harness entries into
+ *   `servers.json` with jq, so they never reach Ferry.
  * - When the key goes off, sync stops and removes the unit and deletes
  *   `~/.ferry/mcp-gateway/`, with the tokens.
  * - `ferry status` reads `ferry mcp list --json` on the box.
@@ -18,7 +21,9 @@ import { quoteShell } from "../box-settings.ts";
 import type { LinkResult, RunOptions } from "../link.ts";
 import type { RemoteMcpServer, SeedMcp } from "../manifest.ts";
 import type { ToolDescriptor } from "../registry/types.ts";
+import { linkPathDirs, unitPath } from "../tools/path.ts";
 import { systemdService, type UserService } from "../watch-service.ts";
+import type { GatewayServerState } from "./login.ts";
 import { SERVER_NAME } from "./store.ts";
 
 /** The Ferry binary of a box install. `ferry install` and `ferry update` put it there. */
@@ -52,16 +57,27 @@ export const MCP_GATEWAY_TOOL: ToolDescriptor = {
 
 type GatewayLink = { run(command: string, options?: RunOptions): Promise<LinkResult> };
 
+/** One server of `servers.json` as Ferry sends it: a remote server, or a shared stdio server without its `env` values. */
+export type GatewayServerEntry = { readonly url: string } | { readonly command: string; readonly args: readonly string[] };
+
 /**
  * The `servers.json` of the gateway: the remote servers of the harnesses that
- * are on for the box. It has only names and URLs. A carried remote server has
- * no headers, because Manifest refuses a server with headers.
+ * are on for the box, and the stdio servers of `shared`. It has only names,
+ * URLs, commands, and arguments. A carried remote server has no headers,
+ * because Manifest refuses a server with headers. `envKeys` has the env key
+ * names of each shared server, from all harnesses.
  */
 export function gatewayServers(
   mcp: readonly SeedMcp[],
   harnesses: readonly string[],
-): { readonly servers: Readonly<Record<string, { readonly url: string }>>; readonly warnings: readonly string[] } {
-  const servers: Record<string, { url: string }> = {};
+  shared: readonly string[] = [],
+): {
+  readonly servers: Readonly<Record<string, GatewayServerEntry>>;
+  readonly envKeys: Readonly<Record<string, readonly string[]>>;
+  readonly warnings: readonly string[];
+} {
+  const servers: Record<string, GatewayServerEntry> = {};
+  const envKeys: Record<string, string[]> = {};
   const warnings: string[] = [];
   for (const entry of mcp) {
     if (!harnesses.includes(entry.harness)) continue;
@@ -75,28 +91,85 @@ export function gatewayServers(
         warnings.push(`The MCP gateway does not serve ${name}, because a gateway server name cannot start with a dot.`);
       } else if (servers[remote.name] === undefined) {
         servers[remote.name] = { url: remote.url };
-      } else if (servers[remote.name]!.url !== remote.url) {
+      } else if ((servers[remote.name] as { url: string }).url !== remote.url) {
         warnings.push(`The MCP gateway serves ${remote.name} with the URL of the first harness. ${name} has another URL.`);
       }
     }
   }
+  // The stdio servers come after the remote servers, so that a remote server keeps its name on the gateway.
+  for (const entry of mcp) {
+    if (!harnesses.includes(entry.harness)) continue;
+    for (const server of entry.servers) {
+      if (server.type !== "stdio" || !shared.includes(server.name)) continue;
+      const name = `${entry.harness}/${server.name}`;
+      const known = servers[server.name];
+      if (!SERVER_NAME.test(server.name)) {
+        warnings.push(`The MCP gateway does not share ${name}, because a gateway server name cannot start with a dot.`);
+      } else if (known !== undefined && "url" in known) {
+        warnings.push(`The MCP gateway does not share ${name}, because it serves the remote server ${server.name} of another harness.`);
+      } else if (known === undefined) {
+        servers[server.name] = { command: server.command, args: server.args };
+        envKeys[server.name] = [...server.env];
+      } else if (known.command !== server.command || JSON.stringify(known.args) !== JSON.stringify(server.args)) {
+        warnings.push(`The MCP gateway shares ${server.name} with the command of the first harness. ${name} has another command or other arguments.`);
+      } else {
+        envKeys[server.name] = [...new Set([...(envKeys[server.name] ?? []), ...server.env])];
+      }
+    }
+  }
+  const carried = new Set(mcp.filter((entry) => harnesses.includes(entry.harness)).flatMap((entry) => entry.servers.filter((server) => server.type === "stdio").map((server) => server.name)));
+  for (const name of shared) {
+    if (!carried.has(name)) warnings.push(`mcp_gateway_shared names ${name}, but Ferry carries no stdio MCP server ${name} to this box. Ferry ignores the name.`);
+  }
   const sorted = Object.fromEntries(Object.entries(servers).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
-  return { servers: sorted, warnings };
-}
-
-/** The unit file of the gateway on a box with the home `remoteHome`. */
-export function gatewayUnit(remoteHome: string): string {
-  return systemdService(MCP_GATEWAY_SERVICE, [`${remoteHome}/.local/bin/ferry`], "/usr/local/bin:/usr/bin:/bin", undefined);
+  return { servers: sorted, envKeys, warnings };
 }
 
 /**
- * Write `servers.json` from stdin, make the client key when it is missing,
- * write the unit, and start it. A changed unit restarts the service. The
- * gateway reads `servers.json` at each request, so a server change needs no
- * restart. The command prints `missing` when the box has no Ferry, else
- * `unit` when the unit changed, then `running` or `stopped`. It never prints the key.
+ * The unit file of the gateway on a box with the home `remoteHome`. It gets
+ * the box PATH directories `pathDirs` in front of the system PATH, as the
+ * Paseo unit, so a shared stdio server finds the same commands as an agent.
  */
-export function enableGatewayCommand(unit: string): string {
+export function gatewayUnit(remoteHome: string, pathDirs: readonly string[]): string {
+  return systemdService(MCP_GATEWAY_SERVICE, [`${remoteHome}/.local/bin/ferry`], unitPath(pathDirs), undefined);
+}
+
+/**
+ * A jq program for the new `servers.json`. `$new` is the file from Ferry,
+ * with the env key names of each shared server in `envKeys`. `$old` is the
+ * file on the box. The inputs are the lines of `sharedEnvScript`. A shared
+ * server keeps the `env` of the old file when it has all keys, else gets the
+ * `env` of the first harness entry with all keys, else the first `env` that
+ * the box has.
+ */
+const MERGE_SERVERS = [
+  "def full($k): type == \"object\" and ([$k[] as $x | .[$x] | type == \"string\" and . != \"\"] | all);",
+  "$new[0] as $n | (($old[0] // {}).servers // {}) as $o | [inputs] as $h |",
+  "{servers: ($n.servers | with_entries(if (.value | has(\"command\")) then",
+  "  .key as $s | ($n.envKeys[$s] // []) as $k |",
+  "  ([($o[$s] | if type == \"object\" and has(\"command\") then .env else null end)] + [$h[] | select(.n == $s) | .env]) as $c |",
+  "  .value.env = (([$c[] | select(full($k))] + [$c[] | select(type == \"object\")] + [{}])[0] | with_entries(select(.value | type == \"string\")))",
+  "else . end))}",
+].join("\n");
+
+/**
+ * Write `servers.json`, make the client key when it is missing, write the
+ * unit, and start it. A changed unit restarts the service. The gateway reads
+ * `servers.json` at each request, so a server change needs no restart.
+ *
+ * Stdin has two lines: `servers.json` without the shared servers, then
+ * `servers.json` with them and their env key names. `cleanup` runs first,
+ * while the old `servers.json` is there, so that the entries of a server
+ * that is no longer shared get their `env` values back. Then jq builds the
+ * new file with the `env` values of the old file and of `envScript`. Without
+ * jq, the box writes the first line, but keeps an old file that has a stdio
+ * server, and prints `nojq` when Ferry asked to share a server.
+ *
+ * The command prints `missing` when the box has no Ferry, else the output of
+ * `cleanup`, `unit` when the unit changed, then `running` or `stopped`. It
+ * never prints the key or an `env` value.
+ */
+export function enableGatewayCommand(unit: string, cleanup: string | null = null, envScript = ":"): string {
   const name = MCP_GATEWAY_SERVICE.unit;
   return [
     `[ -f "$HOME/.ferry/box.json" ] && [ -x ${BOX_FERRY} ] || { echo missing; exit 0; }`,
@@ -107,7 +180,18 @@ export function enableGatewayCommand(unit: string): string {
     'if cmp -s "$u.tmp" "$u"; then rm -f "$u.tmp"; changed=0; else mv -f "$u.tmp" "$u" || exit 1; changed=1; echo unit; fi',
     "umask 077",
     'mkdir -p "$d" && chmod 700 "$d" || exit 1',
-    'cat > "$d/servers.json.tmp" && mv -f "$d/servers.json.tmp" "$d/servers.json" || exit 1',
+    'IFS= read -r direct && IFS= read -r shared || exit 1',
+    ...(cleanup === null ? [] : [cleanup]),
+    `if command -v jq >/dev/null 2>&1; then`,
+    `  printf '%s\\n' "$shared" > "$d/servers.json.new" || exit 1`,
+    `  [ -f "$d/servers.json" ] || printf '{}\\n' > "$d/servers.json" || exit 1`,
+    `  { ${envScript}\n} </dev/null | jq -n --slurpfile new "$d/servers.json.new" --slurpfile old "$d/servers.json" ${quoteShell(MERGE_SERVERS)} > "$d/servers.json.tmp" || { rm -f "$d/servers.json.new" "$d/servers.json.tmp"; exit 1; }`,
+    `  rm -f "$d/servers.json.new"`,
+    `else`,
+    `  [ "$direct" = "$shared" ] || echo nojq`,
+    `  if [ -f "$d/servers.json" ] && grep -qF '"command":' "$d/servers.json"; then :; else printf '%s\\n' "$direct" > "$d/servers.json.tmp" || exit 1; fi`,
+    `fi`,
+    '[ ! -f "$d/servers.json.tmp" ] || mv -f "$d/servers.json.tmp" "$d/servers.json" || exit 1',
     'if [ ! -s "$d/client-key" ]; then',
     "  k=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \\n') || exit 1",
     '  [ "${#k}" -eq 64 ] || exit 1',
@@ -151,18 +235,40 @@ export function disableGatewayCommand(cleanup: string | null): string {
  */
 export const RESTART_GATEWAY_COMMAND = `systemctl --user try-restart ${MCP_GATEWAY_SERVICE.unit}`;
 
+/**
+ * `sharing` is false when the box could not copy the `env` values of the
+ * shared servers, because it has no jq. Then the harness entries of these
+ * servers must stay direct. `output` has the output of `cleanup`.
+ */
 export type GatewaySyncResult =
   | { readonly state: "missing" }
-  | { readonly state: "running" | "stopped"; readonly servers: number; readonly unitChanged: boolean };
+  | {
+      readonly state: "running" | "stopped";
+      readonly servers: number;
+      readonly unitChanged: boolean;
+      readonly sharing: boolean;
+      readonly output: string;
+    };
 
-/** Write the gateway files on the box and start the service. */
+/**
+ * Write the gateway files on the box and start the service. `envKeys` has
+ * the env key names of each shared stdio server of `servers`. `cleanup` and
+ * `envScript` are box scripts: see `enableGatewayCommand`.
+ */
 export async function enableGateway(
   link: GatewayLink,
   remoteHome: string,
-  servers: Readonly<Record<string, { readonly url: string }>>,
+  servers: Readonly<Record<string, GatewayServerEntry>>,
+  shared: { readonly envKeys: Readonly<Record<string, readonly string[]>>; readonly cleanup: string | null; readonly envScript: string } = {
+    envKeys: {},
+    cleanup: null,
+    envScript: ":",
+  },
 ): Promise<GatewaySyncResult> {
-  const result = await link.run(enableGatewayCommand(gatewayUnit(remoteHome)), {
-    input: new TextEncoder().encode(`${JSON.stringify({ servers })}\n`),
+  const direct = Object.fromEntries(Object.entries(servers).filter(([, server]) => "url" in server));
+  const full = Object.keys(shared.envKeys).length > 0 ? { servers, envKeys: shared.envKeys } : { servers: direct };
+  const result = await link.run(enableGatewayCommand(gatewayUnit(remoteHome, linkPathDirs(link)), shared.cleanup, shared.envScript), {
+    input: new TextEncoder().encode(`${JSON.stringify({ servers: direct })}\n${JSON.stringify(full)}\n`),
   });
   if (!result.ok) throw new Error(`${result.error.origin}/${result.error.code}: ${result.error.message}`);
   const lines = result.stdout.split("\n").map((line) => line.trim());
@@ -171,6 +277,8 @@ export async function enableGateway(
     state: lines.includes("running") ? "running" : "stopped",
     servers: Object.keys(servers).length,
     unitChanged: lines.includes("unit"),
+    sharing: !lines.includes("nojq"),
+    output: result.stdout,
   };
 }
 
@@ -195,8 +303,13 @@ export type McpGatewayStatus = {
   readonly state: "running" | "stopped" | "unavailable";
   readonly reason: string | null;
   readonly port: number | null;
-  readonly servers: readonly { readonly name: string; readonly state: "ready" | "login-required" }[];
+  readonly servers: readonly { readonly name: string; readonly state: GatewayServerState }[];
 };
+
+/** The fix of a shared stdio server that the gateway cannot share. */
+export function cannotShareText(server: string, box: string): string {
+  return `The stdio MCP server ${server} sent a request to the client, so the MCP gateway cannot share it between agents. On the operator machine, remove ${server} from mcp_gateway_shared in [box.${box}] of ~/.ferry/config.toml, then run ferry sync --box ${box}.`;
+}
 
 export const GATEWAY_STATUS_COMMAND = `[ -f "$HOME/.ferry/box.json" ] && [ -x ${BOX_FERRY} ] || { echo missing; exit 0; }\n${BOX_FERRY} --json mcp list`;
 
@@ -227,7 +340,7 @@ export function parseGatewayStatus(stdout: string): McpGatewayStatus {
     reason: null,
     port: typeof gateway.port === "number" ? gateway.port : null,
     servers: servers.flatMap((server: { name?: unknown; state?: unknown }) =>
-      typeof server.name === "string" && (server.state === "ready" || server.state === "login-required")
+      typeof server.name === "string" && (server.state === "ready" || server.state === "login-required" || server.state === "cannot-share")
         ? [{ name: server.name, state: server.state }]
         : [],
     ),

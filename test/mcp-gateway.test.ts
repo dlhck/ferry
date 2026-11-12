@@ -61,10 +61,10 @@ async function key(): Promise<string> {
   return (await readFile(join(home, ".ferry/mcp-gateway/client-key"), "utf8")).trim();
 }
 
-async function connect(running: RunningGateway): Promise<Client> {
+async function connect(running: RunningGateway, server = "remote"): Promise<Client> {
   const client = new Client({ name: "harness", version: "1.0.0" });
   await client.connect(
-    new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${running.port}/mcp/remote`), {
+    new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${running.port}/mcp/${server}`), {
       requestInit: { headers: { Authorization: `Bearer ${await key()}` } },
     }),
   );
@@ -240,6 +240,109 @@ describe("ferry mcp serve", () => {
   });
 });
 
+describe("ferry mcp serve with a shared stdio server", () => {
+  const TOKEN = `ghp_${"t".repeat(36)}`;
+  let starts: string;
+
+  beforeEach(async () => {
+    starts = join(home, "starts");
+    await writeServers(process.execPath);
+  });
+
+  afterEach(() => {
+    for (const line of output) expect(line).not.toContain(TOKEN);
+  });
+
+  async function writeServers(command: string): Promise<void> {
+    const shared = { command, args: [join(import.meta.dir, "mcp-stdio-server.ts"), starts], env: { TEST_TOKEN: TOKEN } };
+    await writeFile(join(home, ".ferry/mcp-gateway/servers.json"), JSON.stringify({ servers: { remote: { url: remote.mcpUrl }, shared } }));
+  }
+
+  async function text(client: Client, name: string, args: Record<string, unknown> = {}): Promise<string> {
+    const result = await client.callTool({ name, arguments: args });
+    output.push(JSON.stringify(result));
+    return (result.content as { text: string }[])[0]?.text ?? "";
+  }
+
+  async function processes(): Promise<string[]> {
+    return (await readFile(starts, "utf8").catch(() => "")).split("\n").filter(Boolean);
+  }
+
+  test("runs one process for two client sessions, with the env of servers.json", async () => {
+    const running = serve();
+    const first = await connect(running, "shared");
+    const second = await connect(running, "shared");
+
+    const pids = [await text(first, "pid"), await text(second, "pid")];
+    expect(pids[0]).toBe(pids[1]!);
+    expect(await processes()).toEqual([pids[0]!]);
+    expect(await text(second, "env")).toBe("TEST_TOKEN is set");
+    expect((await list()).servers).toEqual([
+      { name: "remote", state: "login-required" },
+      { name: "shared", state: "ready" },
+    ]);
+    await first.close();
+    await second.close();
+  });
+
+  test("two concurrent calls with the same JSON-RPC id and progress token get their own answers", async () => {
+    const running = serve();
+    const good = await key();
+    const send = (value: string, ms: number) =>
+      post(
+        running,
+        good,
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "slow", arguments: { text: value, ms }, _meta: { progressToken: "p" } } },
+        {},
+        "shared",
+      ).then((response) => response.text());
+
+    const [slow, fast] = await Promise.all([send("first", 300), send("second", 50)]);
+    output.push(slow, fast);
+
+    const messages = (body: string) => body.split("\n").filter((line) => line.startsWith("data: ")).map((line) => JSON.parse(line.slice(6)));
+    for (const [body, value] of [[slow, "first"], [fast, "second"]] as const) {
+      const parsed = messages(body);
+      expect(parsed.find((message) => message.id === 1)?.result.content).toEqual([{ type: "text", text: value }]);
+      expect(parsed.find((message) => message.method === "notifications/progress")?.params).toMatchObject({ progressToken: "p", progress: 1 });
+    }
+    expect(await processes()).toHaveLength(1);
+  });
+
+  test("answers a request of the server with an error and shows cannot-share", async () => {
+    const client = await connect(serve(), "shared");
+
+    expect(await text(client, "roots")).toStartWith("roots/list failed:");
+    expect((await list()).servers).toContainEqual({ name: "shared", state: "cannot-share" });
+    expect(output.some((line) => line.includes("shared: sent roots/list to the client"))).toBe(true);
+    await client.close();
+  });
+
+  test("starts a stopped process again at the next call, and keeps the last good tool list", async () => {
+    const client = await connect(serve(), "shared");
+    const pid = await text(client, "pid");
+    expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("roots");
+
+    expect((await client.callTool({ name: "exit", arguments: {} })).isError).toBe(true);
+    const next = await text(client, "pid");
+    expect(next).not.toBe(pid);
+    expect(await processes()).toEqual([pid, next]);
+
+    // A command that cannot start gives the last good tool list and a tool error.
+    await writeServers(join(home, "no-such-command"));
+    expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("roots");
+    expect((await client.callTool({ name: "pid", arguments: {} })).isError).toBe(true);
+    await client.close();
+  });
+
+  test("ferry mcp login refuses a shared stdio server", async () => {
+    const errors: string[] = [];
+    await runCli(["mcp", "login", "shared"], { isBoxMode: () => true, home: () => home }, { renderError: (line) => errors.push(line), setExitCode: () => {} });
+    output.push(...errors);
+    expect(errors).toEqual(["shared is a shared stdio server of the MCP gateway. It needs no login."]);
+  });
+});
+
 describe("ferry mcp list", () => {
   test("shows each server with no login as login-required, and a stopped gateway", async () => {
     const lines: string[] = [];
@@ -250,8 +353,8 @@ describe("ferry mcp list", () => {
   });
 });
 
-function post(running: RunningGateway, key: string | null, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
-  return fetch(`http://127.0.0.1:${running.port}/mcp/remote`, {
+function post(running: RunningGateway, key: string | null, body: unknown, headers: Record<string, string> = {}, server = "remote"): Promise<Response> {
+  return fetch(`http://127.0.0.1:${running.port}/mcp/${server}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",

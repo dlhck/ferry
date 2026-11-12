@@ -42,6 +42,8 @@ export type BoxConfig = {
   readonly agentMemoryMax?: string;
   /** True when Ferry runs the MCP gateway on the box (`mcp_gateway = true`). A missing key means no gateway. */
   readonly mcpGateway?: true;
+  /** The carried stdio MCP servers that the gateway runs as one process for all agents of the box (`mcp_gateway_shared`). */
+  readonly mcpGatewayShared?: readonly string[];
   readonly integrations?: IntegrationsConfig;
   /**
    * Policies by tool id. A policy replaces the `[tools]` policy or the `version` of a `[tools.<id>]` table.
@@ -476,6 +478,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       ...(entry.projects ? { projects: entry.projects } : {}),
       ...(entry.agentMemoryMax ? { agentMemoryMax: entry.agentMemoryMax } : {}),
       ...(entry.mcpGateway ? { mcpGateway: true as const } : {}),
+      ...(entry.mcpGatewayShared ? { mcpGatewayShared: entry.mcpGatewayShared } : {}),
       ...(entry.integrations ? { integrations: entry.integrations } : {}),
       ...(entry.tools ? { tools: entry.tools } : {}),
     };
@@ -498,6 +501,7 @@ type ParsedBox = {
   projects?: string[];
   agentMemoryMax?: string;
   mcpGateway?: boolean;
+  mcpGatewayShared?: string[];
   integrations?: Record<string, boolean>;
   tools?: Record<string, ToolPolicy>;
 };
@@ -534,6 +538,14 @@ function readBoxKey(entry: ParsedBox, part: BoxPart, key: string, encoded: strin
   if (part === "host" && key === "mcp_gateway") {
     if (encoded !== "true" && encoded !== "false") throw new ConfigError(`invalid mcp_gateway in ${section} of ${path}. Use true or false.`);
     entry.mcpGateway = encoded === "true";
+    return;
+  }
+  if (part === "host" && key === "mcp_gateway_shared") {
+    const list = parseJson(encoded);
+    if (!Array.isArray(list) || !list.every((name) => typeof name === "string" && name !== "")) {
+      throw new ConfigError(`invalid mcp_gateway_shared in ${section} of ${path}. Use a list of stdio MCP server names, such as ["context7"].`);
+    }
+    entry.mcpGatewayShared = list;
     return;
   }
   if (!SECTION_KEYS[part === "host" ? "[host]" : "[integrations]"]?.includes(key)) {
@@ -683,6 +695,7 @@ function boxLines(box: BoxConfig): string[] {
     ...(box.projects !== undefined ? [`projects = ${JSON.stringify(box.projects)}`] : []),
     ...(box.agentMemoryMax !== undefined ? [`agent_memory_max = ${JSON.stringify(box.agentMemoryMax)}`] : []),
     ...(box.mcpGateway ? ["mcp_gateway = true"] : []),
+    ...(box.mcpGatewayShared !== undefined ? [`mcp_gateway_shared = ${JSON.stringify(box.mcpGatewayShared)}`] : []),
     "",
     ...integrationLines(box.integrations, `box.${box.name}.integrations`),
     ...(tools.length > 0

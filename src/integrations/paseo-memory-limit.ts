@@ -7,7 +7,8 @@
  * carries no command from the operator machine: it changes only the box value.
  */
 import { jqCommandScript, jqReadScript, quoteShell } from "../box-settings.ts";
-import { CONFIG_FILE, editBoxConfig, jqObjects, noJqWarning, PaseoError, SYSTEM_PATH } from "./paseo.ts";
+import { CONFIG_FILE, editBoxConfig, jqObjects, noJqWarning, PaseoError } from "./paseo.ts";
+import { SYSTEM_PATH } from "../tools/path.ts";
 import type { IntegrationLink } from "./types.ts";
 
 const BOX_TIMEOUT_MS = 30_000;

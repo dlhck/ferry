@@ -41,6 +41,19 @@ export function boxPathDirs(tools: readonly ToolDescriptor[]): readonly string[]
 /** The box PATH of the built-in tools. A Link uses it when it gets no directories. */
 export const BUILTIN_BOX_PATH_DIRS = boxPathDirs(BUILTIN_TOOLS);
 
+/** The system directories at the end of the PATH of a Ferry unit on the box. */
+export const SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/** The PATH of a systemd user unit on the box: `dirs` in the home (`%h`), then `SYSTEM_PATH`. */
+export function unitPath(dirs: readonly string[]): string {
+  return [...dirs.map((dir) => `%h/${dir}`), SYSTEM_PATH].join(":");
+}
+
+/** A Link knows the box PATH directories. A link without them gets the directories of the built-in tools. */
+export function linkPathDirs(link: object): readonly string[] {
+  return (link as { readonly pathDirs?: readonly string[] }).pathDirs ?? BUILTIN_BOX_PATH_DIRS;
+}
+
 /** A shell statement that puts `dirs` in front of PATH. */
 export function pathExport(dirs: readonly string[]): string {
   return `export PATH="${dirs.map((dir) => `$HOME/${dir}`).join(":")}:$PATH"`;

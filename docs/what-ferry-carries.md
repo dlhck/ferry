@@ -61,7 +61,7 @@ On a box with the [MCP gateway](boxes.md#an-mcp-gateway-on-the-box), the harness
 
 Ferry carries the name, the command, the arguments, and the names of the `env` keys. It never carries an `env` value.
 
-- Set the values in the `env` of the server on the box. Ferry keeps them.
+- Set the values in the `env` of the server on the box. Ferry keeps them. On a box with [shared stdio servers](boxes.md#shared-stdio-servers), the box moves the values of a shared server into `~/.ferry/mcp-gateway/servers.json`, and back when the server stops being shared.
 - Ferry never installs the command. `ferry status --brief` names each missing env key and each command that is not on the box.
 - Ferry does not carry a server whose command or arguments refer to a path in your home, as an absolute path, `~`, `$HOME`, or `${HOME}`.
 - Ferry does not carry a server whose command or arguments refer to a path in a macOS app bundle, a path with a `<name>.app/Contents/` part, as in `/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl`. A box does not have the app. You have nothing to do, so `ferry status --brief` shows no item for it.

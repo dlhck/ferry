@@ -17,6 +17,13 @@
  * goes off, the direct path declares the carried URL again, and so replaces
  * each gateway entry of a carried server. `gatewayCleanupCommand` removes a
  * gateway entry of a server that Ferry no longer carries.
+ *
+ * A stdio server in `mcp_gateway_shared` gets a gateway entry too. Before
+ * that, `sharedEnvScript` gives the box the `env` values of its harness
+ * entries, and the box copies them into the gateway file. When the server is
+ * no longer shared, `gatewayCleanupCommand` writes the direct entry again,
+ * with the `env` values of the gateway file. The direct path leaves a gateway
+ * entry of a stdio server as it is, so that the cleanup can do this.
  */
 
 import { posix } from "node:path";
@@ -36,15 +43,18 @@ const REGISTER_TIMEOUT_MS = 600_000;
 
 /** A jq filter: `$e`, the box entry, has the command and arguments of `$c`, the carried entry. */
 const SAME_COMMAND = '($e | type) == "object" and $e.command == $c.command and ($e.args // []) == $c.args';
+/** A jq filter: the box entry `$e` points at the MCP gateway. `$p` is `GATEWAY_URL_PREFIX`. */
+const IS_GATEWAY = '($e | type) == "object" and (($e.url // "") | type == "string" and startswith($p))';
 /** A jq filter: the carried entry `$c` with the `env` of the box entry `$e`, when it has one. */
 const WITH_BOX_ENV = '$c + (if ($e | type) == "object" and ($e | has("env")) then {env: $e.env} else {} end)';
 /**
  * A jq filter for a JSON MCP file: set each carried entry of `$s` under the
- * key `$k`, and keep the `env` and `env_vars` of the box entry.
+ * key `$k`, and keep the `env` and `env_vars` of the box entry. A gateway
+ * entry stays as it is.
  */
 const MERGE_FILE =
-  '.[$k] = ((.[$k] // {}) as $b | $b + ($s | with_entries(.key as $n | .value += (($b[$n] // {}) | ' +
-  'if type == "object" then with_entries(select(.key == "env" or .key == "env_vars")) else {} end))))';
+  `.[$k] = ((.[$k] // {}) as $b | $b + ($s | with_entries(.key as $n | ($b[$n] // null) as $e | if ${IS_GATEWAY} then .value = $e else .value += (($e // {}) | ` +
+  'if type == "object" then with_entries(select(.key == "env" or .key == "env_vars")) else {} end) end)))';
 /** A jq filter for a JSON MCP file: set each carried entry of `$s` under the key `$k`. */
 const REPLACE_FILE = '.[$k] = ((.[$k] // {}) + $s)';
 /** The client key of the MCP gateway on the box, as a shell word. */
@@ -63,8 +73,19 @@ const IN_APP_BUNDLE =
 const STALE_GATEWAY_ENTRY =
   '(.value | type) == "object" and ((.value.url // .value.transport.url // "") | type == "string" and startswith($p))' +
   ' and (.key | test("^[A-Za-z0-9._-]+$")) and (.key as $n | $keep | any(. == $n) | not)';
-/** A jq expression: the direct URL of the server `$n` in the gateway file `$sv`, or null. */
-const DIRECT_URL = '($sv.servers[$n].url // null) as $r | if ($r | type) == "string" and ($r | startswith("https://")) then $r else null end';
+/** A jq prefix: `$sv` is the gateway file that `--slurpfile svs` read, or `{}`. */
+const GATEWAY_FILE_VALUE = '($svs[0] // {}) as $sv | ';
+/** A jq expression: with `$restore`, the direct URL of the server `$n` in the gateway file `$sv`, or null. */
+const DIRECT_URL =
+  '($sv.servers[$n].url // null) as $r | if $restore and ($r | type) == "string" and ($r | startswith("https://")) then $r else null end';
+/** A jq expression: the direct entry of the shared stdio server `$n` in the gateway file `$sv`, with its `env`, or null. */
+const SHARED_ENTRY =
+  '($sv.servers[$n] // null) | if type == "object" and (.command | type) == "string" then ' +
+  '{command, args: (.args // []), env: ((.env // {}) | with_entries(select(.value | type == "string")))} else null end';
+/** A jq filter: `<server>\t<key>` for each key of `$w` that the env `$e` of the server `$n` does not set. */
+const MISSING_KEYS = '$w[] | select(($e[.] // "") | type != "string" or . == "") | "\\($n)\\t\\(.)"';
+/** The gateway file on the box, relative to the home. It has the `env` values of the shared stdio servers. */
+const GATEWAY_SERVERS_FILE = ".ferry/mcp-gateway/servers.json";
 /** A shell test that fails when jq is not on the box. */
 const HAS_JQ = "command -v jq >/dev/null 2>&1";
 
@@ -95,8 +116,11 @@ export async function registerBoxMcp(input: {
   readonly progress?: Pick<Progress, "count">;
   /** The names of the servers that the MCP gateway of the box serves. Absent on a box without the gateway. */
   readonly gateway?: readonly string[];
+  /** The names of the stdio servers that the MCP gateway shares, also in `gateway`. Their `env` values are in the gateway file. */
+  readonly shared?: readonly string[];
 }): Promise<readonly string[]> {
   const served = new Set(input.gateway ?? []);
+  const shared = new Set((input.shared ?? []).filter((name) => served.has(name)));
   const entries = declared(input.mcp, input.tools);
   const total = entries.reduce((sum, { entry }) => sum + entry.servers.length, 0);
   let current = 0;
@@ -115,9 +139,9 @@ export async function registerBoxMcp(input: {
     const box = path && file ? { path, file } : null;
     for (const name of entry.appBundle ?? []) warnings.push(...(await removeAppBundle(entry.harness, name, recipe, box, input.link)));
     const remotes = entry.servers.filter((server): server is RemoteMcpServer => server.type !== "stdio");
-    const gateway = remotes.filter((server) => served.has(server.name));
     const remote = remotes.filter((server) => !served.has(server.name));
-    const stdio = entry.servers.filter((server): server is StdioMcpServer => server.type === "stdio");
+    const stdio = entry.servers.filter((server): server is StdioMcpServer => server.type === "stdio" && !shared.has(server.name));
+    const gateway = entry.servers.filter((server) => (server.type === "stdio" ? shared.has(server.name) : served.has(server.name)));
     if (gateway.length > 0) warnings.push(...(await registerGateway(entry.harness, gateway, recipe, box, input.link, advance)));
     if (remote.length > 0 && recipe.register) {
       warnings.push(...(await registerWithCli({ harness: entry.harness, servers: remote }, recipe, input.link, advance)));
@@ -162,7 +186,10 @@ export async function checkBoxMcp(input: {
   readonly tools: readonly ToolDescriptor[];
   readonly sources: readonly McpSource[];
   readonly link: BoxSettingsLink;
+  /** The stdio servers that the MCP gateway shares. Ferry checks their env keys in the gateway file, as the harness `gateway`. */
+  readonly shared?: readonly string[];
 }): Promise<readonly BoxMcpIssue[]> {
+  const shared = new Set(input.shared ?? []);
   const issues: BoxMcpIssue[] = [];
   const stdio: { harness: string; server: StdioMcpServer }[] = [];
   const recipes = new Map<string, ToolMcp>();
@@ -185,7 +212,9 @@ export async function checkBoxMcp(input: {
   }
 
   for (const harness of input.harnesses) {
-    const needs = stdio.filter((item) => item.harness === harness.id && item.server.env.length > 0).map((item) => item.server);
+    const needs = stdio
+      .filter((item) => item.harness === harness.id && item.server.env.length > 0 && !shared.has(item.server.name))
+      .map((item) => item.server);
     if (!harness.mcp || needs.length === 0) continue;
     const getJson = recipes.get(harness.id)?.register?.getJson;
     const script = envCheckScript(posix.join(input.remoteHome, harness.mcp.file), harness.mcp, getJson, needs);
@@ -202,7 +231,63 @@ export async function checkBoxMcp(input: {
       if (keys.length > 0) issues.push({ kind: "env-missing", harness: harness.id, server: server.name, keys, file: harness.mcp.file });
     }
   }
+
+  // A shared server has one env for all harnesses, in the gateway file. It needs each key that a harness carries.
+  const want: Record<string, string[]> = {};
+  for (const { server } of stdio) {
+    if (shared.has(server.name) && server.env.length > 0) want[server.name] = [...new Set([...(want[server.name] ?? []), ...server.env])];
+  }
+  if (Object.keys(want).length > 0) {
+    const filter = `.servers as $m | $want | to_entries[] | .key as $n | .value as $w | (($m[$n] // {}).env // {}) as $e | ${MISSING_KEYS}`;
+    const script = [
+      `${HAS_JQ} || { printf 'J\\n'; exit 0; }`,
+      `f="$HOME/${GATEWAY_SERVERS_FILE}"`,
+      `{ [ -e "$f" ] && cat "$f" || printf '{}'; } | jq -r --argjson want ${quoteShell(JSON.stringify(want))} ${quoteShell(filter)} 2>/dev/null || printf 'E\\n'`,
+    ].join("\n");
+    const lines = (await checked(input.link, `sh -c ${quoteShell(script)}`)).stdout.split("\n");
+    if (lines.includes("E")) throw new BoxSettingsError("gateway: Ferry cannot read the MCP gateway file");
+    for (const [name, env] of Object.entries(want)) {
+      const keys = env.filter((key) => lines.includes(`${name}\t${key}`));
+      if (lines.includes("J")) issues.push({ kind: "env-unchecked", harness: "gateway", server: name, keys: env });
+      else if (keys.length > 0) issues.push({ kind: "env-missing", harness: "gateway", server: name, keys, file: GATEWAY_SERVERS_FILE });
+    }
+  }
   return issues;
+}
+
+/**
+ * The box script that prints one JSON line `{"n": <server>, "env": <env>}`
+ * for each harness entry of a shared stdio server, in harness order. `env` is
+ * null for an entry without `env`, such as a gateway entry. The enable command
+ * of the gateway reads these lines on the box, so no `env` value reaches Ferry.
+ */
+export function sharedEnvScript(
+  harnesses: readonly HarnessDescriptor[],
+  tools: readonly ToolDescriptor[],
+  home: string,
+  mcp: readonly SeedMcp[],
+  shared: readonly string[],
+): string {
+  const lines = harnesses.flatMap((harness) => {
+    const recipe = tools.find((tool) => tool.id === harness.id)?.mcp;
+    const names =
+      mcp
+        .find((entry) => entry.harness === harness.id)
+        ?.servers.filter((server) => server.type === "stdio" && shared.includes(server.name))
+        .map((server) => server.name) ?? [];
+    if (!recipe || !harness.mcp || names.length === 0) return [];
+    const getJson = recipe.register?.getJson;
+    if (getJson) {
+      const line = (name: string) =>
+        `  ${mcpCommand(getJson, { name })} </dev/null 2>/dev/null | jq -c --arg n ${quoteShell(name)} '{n: $n, env: ((.transport // .).env // null)}' 2>/dev/null`;
+      return [`if command -v ${mcpBinary(recipe)} >/dev/null 2>&1; then`, ...names.map(line), "fi"];
+    }
+    if (harness.mcp.format !== "json") return [];
+    const path = quoteShell(posix.join(home, harness.mcp.file));
+    const filter = '(.[$k] // {}) | to_entries[] | select(.key as $x | $names | any(. == $x)) | {n: .key, env: (.value | if type == "object" then .env else null end)}';
+    return [`[ ! -f ${path} ] || jq -c --arg k ${quoteShell(harness.mcp.key)} --argjson names ${quoteShell(JSON.stringify(names))} ${quoteShell(filter)} ${path} 2>/dev/null`];
+  });
+  return lines.length === 0 ? ":" : lines.join("\n");
 }
 
 /**
@@ -217,19 +302,17 @@ function envCheckScript(
   getJson: string | undefined,
   servers: readonly StdioMcpServer[],
 ): string | null {
-  const missing =
-    '$w[] | select(($e[.] // "") | type != "string" or . == "") | "\\($n)\\t\\(.)"';
   if (getJson) {
     const lines = servers.map((server) => {
       const read = `{ ${mcpCommand(getJson, server)} 2>/dev/null || printf '{}'; }`;
-      const filter = `((.transport // .).env // {}) as $e | ${missing}`;
+      const filter = `((.transport // .).env // {}) as $e | ${MISSING_KEYS}`;
       return `${read} | jq -r --arg n ${quoteShell(server.name)} --argjson w ${quoteShell(JSON.stringify(server.env))} ${quoteShell(filter)} 2>/dev/null || printf 'E\\n'`;
     });
     return [`${HAS_JQ} || { printf 'J\\n'; exit 0; }`, ...lines].join("\n");
   }
   if (file.format !== "json") return null;
   const want = Object.fromEntries(servers.map((server) => [server.name, server.env]));
-  const filter = `.[$k] as $m | $want | to_entries[] | .key as $n | .value as $w | (($m[$n] // {}).env // {}) as $e | ${missing}`;
+  const filter = `.[$k] as $m | $want | to_entries[] | .key as $n | .value as $w | (($m[$n] // {}).env // {}) as $e | ${MISSING_KEYS}`;
   return [
     `${HAS_JQ} || { printf 'J\\n'; exit 0; }`,
     `f=${quoteShell(path)}`,
@@ -358,7 +441,8 @@ async function mergeFileOnBox(
 ): Promise<string[]> {
   if (!box || box.file.format !== "json") return [`could not declare ${harness} MCP servers ${names}`];
   const created = `${JSON.stringify({ [box.file.key]: entries }, null, 2)}\n`;
-  const args = `--arg k ${quoteShell(box.file.key)} --argjson s ${quoteShell(JSON.stringify(entries))}${gateway ? ` --rawfile g ${CLIENT_KEY}` : ""}`;
+  const prefix = filter === MERGE_FILE ? ` --arg p ${quoteShell(GATEWAY_URL_PREFIX)}` : "";
+  const args = `--arg k ${quoteShell(box.file.key)} --argjson s ${quoteShell(JSON.stringify(entries))}${prefix}${gateway ? ` --rawfile g ${CLIENT_KEY}` : ""}`;
   const script = [
     `f=${quoteShell(box.path)}`,
     "umask 077",
@@ -389,7 +473,7 @@ function noClientKey(harness: string, names: string): string {
 }
 
 /**
- * Point remote servers at the MCP gateway: the URL `gatewayUrl(name)` and the
+ * Point remote servers and shared stdio servers at the MCP gateway: the URL `gatewayUrl(name)` and the
  * header `Authorization: Bearer <client key>`. The box reads the key from its
  * file, writes it only into the harness entry, and prints only a status
  * letter: `C` the harness CLI is missing, `K` the box has no client key, `J`
@@ -401,7 +485,7 @@ function noClientKey(harness: string, names: string): string {
  */
 async function registerGateway(
   harness: string,
-  servers: readonly RemoteMcpServer[],
+  servers: readonly { readonly name: string }[],
   recipe: ToolMcp,
   box: { readonly path: string; readonly file: McpFile } | null,
   link: BoxSettingsLink,
@@ -551,9 +635,9 @@ async function removeAppBundle(
 
 /**
  * Remove and add one server with `addJson`. When the box file names the
- * server, jq on the box keeps an entry with the carried command and arguments,
- * or adds the `env` of the box entry to the declaration. Without jq, only a
- * server that the file does not name is added.
+ * server, jq on the box keeps an entry with the carried command and arguments
+ * or a gateway entry, or adds the `env` of the box entry to the declaration.
+ * Without jq, only a server that the file does not name is added.
  */
 function addJsonScript(
   register: NonNullable<ToolMcp["register"]>,
@@ -562,7 +646,7 @@ function addJsonScript(
   box: { readonly path: string; readonly file: McpFile } | null,
 ): string {
   const entry = "(.[$k][$n] // null) as $e";
-  const args = `--arg k ${quoteShell(box?.file.key ?? "")} --arg n ${quoteShell(server.name)} --argjson c "$c"`;
+  const args = `--arg k ${quoteShell(box?.file.key ?? "")} --arg n ${quoteShell(server.name)} --arg p ${quoteShell(GATEWAY_URL_PREFIX)} --argjson c "$c"`;
   const add = (register.addJson as string).replaceAll("{json}", '"$c"');
   return [
     `c=${quoteShell(carried)}`,
@@ -571,7 +655,7 @@ function addJsonScript(
           `f=${quoteShell(box.path)}`,
           `if [ -f "$f" ] && grep -qF -- ${quoteShell(JSON.stringify(server.name))} "$f"; then`,
           `  ${HAS_JQ} || { printf 'J\\n'; exit 0; }`,
-          `  jq -e ${args} ${quoteShell(`${entry} | ${SAME_COMMAND}`)} "$f" >/dev/null 2>&1 && exit 0`,
+          `  jq -e ${args} ${quoteShell(`${entry} | (${SAME_COMMAND}) or (${IS_GATEWAY})`)} "$f" >/dev/null 2>&1 && exit 0`,
           `  c=$(jq -c ${args} ${quoteShell(`${entry} | ${WITH_BOX_ENV}`)} "$f" 2>/dev/null) || { printf 'S\\n'; exit 0; }`,
           "fi",
         ]
@@ -583,21 +667,22 @@ function addJsonScript(
 
 /**
  * Add one new server with `addStdio`. A server that `get` finds stays as it
- * is: with the carried command and arguments nothing is to do, and else the
- * box prints `U`, because the CLI would drop the env settings of the entry.
+ * is: with the carried command and arguments or a gateway entry nothing is to
+ * do, and else the box prints `U`, because the CLI would drop the env
+ * settings of the entry.
  */
 function addStdioScript(register: NonNullable<ToolMcp["register"]>, server: StdioMcpServer, carried: string): string {
   const command = [server.command, ...server.args].map(quoteShell).join(" ");
   const add = (register.addStdio as string).replaceAll("{command}", command);
   const getJson = register.getJson ? mcpCommand(register.getJson, server) : null;
-  const same = `(.transport // .) as $e | ${SAME_COMMAND}`;
+  const same = `(.transport // .) as $e | (${SAME_COMMAND}) or (${IS_GATEWAY})`;
   return [
     `c=${quoteShell(carried)}`,
     `if ${mcpCommand(register.get, server)} >/dev/null 2>&1; then`,
     ...(getJson
       ? [
           `  ${HAS_JQ} || { printf 'J\\n'; exit 0; }`,
-          `  ${getJson} 2>/dev/null | jq -e --argjson c "$c" ${quoteShell(same)} >/dev/null 2>&1 && exit 0`,
+          `  ${getJson} 2>/dev/null | jq -e --argjson c "$c" --arg p ${quoteShell(GATEWAY_URL_PREFIX)} ${quoteShell(same)} >/dev/null 2>&1 && exit 0`,
         ]
       : []),
     "  printf 'U\\n'; exit 0",
@@ -610,11 +695,15 @@ function addStdioScript(register: NonNullable<ToolMcp["register"]>, server: Stdi
 /**
  * One box command that cleans the gateway entries of each harness: each entry
  * whose URL starts with `GATEWAY_URL_PREFIX` and whose server is not in the
- * carried servers `mcp` of the harness. With `restore`, an entry of a server in
- * `~/.ferry/mcp-gateway/servers.json` gets the direct URL from that file.
- * Ferry removes each other such entry. Ferry changes no entry without the
- * prefix. `null` when no harness has an MCP recipe. Read the output with
- * `gatewayCleanupLines`. The script never reads the client key.
+ * carried servers `mcp` of the harness. With `shared`, a carried stdio server
+ * that is not in `shared` counts as not carried, so that its gateway entry
+ * goes too. An entry of a stdio server in `~/.ferry/mcp-gateway/servers.json`
+ * gets its direct entry back, with the `env` values of that file. With
+ * `restore`, an entry of a remote server in that file gets the direct URL
+ * from it. Ferry removes each other such entry. Ferry changes no entry
+ * without the prefix. `null` when no harness has an MCP recipe. Read the
+ * output with `gatewayCleanupLines`. The script never reads the client key,
+ * and prints no `env` value.
  */
 export function gatewayCleanupCommand(
   harnesses: readonly HarnessDescriptor[],
@@ -622,8 +711,13 @@ export function gatewayCleanupCommand(
   home: string,
   mcp: readonly SeedMcp[],
   restore: boolean,
+  shared?: readonly string[],
 ): string | null {
-  const keep = (harness: string) => mcp.find((entry) => entry.harness === harness)?.servers.map((server) => server.name) ?? [];
+  const keep = (harness: string) =>
+    mcp
+      .find((entry) => entry.harness === harness)
+      ?.servers.filter((server) => shared === undefined || server.type !== "stdio" || shared.includes(server.name))
+      .map((server) => server.name) ?? [];
   const scripts = harnesses.flatMap((harness) => {
     const recipe = tools.find((tool) => tool.id === harness.id)?.mcp;
     const script = recipe && harness.mcp ? cleanupScript(harness.id, posix.join(home, harness.mcp.file), harness.mcp, recipe, keep(harness.id), restore) : null;
@@ -655,7 +749,9 @@ export function gatewayCleanupLines(stdout: string): string[] {
  * The box script of one harness for `gatewayCleanupCommand`. A harness with
  * `register` changes its entries with the CLI. Else jq changes the JSON MCP
  * file. Ferry reads a JSON MCP file with jq and a TOML MCP file with
- * `listJson`. `null` when Ferry has no way to read the entries.
+ * `listJson`. jq reads the gateway file with `--slurpfile`, so that no `env`
+ * value is in the arguments of a command, except the `addJson` declaration.
+ * `null` when Ferry has no way to read the entries.
  */
 function cleanupScript(
   harness: string,
@@ -675,13 +771,14 @@ function cleanupScript(
         : null;
   if (list === null || (!register && file.format !== "json")) return null;
   const report = (kind: string) => `printf '${kind}\\t%s\\t%s\\n' "$h" "$n"`;
+  const gatewayFile = `--slurpfile svs "$svf" --argjson restore ${restore}`;
   const head = [
     `h=${quoteShell(harness)}`,
     `f=${quoteShell(path)}`,
     ...(register ? [`command -v ${mcpBinary(recipe)} >/dev/null 2>&1 || exit 0`] : []),
     `${HAS_JQ} || { printf 'J\\t%s\\n' "$h"; exit 0; }`,
-    "sv='{}'",
-    ...(restore ? [`[ -f "$HOME/.ferry/mcp-gateway/servers.json" ] && sv=$(cat "$HOME/.ferry/mcp-gateway/servers.json")`] : []),
+    'svf="$HOME/.ferry/mcp-gateway/servers.json"',
+    '[ -f "$svf" ] || svf=/dev/null',
     `names=$(${list}) || { printf 'S\\t%s\\n' "$h"; exit 0; }`,
     '[ -n "$names" ] || exit 0',
   ];
@@ -692,24 +789,51 @@ function cleanupScript(
       ...head,
       'printf \'%s\\n\' "$names" | while IFS= read -r n; do',
       `  ${remove} </dev/null >/dev/null 2>&1 || { ${report("F")}; continue; }`,
-      ...(restore
-        ? [
-            `  r=$(jq -rn --arg n "$n" --argjson sv "$sv" ${quoteShell(`${DIRECT_URL} | values`)} 2>/dev/null)`,
-            `  if [ -n "$r" ]; then ${add} </dev/null >/dev/null 2>&1 && ${report("D")} || ${report("F")}; else ${report("R")}; fi`,
-          ]
-        : [`  ${report("R")}`]),
+      `  e=$(jq -cn --arg n "$n" ${gatewayFile} ${quoteShell(`${GATEWAY_FILE_VALUE}${SHARED_ENTRY} | values`)} 2>/dev/null)`,
+      `  r=$(jq -rn --arg n "$n" ${gatewayFile} ${quoteShell(`${GATEWAY_FILE_VALUE}${DIRECT_URL} | values`)} 2>/dev/null)`,
+      `  if [ -n "$e" ]; then ${restoreStdio(register, file)} && ${report("D")} || ${report("F")}`,
+      `  elif [ -n "$r" ]; then ${add} </dev/null >/dev/null 2>&1 && ${report("D")} || ${report("F")}`,
+      `  else ${report("R")}; fi`,
       "done",
     ].join("\n");
   }
-  const rewrite = `.[$k] |= ((. // {}) | with_entries(if ${STALE_GATEWAY_ENTRY} then (.key as $n | (${DIRECT_URL})) as $r | if $r then .value = {url: $r} else empty end else . end))`;
+  const rewrite =
+    `${GATEWAY_FILE_VALUE}.[$k] |= ((. // {}) | with_entries(if ${STALE_GATEWAY_ENTRY} then ` +
+    `(.key as $n | {e: (${SHARED_ENTRY}), r: (${DIRECT_URL})}) as $x | if $x.e then .value = $x.e elif $x.r then .value = {url: $x.r} else empty end else . end))`;
+  const direct = `${GATEWAY_FILE_VALUE}(${SHARED_ENTRY}) // (${DIRECT_URL})`;
   return [
     ...head,
     "umask 077",
-    `if jq ${args} --argjson sv "$sv" ${quoteShell(rewrite)} "$f" > "$f.ferry-tmp" 2>/dev/null && mv "$f.ferry-tmp" "$f"; then ok=1; else rm -f "$f.ferry-tmp"; ok=0; fi`,
+    `if jq ${args} ${gatewayFile} ${quoteShell(rewrite)} "$f" > "$f.ferry-tmp" 2>/dev/null && mv "$f.ferry-tmp" "$f"; then ok=1; else rm -f "$f.ferry-tmp"; ok=0; fi`,
     'printf \'%s\\n\' "$names" | while IFS= read -r n; do',
-    `  if [ "$ok" = 0 ]; then ${report("F")}; elif jq -en --arg n "$n" --argjson sv "$sv" ${quoteShell(DIRECT_URL)} >/dev/null 2>&1; then ${report("D")}; else ${report("R")}; fi`,
+    `  if [ "$ok" = 0 ]; then ${report("F")}; elif jq -en --arg n "$n" ${gatewayFile} ${quoteShell(direct)} >/dev/null 2>&1; then ${report("D")}; else ${report("R")}; fi`,
     "done",
   ].join("\n");
+}
+
+/**
+ * The box command that adds the direct entry `$e` of a shared stdio server
+ * `$n` again. `$e` is the JSON entry with the command, the arguments, and the
+ * `env`. A harness with `addJson` gets it from the CLI. A harness with
+ * `addStdio` gets the command and the arguments from the CLI, and the box
+ * appends the `env` table to its TOML MCP file and makes the file private.
+ */
+function restoreStdio(register: NonNullable<ToolMcp["register"]>, file: McpFile): string {
+  if (register.addJson) {
+    const add = register.addJson.replaceAll("{name}", '"$n"').replaceAll("{json}", '"$c"');
+    return `{ c=$(printf '%s' "$e" | jq -c '{type: "stdio"} + .') && ${add} </dev/null >/dev/null 2>&1; }`;
+  }
+  if (!register.addStdio) return "false";
+  const add = register.addStdio.replaceAll("{name}", '"$n"').replaceAll("{command}", '"$@"');
+  const get = register.get.replaceAll("{name}", '"$n"');
+  const table =
+    '.env | if length == 0 then empty else "\\n[" + $k + "." + ($n | tojson) + ".env]\\n" + ' +
+    '(to_entries | map("\\(.key | tojson) = \\(.value | tojson)") | join("\\n")) end';
+  const env =
+    file.format === "toml"
+      ? ` && t=$(printf '%s' "$e" | jq -r --arg k ${quoteShell(file.key)} --arg n "$n" ${quoteShell(table)}) && { [ -z "$t" ] || { printf '%s\\n' "$t" >> "$f" && chmod 600 "$f"; }; }`
+      : "";
+  return `{ a=$(printf '%s' "$e" | jq -r '[.command] + .args | @sh') && eval "set -- $a" && ${add} </dev/null >/dev/null 2>&1; ${get} >/dev/null 2>&1${env}; }`;
 }
 
 type McpFile = NonNullable<HarnessDescriptor["mcp"]>;

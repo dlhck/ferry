@@ -24,7 +24,7 @@ import {
   type GitIdentity,
 } from "./git-identity.ts";
 import { denyRules, MCP_SKIPS, readMcpSources, type DenyRuleDescription } from "./manifest.ts";
-import { DEVELOPMENT_BUILD_REASON, readGatewayStatus } from "./mcp-gateway/service.ts";
+import { cannotShareText, DEVELOPMENT_BUILD_REASON, readGatewayStatus } from "./mcp-gateway/service.ts";
 import { noProgress, type Progress } from "./progress.ts";
 import {
   loadRegistry,
@@ -216,6 +216,8 @@ function boxDependencies(
           tools,
           sources: resolved.readMcpSources(resolved.home(), harnesses),
           link,
+          // The env values of a shared server are in the gateway file. A development build puts no gateway on the box.
+          ...(box.mcpGateway && isReleaseVersion(resolved.ferryVersion) ? { shared: box.mcpGatewayShared } : {}),
         });
       },
     },
@@ -512,7 +514,9 @@ function gatewayLines(box: BoxStatus): string[] {
     ...gateway.servers.map((server) =>
       server.state === "ready"
         ? `  ${server.name}: ready`
-        : `  ${server.name}: LOGIN REQUIRED, run ferry auth --mcp ${server.name} ${flag}`,
+        : server.state === "cannot-share"
+          ? `  ${server.name}: CANNOT SHARE. ${cannotShareText(server.name, box.name)}`
+          : `  ${server.name}: LOGIN REQUIRED, run ferry auth --mcp ${server.name} ${flag}`,
     ),
   ];
 }

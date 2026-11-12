@@ -12,7 +12,7 @@ description: Read the state of each box with ferry status, the watch service, th
 - The link: the box answers over SSH or Tailscale.
 - The snapshot: the commit on the operator machine, on the git remote, and on the box.
 - The managed paths: box links that are missing or wrong. A sync repairs them.
-- The logins of the tools, and the logins of the MCP servers. On a box with the [MCP gateway](boxes.md#an-mcp-gateway-on-the-box), the logins of the gateway servers too, as `gateway/<server>`. A harness entry of the gateway needs no login of its own.
+- The logins of the tools, and the logins of the MCP servers. On a box with the [MCP gateway](boxes.md#an-mcp-gateway-on-the-box), the logins of the gateway servers too, as `gateway/<server>`. A harness entry of the gateway needs no login of its own. A [shared stdio server](boxes.md#shared-stdio-servers) that sent a request to the client shows as `gateway/<server>` in the state `cannot-share`.
 - The tools and their versions.
 - The box-only skills: skills on the box that the snapshot does not have. `ferry adopt --from-box` copies one to the operator machine.
 - The unsaved work: git projects on the box with work that is only on the box. See [Unsaved work](#unsaved-work).

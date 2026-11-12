@@ -569,6 +569,24 @@ describe("box tables", () => {
     }
   });
 
+  test("reads and writes mcp_gateway_shared of a box, and a box without the key shares no server", () => {
+    const home = homeWithConfig([...TOP, "", ...BOX_A, "mcp_gateway = true", 'mcp_gateway_shared = ["context7", "github"]', "", ...BOX_B]);
+    const config = readConfig(home);
+
+    expect(config?.boxes?.map((box) => box.mcpGatewayShared)).toEqual([["context7", "github"], undefined]);
+    expect(resolveBoxes(config!).map((box) => box.mcpGatewayShared)).toEqual([["context7", "github"], []]);
+    writeConfig({ version: 1, publisher: "operator", snapshotUrl: "snapshot.git", boxes: config?.boxes ?? [] }, home);
+    expect(readFileSync(configPath(home), "utf8")).toContain('mcp_gateway_shared = ["context7","github"]\n');
+    expect(readConfig(home)).toEqual(config);
+  });
+
+  test("refuses an mcp_gateway_shared that is not a list of names", () => {
+    for (const value of ['"github"', "[1]", '[""]', "true"]) {
+      const home = homeWithConfig([...TOP, "", ...BOX_A, `mcp_gateway_shared = ${value}`]);
+      expect(() => readConfig(home)).toThrow("invalid mcp_gateway_shared in [box.a]");
+    }
+  });
+
   test("accepts systemd memory sizes for agent_memory_max and refuses other values", () => {
     for (const value of ["6G", "512M", "1.5G", "4294967296", "50%", "100%"]) {
       const home = homeWithConfig([...TOP, "", ...BOX_A, `agent_memory_max = "${value}"`]);
