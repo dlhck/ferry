@@ -42,12 +42,19 @@ const seed: Seed = {
   storeUpdates: [],
 };
 
-function config(mcpGateway: boolean) {
+function config(mcpGateway: boolean, mcpGatewayShared?: readonly string[]) {
   return {
     version: 1 as const,
     publisher: "operator-machine",
     snapshotUrl: "git@example.test:operator/ferry-store.git",
-    boxes: [{ name: "a", host: { transport: "ssh" as const, destination: "dev@box-a.example" }, ...(mcpGateway ? { mcpGateway: true as const } : {}) }],
+    boxes: [
+      {
+        name: "a",
+        host: { transport: "ssh" as const, destination: "dev@box-a.example" },
+        ...(mcpGateway ? { mcpGateway: true as const } : {}),
+        ...(mcpGatewayShared ? { mcpGatewayShared } : {}),
+      },
+    ],
   };
 }
 
@@ -87,8 +94,8 @@ function box(options: { readonly ferry?: boolean; readonly active?: boolean } = 
     done: (detail) => steps.push(`done:${detail ?? ""}`),
     skip: (name, detail) => steps.push(`skip:${name}:${detail}`),
   };
-  const dependencies = (mcpGateway: boolean, ferryVersion = "1.2.3"): SyncDependencies => ({
-    readConfig: () => config(mcpGateway),
+  const dependencies = (mcpGateway: boolean, ferryVersion = "1.2.3", shared?: readonly string[]): SyncDependencies => ({
+    readConfig: () => config(mcpGateway, shared),
     publisher: () => "operator-machine",
     readSeed: () => seed,
     ferryVersion,
@@ -150,8 +157,30 @@ describe("gatewayServers", () => {
 
     expect(gatewayServers(mcp, ["claude", "codex"])).toEqual({
       servers: { linear: { url: LINEAR } },
+      envKeys: {},
       warnings: ["The MCP gateway serves linear with the URL of the first harness. codex/linear has another URL."],
     });
+  });
+
+  test("shares only the listed stdio servers, with the env key names of all harnesses, and warns for a name it cannot share", () => {
+    const files = (env: string[], args = ["--root", "."]) => ({ name: "files", type: "stdio" as const, command: "files-mcp", args, env });
+    const mcp = [
+      { harness: "claude", servers: [files(["FILES_TOKEN"]), { name: "linear", type: "http" as const, url: LINEAR }, { name: "local", type: "stdio" as const, command: "local-mcp", args: [], env: [] }] },
+      { harness: "codex", servers: [files(["FILES_ORG"]), { name: "linear", type: "stdio" as const, command: "linear-mcp", args: [], env: [] }] },
+      { harness: "cursor", servers: [files([], ["--other"])] },
+    ];
+
+    expect(gatewayServers(mcp, ["claude", "codex", "cursor"], ["files", "linear", "missing"])).toEqual({
+      servers: { files: { command: "files-mcp", args: ["--root", "."] }, linear: { url: LINEAR } },
+      envKeys: { files: ["FILES_TOKEN", "FILES_ORG"] },
+      warnings: [
+        "The MCP gateway does not share codex/linear, because it serves the remote server linear of another harness.",
+        "The MCP gateway shares files with the command of the first harness. cursor/files has another command or other arguments.",
+        "mcp_gateway_shared names missing, but Ferry carries no stdio MCP server missing to this box. Ferry ignores the name.",
+      ],
+    });
+    // Without the list, no stdio server goes on the gateway.
+    expect(gatewayServers(mcp, ["claude", "codex", "cursor"]).servers).toEqual({ linear: { url: LINEAR } });
   });
 
   test("skips a name that starts with a dot", () => {
@@ -290,8 +319,8 @@ describe("sync with mcp_gateway", () => {
     const direct = box1.commands.findIndex((command) => command.includes("claude mcp add") && command.includes("mcp.linear.example"));
     expect(direct).toBeGreaterThanOrEqual(0);
     expect(removal).toBeGreaterThan(direct);
-    // Only the removal command names the gateway URL, to find the entries that are still on the gateway.
-    expect(box1.commands.filter((command) => command.includes("127.0.0.1:47820"))).toEqual([box1.commands[removal]!]);
+    // Only the removal command reads the gateway files, to find the entries that are still on the gateway.
+    expect(box1.commands.filter((command) => command.includes(".ferry/mcp-gateway"))).toEqual([box1.commands[removal]!]);
   });
 
   test("a development build keeps the harness entries direct", async () => {
@@ -299,8 +328,29 @@ describe("sync with mcp_gateway", () => {
 
     await runSync({ home: box1.home }, box1.dependencies(true, "0.0.0-dev"));
 
-    expect(box1.commands.some((command) => command.includes("127.0.0.1:47820"))).toBe(false);
+    expect(box1.commands.some((command) => command.includes("127.0.0.1:47820/mcp/linear"))).toBe(false);
     expect(box1.commands.some((command) => command.includes("claude mcp add") && command.includes("mcp.linear.example"))).toBe(true);
+  });
+
+  test("puts a server of mcp_gateway_shared in servers.json with no env value from Ferry, and warns for a name that Ferry does not carry", async () => {
+    const box1 = box();
+
+    await runSync({ home: box1.home }, box1.dependencies(true, "1.2.3", ["files", "nope"]));
+
+    expect(JSON.parse(readFileSync(join(box1.gateway, "servers.json"), "utf8")).servers.files).toEqual({ command: "files-mcp", args: ["--root", "."], env: {} });
+    expect(box1.lines).toContain("Warning: mcp_gateway_shared names nope, but Ferry carries no stdio MCP server nope to this box. Ferry ignores the name.");
+    // The harness entries of files go to the gateway, not to the direct path.
+    expect(box1.commands.some((command) => command.includes('"command":"files-mcp"'))).toBe(false);
+  });
+
+  test("mcp_gateway_shared without mcp_gateway shares nothing and warns", async () => {
+    const box1 = box();
+
+    await runSync({ home: box1.home }, box1.dependencies(false, "1.2.3", ["files"]));
+
+    expect(existsSync(box1.gateway)).toBe(false);
+    expect(box1.lines).toContain("Warning: mcp_gateway_shared has no effect, because mcp_gateway is not true for the box.");
+    expect(box1.commands.some((command) => command.includes('"command":"files-mcp"'))).toBe(true);
   });
 
   test("a box without the key and without a gateway gets no change", async () => {

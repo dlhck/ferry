@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkBoxMcp, gatewayCleanupCommand, gatewayCleanupLines, mcpCommand, registerBoxMcp } from "../src/box-mcp.ts";
+import { checkBoxMcp, gatewayCleanupCommand, gatewayCleanupLines, mcpCommand, registerBoxMcp, sharedEnvScript } from "../src/box-mcp.ts";
+import { disableGateway, enableGateway, gatewayServers } from "../src/mcp-gateway/service.ts";
 import type { StdioMcpServer } from "../src/manifest.ts";
 import type { LinkResult, RunOptions } from "../src/link.ts";
 import { BUILTIN_HARNESSES, BUILTIN_TOOLS } from "../src/registry/builtin.ts";
@@ -16,10 +17,10 @@ afterEach(() => {
 
 class FakeLink {
   readonly runs: { command: string; options?: RunOptions }[] = [];
-  constructor(private readonly answer: (command: string) => LinkResult | Promise<LinkResult>) {}
+  constructor(private readonly answer: (command: string, options?: RunOptions) => LinkResult | Promise<LinkResult>) {}
   async run(command: string, options?: RunOptions): Promise<LinkResult> {
     this.runs.push({ command, options });
-    return this.answer(command);
+    return this.answer(command, options);
   }
 }
 
@@ -186,8 +187,8 @@ function shellBox(options: { readonly jq?: boolean } = {}) {
     path = `${join(home, "bin")}:${join(home, "sys")}`;
   }
   const outputs: string[] = [];
-  const link = new FakeLink(async (command) => {
-    const child = Bun.spawn(["sh", "-c", command], { cwd: home, env: { HOME: home, PATH: path }, stdout: "pipe", stderr: "pipe" });
+  const link = new FakeLink(async (command, options) => {
+    const child = Bun.spawn(["sh", "-c", command], { cwd: home, env: { HOME: home, PATH: path }, stdin: options?.input ?? "ignore", stdout: "pipe", stderr: "pipe" });
     await child.exited;
     const stdout = await new Response(child.stdout).text();
     const stderr = await new Response(child.stderr).text();
@@ -1102,12 +1103,171 @@ describe("registerBoxMcp with the MCP gateway", () => {
     expect(JSON.stringify({ runs: box.link.runs, outputs: box.outputs, lines })).not.toContain(KEY);
   });
 
+  describe("with a shared stdio server", () => {
+    const SECRET = `ghp_${"s".repeat(36)}`;
+    const OTHER = `xoxb-${"o".repeat(30)}`;
+    const shared = stdio("github", { args: ["--org", "example"], env: ["GITHUB_TOKEN", "GITHUB_ORG"] });
+    const local = stdio("local", { env: ["LOCAL_KEY"] });
+    const sharedMcp = [
+      { harness: "claude", servers: [linear, shared, local] },
+      { harness: "codex", servers: [linear, shared] },
+      { harness: "cursor", servers: [linear, shared] },
+    ];
+    const full = { GITHUB_TOKEN: SECRET, GITHUB_ORG: "example" };
+    const direct = (env: Record<string, string>) => ({ command: "github-mcp", args: ["--org", "example"], env });
+
+    /** A gateway box whose harness entries of github are direct, with env values. Only the Codex entry has all keys. */
+    function sharedBox() {
+      const box = gatewayBox();
+      box.put(".ferry/box.json", '{"mode":"box"}\n');
+      box.put(".local/bin/ferry", "#!/bin/sh\nexit 0\n");
+      chmodSync(join(box.home, ".local", "bin", "ferry"), 0o755);
+      writeFileSync(join(box.home, "bin", "systemctl"), "#!/bin/sh\nexit 0\n");
+      chmodSync(join(box.home, "bin", "systemctl"), 0o755);
+      box.put(
+        ".claude.json",
+        JSON.stringify({ mcpServers: { github: { type: "stdio", ...direct({ GITHUB_TOKEN: SECRET }) }, local: { type: "stdio", command: "local-mcp", args: [], env: { LOCAL_KEY: OTHER } } } }),
+      );
+      box.put(
+        ".codex/config.toml",
+        `[mcp_servers.github]\ncommand = "github-mcp"\nargs = ["--org", "example"]\n\n[mcp_servers.github.env]\nGITHUB_TOKEN = "${SECRET}"\nGITHUB_ORG = "example"\n`,
+      );
+      box.put(".cursor/mcp.json", JSON.stringify({ mcpServers: { github: direct({ GITHUB_TOKEN: SECRET }) } }));
+      const common = { harnesses: BUILTIN_HARNESSES, tools: BUILTIN_TOOLS, link: box.link };
+      /** One sync with the gateway, as `runSync` does it: the gateway files first, then the harness entries. */
+      const enable = async (names: readonly string[]) => {
+        const { servers, envKeys } = gatewayServers(sharedMcp, ["claude", "codex", "cursor"], names);
+        const list = Object.keys(envKeys);
+        const started = await enableGateway(box.link, box.home, servers, {
+          envKeys,
+          cleanup: gatewayCleanupCommand(BUILTIN_HARNESSES, BUILTIN_TOOLS, box.home, sharedMcp, false, list),
+          envScript: sharedEnvScript(BUILTIN_HARNESSES, BUILTIN_TOOLS, box.home, sharedMcp, list),
+        });
+        const warnings = await registerBoxMcp({ ...common, remoteHome: box.home, mcp: sharedMcp, gateway: Object.keys(servers), shared: list });
+        return { started, warnings };
+      };
+      /** One sync without the gateway: the direct path first, then the removal of the gateway. */
+      const disable = async () => {
+        const warnings = await registerBoxMcp({ ...common, remoteHome: box.home, mcp: sharedMcp });
+        const { output } = await disableGateway(box.link, gatewayCleanupCommand(BUILTIN_HARNESSES, BUILTIN_TOOLS, box.home, sharedMcp, false, []));
+        return [...warnings, ...gatewayCleanupLines(output)];
+      };
+      const github = () => {
+        const entries = box.entries();
+        return { claude: entries.claude.github, codex: entries.codex.github, cursor: entries.cursor.github };
+      };
+      const captured = (extra: unknown = null) => JSON.stringify({ runs: box.link.runs, outputs: box.outputs, extra });
+      return { ...box, enable, disable, github, captured };
+    }
+
+    jqTest("moves the env values into servers.json, points the harness entries at the gateway, and keeps the other stdio servers direct", async () => {
+      const box = sharedBox();
+
+      const { started, warnings } = await box.enable(["github"]);
+
+      expect(started).toMatchObject({ state: "running", sharing: true });
+      expect(warnings).toEqual([]);
+      const file = join(box.home, ".ferry", "mcp-gateway", "servers.json");
+      // The first harness entry with all keys gives the env: the Claude entry lacks GITHUB_ORG, the Codex entry has it.
+      expect(JSON.parse(readFileSync(file, "utf8")).servers.github).toEqual(direct(full));
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+      const header = { Authorization: `Bearer ${KEY}` };
+      const url = "http://127.0.0.1:47820/mcp/github";
+      expect(box.github()).toEqual({
+        claude: { type: "http", url, headers: header },
+        codex: { url, http_headers: header },
+        cursor: { url, headers: header },
+      });
+      expect(box.entries().claude.local).toEqual({ type: "stdio", command: "local-mcp", args: [], env: { LOCAL_KEY: OTHER } });
+      for (const secret of [SECRET, OTHER, KEY]) expect(box.captured(warnings)).not.toContain(secret);
+
+      // A second sync keeps the env values of servers.json, though no harness entry has them now.
+      await box.enable(["github"]);
+      expect(JSON.parse(readFileSync(file, "utf8")).servers.github).toEqual(direct(full));
+
+      const issues = await checkBoxMcp({
+        remoteHome: box.home,
+        harnesses: BUILTIN_HARNESSES,
+        tools: BUILTIN_TOOLS,
+        sources: sharedMcp.map((entry) => ({ ...entry, nonPortable: [] })),
+        link: box.link,
+        shared: ["github"],
+      });
+      expect(issues.filter((issue) => issue.kind.startsWith("env"))).toEqual([]);
+    });
+
+    jqTest("without the gateway, copies the env values back into each harness entry before the gateway directory goes", async () => {
+      const box = sharedBox();
+      await box.enable(["github"]);
+
+      const lines = await box.disable();
+
+      expect(lines.filter((line) => line.includes("github"))).toEqual(
+        ["claude", "codex", "cursor"].map((harness) => `Ferry changed ${harness} MCP server github on the box back to its direct entry.`),
+      );
+      expect(box.github()).toEqual({ claude: { type: "stdio", ...direct(full) }, codex: direct(full), cursor: direct(full) });
+      expect(existsSync(join(box.home, ".ferry", "mcp-gateway"))).toBe(false);
+      expect(statSync(join(box.home, ".codex", "config.toml")).mode & 0o777).toBe(0o600);
+      for (const secret of [SECRET, OTHER, KEY]) expect(box.captured(lines)).not.toContain(secret);
+
+      // The next sync without the gateway keeps the entries and their env values.
+      await box.disable();
+      expect(box.github()).toEqual({ claude: { type: "stdio", ...direct(full) }, codex: direct(full), cursor: direct(full) });
+    });
+
+    jqTest("a server that leaves mcp_gateway_shared gets its direct entry and its env values back", async () => {
+      const box = sharedBox();
+      await box.enable(["github"]);
+
+      const { warnings } = await box.enable([]);
+
+      expect(box.github()).toEqual({ claude: { type: "stdio", ...direct(full) }, codex: direct(full), cursor: direct(full) });
+      expect(JSON.parse(box.read(".ferry/mcp-gateway/servers.json")).servers.github).toBeUndefined();
+      expect(warnings).toEqual([]);
+      for (const secret of [SECRET, OTHER, KEY]) expect(box.captured(warnings)).not.toContain(secret);
+    });
+
+    jqTest("the cleanup of the uninstall copies the env values back from servers.json", async () => {
+      const box = sharedBox();
+      await box.enable(["github"]);
+
+      const result = await box.link.run(gatewayCleanupCommand(BUILTIN_HARNESSES, BUILTIN_TOOLS, box.home, [], true)!);
+
+      expect(gatewayCleanupLines(result.ok ? result.stdout : "").filter((line) => line.includes("github"))).toHaveLength(3);
+      expect(box.github()).toEqual({ claude: { type: "stdio", ...direct(full) }, codex: direct(full), cursor: direct(full) });
+      for (const secret of [SECRET, OTHER, KEY]) expect(box.captured()).not.toContain(secret);
+    });
+
+    jqTest("checks the env keys of a shared server in servers.json", async () => {
+      const box = sharedBox();
+      await box.enable(["github"]);
+      const file = JSON.parse(box.read(".ferry/mcp-gateway/servers.json"));
+      file.servers.github.env = { GITHUB_TOKEN: SECRET };
+      box.put(".ferry/mcp-gateway/servers.json", JSON.stringify(file));
+
+      const issues = await checkBoxMcp({
+        remoteHome: box.home,
+        harnesses: BUILTIN_HARNESSES,
+        tools: BUILTIN_TOOLS,
+        sources: sharedMcp.map((entry) => ({ ...entry, nonPortable: [] })),
+        link: box.link,
+        shared: ["github"],
+      });
+
+      expect(issues.filter((issue) => issue.kind === "env-missing")).toEqual([
+        { kind: "env-missing", harness: "gateway", server: "github", keys: ["GITHUB_ORG"], file: ".ferry/mcp-gateway/servers.json" },
+      ]);
+      expect(box.captured(issues)).not.toContain(SECRET);
+    });
+  });
+
   test("a box without the gateway gets no command that reads the client key", async () => {
     const link = new FakeLink(() => ok());
 
     await registerBoxMcp({ remoteHome: "/home/agent", harnesses: BUILTIN_HARNESSES, tools: BUILTIN_TOOLS, mcp, link });
 
     expect(link.runs.length).toBeGreaterThan(0);
-    expect(link.runs.some((run) => run.command.includes("mcp-gateway") || run.command.includes("127.0.0.1"))).toBe(false);
+    // The direct path names the gateway URL only to leave a gateway entry of a stdio server as it is.
+    expect(link.runs.some((run) => run.command.includes(".ferry/mcp-gateway"))).toBe(false);
   });
 });

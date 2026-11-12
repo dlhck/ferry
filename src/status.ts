@@ -9,7 +9,7 @@ import { parseGitIdentity, type GitIdentity } from "./git-identity.ts";
 import type { UncarriedHookPath } from "./hook-paths.ts";
 import type { LinkError, LinkResult } from "./link.ts";
 import type { IntegrationHealth, IntegrationId } from "./integrations/types.ts";
-import type { McpGatewayStatus } from "./mcp-gateway/service.ts";
+import { cannotShareText, type McpGatewayStatus } from "./mcp-gateway/service.ts";
 import { MCP_SKIPS, type DenyRuleDescription, type NonPortableMcp } from "./manifest.ts";
 import { groupProgress, noProgress, plural, step, type Progress } from "./progress.ts";
 import type { TipReport } from "./store.ts";
@@ -228,7 +228,9 @@ export type StatusReport = {
  * server of the MCP gateway. `mcp-gateway`: the MCP gateway service does not
  * run, in the state `stopped`. `mcp-server`: a carried
  * stdio MCP server, with the name `harness/server`, in the state `env-missing`,
- * `env-unchecked`, `command-missing`, or `not-portable`. `tool`: a tool with the state `drift`,
+ * `env-unchecked`, `command-missing`, or `not-portable`, or a shared stdio
+ * server of the MCP gateway, with the name `gateway/server`, in the state
+ * `cannot-share`. `tool`: a tool with the state `drift`,
  * `missing`, or `hidden`. `hook`: a hook command that refers to a home file
  * Ferry does not carry, with the name of that path. `resource`: the free disk
  * of the home file system (`disk`) or the available memory (`memory`) of the
@@ -400,7 +402,7 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
   if (box.mcpGateway) {
     const gateway = box.mcpGateway;
     try {
-      issues.push(...gatewayIssues(await step(progress, GATEWAY_STEP, () => gateway.read()), flag));
+      issues.push(...gatewayIssues(await step(progress, GATEWAY_STEP, () => gateway.read()), box.name));
     } catch (cause) {
       failed("MCP gateway", cause);
     }
@@ -512,8 +514,12 @@ function mcpServerIssue(issue: BoxMcpIssue, flag: string): BriefIssue {
   }
 }
 
-/** One item when the service does not run, and one `gateway/<server>` item for each server that needs a login. */
-function gatewayIssues(gateway: McpGatewayStatus, flag: string): BriefIssue[] {
+/**
+ * One item when the service does not run, one `gateway/<server>` item for each
+ * server that needs a login, and one for each shared server that the gateway cannot share.
+ */
+function gatewayIssues(gateway: McpGatewayStatus, box: string): BriefIssue[] {
+  const flag = `--box ${box}`;
   const issues: BriefIssue[] = [];
   if (gateway.state === "stopped") {
     issues.push({
@@ -526,8 +532,18 @@ function gatewayIssues(gateway: McpGatewayStatus, flag: string): BriefIssue[] {
     });
   }
   for (const server of gateway.servers) {
-    if (server.state !== "login-required") continue;
     const name = `gateway/${server.name}`;
+    if (server.state === "cannot-share") {
+      issues.push({
+        kind: "mcp-server",
+        name,
+        state: "cannot-share",
+        summary: summarize(name, "cannot share"),
+        message: cannotShareText(server.name, box),
+        command: null,
+      });
+    }
+    if (server.state !== "login-required") continue;
     issues.push({
       kind: "mcp-login",
       name,

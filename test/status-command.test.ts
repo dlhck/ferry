@@ -1653,7 +1653,7 @@ describe("ferry status with the MCP gateway", () => {
     error: null,
   });
 
-  function gatewayStack(ferryVersion: string, mcpGateway = true) {
+  function gatewayStack(ferryVersion: string, mcpGateway = true, listOutput = list) {
     const base = fakeStack();
     const baseLink = base.dependencies.createLink!({ host: "unused", user: "unused" });
     const commands: string[] = [];
@@ -1669,7 +1669,7 @@ describe("ferry status with the MCP gateway", () => {
         ...baseLink,
         async run(command: string) {
           commands.push(command);
-          if (command === GATEWAY_STATUS_COMMAND) return { ok: true, address: "100.64.0.8", stdout: `${list}\n`, stderr: "" };
+          if (command === GATEWAY_STATUS_COMMAND) return { ok: true, address: "100.64.0.8", stdout: `${listOutput}\n`, stderr: "" };
           return baseLink.run(command);
         },
       }),
@@ -1702,6 +1702,25 @@ describe("ferry status with the MCP gateway", () => {
     expect(report.boxes[0]!.issues.filter((issue) => issue.kind === "mcp-gateway" || issue.name.startsWith("gateway/")).map((issue) => issue.command)).toEqual([
       "ferry sync --box a",
       "ferry auth --mcp linear --box a",
+    ]);
+  });
+
+  test("shows a shared server that the gateway cannot share in the full and the brief report, with the fix", async () => {
+    const cannotShare = JSON.stringify({
+      ok: true,
+      result: { gateway: { state: "running", port: 47820 }, servers: [{ name: "files", state: "cannot-share" }] },
+    });
+    const fix =
+      "The stdio MCP server files sent a request to the client, so the MCP gateway cannot share it between agents. On the operator machine, remove files from mcp_gateway_shared in [box.a] of ~/.ferry/config.toml, then run ferry sync --box a.";
+
+    const stack = gatewayStack("1.2.3", true, cannotShare);
+    const report = await status(stack);
+    const brief = await runBriefStatusCommand({}, gatewayStack("1.2.3", true, cannotShare).dependencies);
+
+    expect(stack.output[0]).toContain(`\nMCP gateway: RUNNING on 127.0.0.1:47820\n  files: CANNOT SHARE. ${fix}`);
+    expect(report.boxes[0]!.mcpGateway?.servers).toEqual([{ name: "files", state: "cannot-share" }]);
+    expect(brief.boxes[0]!.issues.filter((issue) => issue.name.startsWith("gateway/"))).toEqual([
+      { kind: "mcp-server", name: "gateway/files", state: "cannot-share", summary: "gateway/files: cannot share", message: fix, command: null },
     ]);
   });
 

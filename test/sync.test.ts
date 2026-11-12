@@ -628,7 +628,8 @@ describe("runSync", () => {
       run: async (command: string) => {
         let stdout = "";
         if (command.startsWith("printf")) stdout = "/srv/ferry\n";
-        else if (command.includes("claude mcp add")) {
+        // The removal command of the gateway can also run claude mcp add, for an entry that is still on the gateway.
+        else if (command.includes("claude mcp add") && !command.includes(".ferry/mcp-gateway")) {
           events.push("declare-mcp");
           stdout = "S\tlinear\n";
         }
