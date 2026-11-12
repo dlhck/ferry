@@ -673,6 +673,29 @@ describe("ferry init", () => {
     expect(readConfig(home)?.notifications).toEqual({ agents: true });
   });
 
+  test("a second run keeps the [provider.hetzner] table", async () => {
+    const home = makeHome();
+    write(join(home, ".ferry/config.toml"), [
+      "version = 1",
+      'publisher = "first-operator"',
+      'snapshot_url = "snapshot.git"',
+      "",
+      "[host]",
+      'tailscale = "box"',
+      'ssh_user = "david"',
+      "",
+      "[provider.hetzner]",
+      'server_type = "cax31"',
+      'location = "nbg1"',
+      "",
+    ].join("\n"));
+    const { deps } = dependencies(home);
+
+    await runInit({ home, harnesses: BUILTIN_HARNESSES }, deps);
+
+    expect(readConfig(home)?.provider).toEqual({ hetzner: { serverType: "cax31", location: "nbg1" } });
+  });
+
   test("a second run keeps the [status] limits", async () => {
     const home = makeHome();
     write(join(home, ".ferry/config.toml"), [

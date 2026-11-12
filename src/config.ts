@@ -44,6 +44,8 @@ export type BoxConfig = {
   readonly mcpGateway?: true;
   /** The carried stdio MCP servers that the gateway runs as one process for all agents of the box (`mcp_gateway_shared`). */
   readonly mcpGatewayShared?: readonly string[];
+  /** The id of the machine at the provider, for a box of `ferry box create` (`provider_id`). */
+  readonly providerId?: string;
   readonly integrations?: IntegrationsConfig;
   /**
    * Policies by tool id. A policy replaces the `[tools]` policy or the `version` of a `[tools.<id>]` table.
@@ -490,6 +492,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       ...(entry.agentMemoryMax ? { agentMemoryMax: entry.agentMemoryMax } : {}),
       ...(entry.mcpGateway ? { mcpGateway: true as const } : {}),
       ...(entry.mcpGatewayShared ? { mcpGatewayShared: entry.mcpGatewayShared } : {}),
+      ...(entry.providerId ? { providerId: entry.providerId } : {}),
       ...(entry.integrations ? { integrations: entry.integrations } : {}),
       ...(entry.tools ? { tools: entry.tools } : {}),
     };
@@ -513,6 +516,7 @@ type ParsedBox = {
   agentMemoryMax?: string;
   mcpGateway?: boolean;
   mcpGatewayShared?: string[];
+  providerId?: string;
   integrations?: Record<string, boolean>;
   tools?: Record<string, ToolPolicy>;
 };
@@ -559,6 +563,12 @@ function readBoxKey(entry: ParsedBox, part: BoxPart, key: string, encoded: strin
       throw new ConfigError(`invalid mcp_gateway_shared in ${section} of ${path}. Use a list of stdio MCP server names, such as ["context7"].`);
     }
     entry.mcpGatewayShared = list;
+    return;
+  }
+  if (part === "host" && key === "provider_id") {
+    const value = tomlString(encoded);
+    if (value === undefined || value === "") throw new ConfigError(`invalid provider_id in ${section} of ${path}. Use the machine id as a string.`);
+    entry.providerId = value;
     return;
   }
   if (!SECTION_KEYS[part === "host" ? "[host]" : "[integrations]"]?.includes(key)) {
@@ -709,6 +719,7 @@ function boxLines(box: BoxConfig): string[] {
     ...(box.agentMemoryMax !== undefined ? [`agent_memory_max = ${JSON.stringify(box.agentMemoryMax)}`] : []),
     ...(box.mcpGateway ? ["mcp_gateway = true"] : []),
     ...(box.mcpGatewayShared !== undefined ? [`mcp_gateway_shared = ${JSON.stringify(box.mcpGatewayShared)}`] : []),
+    ...(box.providerId !== undefined ? [`provider_id = ${JSON.stringify(box.providerId)}`] : []),
     "",
     ...integrationLines(box.integrations, `box.${box.name}.integrations`),
     ...(tools.length > 0

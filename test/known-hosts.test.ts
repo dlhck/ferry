@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { knownKeys, pinHostKey, unpinBox } from "../src/known-hosts.ts";
@@ -73,5 +73,23 @@ describe("known_hosts", () => {
     expect(unpinBox(path, "b")).toBe(1);
     expect(readFileSync(join(path, ".ssh/known_hosts"), "utf8")).toBe(`keep.example ${KEY_B}\n203.0.113.11 ${KEY_A} ferry:c\n`);
     expect(unpinBox(path, "b")).toBe(0);
+  });
+
+  test("pinHostKey and unpinBox replace the file with a rename and keep its mode", () => {
+    const path = home(`keep.example ${KEY_B}\n`);
+    const file = join(path, ".ssh/known_hosts");
+    chmodSync(file, 0o644);
+    const before = statSync(file).ino;
+    pinHostKey(path, "b", ["203.0.113.10"], KEY_A);
+    const pinned = statSync(file);
+    // A new inode shows that Ferry renamed a new file over the old one, so ssh never reads a part of it.
+    expect(pinned.ino).not.toBe(before);
+    expect(pinned.mode & 0o777).toBe(0o644);
+    expect(unpinBox(path, "b")).toBe(1);
+    const unpinned = statSync(file);
+    expect(unpinned.ino).not.toBe(pinned.ino);
+    expect(unpinned.mode & 0o777).toBe(0o644);
+    expect(readFileSync(file, "utf8")).toBe(`keep.example ${KEY_B}\n`);
+    expect(readdirSync(join(path, ".ssh"))).toEqual(["known_hosts"]);
   });
 });

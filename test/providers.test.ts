@@ -123,6 +123,30 @@ describe("Hetzner Cloud provider", () => {
     ]);
   });
 
+  test("destroy warns with the firewall name when the firewall stays after the server is gone", async () => {
+    const api = fakeApi({
+      "DELETE /servers/42": () => [200, { action: { id: 5, status: "success" } }],
+      "GET /firewalls": () => [200, { firewalls: [{ id: 9, name: "ferry-b" }] }],
+      "DELETE /firewalls/9": () => [403, { error: { code: "forbidden", message: `no access for ${TOKEN}` } }],
+    });
+    const warnings = await createHetzner(TOKEN, { fetch: api.fetch, sleep: noSleep }).destroy({
+      id: "42", name: "ferry-b", box: "b", ipv4: null, ipv6: null, serverType: "cax21", location: "fsn1",
+    });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("the firewall ferry-b (id 9)");
+    expect(warnings[0]).toContain("Remove it in the Hetzner Cloud console");
+    expect(warnings[0]).not.toContain(TOKEN);
+
+    const unread = fakeApi({
+      "DELETE /servers/42": () => [200, {}],
+      "GET /firewalls": () => [500, { error: { code: "server_error", message: "down" } }],
+    });
+    const listed = await createHetzner(TOKEN, { fetch: unread.fetch, sleep: noSleep }).destroy({
+      id: "42", name: "ferry-b", box: "b", ipv4: null, ipv6: null, serverType: "cax21", location: "fsn1",
+    });
+    expect(listed).toEqual([expect.stringContaining("the firewall ferry-b at Hetzner Cloud")]);
+  });
+
   test("machineType gives the size and the gross monthly price of the location", async () => {
     const api = fakeApi({
       "GET /server_types": () => [200, {
