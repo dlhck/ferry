@@ -373,6 +373,8 @@ export const BUILTIN_TOOLS: readonly ToolDescriptor[] = [
         add: "timeout 20 codex mcp add {name} --url {url}",
         addStdio: "timeout 20 codex mcp add {name} -- {command}",
         getJson: "codex mcp get {name} --json",
+        // The add command has no header option, so the box appends the header table to config.toml.
+        headersTable: "http_headers",
       },
       list: "codex mcp list",
       loginRequired: "^(\\S+)\\s+https://\\S+\\s.*\\bNot logged in\\s*$",

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkBoxMcp, mcpCommand, registerBoxMcp } from "../src/box-mcp.ts";
@@ -813,5 +813,219 @@ describe("checkBoxMcp", () => {
 describe("mcpCommand", () => {
   test("quotes each value", () => {
     expect(mcpCommand("x {name} {url}", { name: "a", url: "b c" })).toBe("x 'a' 'b c'");
+  });
+});
+
+/**
+ * Stateful stubs of the claude and codex CLIs, as Bun scripts on the box
+ * PATH. They keep their entries where the real CLIs do: claude in
+ * `~/.claude.json`, codex in `~/.codex/config.toml`, which they read and
+ * write as TOML, so a table that the box appends goes through a real parse.
+ */
+function stubStatefulClis(home: string): void {
+  const toml = join(import.meta.dir, "..", "node_modules", "smol-toml", "dist", "index.js");
+  const common = [
+    `#!${process.execPath}`,
+    'import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";',
+    `const toml = await import(${JSON.stringify(toml)});`,
+    "const [, , , command, ...rest] = process.argv;",
+    "const words = rest.slice(0, rest.includes('--') ? rest.indexOf('--') : rest.length).filter((word, index, all) => !word.startsWith('-') && !['--transport', '--scope', '--url'].includes(all[index - 1]));",
+    "const name = words[0];",
+  ];
+  writeFileSync(
+    join(home, "bin", "claude"),
+    [
+      ...common,
+      `const file = ${JSON.stringify(join(home, ".claude.json"))};`,
+      "const data = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};",
+      "const servers = (data.mcpServers ??= {});",
+      "const save = () => writeFileSync(file, JSON.stringify(data));",
+      "if (command === 'get') {",
+      "  const entry = servers[name];",
+      "  if (!entry) process.exit(1);",
+      "  const headers = Object.entries(entry.headers ?? {}).map(([key, value]) => `    ${key}: ${value}`);",
+      "  console.log([`${name}:`, `  Type: ${entry.type ?? 'stdio'}`, `  URL: ${entry.url ?? ''}`, ...(headers.length ? ['  Headers:', ...headers] : [])].join('\\n'));",
+      "} else if (command === 'remove') { delete servers[name]; save(); }",
+      "else if (command === 'add-json') { servers[name] = JSON.parse(rest.at(-1)); save(); }",
+      "else if (command === 'add') { servers[name] = { type: rest[rest.indexOf('--transport') + 1], url: words[1] }; save(); }",
+    ].join("\n"),
+  );
+  writeFileSync(
+    join(home, "bin", "codex"),
+    [
+      ...common,
+      `const file = ${JSON.stringify(join(home, ".codex", "config.toml"))};`,
+      "const data = existsSync(file) ? toml.parse(readFileSync(file, 'utf8')) : {};",
+      "const servers = (data.mcp_servers ??= {});",
+      "const save = () => { mkdirSync(file.slice(0, file.lastIndexOf('/')), { recursive: true }); writeFileSync(file, toml.stringify(data)); };",
+      "if (command === 'get') {",
+      "  const entry = servers[name];",
+      "  if (!entry) process.exit(1);",
+      "  console.log(JSON.stringify({ name, transport: entry.url ? { type: 'streamable_http', url: entry.url, http_headers: entry.http_headers ?? null } : { type: 'stdio', ...entry } }));",
+      "} else if (command === 'remove') { delete servers[name]; save(); }",
+      "else if (command === 'add') {",
+      "  const separator = rest.indexOf('--');",
+      "  servers[name] = separator >= 0 ? { command: rest[separator + 1], args: rest.slice(separator + 2) } : { url: rest[rest.indexOf('--url') + 1] };",
+      "  save();",
+      "}",
+    ].join("\n"),
+  );
+  chmodSync(join(home, "bin", "claude"), 0o755);
+  chmodSync(join(home, "bin", "codex"), 0o755);
+}
+
+describe("registerBoxMcp with the MCP gateway", () => {
+  const KEY = "a".repeat(32) + "b".repeat(32);
+  const GATEWAY = "http://127.0.0.1:47820/mcp/linear";
+  const linear = { name: "linear", type: "http" as const, url: "https://mcp.linear.app/mcp" };
+  const github = stdio("github", { args: ["--org", "example"] });
+  const mcp = [
+    { harness: "claude", servers: [linear, github] },
+    { harness: "codex", servers: [linear, github] },
+    { harness: "cursor", servers: [linear, github] },
+  ];
+
+  function gatewayBox() {
+    const box = shellBox();
+    stubStatefulClis(box.home);
+    box.put(".ferry/mcp-gateway/client-key", `${KEY}\n`);
+    const register = (gateway?: readonly string[]) =>
+      registerBoxMcp({ remoteHome: box.home, harnesses: BUILTIN_HARNESSES, tools: BUILTIN_TOOLS, mcp, link: box.link, ...(gateway ? { gateway } : {}) });
+    const entries = () => ({
+      claude: JSON.parse(box.read(".claude.json")).mcpServers,
+      codex: (Bun.TOML.parse(box.read(".codex/config.toml")) as { mcp_servers: Record<string, unknown> }).mcp_servers,
+      cursor: JSON.parse(box.read(".cursor/mcp.json")).mcpServers,
+    });
+    return { ...box, register, entries };
+  }
+
+  jqTest("points the remote servers of all three harnesses at the gateway and keeps the stdio servers direct", async () => {
+    const box = gatewayBox();
+
+    const warnings = await box.register(["linear"]);
+
+    expect(warnings).toEqual([]);
+    const header = { Authorization: `Bearer ${KEY}` };
+    const direct = { command: "github-mcp", args: ["--org", "example"] };
+    expect(box.entries()).toEqual({
+      claude: { linear: { type: "http", url: GATEWAY, headers: header }, github: { type: "stdio", ...direct } },
+      codex: { linear: { url: GATEWAY, http_headers: header }, github: direct },
+      cursor: { linear: { url: GATEWAY, headers: header }, github: direct },
+    });
+    // The Codex file holds the key now, so only the box user can read it.
+    expect(statSync(join(box.home, ".codex", "config.toml")).mode & 0o777).toBe(0o600);
+    expect(statSync(join(box.home, ".cursor", "mcp.json")).mode & 0o777).toBe(0o600);
+    // The key stays on the box: no command, output, or warning has it.
+    expect(JSON.stringify({ runs: box.link.runs, outputs: box.outputs, warnings })).not.toContain(KEY);
+  });
+
+  jqTest("a second sync leaves the gateway entries as they are", async () => {
+    const box = gatewayBox();
+    await box.register(["linear"]);
+    const files = [".claude.json", ".codex/config.toml", ".cursor/mcp.json"].map((file) => box.read(file));
+
+    const warnings = await box.register(["linear"]);
+
+    expect(warnings).toEqual([]);
+    expect([".claude.json", ".codex/config.toml", ".cursor/mcp.json"].map((file) => box.read(file))).toEqual(files);
+  });
+
+  jqTest("a new client key replaces the key in each gateway entry", async () => {
+    const box = gatewayBox();
+    await box.register(["linear"]);
+    const next = "c".repeat(64);
+    box.put(".ferry/mcp-gateway/client-key", `${next}\n`);
+
+    await box.register(["linear"]);
+
+    const header = { Authorization: `Bearer ${next}` };
+    const entries = box.entries();
+    expect([entries.claude.linear.headers, (entries.codex.linear as { http_headers: unknown }).http_headers, entries.cursor.linear.headers]).toEqual([
+      header,
+      header,
+      header,
+    ]);
+  });
+
+  jqTest("without the gateway, changes the gateway entries back to the carried entries and leaves the other box entries", async () => {
+    const box = gatewayBox();
+    await box.register(["linear"]);
+    // Box entries that Ferry does not carry: one remote and one stdio server, in each harness.
+    const mine = { type: "http", url: "https://mine.example/mcp" };
+    const tool = { command: "box-tool", args: [] };
+    const claude = JSON.parse(box.read(".claude.json"));
+    claude.mcpServers = { ...claude.mcpServers, mine, tool };
+    box.put(".claude.json", JSON.stringify(claude));
+    box.put(".codex/config.toml", `${box.read(".codex/config.toml")}\n[mcp_servers.mine]\nurl = "https://mine.example/mcp"\n\n[mcp_servers.tool]\ncommand = "box-tool"\nargs = []\n`);
+    const cursor = JSON.parse(box.read(".cursor/mcp.json"));
+    cursor.mcpServers = { ...cursor.mcpServers, mine: { url: mine.url }, tool };
+    box.put(".cursor/mcp.json", JSON.stringify(cursor));
+
+    const warnings = await box.register();
+
+    expect(warnings).toEqual([]);
+    const direct = { command: "github-mcp", args: ["--org", "example"] };
+    expect(box.entries()).toEqual({
+      claude: { linear: { type: "http", url: linear.url }, github: { type: "stdio", ...direct }, mine, tool },
+      codex: { linear: { url: linear.url }, github: direct, mine: { url: mine.url }, tool },
+      cursor: { linear: { url: linear.url }, github: direct, mine: { url: mine.url }, tool },
+    });
+    expect(JSON.stringify(box.entries())).not.toContain(KEY);
+  });
+
+  jqTest("without the client key, leaves the entries as they are and warns", async () => {
+    const box = gatewayBox();
+    rmSync(join(box.home, ".ferry", "mcp-gateway", "client-key"));
+
+    const warnings = await box.register(["linear"]);
+
+    const missing = (harness: string) =>
+      `the box has no MCP gateway client key, so Ferry did not point ${harness} MCP linear at the gateway. Sync again to make the key.`;
+    expect(warnings).toEqual([missing("claude"), missing("codex"), missing("cursor")]);
+    expect(JSON.stringify(box.entries())).not.toContain("127.0.0.1");
+  });
+
+  jqTest("adds no Codex header table when codex mcp add fails", async () => {
+    const box = gatewayBox();
+    // A codex that adds nothing: get never finds the server.
+    writeFileSync(join(box.home, "bin", "codex"), '#!/bin/sh\n[ "$2" = get ] && exit 1\nexit 0\n');
+    box.put(".codex/config.toml", 'model = "o3"\n');
+
+    const warnings = await registerBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      mcp: [{ harness: "codex", servers: [linear] }],
+      link: box.link,
+      gateway: ["linear"],
+    });
+
+    expect(warnings).toEqual(["could not point codex MCP server linear at the gateway"]);
+    expect(box.read(".codex/config.toml")).toBe('model = "o3"\n');
+  });
+
+  jqTest("serves only the servers that the gateway has: an SSE server stays direct", async () => {
+    const box = gatewayBox();
+    const events = { name: "events", type: "sse" as const, url: "https://events.example/sse" };
+
+    await registerBoxMcp({
+      remoteHome: box.home,
+      harnesses: BUILTIN_HARNESSES,
+      tools: BUILTIN_TOOLS,
+      mcp: [{ harness: "cursor", servers: [linear, events] }],
+      link: box.link,
+      gateway: ["linear"],
+    });
+
+    expect(JSON.parse(box.read(".cursor/mcp.json")).mcpServers.events).toEqual({ type: "sse", url: events.url });
+  });
+
+  test("a box without the gateway gets no command that reads the client key", async () => {
+    const link = new FakeLink(() => ok());
+
+    await registerBoxMcp({ remoteHome: "/home/agent", harnesses: BUILTIN_HARNESSES, tools: BUILTIN_TOOLS, mcp, link });
+
+    expect(link.runs.length).toBeGreaterThan(0);
+    expect(link.runs.some((run) => run.command.includes("mcp-gateway") || run.command.includes("127.0.0.1"))).toBe(false);
   });
 });

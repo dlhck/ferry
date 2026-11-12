@@ -667,6 +667,37 @@ async function applyOnBox(context: {
     );
   }
 
+  // The gateway only warns on failure, so it never blocks the core sync. It starts before Ferry declares the MCP
+  // servers, because the harness entries of the gateway need its client key. Without Ferry on the box, the entries stay direct.
+  let gateway: readonly string[] | undefined;
+  if (box.mcpGateway) {
+    const name = "Starting the MCP gateway";
+    if (!isReleaseVersion(context.ferryVersion)) {
+      progress.skip(name, "development build");
+      warn("Warning: The MCP gateway runs the Ferry of the box. This Ferry is a development build, so the box has no Ferry and Ferry did not start the gateway.");
+    } else {
+      const { servers, warnings } = gatewayServers(seed.mcp, tools.filter((tool) => tool.mcp).map((tool) => tool.id));
+      for (const warning of warnings) warn(`Warning: ${warning}`);
+      // When the start fails, the entries stay at the gateway. Without the client key, the box leaves them as they are.
+      gateway = Object.keys(servers);
+      try {
+        const started = await boxStep(
+          name,
+          () => enableGateway(link, required(plan.remoteHome), servers),
+          (gateway) => (gateway.state === "missing" ? "no Ferry on the box" : `${plural(gateway.servers, "server")}, ${gateway.state}`),
+        );
+        if (started.state === "missing") {
+          gateway = undefined;
+          warn(`Warning: The MCP gateway needs Ferry on the box. Run ferry install --box ${box.name}.`);
+        } else if (started.state === "stopped") {
+          warn(`Warning: ${MCP_GATEWAY_SERVICE.unit} does not run on the box. Run journalctl --user -u ${MCP_GATEWAY_SERVICE.unit} on the box to see why.`);
+        }
+      } catch (cause) {
+        warn(`Warning: Ferry could not start the MCP gateway: ${messageOf(cause)}. The core sync is complete.`);
+      }
+    }
+  }
+
   try {
     const warnings = await boxStep(
       "Declaring MCP servers",
@@ -678,6 +709,7 @@ async function applyOnBox(context: {
           mcp: seed.mcp,
           link,
           progress,
+          gateway,
         }),
       (warnings) =>
         [plural(plan.mcpServers.length, "server"), warnings.length > 0 && plural(warnings.length, "warning")]
@@ -711,31 +743,8 @@ async function applyOnBox(context: {
     (detail) => detail,
   );
 
-  // The gateway only warns on failure, so it never blocks the core sync.
-  if (box.mcpGateway) {
-    const name = "Starting the MCP gateway";
-    if (!isReleaseVersion(context.ferryVersion)) {
-      progress.skip(name, "development build");
-      warn("Warning: The MCP gateway runs the Ferry of the box. This Ferry is a development build, so the box has no Ferry and Ferry did not start the gateway.");
-    } else {
-      try {
-        const { servers, warnings } = gatewayServers(seed.mcp, tools.filter((tool) => tool.mcp).map((tool) => tool.id));
-        for (const warning of warnings) warn(`Warning: ${warning}`);
-        const gateway = await boxStep(
-          name,
-          () => enableGateway(link, required(plan.remoteHome), servers),
-          (gateway) => (gateway.state === "missing" ? "no Ferry on the box" : `${plural(gateway.servers, "server")}, ${gateway.state}`),
-        );
-        if (gateway.state === "missing") {
-          warn(`Warning: The MCP gateway needs Ferry on the box. Run ferry install --box ${box.name}.`);
-        } else if (gateway.state === "stopped") {
-          warn(`Warning: ${MCP_GATEWAY_SERVICE.unit} does not run on the box. Run journalctl --user -u ${MCP_GATEWAY_SERVICE.unit} on the box to see why.`);
-        }
-      } catch (cause) {
-        warn(`Warning: Ferry could not start the MCP gateway: ${messageOf(cause)}. The core sync is complete.`);
-      }
-    }
-  } else {
+  // After the MCP step, so that the harness entries are direct again before the gateway and its client key go.
+  if (!box.mcpGateway) {
     try {
       if (await disableGateway(link)) warn("Removed the MCP gateway, its unit, and its logins from the box.");
     } catch (cause) {

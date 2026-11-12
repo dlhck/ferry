@@ -9,6 +9,13 @@
  * a stdio server stay on the box too. The box merges its own entry with jq or
  * the harness CLI, and prints back only a status letter or key names, so an
  * env value never reaches Ferry.
+ *
+ * On a box with the MCP gateway, a remote server that the gateway serves gets
+ * an entry with the gateway URL and the client key of the box in place of
+ * its direct entry. The box reads the key from its file and writes it only
+ * into the harness entry, so the key never reaches Ferry. When the gateway
+ * goes off, the direct path declares the carried URL again, and so replaces
+ * each gateway entry of a carried server.
  */
 
 import { posix } from "node:path";
@@ -21,6 +28,7 @@ import {
 import { APP_BUNDLE_PATH, type McpSource, type NonPortableMcp, type RemoteMcpServer, type SeedMcp, type StdioMcpServer } from "./manifest.ts";
 import type { Progress } from "./progress.ts";
 import type { HarnessDescriptor, ToolDescriptor, ToolMcp } from "./registry/types.ts";
+import { gatewayUrl } from "./mcp-gateway/url.ts";
 
 /** Codex waits in `mcp add` for a login callback, so each server gets more time than one command. */
 const REGISTER_TIMEOUT_MS = 600_000;
@@ -38,6 +46,12 @@ const MERGE_FILE =
   'if type == "object" then with_entries(select(.key == "env" or .key == "env_vars")) else {} end))))';
 /** A jq filter for a JSON MCP file: set each carried entry of `$s` under the key `$k`. */
 const REPLACE_FILE = '.[$k] = ((.[$k] // {}) + $s)';
+/** The client key of the MCP gateway on the box, as a shell word. */
+const CLIENT_KEY = '"$HOME/.ferry/mcp-gateway/client-key"';
+/** A jq expression: the `Authorization` header value for the client key in `$g`, the text of its file. */
+const BEARER = '("Bearer " + ($g | rtrimstr("\\n")))';
+/** A jq filter for a JSON MCP file: set each gateway entry of `$s` under the key `$k`, with the client key header. */
+const GATEWAY_FILE = `.[$k] = ((.[$k] // {}) + ($s | map_values(. + {headers: {Authorization: ${BEARER}}})))`;
 /** A jq filter: the command or an argument of the box entry `$e` is a path in a macOS app bundle. `$r` is `APP_BUNDLE_PATH`. */
 const IN_APP_BUNDLE =
   '($e | type) == "object" and ([$e.command, ($e.args // [])[]?] | any(type == "string" and test($r; "i")))';
@@ -69,7 +83,10 @@ export async function registerBoxMcp(input: {
   readonly mcp: readonly SeedMcp[];
   readonly link: BoxSettingsLink;
   readonly progress?: Pick<Progress, "count">;
+  /** The names of the servers that the MCP gateway of the box serves. Absent on a box without the gateway. */
+  readonly gateway?: readonly string[];
 }): Promise<readonly string[]> {
+  const served = new Set(input.gateway ?? []);
   const entries = declared(input.mcp, input.tools);
   const total = entries.reduce((sum, { entry }) => sum + entry.servers.length, 0);
   let current = 0;
@@ -83,8 +100,11 @@ export async function registerBoxMcp(input: {
     const path = file ? posix.join(input.remoteHome, file.file) : null;
     const box = path && file ? { path, file } : null;
     for (const name of entry.appBundle ?? []) warnings.push(...(await removeAppBundle(entry.harness, name, recipe, box, input.link)));
-    const remote = entry.servers.filter((server): server is RemoteMcpServer => server.type !== "stdio");
+    const remotes = entry.servers.filter((server): server is RemoteMcpServer => server.type !== "stdio");
+    const gateway = remotes.filter((server) => served.has(server.name));
+    const remote = remotes.filter((server) => !served.has(server.name));
     const stdio = entry.servers.filter((server): server is StdioMcpServer => server.type === "stdio");
+    if (gateway.length > 0) warnings.push(...(await registerGateway(entry.harness, gateway, recipe, box, input.link, advance)));
     if (remote.length > 0 && recipe.register) {
       warnings.push(...(await registerWithCli({ harness: entry.harness, servers: remote }, recipe, input.link, advance)));
     } else if (remote.length > 0) {
@@ -310,7 +330,8 @@ async function registerStdio(
  * Merge `entries` into the JSON MCP file of the box with the jq `filter`, in
  * one command. The box creates a missing file without jq, writes the file only
  * when an entry changes, and prints only a status letter: `J` jq is missing,
- * `S` the merge failed.
+ * `S` the merge failed. With `gateway`, jq reads the client key of the
+ * gateway from its file into `$g`, and the box prints `K` when it has no key.
  */
 async function mergeFileOnBox(
   harness: string,
@@ -319,24 +340,153 @@ async function mergeFileOnBox(
   filter: string,
   box: { readonly path: string; readonly file: McpFile } | null,
   link: BoxSettingsLink,
+  gateway = false,
 ): Promise<string[]> {
   if (!box || box.file.format !== "json") return [`could not declare ${harness} MCP servers ${names}`];
   const created = `${JSON.stringify({ [box.file.key]: entries }, null, 2)}\n`;
-  const args = `--arg k ${quoteShell(box.file.key)} --argjson s ${quoteShell(JSON.stringify(entries))}`;
+  const args = `--arg k ${quoteShell(box.file.key)} --argjson s ${quoteShell(JSON.stringify(entries))}${gateway ? ` --rawfile g ${CLIENT_KEY}` : ""}`;
   const script = [
     `f=${quoteShell(box.path)}`,
     "umask 077",
-    `if [ ! -e "$f" ]; then mkdir -p "$(dirname "$f")" && printf '%s' ${quoteShell(created)} > "$f.ferry-tmp" && mv "$f.ferry-tmp" "$f" || printf 'S\\n'; exit 0; fi`,
-    `${HAS_JQ} || { printf 'J\\n'; exit 0; }`,
+    ...(gateway
+      ? [
+          `[ -s ${CLIENT_KEY} ] || { printf 'K\\n'; exit 0; }`,
+          `${HAS_JQ} || { printf 'J\\n'; exit 0; }`,
+          `[ -e "$f" ] || { mkdir -p "$(dirname "$f")" && printf '{}\\n' > "$f"; } || { printf 'S\\n'; exit 0; }`,
+        ]
+      : [
+          `if [ ! -e "$f" ]; then mkdir -p "$(dirname "$f")" && printf '%s' ${quoteShell(created)} > "$f.ferry-tmp" && mv "$f.ferry-tmp" "$f" || printf 'S\\n'; exit 0; fi`,
+          `${HAS_JQ} || { printf 'J\\n'; exit 0; }`,
+        ]),
     `jq -e ${args} ${quoteShell(`(${filter}) == .`)} "$f" >/dev/null 2>&1 && exit 0`,
     `if jq ${args} ${quoteShell(filter)} "$f" > "$f.ferry-tmp" 2>/dev/null; then mv "$f.ferry-tmp" "$f"; else rm -f "$f.ferry-tmp"; printf 'S\\n'; fi`,
   ].join("\n");
   const { stdout } = await checked(link, `sh -c ${quoteShell(script)}`);
+  if (stdout.startsWith("K")) return [noClientKey(harness, names)];
   if (stdout.startsWith("J")) {
     return [`jq is not on the box, so Ferry did not update ${harness} MCP servers ${names}. Run ferry update to install jq.`];
   }
   if (stdout.startsWith("S")) return [`could not declare ${harness} MCP servers ${names}`];
   return [];
+}
+
+function noClientKey(harness: string, names: string): string {
+  return `the box has no MCP gateway client key, so Ferry did not point ${harness} MCP ${names} at the gateway. Sync again to make the key.`;
+}
+
+/**
+ * Point remote servers at the MCP gateway: the URL `gatewayUrl(name)` and the
+ * header `Authorization: Bearer <client key>`. The box reads the key from its
+ * file, writes it only into the harness entry, and prints only a status
+ * letter: `C` the harness CLI is missing, `K` the box has no client key, `J`
+ * jq is missing, `S` the declaration failed. A harness with `addJson` gets
+ * the entry with the header from the CLI. A harness with `headersTable` gets
+ * the URL from `add`, and the box appends the header table to its TOML MCP
+ * file. Else the box merges the entries into the JSON MCP file with jq. An
+ * entry that already has the URL and the key stays as it is.
+ */
+async function registerGateway(
+  harness: string,
+  servers: readonly RemoteMcpServer[],
+  recipe: ToolMcp,
+  box: { readonly path: string; readonly file: McpFile } | null,
+  link: BoxSettingsLink,
+  advance: (servers: number) => void,
+): Promise<string[]> {
+  const register = recipe.register;
+  const names = servers.map((server) => server.name).join(", ");
+  if (!register) {
+    advance(servers.length);
+    const entries = Object.fromEntries(servers.map((server) => [server.name, { url: gatewayUrl(server.name) }]));
+    return mergeFileOnBox(harness, names, entries, GATEWAY_FILE, box, link, true);
+  }
+  const binary = mcpBinary(recipe);
+  const warnings: string[] = [];
+  for (const server of servers) {
+    advance(1);
+    const values = { name: server.name, url: gatewayUrl(server.name), type: "http" };
+    const script = register.addJson
+      ? gatewayJsonScript(register, values)
+      : register.headersTable && register.getJson && box?.file.format === "toml"
+        ? gatewayTomlScript(register, values, box)
+        : null;
+    if (script === null) {
+      warnings.push(`could not point ${harness} MCP server ${server.name} at the gateway`);
+      continue;
+    }
+    const { stdout } = await checked(
+      link,
+      `sh -c ${quoteShell(
+        [
+          `command -v ${binary} >/dev/null 2>&1 || { printf 'C\\n'; exit 0; }`,
+          `[ -s ${CLIENT_KEY} ] || { printf 'K\\n'; exit 0; }`,
+          `${HAS_JQ} || { printf 'J\\n'; exit 0; }`,
+          `u=${quoteShell(values.url)}`,
+          script,
+        ].join("\n"),
+      )}`,
+      { timeoutMs: REGISTER_TIMEOUT_MS },
+    );
+    if (stdout.startsWith("C")) {
+      warnings.push(`the ${binary} CLI is not on the box PATH; no ${harness} MCP server was declared`);
+      return warnings;
+    }
+    if (stdout.startsWith("K")) {
+      warnings.push(noClientKey(harness, names));
+      return warnings;
+    }
+    if (stdout.startsWith("J")) {
+      warnings.push(`jq is not on the box, so Ferry did not point ${harness} MCP ${names} at the gateway. Run ferry update to install jq.`);
+      return warnings;
+    }
+    if (stdout.startsWith("S")) warnings.push(`could not point ${harness} MCP server ${server.name} at the gateway`);
+  }
+  return warnings;
+}
+
+/**
+ * The box script for a gateway entry with `addJson`. jq reads the key from
+ * its file and builds the declaration. The script compares the `get` output
+ * with shell patterns only, so the key is in the arguments of no command but
+ * the add command.
+ */
+function gatewayJsonScript(register: NonNullable<ToolMcp["register"]>, server: McpCommandValues): string {
+  const declaration = `{type: "http", url: $u, headers: {Authorization: ${BEARER}}}`;
+  const add = (register.addJson as string).replaceAll("{json}", '"$c"');
+  return [
+    `k=$(tr -d '\\n' < ${CLIENT_KEY})`,
+    `o=$(${mcpCommand(register.get, server)} 2>/dev/null) && case "$o" in *"$u"*) case "$o" in *"Bearer $k"*) exit 0;; esac;; esac`,
+    `c=$(jq -cn --arg u "$u" --rawfile g ${CLIENT_KEY} ${quoteShell(declaration)}) || { printf 'S\\n'; exit 0; }`,
+    `${mcpCommand(register.remove, server)} >/dev/null 2>&1`,
+    `${mcpCommand(add, server)} </dev/null >/dev/null 2>&1 || printf 'S\\n'`,
+  ].join("\n");
+}
+
+/**
+ * The box script for a gateway entry with `headersTable`. `add` writes the
+ * entry with the URL, and the box appends the header table with the key to
+ * the TOML MCP file and makes the file private. `remove` takes away an old
+ * header table, so the file never has the table twice.
+ */
+function gatewayTomlScript(
+  register: NonNullable<ToolMcp["register"]>,
+  server: McpCommandValues,
+  box: { readonly path: string; readonly file: McpFile },
+): string {
+  const same = `(.transport // .) as $t | $t.url == $u and ($t.${register.headersTable}.Authorization // "") == ${BEARER}`;
+  const check = `${mcpCommand(register.getJson as string, server)} 2>/dev/null | jq -e --arg u "$u" --rawfile g ${CLIENT_KEY} ${quoteShell(same)} >/dev/null 2>&1`;
+  const table = `[${box.file.key}.${JSON.stringify(server.name)}.${register.headersTable}]`;
+  return [
+    `${check} && exit 0`,
+    `${mcpCommand(register.remove, server)} >/dev/null 2>&1`,
+    `${mcpCommand(register.add, server)} </dev/null >/dev/null 2>&1`,
+    `f=${quoteShell(box.path)}`,
+    // A header table without its server entry is not a valid Codex server, so the box appends it only after a complete add.
+    `${mcpCommand(register.get, server)} >/dev/null 2>&1 && [ -f "$f" ] || { printf 'S\\n'; exit 0; }`,
+    `k=$(tr -d '\\n' < ${CLIENT_KEY})`,
+    `printf '\\n%s\\nAuthorization = "Bearer %s"\\n' ${quoteShell(table)} "$k" >> "$f" && chmod 600 "$f" || { printf 'S\\n'; exit 0; }`,
+    `${check} || printf 'S\\n'`,
+  ].join("\n");
 }
 
 /**
