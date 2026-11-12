@@ -21,6 +21,7 @@ import {
 import { hasBoxPart, INTEGRATIONS, type BoxIntegration, type Integration } from "./integrations/index.ts";
 import { BunHostAdapter, Link, type HostAdapter, type LinkError, type LinkOptions } from "./link.ts";
 import { FerryError, linkFailure } from "./errors.ts";
+import { RESTART_GATEWAY_COMMAND } from "./mcp-gateway/service.ts";
 import { errorInfo, type ErrorInfo } from "./output.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
 import { boxLocker } from "./sync.ts";
@@ -197,7 +198,7 @@ async function updateBoxes(
   // Ferry on the box follows this Ferry, like an `operator` policy, so only `ferry update` changes it.
   const planBox = async (box: ResolvedBox, link: Pick<Link, "run">): Promise<ToolStep[]> => [
     ...(await planTools("update", selectTools(box.tools), box.tools, resolved.local, link)),
-    ...(input.latestOnly === true ? [] : [await planBoxFerry("update", link, resolved.ferryVersion)]),
+    ...(input.latestOnly === true ? [] : [withGatewayRestart(box, await planBoxFerry("update", link, resolved.ferryVersion))]),
   ];
 
   let boxes: BoxUpdate[];
@@ -387,6 +388,13 @@ async function updateBoxes(
     );
   }
   return result();
+}
+
+/** The Ferry step of a box with the MCP gateway also restarts the gateway, so that it runs the new binary. */
+function withGatewayRestart(box: ResolvedBox, step: ToolStep): ToolStep {
+  if (!box.mcpGateway || step.command === undefined) return step;
+  // The last line of the command writes the box marker, so the restart runs only after a complete install.
+  return { ...step, command: `${step.command} && ${RESTART_GATEWAY_COMMAND}` };
 }
 
 /** The commands to run: the box changes of each box in `depends` order, then the operator updates. */

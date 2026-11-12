@@ -139,6 +139,13 @@ export const DISABLE_GATEWAY_COMMAND = [
   "echo removed",
 ].join("\n");
 
+/**
+ * The command that `ferry update` runs after it changes the Ferry binary of a
+ * box with the gateway, so that the gateway runs the new binary. A stopped
+ * service stays stopped, and the next sync starts it.
+ */
+export const RESTART_GATEWAY_COMMAND = `systemctl --user try-restart ${MCP_GATEWAY_SERVICE.unit}`;
+
 export type GatewaySyncResult =
   | { readonly state: "missing" }
   | { readonly state: "running" | "stopped"; readonly servers: number; readonly unitChanged: boolean };
