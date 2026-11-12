@@ -131,6 +131,18 @@ describe("box work", () => {
     });
   });
 
+  test("a worktree detached at the tip of an unpushed local branch shows the commits once", async () => {
+    const box = fakeBox();
+    const git = box.project("code/app");
+    git(`git checkout -q -b feature && git commit -q --allow-empty -m two && git checkout -q main`);
+    git(`git worktree add -q --detach ${box.home}/wt feature`);
+    expect(await readBoxWork(box.link, ["code/app"])).toEqual({
+      checked: 2,
+      projects: [{ path: "code/app", branch: "main", changes: 0, unpushed: [{ branch: "feature", commits: 1 }] }],
+      unchecked: [],
+    });
+  });
+
   test("each linked worktree of a project is checked with its own path", async () => {
     const box = fakeBox();
     const git = box.project("code/app");

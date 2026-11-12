@@ -62,7 +62,7 @@ A project appears when it has one of these:
 
 - A changed tracked file or an untracked file. An ignored file does not count.
 - A local branch with commits that no remote-tracking branch has. A branch without a remote counts all its commits. Ferry does not fetch, so the counts use the remote-tracking branches of the last fetch on the box.
-- A detached HEAD with commits that no remote-tracking branch has. It shows as `HEAD`.
+- A detached HEAD with commits that no local branch and no remote-tracking branch has. It shows as `HEAD`. A commit that a local branch has shows under that branch.
 
 When a git command fails in a project or a worktree, for example because git refuses a repository with dubious ownership, the line shows `could not check`. Ferry does not know the work there, so the block never says `none` for it. A directory with `.git` that git cannot read is such a project.
 

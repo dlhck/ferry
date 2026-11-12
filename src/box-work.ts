@@ -28,7 +28,7 @@ export type ProjectWork = {
   readonly changes: number;
   /**
    * Each local branch with commits that no remote-tracking branch has. A branch without a remote counts all its commits.
-   * A detached HEAD with such commits has the branch `HEAD`.
+   * A detached HEAD with commits that no local branch and no remote has gets the branch `HEAD`.
    */
   readonly unpushed: readonly { readonly branch: string; readonly commits: number }[];
 };
@@ -58,7 +58,7 @@ tree() {
   case $? in 0) ;; 1) b= ;; *) printf 'error\t%s\n' "$1"; return ;; esac
   printf 'project\t%s\t%s\t%s\n' "$1" "$b" "$(printf '%s\n' "$c" | grep -c .)"
   [ -n "$b" ] && return
-  n=$(git -C "$2" rev-list --count HEAD --not --remotes </dev/null 2>/dev/null) || { printf 'error\t%s\n' "$1"; return; }
+  n=$(git -C "$2" rev-list --count HEAD --not --remotes --branches </dev/null 2>/dev/null) || { printf 'error\t%s\n' "$1"; return; }
   [ "$n" -gt 0 ] 2>/dev/null && printf 'branch\t%s\tHEAD\t%s\n' "$1" "$n"
 }
 work() {
