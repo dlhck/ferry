@@ -129,6 +129,25 @@ describe("ferry usage-count", () => {
     expect(text).not.toContain("msg_");
   });
 
+  test("the last line of a message id counts, also when a later file has it", async () => {
+    const usage = (output: number) => ({ ...claudeUsage, output_tokens: output });
+    const dir = home({
+      // Claude writes one line for each content block of a message. The output count grows to the final value.
+      ".claude/projects/-home-user-app/one.jsonl": [
+        claudeLine("msg_1", "2026-01-02T09:01:00.000Z", "/home/user/app", usage(1)),
+        claudeLine("msg_1", "2026-01-02T09:01:00.000Z", "/home/user/app", usage(5)),
+        claudeLine("msg_1", "2026-01-02T09:01:00.000Z", "/home/user/app", usage(90)),
+      ],
+      ".claude/projects/-home-user-app/two.jsonl": [claudeLine("msg_1", "2026-01-02T09:01:00.000Z", "/home/user/app", usage(90))],
+    });
+
+    const result = await countUsage(BUILTIN_HARNESSES.filter((harness) => harness.id === "claude"), dir, null);
+
+    expect(result.harnesses[0]!.projects).toEqual([
+      { path: "/home/user/app", days: [{ day: "2026-01-02", input: 10, output: 90, cacheRead: 300, cacheWrite: 40 }] },
+    ]);
+  });
+
   test("--since counts only the records of that UTC day and later", async () => {
     const dir = home({
       ".claude/projects/-home-user-app/one.jsonl": [
