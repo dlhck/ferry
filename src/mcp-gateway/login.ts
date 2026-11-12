@@ -12,7 +12,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { auth } from "@modelcontextprotocol/client";
 import { LoginOAuthProvider } from "./oauth.ts";
-import { gatewayDir, readServers, readState, setLoginRequired, writePrivate } from "./store.ts";
+import { gatewayDir, readServers, readState, setLoginRequired, writePrivate, type GatewayServer } from "./store.ts";
 
 /** The login stops after this time. `ferry auth` holds the port forward for 5 minutes. */
 export const LOGIN_TIMEOUT_MS = 300_000;
@@ -28,6 +28,7 @@ export type LoginInput = {
 export async function loginServer(input: LoginInput): Promise<void> {
   const server = readServers(input.home).find((candidate) => candidate.name === input.server);
   if (!server) throw new Error(`The MCP gateway has no server ${input.server}. Add it to ~/.ferry/mcp-gateway/servers.json.`);
+  if (!("url" in server)) throw new Error(`${server.name} is a shared stdio server of the MCP gateway. It needs no login.`);
 
   const state = randomBytes(16).toString("hex");
   let answer: (callback: { code: string; iss?: string }) => void = () => {};
@@ -74,22 +75,30 @@ export async function loginServer(input: LoginInput): Promise<void> {
   }
 }
 
+/**
+ * The state of one server. `login-required`: a remote server has no valid
+ * login. `cannot-share`: a shared stdio server sent a request to the client.
+ */
+export type GatewayServerState = "ready" | "login-required" | "cannot-share";
+
 export type GatewayList = {
   readonly gateway: { readonly state: "running" | "stopped"; readonly port: number | null };
-  readonly servers: readonly { readonly name: string; readonly state: "ready" | "login-required" }[];
+  readonly servers: readonly { readonly name: string; readonly state: GatewayServerState }[];
 };
 
-/** The state of the gateway and of each server. It has no URL, token, or key. */
+/** The state of the gateway and of each server. It has no URL, command, `env` value, token, or key. */
 export function listGateway(home: string): GatewayList {
   const state = readState(home);
   const running = state.pid !== undefined && isRunning(state.pid);
   const expired = new Set(state.loginRequired ?? []);
+  const unshared = new Set(state.cannotShare ?? []);
+  const serverState = (server: GatewayServer): GatewayServerState => {
+    if (!("url" in server)) return unshared.has(server.name) ? "cannot-share" : "ready";
+    return expired.has(server.name) || !existsSync(join(gatewayDir(home), "tokens", `${server.name}.json`)) ? "login-required" : "ready";
+  };
   return {
     gateway: { state: running ? "running" : "stopped", port: running ? (state.port ?? null) : null },
-    servers: readServers(home).map(({ name }) => ({
-      name,
-      state: expired.has(name) || !existsSync(join(gatewayDir(home), "tokens", `${name}.json`)) ? "login-required" : "ready",
-    })),
+    servers: readServers(home).map((server) => ({ name: server.name, state: serverState(server) })),
   };
 }
 

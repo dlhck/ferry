@@ -1,9 +1,11 @@
 /**
  * The files of the MCP gateway on a box, in `~/.ferry/mcp-gateway/`:
  *
- * - `servers.json`: the remote servers of the gateway. This is the input of
- *   `ferry mcp serve`. A later sync writes it from the carried MCP entries.
- *   Until then, write it by hand: `{"servers":{"<name>":{"url":"https://..."}}}`.
+ * - `servers.json`: the servers of the gateway. This is the input of
+ *   `ferry mcp serve`. Sync writes it from the carried MCP entries: a remote
+ *   server as `{"url":"https://..."}`, and a shared stdio server as
+ *   `{"command":"...","args":[...],"env":{...}}`. The box copies the `env`
+ *   values from the harness entries. They never leave the box.
  * - `client-key`: the key that a harness sends as `Authorization: Bearer <key>`.
  *   Ferry makes it on the box. It never leaves the box.
  * - `tokens/<server>.json`: the OAuth client registration and the tokens of one server.
@@ -25,7 +27,17 @@ export { DEFAULT_GATEWAY_PORT } from "./url.ts";
 /** A server name is also a file name and a URL path segment. It does not start with a dot. */
 export const SERVER_NAME = /^[A-Za-z0-9_:-][A-Za-z0-9._:-]*$/;
 
-export type GatewayServer = { readonly name: string; readonly url: string };
+export type RemoteGatewayServer = { readonly name: string; readonly url: string };
+
+/** A shared stdio server. The gateway runs one process of it for all agents of the box. */
+export type StdioGatewayServer = {
+  readonly name: string;
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly env: Readonly<Record<string, string>>;
+};
+
+export type GatewayServer = RemoteGatewayServer | StdioGatewayServer;
 
 export type TokenFile = {
   readonly clientInformation?: StoredOAuthClientInformation;
@@ -38,6 +50,8 @@ export type GatewayState = {
   readonly port?: number;
   /** The servers whose refresh failed. A new login removes the server. */
   readonly loginRequired?: readonly string[];
+  /** The shared stdio servers that sent a request to the client. The gateway cannot share them. */
+  readonly cannotShare?: readonly string[];
 };
 
 export type ToolCache = { readonly tools: readonly unknown[] };
@@ -46,14 +60,25 @@ export function gatewayDir(home: string): string {
   return join(home, ".ferry", "mcp-gateway");
 }
 
-/** Read `servers.json`. A missing file is no servers. An invalid name or URL is an error. */
+/**
+ * Read `servers.json`. A missing file is no servers. An invalid name, URL, or
+ * stdio entry is an error. The error has no `env` value.
+ */
 export function readServers(home: string): GatewayServer[] {
   const path = join(gatewayDir(home), "servers.json");
   if (!existsSync(path)) return [];
-  const parsed = readJson(path) as { servers?: Record<string, { url?: unknown }> };
+  const parsed = readJson(path) as { servers?: Record<string, { url?: unknown; command?: unknown; args?: unknown; env?: unknown }> };
   const servers: GatewayServer[] = [];
   for (const [name, entry] of Object.entries(parsed.servers ?? {})) {
     if (!SERVER_NAME.test(name)) throw new Error(`servers.json has an invalid server name: ${name}`);
+    if (typeof entry?.command === "string") {
+      const { command, args = [], env = {} } = entry;
+      const strings = (value: unknown) => Array.isArray(value) && value.every((item) => typeof item === "string");
+      const record = typeof env === "object" && env !== null && !Array.isArray(env) && strings(Object.values(env));
+      if (command === "" || !strings(args) || !record) throw new Error(`servers.json has an invalid stdio server ${name}`);
+      servers.push({ name, command, args: args as string[], env: env as Record<string, string> });
+      continue;
+    }
     const url = typeof entry?.url === "string" ? new URL(entry.url) : null;
     if (!url || (url.protocol !== "https:" && !isLoopback(url))) {
       throw new Error(`servers.json needs an https URL for ${name}`);
@@ -110,6 +135,13 @@ export function setLoginRequired(home: string, server: string, required: boolean
   });
 }
 
+export function setCannotShare(home: string, server: string): void {
+  updateState(home, (state) => {
+    const others = (state.cannotShare ?? []).filter((name) => name !== server);
+    return { ...state, cannotShare: [...others, server] };
+  });
+}
+
 export function readToolCache(home: string, server: string): ToolCache | null {
   const path = join(gatewayDir(home), "cache", `${server}.json`);
   if (!existsSync(path)) return null;
@@ -121,13 +153,23 @@ export function writeToolCache(home: string, server: string, cache: ToolCache): 
 }
 
 /**
- * The secrets that must not leave the gateway: the client key, and the
- * tokens and client secret of each server.
+ * The secrets that must not leave the gateway: the client key, the tokens
+ * and client secret of each server, and the `env` values of each stdio server.
  */
 export function knownSecrets(home: string, servers: readonly string[]): string[] {
   const secrets: string[] = [];
   const key = clientKey(home);
   if (key) secrets.push(key);
+  let configured: GatewayServer[] = [];
+  try {
+    configured = readServers(home);
+  } catch {
+    // A servers.json that is not valid has no value to take out.
+  }
+  for (const server of configured) {
+    if (!servers.includes(server.name) || !("env" in server)) continue;
+    for (const value of Object.values(server.env)) if (value.length >= 8) secrets.push(value);
+  }
   for (const server of servers) {
     let file: TokenFile | null = null;
     try {

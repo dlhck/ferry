@@ -1,8 +1,16 @@
 /**
  * The MCP gateway of a box: `ferry mcp serve`. It listens on 127.0.0.1 and
- * gives each remote server of `servers.json` the path `/mcp/<server>`. It is
- * the only OAuth client of each server on the box, and each harness on the
+ * gives each server of `servers.json` the path `/mcp/<server>`. It is the
+ * only OAuth client of each remote server on the box, and each harness on the
  * box connects to it with the client key.
+ *
+ * A shared stdio server runs as one process for all agents of the box. The
+ * gateway is its only client. It sends empty client capabilities, and its own
+ * JSON-RPC ids and progress tokens, so the ids of two agents cannot collide.
+ * A cancel reaches the process when the harness closes its request. When the
+ * process sends a request to the client, such as `roots/list`, the gateway
+ * answers with an error and records `cannot-share` for the server. A process
+ * that stopped starts again at the next call.
  *
  * The gateway never sends 401 to a harness, so a harness never starts its own
  * login. A request with no key, a wrong key, a wrong `Host`, or a wrong
@@ -15,7 +23,8 @@
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
-import { Client, OAuthError, StreamableHTTPClientTransport, UnauthorizedError } from "@modelcontextprotocol/client";
+import { Client, OAuthError, ProtocolError, ProtocolErrorCode, StreamableHTTPClientTransport, UnauthorizedError } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { createMcpHandler, Server, type McpHttpHandler } from "@modelcontextprotocol/server";
 import { VERSION } from "../version.ts";
 import { GatewayOAuthProvider, LoginRequiredError } from "./oauth.ts";
@@ -26,11 +35,14 @@ import {
   readTokenFile,
   readToolCache,
   scrub,
+  setCannotShare,
   setLoginRequired,
   tokenVersion,
   updateState,
   writeToolCache,
   type GatewayServer,
+  type RemoteGatewayServer,
+  type StdioGatewayServer,
 } from "./store.ts";
 
 export type GatewayInput = {
@@ -55,20 +67,23 @@ export function loginFixText(server: string, box: string | null): string {
 /** Start the gateway. It writes its pid and port to `state.json` and makes the client key when there is none. */
 export function startGateway(input: GatewayInput): RunningGateway {
   clientKey(input.home, true);
-  const routes = new Map<string, { url: string; upstream: Upstream; handler: McpHttpHandler }>();
+  const routes = new Map<string, { identity: string; upstream: Upstream; handler: McpHttpHandler }>();
   const log = (line: string, servers: readonly string[] = []) => input.log(scrub(line, knownSecrets(input.home, servers)));
   let port = input.port;
 
   const route = (server: GatewayServer) => {
+    // A changed URL, command, argument, or env value gives a new connection.
+    const identity = JSON.stringify(server);
     const known = routes.get(server.name);
-    if (known?.url === server.url) return known;
+    if (known?.identity === identity) return known;
     void known?.upstream.close();
     void known?.handler.close();
-    const upstream = new Upstream(input.home, server);
+    const upstream =
+      "url" in server ? new RemoteUpstream(input.home, server) : new StdioUpstream(input.home, server, (line) => log(`${server.name}: ${line}`, [server.name]));
     const handler = createMcpHandler(() => gatewayServer(input, server.name, upstream, log), {
       onerror: (error) => log(`${server.name}: ${error.message}`, [server.name]),
     });
-    const created = { url: server.url, upstream, handler };
+    const created = { identity, upstream, handler };
     routes.set(server.name, created);
     return created;
   };
@@ -139,9 +154,16 @@ function gatewayServer(
       return clean({ tools: (cache?.tools ?? []) as never[] });
     }
   });
-  server.setRequestHandler("tools/call", async (request) => {
+  server.setRequestHandler("tools/call", async (request, ctx) => {
+    // The gateway gives the call its own progress token, and maps each progress notice back to the token of the harness.
+    const { progressToken, ...meta } = request.params._meta ?? {};
+    const params = { ...request.params, _meta: meta };
+    const onprogress =
+      progressToken === undefined
+        ? undefined
+        : (progress: object) => void ctx.mcpReq.notify({ method: "notifications/progress", params: { ...clean(progress), progressToken } }).catch(() => {});
     try {
-      return clean(await upstream.use((client) => client.callTool(request.params)));
+      return clean(await upstream.use((client) => client.callTool(params, { signal: ctx.mcpReq.signal, ...(onprogress ? { onprogress } : {}) })));
     } catch (error) {
       if (error instanceof LoginRequiredError) {
         return { isError: true, content: [{ type: "text", text: loginFixText(name, input.box) }] };
@@ -156,12 +178,18 @@ function gatewayServer(
   return server;
 }
 
+/** The connection of the gateway to one server. */
+type Upstream = {
+  use<T>(run: (client: Client) => Promise<T>): Promise<T>;
+  close(): Promise<void>;
+};
+
 /**
  * The connection of the gateway to one remote server. The SDK refreshes an
  * expired access token on a 401. When the refresh fails, the gateway records
  * `login-required` and does not call the server again until the token file changes.
  */
-class Upstream {
+class RemoteUpstream implements Upstream {
   private client: Promise<Client> | null = null;
   /** The token of the last failed login, so that the gateway does not retry the same token. */
   private failedToken: string | null = null;
@@ -169,7 +197,7 @@ class Upstream {
 
   constructor(
     private readonly home: string,
-    private readonly server: GatewayServer,
+    private readonly server: RemoteGatewayServer,
   ) {}
 
   async use<T>(run: (client: Client) => Promise<T>): Promise<T> {
@@ -218,6 +246,61 @@ class Upstream {
     if (this.marked === required) return;
     this.marked = required;
     setLoginRequired(this.home, this.server.name, required);
+  }
+}
+
+/**
+ * The one process of a shared stdio server, for all agents of the box. The
+ * process gets the `env` of `servers.json` and the working directory of the
+ * gateway. Its stderr goes to the log of the gateway, without secrets.
+ */
+class StdioUpstream implements Upstream {
+  private client: Promise<Client> | null = null;
+
+  constructor(
+    private readonly home: string,
+    private readonly server: StdioGatewayServer,
+    private readonly log: (line: string) => void,
+  ) {}
+
+  async use<T>(run: (client: Client) => Promise<T>): Promise<T> {
+    return run(await this.connect());
+  }
+
+  private connect(): Promise<Client> {
+    if (this.client) return this.client;
+    // Empty capabilities: the gateway cannot answer roots, sampling, or elicitation for one agent.
+    const client = new Client({ name: "ferry-mcp-gateway", version: VERSION }, { capabilities: {} });
+    client.fallbackRequestHandler = async (request) => {
+      setCannotShare(this.home, this.server.name);
+      this.log(`sent ${request.method} to the client. The gateway cannot share this server. Remove it from mcp_gateway_shared.`);
+      throw new ProtocolError(ProtocolErrorCode.MethodNotFound, `The Ferry MCP gateway shares this server between agents and cannot answer ${request.method}.`);
+    };
+    const transport = new StdioClientTransport({
+      command: this.server.command,
+      args: [...this.server.args],
+      env: { ...this.server.env },
+      stderr: "pipe",
+    });
+    transport.stderr?.on("data", (chunk: Buffer) => {
+      for (const line of chunk.toString("utf8").split("\n")) if (line.trim() !== "") this.log(line);
+    });
+    const connected = client.connect(transport).then(() => client);
+    this.client = connected;
+    // A process that stops starts again at the next call.
+    client.onclose = () => {
+      if (this.client === connected) this.client = null;
+    };
+    connected.catch(() => {
+      if (this.client === connected) this.client = null;
+    });
+    return connected;
+  }
+
+  async close(): Promise<void> {
+    const client = this.client;
+    this.client = null;
+    await client?.then((connected) => connected.close()).catch(() => {});
   }
 }
 
