@@ -197,7 +197,7 @@ The `Notification` hook takes a permission prompt and a question from an MCP ser
 }
 ```
 
-`id` is unique for each box. `at` is the time on the box, and `receivedAt` is the time on the operator machine. The app sends one notification for each `id` that it did not read before, when `receivedAt` is after the start of the app. With Notifications off in the menu, the app sends none.
+`id` is unique for each box. `at` is the time on the box, and `receivedAt` is the time on the operator machine. When the file is not there, the read is the first read of the box. Then Ferry writes the file with no events, and puts the IDs of the events on the box in `seen`. These events are older than the follow, so Ferry never shows them. The app sends one notification for each `id` that it did not read before, when `receivedAt` is after the start of the app. With Notifications off in the menu, the app sends none.
 
 ## Linux
 

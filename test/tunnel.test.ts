@@ -709,28 +709,68 @@ describe("ferry tunnel --follow", () => {
 
     const running = runTunnel(followInput, dependencies);
     await waitFor(() => lines.length > 0);
-    masters[0]!.write(`${eventLine(first)}.\n`);
+    // The first read finds no event, so it writes a file without events.
+    masters[0]!.write(".\n");
     await waitFor(() => eventFiles.length === 1);
+    masters[0]!.write(`${eventLine(first)}.\n`);
+    await waitFor(() => eventFiles.length === 2);
     // A change of the entries sends the same events again.
     masters[0]!.write(`${entry(11, 3000, "web")}${eventLine(first)}.\n`);
     await waitFor(() => masters[0]!.calls.length === 1);
     masters[0]!.drop("Connection reset by peer");
     await waitFor(() => lines.some((line) => line.startsWith("Connected again.")));
     masters[1]!.write(`${eventLine(first)}${eventLine(second)}.\n`);
-    await waitFor(() => eventFiles.length === 2);
+    await waitFor(() => eventFiles.length === 3);
     interrupt();
     await running;
 
-    expect(eventFiles).toHaveLength(2);
-    expect(eventFiles[1]).toEqual({
+    expect(eventFiles).toHaveLength(3);
+    expect(eventFiles[0]).toEqual({ schemaVersion: 1, box: "lab", updatedAt: expect.any(String), events: [], seen: [] });
+    expect(eventFiles[2]).toEqual({
       schemaVersion: 1,
       box: "lab",
       updatedAt: expect.any(String),
       events: [
-        { ...first, receivedAt: eventFiles[0]!.updatedAt },
-        { ...second, receivedAt: eventFiles[1]!.updatedAt },
+        { ...first, receivedAt: eventFiles[1]!.updatedAt },
+        { ...second, receivedAt: eventFiles[2]!.updatedAt },
       ],
     });
+  });
+
+  test("the first read records the events on the box as seen, and shows none of them, also after a restart", async () => {
+    const old = agentEvent("1789000000000-41");
+    const next = agentEvent("1789000060000-42", "waiting-for-input");
+    const masters = [new FakeMaster(), new FakeMaster()];
+    let index = 0;
+    const { dependencies, lines, eventFiles, interrupt } = harness(new FollowLink(() => masters[index++]!));
+
+    const running = runTunnel(followInput, dependencies);
+    await waitFor(() => lines.length > 0);
+    masters[0]!.write(`${eventLine(old)}.\n`);
+    await waitFor(() => eventFiles.length === 1);
+    masters[0]!.write(`${eventLine(old)}${eventLine(next)}.\n`);
+    await waitFor(() => eventFiles.length === 2);
+    interrupt();
+    await running;
+
+    expect(eventFiles[0]).toEqual({ schemaVersion: 1, box: "lab", updatedAt: expect.any(String), events: [], seen: [old.id] });
+    expect(eventFiles[1]).toEqual({
+      schemaVersion: 1,
+      box: "lab",
+      updatedAt: expect.any(String),
+      events: [{ ...next, receivedAt: eventFiles[1]!.updatedAt }],
+      seen: [old.id],
+    });
+
+    // A restart reads the file, so the seen event does not come back.
+    const restart = harness(new FollowLink(() => masters[1]!), { readEventsFile: () => eventFiles.at(-1) ?? null });
+    const again = runTunnel(followInput, restart.dependencies);
+    await waitFor(() => restart.lines.length > 0);
+    // The fake master gives the text to the reader at once, so Ferry has read the snapshot after the write.
+    masters[1]!.write(`${eventLine(old)}${eventLine(next)}.\n`);
+    restart.interrupt();
+    await again;
+    expect(restart.eventFiles).toEqual([]);
   });
 
   test("--follow does not take ports or --list", async () => {

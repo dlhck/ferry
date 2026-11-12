@@ -123,6 +123,11 @@ describe("mergeEvents", () => {
     ]);
   });
 
+  test("does not add a seen event", () => {
+    expect(mergeEvents([], [numbered(1)], "now", [numbered(1).id])).toBeNull();
+    expect(mergeEvents([], [numbered(1), numbered(2)], "now", [numbered(1).id])).toEqual([{ ...numbered(2), receivedAt: "now" }]);
+  });
+
   test("keeps the newest 20 events, oldest first", () => {
     const merged = mergeEvents([], Array.from({ length: 25 }, (_, index) => numbered(24 - index)), "now");
     expect(merged?.map((entry) => entry.at)).toEqual(Array.from({ length: 20 }, (_, index) => at(index + 5)));

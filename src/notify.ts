@@ -46,6 +46,11 @@ export type EventsFile = {
   readonly updatedAt: string;
   /** The newest events, oldest first. */
   readonly events: readonly ReceivedEvent[];
+  /**
+   * The IDs of the events that were on the box at the first read. Ferry
+   * shows none of them, because they are older than the first follow.
+   */
+  readonly seen?: readonly string[];
 };
 
 /** The box keeps this number of events, and the operator file too. */
@@ -155,16 +160,17 @@ export function parseBoxEvent(json: string): AgentEvent | null {
 }
 
 /**
- * Add the events that `known` does not have. Keep the newest MAX_EVENTS,
- * oldest first. Returns null when no event is new, so Ferry does not write
- * the file again.
+ * Add the events that `known` and `seen` do not have. Keep the newest
+ * MAX_EVENTS, oldest first. Returns null when no event is new, so Ferry does
+ * not write the file again.
  */
 export function mergeEvents(
   known: readonly ReceivedEvent[],
   incoming: readonly AgentEvent[],
   receivedAt: string,
+  seen: readonly string[] = [],
 ): ReceivedEvent[] | null {
-  const ids = new Set(known.map((event) => event.id));
+  const ids = new Set([...known.map((event) => event.id), ...seen]);
   const added: ReceivedEvent[] = [];
   for (const event of incoming) {
     if (ids.has(event.id)) continue;
