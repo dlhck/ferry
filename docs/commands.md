@@ -1759,7 +1759,6 @@ List the conversations of the project of the current directory
 
 Options:
   --query <words>  words to find
-  --all            also the closed conversations
   -h, --help       display help for command
 ```
 

@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { backupRelay, changeRelayUrl, messagingStatus, messagingStatusLines, part, readRelayConfig, relayOwners, relayStatus, restoreRelay, serveRelay } from "../../../src/messaging/commands.ts";
+import { backupRelay, changeRelayUrl, enrollMachine, relayFailure, relayRefusal, messagingStatus, messagingStatusLines, part, readRelayConfig, relayOwners, relayStatus, restoreRelay, serveRelay } from "../../../src/messaging/commands.ts";
 import { messagingHookCommand } from "../../../src/messaging/hooks.ts";
 import { runMessagingSetup, runMessagingTeardown, type WorkerStatusView } from "../../../src/messaging/setup.ts";
 import { openStore } from "../../../src/messaging/relay/store.ts";
@@ -139,6 +139,49 @@ test("ferry messaging relay-url writes the config and client.json", () => {
   expect(readFileSync(join(root, ".ferry", "config.toml"), "utf8")).toContain('relay = "https://new-relay.example"');
   expect(JSON.parse(readFileSync(join(root, ".ferry", "messaging", "client.json"), "utf8"))).toMatchObject({ relayUrl: "https://new-relay.example", deviceId: "dev_1" });
   expect(() => changeRelayUrl("http://relay.example", root)).toThrow(/relay URL/);
+});
+
+describe("relay refusals", () => {
+  /** The shape of `RelayError` of the relay client. */
+  class RelayError extends Error {
+    constructor(
+      readonly status: number,
+      readonly code: string,
+      message: string,
+      readonly hint: string | null,
+    ) {
+      super(message);
+      this.name = "RelayError";
+    }
+  }
+
+  test("ferry messaging enroll gives the message and the hint of each relay refusal", async () => {
+    const root = home();
+    for (const [code, hint] of [["device-flow-disabled", "Enable Device Flow in the settings of the GitHub App."], ["enrollment-failed", null]] as const) {
+      const refused = enrollMachine({ relayUrl: "https://relay.example", home: root, print: () => {} }, async () => ({
+        currentPlatform: () => "linux",
+        enroll: async () => {
+          throw new RelayError(400, code, `The relay refused: ${code}.`, hint);
+        },
+      }));
+      const message = hint === null ? `The relay refused: ${code}.` : `The relay refused: ${code}. ${hint}`;
+      await expect(refused).rejects.toMatchObject({ name: "FerryError", message, details: { status: 400, code } });
+    }
+    expect(existsSync(join(root, ".ferry", "config.toml"))).toBe(false);
+  });
+
+  test("other errors stay as they are", () => {
+    const error = new Error("socket closed");
+    expect(relayFailure(error)).toBe(error);
+  });
+
+  test("a view gives the message, the hint, and the status of the relay", () => {
+    expect(relayRefusal(403, { error: { code: "not-session-device", message: "The session belongs to another device.", hint: "Use the device of the session." } })).toMatchObject({
+      message: "The session belongs to another device. Use the device of the session.",
+      details: { status: 403, code: "not-session-device" },
+    });
+    expect(relayRefusal(502, null)).toMatchObject({ message: "The relay answered HTTP 502.", details: { status: 502, code: null } });
+  });
 });
 
 test("a part that is not in the build gives a clear error", async () => {

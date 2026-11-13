@@ -157,13 +157,21 @@ export function messagingStatusLines(result: MessagingStatus): string[] {
 }
 
 /** `ferry messaging enroll --relay <url>`: enroll this machine, and write the URL into `[messaging]`. */
-export async function enrollMachine(input: { relayUrl: string; home?: string; print: Print }): Promise<{ owner: string; device: string; relayUrl: string }> {
+export async function enrollMachine(
+  input: { relayUrl: string; home?: string; print: Print },
+  load: () => Promise<Pick<EnrollPart, "enroll" | "currentPlatform">> = () => part<EnrollPart>("enroll"),
+): Promise<{ owner: string; device: string; relayUrl: string }> {
   const home = input.home ?? homedir();
   if (!isRelayUrl(input.relayUrl)) {
     throw new FerryError("usage", `${input.relayUrl} is not a relay URL. Use https://<host>, or http:// only for localhost.`);
   }
-  const { enroll, currentPlatform } = await part<EnrollPart>("enroll");
-  const result = await enroll({ home, relayUrl: input.relayUrl, deviceName: hostname(), platform: currentPlatform(), ferryVersion: VERSION, print: input.print });
+  const { enroll, currentPlatform } = await load();
+  let result: Awaited<ReturnType<EnrollPart["enroll"]>>;
+  try {
+    result = await enroll({ home, relayUrl: input.relayUrl, deviceName: hostname(), platform: currentPlatform(), ferryVersion: VERSION, print: input.print });
+  } catch (error) {
+    throw relayFailure(error);
+  }
   setMessagingRelay(input.relayUrl, home);
   return { owner: result.owner.login, device: result.device.id, relayUrl: input.relayUrl };
 }
@@ -179,7 +187,12 @@ type BoxLink = { run(command: string, options?: RunOptions): Promise<LinkResult>
 export async function enrollBox(input: { box: string; link: BoxLink; home?: string }): Promise<{ box: string; device: string; keyChanged: boolean }> {
   const home = input.home ?? homedir();
   const { enrollBox: create } = await part<EnrollPart>("enroll");
-  const { device } = await create({ home, box: input.box, link: input.link, ferryVersion: VERSION });
+  let device: { id: string };
+  try {
+    ({ device } = await create({ home, box: input.box, link: input.link, ferryVersion: VERSION }));
+  } catch (error) {
+    throw relayFailure(error);
+  }
   return { box: input.box, device: device.id, keyChanged: setBoxMessagingKey(input.box, "messaging", true, home) };
 }
 
@@ -214,8 +227,7 @@ export async function relayView(read: (call: RelayCall, project: () => Promise<{
     const search = new URLSearchParams(query).toString();
     const answer = await client.request({ method, path: search === "" ? path : `${path}?${search}`, ...(body === undefined ? {} : { body }) });
     if (answer.status >= 200 && answer.status < 300) return answer.body;
-    const error = (answer.body as { error?: { code?: unknown; message?: unknown } } | null)?.error;
-    throw new FerryError("failed", `The relay refused the call: ${typeof error?.code === "string" ? error.code : `HTTP ${answer.status}`}${typeof error?.message === "string" ? `. ${error.message}` : ""}`);
+    throw relayRefusal(answer.status, answer.body);
   };
   const project = async () => {
     const { findProject } = await part<RemotePart>("remote");
@@ -226,6 +238,29 @@ export async function relayView(read: (call: RelayCall, project: () => Promise<{
     return ((await call("GET", "/v1/projects", { key })) as { project: { id: string } }).project;
   };
   return read(call, project);
+}
+
+/**
+ * A refusal of the relay as a FerryError. The message is the message of the
+ * relay, then its hint, because the human output of the CLI shows only the
+ * message. `details` has the HTTP status and the relay error code.
+ */
+export function relayRefusal(status: number, body: unknown): FerryError {
+  const error = (body as { error?: { code?: unknown; message?: unknown; hint?: unknown } } | null)?.error;
+  const message = typeof error?.message === "string" ? error.message : `The relay answered HTTP ${status}.`;
+  return refusal(message, error?.hint, status, error?.code);
+}
+
+/** A `RelayError` of the relay client becomes the FerryError of `relayRefusal`. Other errors stay. */
+export function relayFailure(error: unknown): unknown {
+  if (!(error instanceof Error) || error.name !== "RelayError") return error;
+  const { status, code, hint } = error as Error & { status?: unknown; code?: unknown; hint?: unknown };
+  return refusal(error.message, hint, status, code);
+}
+
+function refusal(message: string, hint: unknown, status: unknown, code: unknown): FerryError {
+  const text = typeof hint === "string" && hint !== "" ? `${message} ${hint}` : message;
+  return new FerryError("failed", text, { details: { status, code: typeof code === "string" ? code : null } });
 }
 
 /** `ferry relay install`: the relay service on this machine, with `~/.ferry/relay` (0700). */

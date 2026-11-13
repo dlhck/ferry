@@ -2172,11 +2172,8 @@ the worker on the box.`);
     .command("conversations")
     .description("List the conversations of the project of the current directory")
     .option("--query <words>", "words to find")
-    .option("--all", "also the closed conversations")
-    .action((options: { query?: string; all?: boolean }) =>
-      view(async (call, project) =>
-        call("GET", `/v1/projects/${(await project()).id}/conversations`, { state: options.all ? "all" : "open", ...(options.query ? { query: options.query } : {}) }),
-      )(),
+    .action((options: { query?: string }) =>
+      view(async (call, project) => call("GET", `/v1/projects/${(await project()).id}/conversations`, options.query ? { query: options.query } : {}))(),
     );
   messagingGroup
     .command("show <conversation>")
@@ -2186,7 +2183,7 @@ the worker on the box.`);
       view(async (call, project) => {
         const id = conversation.startsWith("cnv_")
           ? conversation
-          : ((await call("GET", `/v1/projects/${(await project()).id}/conversations`, { query: conversation, state: "all" })) as {
+          : ((await call("GET", `/v1/projects/${(await project()).id}/conversations`, { query: conversation })) as {
               conversations: { id: string; slug: string }[];
             }).conversations.find((entry) => entry.slug === conversation)?.id;
         if (id === undefined) throw new FerryError("usage", `The project has no conversation ${conversation}.`);
@@ -2217,7 +2214,17 @@ the worker on the box.`);
     .description("Retire a session of your owner. Its memberships end")
     .requiredOption("--session <id>", "the session id (ses_...)")
     .action((options: { session: string }) =>
-      view(async (call) => call("POST", `/v1/sessions/${encodeURIComponent(options.session)}/end`, {}, { reason: "retired" }))(),
+      view(async (call) => {
+        try {
+          return await call("POST", `/v1/sessions/${encodeURIComponent(options.session)}/end`, {}, { reason: "retired" });
+        } catch (error) {
+          // The relay lets only the device of the session retire it.
+          if (error instanceof FerryError && error.details?.status === 403) {
+            throw new FerryError("failed", `This machine cannot retire session ${options.session}. Retire the session from the machine that runs it.`);
+          }
+          throw error;
+        }
+      })(),
     );
   const remote = messagingGroup.command("remote").description("Choose the Git remote of the project for the checkout of the current directory");
   remote
