@@ -1503,7 +1503,8 @@ Options:
 Commands:
   setup                        Create the GitHub App of the relay
   import-github-app [options]  Store an existing GitHub App for the relay, when
-                               the manifest flow is not possible
+                               the manifest flow is not possible. With --box,
+                               store it on the box
   install                      Install and start the relay service on this
                                machine. With --box, set relay = true for the box
   uninstall [options]          Stop and remove the relay service. Without
@@ -1534,7 +1535,8 @@ Options:
 
 Commands:
   github-app [options]  Create the GitHub App of the relay with the manifest
-                        flow of GitHub, and store its key in ~/.ferry/relay
+                        flow of GitHub, and store its key in ~/.ferry/relay.
+                        With --box, store it on the box
   help [command]        display help for command
 ```
 
@@ -1544,7 +1546,7 @@ Commands:
 Usage: ferry relay setup github-app [options]
 
 Create the GitHub App of the relay with the manifest flow of GitHub, and store
-its key in ~/.ferry/relay
+its key in ~/.ferry/relay. With --box, store it on the box
 
 Options:
   --org <org>    create the App for this organization, else for your user
@@ -1559,7 +1561,7 @@ Options:
 Usage: ferry relay import-github-app [options]
 
 Store an existing GitHub App for the relay, when the manifest flow is not
-possible
+possible. With --box, store it on the box
 
 Options:
   --app-id <id>      the numeric App id

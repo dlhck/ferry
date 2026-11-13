@@ -13,13 +13,13 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
-import { quoteShell } from "../box-settings.ts";
 import { isRelayUrl, setBoxMessagingKey, setMessagingRelay } from "../config.ts";
 import { FerryError } from "../errors.ts";
+import { VERSION } from "../version.ts";
 import { LOGIN } from "./ids.ts";
 import type { GitHubAccess } from "./relay/access.ts";
 import type { LinkResult, RunOptions } from "../link.ts";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { installUserService, launchdPath, systemdPath, uninstallUserService, type WatchServiceResult } from "../watch-service.ts";
 import { callWorker, MESSAGING_DIR, workerSocketPath } from "./hook.ts";
 import { MESSAGING_SERVICE, RELAY_DIR, RELAY_SERVICE, type MessagingStatus, type WorkerStatusView } from "./setup.ts";
@@ -27,42 +27,60 @@ import { MESSAGING_SERVICE, RELAY_DIR, RELAY_SERVICE, type MessagingStatus, type
 /** The worker answers `status` from its local store, so the call is short. */
 const STATUS_TIMEOUT_MS = 3000;
 
-/** `enroll` of the enrollment module: the device flow, then `credential` and `client.json` in `~/.ferry/messaging`. */
+// The interfaces below are the exports of lane B (#314) that the commands use.
+
+/** `src/messaging/client/enroll.ts`. `enroll` and `enrollBox` write `credential` and `client.json` (0600, in a 0700 directory). */
 export type EnrollPart = {
-  enroll(input: { relayUrl: string; home: string; deviceName: string; print: (line: string) => void }): Promise<{
+  enroll(input: { home: string; relayUrl: string; deviceName: string; platform: "linux" | "darwin"; ferryVersion: string; print: Print }): Promise<{
     owner: { login: string };
     device: { id: string; name: string };
+    relayUrl: string;
   }>;
-  /** A new device of the same owner for a box. `client` is the `client.json` of the box. Nothing goes to disk on this machine. */
-  enrollBox(input: { home: string; deviceName: string }): Promise<{ credential: string; client: Readonly<Record<string, unknown>> }>;
+  /** A new device of the same owner for the box. It writes the credential on the box over the link, never on this machine. */
+  enrollBox(input: { home: string; box: string; link: BoxLink; deviceName?: string; ferryVersion: string }): Promise<{ device: { id: string; name: string } }>;
+  currentPlatform(): "linux" | "darwin";
 };
 
 /**
- * The relay client, with the device credential of this host. It is the
- * `RelayTransport` of the worker (`src/messaging/worker/outbox.ts`): one
- * call of the relay API of section 7, which gives the status and the JSON body.
+ * One call of the relay API of section 7, which gives the status and the JSON
+ * body. `RelayClient` of lane B has it, and the worker takes it as its
+ * `RelayTransport` (`src/messaging/worker/outbox.ts`).
  */
 export type RelayTransport = {
   request(call: { method: "GET" | "POST" | "PATCH"; path: string; body?: unknown; idempotencyKey?: string; signal?: AbortSignal }): Promise<{ status: number; body: unknown }>;
 };
-export type RelayClientPart = { openRelayClient(input: { home: string }): Promise<RelayTransport> };
+/** `src/messaging/client/relay-client.ts`. */
+export type RelayClientPart = { RelayClient: new (options: { url: string; credential: string | null; ferryVersion: string }) => RelayTransport };
+/** `src/messaging/client/credential.ts`. */
+export type CredentialPart = {
+  readCredential(home: string): string | null;
+  readClientConfig(home: string): { relayUrl: string } | null;
+};
 
-/** Remote selection (section 5.1). `projectKey` gives `github.com/<owner>/<repo>` of the checkout of `cwd`, or throws a coded error. */
+/** `src/messaging/client/remote.ts`: remote selection (section 5.1). `findProject` gives null outside a Git checkout. */
 export type RemotePart = {
-  projectKey(input: { cwd: string; home: string }): Promise<string>;
-  /** Set or clear (`remote` null) the remote override of the checkout of `cwd` in `remotes.json`. Returns the checkout root. */
-  setRemoteOverride(input: { cwd: string; home: string; remote: string | null }): Promise<{ root: string }>;
+  findProject(
+    cwd: string,
+    options: { home: string },
+  ): Promise<({ root: string } & ({ ok: true; remote: string; key: string } | { ok: false; code: string; remotes: readonly string[] })) | null>;
+  setRemoteOverride(home: string, root: string, remote: string | null): void;
 };
 
-/** The GitHub App of the relay. */
+type RelayHostFiles = { readonly where: string };
+type GitHubAppResult = { appId: number; slug: string; clientId: string; installUrl: string; allowedOwners: readonly string[] };
+/** `src/messaging/github/manifest.ts`. `openRelayHost` gives this machine, or the box of `box` over the link. */
 export type GitHubAppPart = {
-  setupGitHubApp(input: { home: string; org?: string; public: boolean; name?: string; print: (line: string) => void }): Promise<{ slug: string; appId: number }>;
-  importGitHubApp(input: { home: string; appId: number; clientId: string; slug: string; keyFile: string }): Promise<{ slug: string; appId: number }>;
+  openRelayHost(input: { home: string; box?: string }): Promise<RelayHostFiles>;
+  setupGitHubApp(input: { org?: string; public?: boolean; name?: string; relayHost: RelayHostFiles; print: Print; openUrl: (url: string) => void }): Promise<GitHubAppResult>;
+  importGitHubApp(input: { appId: number; clientId: string; slug: string; keyFile: string; relayHost: RelayHostFiles; print: Print }): Promise<GitHubAppResult>;
 };
 
-/** The GitHub access of the relay (`src/messaging/github/access.ts`). `app` is the `github` value of the relay config. */
+/** `src/messaging/github/app.ts`: the App credentials from `config.json` and `github-app.pem`. */
+export type AppCredentialsPart = { readAppCredentials(home: string): { appId: number; slug: string; clientId: string; privateKeyPem: string } };
+
+/** `src/messaging/github/access.ts`. */
 export type GitHubAccessPart = {
-  createGitHubAccess(config: { app: unknown; privateKey: string }): GitHubAccess;
+  createGitHubAccess(config: { appId: number; slug: string; clientId: string; privateKeyPem: string }): GitHubAccess;
 };
 
 /** The worker (`src/messaging/worker/worker.ts`). */
@@ -74,9 +92,8 @@ export type WorkerPart = {
 /** `ferry messaging worker`: the worker with the relay client and the adapters of this host, until SIGINT or SIGTERM. */
 export async function runWorkerService(home: string, log: Print): Promise<void> {
   const { runWorker, defaultAdapters } = await part<WorkerPart>("worker");
-  const { openRelayClient } = await part<RelayClientPart>("client");
   const clock = { now: () => Date.now() };
-  const worker = await runWorker({ home, client: await openRelayClient({ home }), adapters: defaultAdapters(home, clock), clock, log });
+  const worker = await runWorker({ home, client: await openRelayClient(home), adapters: defaultAdapters(home, clock), clock, log });
   await new Promise<void>((resolve) => {
     for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => resolve());
   });
@@ -86,15 +103,19 @@ export async function runWorkerService(home: string, log: Print): Promise<void> 
 const PARTS = {
   enroll: { specifier: "./client/enroll.ts", what: "messaging enrollment" },
   client: { specifier: "./client/relay-client.ts", what: "relay client" },
+  credential: { specifier: "./client/credential.ts", what: "messaging credential" },
   remote: { specifier: "./client/remote.ts", what: "remote selection" },
   app: { specifier: "./github/manifest.ts", what: "GitHub App setup" },
   access: { specifier: "./github/access.ts", what: "GitHub access" },
+  appCredentials: { specifier: "./github/app.ts", what: "GitHub App" },
   worker: { specifier: "./worker/worker.ts", what: "messaging worker" },
 } as const;
 
 /**
  * Load a module of the feature. The specifier is a variable, so the build
- * does not need the module.
+ * does not need the module. `bun build --compile` does not bundle a module
+ * that it reaches only through a variable, so a release build must change
+ * each part to a literal `import(...)` when the module is on main.
  */
 export async function part<T>(name: keyof typeof PARTS): Promise<T> {
   const { specifier, what } = PARTS[name];
@@ -141,8 +162,8 @@ export async function enrollMachine(input: { relayUrl: string; home?: string; pr
   if (!isRelayUrl(input.relayUrl)) {
     throw new FerryError("usage", `${input.relayUrl} is not a relay URL. Use https://<host>, or http:// only for localhost.`);
   }
-  const { enroll } = await part<EnrollPart>("enroll");
-  const result = await enroll({ relayUrl: input.relayUrl, home, deviceName: hostname(), print: input.print });
+  const { enroll, currentPlatform } = await part<EnrollPart>("enroll");
+  const result = await enroll({ home, relayUrl: input.relayUrl, deviceName: hostname(), platform: currentPlatform(), ferryVersion: VERSION, print: input.print });
   setMessagingRelay(input.relayUrl, home);
   return { owner: result.owner.login, device: result.device.id, relayUrl: input.relayUrl };
 }
@@ -150,32 +171,16 @@ export async function enrollMachine(input: { relayUrl: string; home?: string; pr
 type BoxLink = { run(command: string, options?: RunOptions): Promise<LinkResult> };
 
 /**
- * `ferry messaging enroll --box <b>`: a new device credential for the box. It
- * goes to the box on SSH standard input, and never into a file on this
- * machine or into an argument. The box key `messaging` becomes true.
+ * `ferry messaging enroll --box <b>`: a new device credential for the box.
+ * The enrollment module writes it on the box over the link, never into a
+ * file on this machine or into an argument. The box key `messaging` becomes
+ * true.
  */
-export async function enrollBox(input: { box: string; link: BoxLink; home?: string }): Promise<{ box: string; keyChanged: boolean }> {
+export async function enrollBox(input: { box: string; link: BoxLink; home?: string }): Promise<{ box: string; device: string; keyChanged: boolean }> {
   const home = input.home ?? homedir();
   const { enrollBox: create } = await part<EnrollPart>("enroll");
-  const { credential, client } = await create({ home, deviceName: input.box });
-  const script = [
-    "umask 077",
-    `d="$HOME/${MESSAGING_DIR}"`,
-    'mkdir -p "$d" && chmod 700 "$d" || exit 1',
-    'IFS= read -r credential || exit 1',
-    'IFS= read -r client || exit 1',
-    `printf '%s\\n' "$client" > "$d/client.json.tmp" && mv -f "$d/client.json.tmp" "$d/client.json" || exit 1`,
-    `printf '%s' "$credential" > "$d/credential.tmp" && mv -f "$d/credential.tmp" "$d/credential" || exit 1`,
-  ].join("\n");
-  const result = await input.link.run(`sh -c ${quoteShell(script)}`, {
-    input: new TextEncoder().encode(`${credential}\n${JSON.stringify(client)}\n`),
-  });
-  if (!result.ok) {
-    throw new FerryError("box-command-failed", `Ferry could not write the messaging credential on box ${input.box}: ${result.error.message}`, {
-      hint: `Revoke the new device with ferry messaging revoke, then run ferry messaging enroll --box ${input.box} again.`,
-    });
-  }
-  return { box: input.box, keyChanged: setBoxMessagingKey(input.box, "messaging", true, home) };
+  const { device } = await create({ home, box: input.box, link: input.link, ferryVersion: VERSION });
+  return { box: input.box, device: device.id, keyChanged: setBoxMessagingKey(input.box, "messaging", true, home) };
 }
 
 /** `ferry messaging relay-url <url>`: the new relay URL in `[messaging]` and in `client.json` of this machine. Sync writes it to the boxes. */
@@ -192,9 +197,11 @@ export function changeRelayUrl(relayUrl: string, home = homedir()): { relayUrl: 
 
 /** `ferry messaging remote set <name>|clear`. */
 export async function setRemote(remote: string | null, cwd = process.cwd(), home = homedir()): Promise<{ root: string; remote: string | null }> {
-  const { setRemoteOverride } = await part<RemotePart>("remote");
-  const { root } = await setRemoteOverride({ cwd, home, remote });
-  return { root, remote };
+  const { findProject, setRemoteOverride } = await part<RemotePart>("remote");
+  const project = await findProject(cwd, { home });
+  if (project === null) throw new FerryError("usage", "The current directory is not in a Git checkout.");
+  setRemoteOverride(home, project.root, remote);
+  return { root: project.root, remote };
 }
 
 /** One relay call for a view. A JSON error body of the relay becomes a FerryError with its code and message. */
@@ -202,8 +209,7 @@ export type RelayCall = (method: "GET" | "POST", path: string, query?: Readonly<
 
 /** A read-only view, or a device action: relay calls with the credential of this host. `project` gives the project of the current directory. */
 export async function relayView(read: (call: RelayCall, project: () => Promise<{ id: string }>) => Promise<unknown>, cwd = process.cwd(), home = homedir()): Promise<unknown> {
-  const { openRelayClient } = await part<RelayClientPart>("client");
-  const client = await openRelayClient({ home });
+  const client = await openRelayClient(home);
   const call: RelayCall = async (method, path, query = {}, body) => {
     const search = new URLSearchParams(query).toString();
     const answer = await client.request({ method, path: search === "" ? path : `${path}?${search}`, ...(body === undefined ? {} : { body }) });
@@ -212,8 +218,11 @@ export async function relayView(read: (call: RelayCall, project: () => Promise<{
     throw new FerryError("failed", `The relay refused the call: ${typeof error?.code === "string" ? error.code : `HTTP ${answer.status}`}${typeof error?.message === "string" ? `. ${error.message}` : ""}`);
   };
   const project = async () => {
-    const { projectKey } = await part<RemotePart>("remote");
-    const key = await projectKey({ cwd, home });
+    const { findProject } = await part<RemotePart>("remote");
+    const found = await findProject(cwd, { home });
+    if (found === null) throw new FerryError("usage", "The current directory is not in a Git checkout.");
+    if (!found.ok) throw new FerryError("usage", `Ferry cannot select the GitHub remote of ${found.root}: ${found.code}.`, { hint: "Run ferry messaging remote set <name>." });
+    const key = found.key;
     return ((await call("GET", "/v1/projects", { key })) as { project: { id: string } }).project;
   };
   return read(call, project);
@@ -288,21 +297,16 @@ const RELAY_KEY_FILE = `${RELAY_DIR}/github-app.pem`;
 /** `ferry relay serve`: the relay with the config of `~/.ferry/relay`, until SIGINT or SIGTERM. */
 export async function serveRelay(listen: string, version: string, log: Print, home = homedir()): Promise<void> {
   const { github, allowedOwners } = readRelayConfig(home);
-  let privateKey: string;
-  try {
-    privateKey = readFileSync(join(home, RELAY_KEY_FILE), "utf8");
-  } catch {
-    privateKey = "";
-  }
-  if (github === null || privateKey === "") {
+  if (github === null || !existsSync(join(home, RELAY_KEY_FILE))) {
     throw new FerryError("failed", "The relay has no GitHub App.", { hint: "Run ferry relay setup github-app or ferry relay import-github-app." });
   }
   const { startRelay } = await import("./relay/server.ts");
   const { createGitHubAccess } = await part<GitHubAccessPart>("access");
+  const { readAppCredentials } = await part<AppCredentialsPart>("appCredentials");
   const relay = await startRelay({
     dbPath: join(home, RELAY_DB_FILE),
     listen,
-    github: createGitHubAccess({ app: github, privateKey }),
+    github: createGitHubAccess(readAppCredentials(home)),
     clock: { now: () => Date.now() },
     // The relay log events have no secret values. Each event is one JSON line on stderr, for the journal.
     log: (event, fields) => log(JSON.stringify({ event, ...fields })),
@@ -371,6 +375,49 @@ function restartRelay(home: string): boolean {
   }
   if (!existsSync(systemdPath(RELAY_SERVICE, home))) return false;
   return spawnSync("systemctl", ["--user", "try-restart", RELAY_SERVICE.unit], { stdio: "ignore" }).status === 0;
+}
+
+/** The relay client with the device credential of this host. */
+async function openRelayClient(home: string): Promise<RelayTransport> {
+  const { readCredential, readClientConfig } = await part<CredentialPart>("credential");
+  const { RelayClient } = await part<RelayClientPart>("client");
+  const config = readClientConfig(home);
+  const credential = readCredential(home);
+  if (config === null || credential === null) {
+    throw new FerryError("failed", "This machine has no messaging enrollment.", { hint: "Run ferry messaging enroll --relay <url>." });
+  }
+  return new RelayClient({ url: config.relayUrl, credential, ferryVersion: VERSION });
+}
+
+/** `ferry relay setup github-app`: the manifest flow. The App key goes to this machine, or to the box of `box`. */
+export async function setupApp(input: { home: string; box?: string; org?: string; public: boolean; name?: string; print: Print }): Promise<GitHubAppResult> {
+  const { openRelayHost, setupGitHubApp } = await part<GitHubAppPart>("app");
+  const relayHost = await openRelayHost({ home: input.home, ...(input.box === undefined ? {} : { box: input.box }) });
+  return setupGitHubApp({
+    relayHost,
+    public: input.public,
+    print: input.print,
+    openUrl,
+    ...(input.org === undefined ? {} : { org: input.org }),
+    ...(input.name === undefined ? {} : { name: input.name }),
+  });
+}
+
+/** `ferry relay import-github-app`: an existing App. The key goes to this machine, or to the box of `box`. */
+export async function importApp(input: { home: string; box?: string; appId: number; clientId: string; slug: string; keyFile: string; print: Print }): Promise<GitHubAppResult> {
+  const { openRelayHost, importGitHubApp } = await part<GitHubAppPart>("app");
+  const relayHost = await openRelayHost({ home: input.home, ...(input.box === undefined ? {} : { box: input.box }) });
+  return importGitHubApp({ relayHost, appId: input.appId, clientId: input.clientId, slug: input.slug, keyFile: input.keyFile, print: input.print });
+}
+
+/** Open a URL in the browser. The manifest flow prints the URL too, so a machine without a browser still works. */
+function openUrl(url: string): void {
+  const command = process.platform === "darwin" ? "open" : "xdg-open";
+  try {
+    spawn(command, [url], { stdio: "ignore", detached: true }).on("error", () => {}).unref();
+  } catch {
+    // No browser on this machine.
+  }
 }
 
 function readClient(home: string): Record<string, unknown> | null {

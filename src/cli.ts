@@ -1946,19 +1946,20 @@ data in ~/.ferry/relay. Agents reach it over HTTPS, for example through
 Tailscale Serve. With --box, relay install and relay uninstall change the
 box key relay of [box.<name>], and the next ferry sync starts or removes the
 relay on that box.`);
-  relayGroup
+  const relaySetupApp = relayGroup
     .command("setup")
     .description("Create the GitHub App of the relay")
     .command("github-app")
-    .description("Create the GitHub App of the relay with the manifest flow of GitHub, and store its key in ~/.ferry/relay")
+    .description("Create the GitHub App of the relay with the manifest flow of GitHub, and store its key in ~/.ferry/relay. With --box, store it on the box")
     .option("--org <org>", "create the App for this organization, else for your user")
     .option("--public", "let other owners install the App")
     .option("--name <name>", "the App name")
     .action(async (options: { org?: string; public?: boolean; name?: string }) => {
-      const { part } = await import("./messaging/commands.ts");
-      const { setupGitHubApp } = await part<import("./messaging/commands.ts").GitHubAppPart>("app");
-      const result = await setupGitHubApp({
+      const box = boxNames().length > 0 ? selectBox("relay setup github-app")?.box.name : undefined;
+      const { setupApp } = await import("./messaging/commands.ts");
+      const result = await setupApp({
         home: messagingHome(),
+        ...(box === undefined ? {} : { box }),
         public: options.public === true,
         print: writeLine,
         ...(options.org !== undefined ? { org: options.org } : {}),
@@ -1966,9 +1967,10 @@ relay on that box.`);
       });
       report(result, (result) => writeLine(`Created the GitHub App ${result.slug}.`));
     });
-  relayGroup
+  boxCommands.add(relaySetupApp);
+  const relayImportApp = relayGroup
     .command("import-github-app")
-    .description("Store an existing GitHub App for the relay, when the manifest flow is not possible")
+    .description("Store an existing GitHub App for the relay, when the manifest flow is not possible. With --box, store it on the box")
     .requiredOption("--app-id <id>", "the numeric App id")
     .requiredOption("--client-id <id>", "the client id of the App")
     .requiredOption("--slug <slug>", "the App slug")
@@ -1976,11 +1978,12 @@ relay on that box.`);
     .action(async (options: { appId: string; clientId: string; slug: string; keyFile: string }) => {
       const appId = Number(options.appId);
       if (!Number.isInteger(appId) || appId <= 0) throw new FerryError("usage", `invalid App id ${options.appId}`);
-      const { part } = await import("./messaging/commands.ts");
-      const { importGitHubApp } = await part<import("./messaging/commands.ts").GitHubAppPart>("app");
-      const result = await importGitHubApp({ home: messagingHome(), appId, clientId: options.clientId, slug: options.slug, keyFile: options.keyFile });
+      const box = boxNames().length > 0 ? selectBox("relay import-github-app")?.box.name : undefined;
+      const { importApp } = await import("./messaging/commands.ts");
+      const result = await importApp({ home: messagingHome(), ...(box === undefined ? {} : { box }), appId, clientId: options.clientId, slug: options.slug, keyFile: options.keyFile, print: writeLine });
       report(result, (result) => writeLine(`Stored the GitHub App ${result.slug}.`));
     });
+  boxCommands.add(relayImportApp);
   const relayInstall = relayGroup
     .command("install")
     .description("Install and start the relay service on this machine. With --box, set relay = true for the box")
@@ -2120,7 +2123,7 @@ the worker on the box.`);
       if (selected) {
         if (options.relay !== undefined) throw new FerryError("usage", "--relay does not apply with --box. The box uses the relay of [messaging].");
         const result = await commands.enrollBox({ box: selected.box.name, link: createLink(resolveLinkOptions(selected.box.host)), home: messagingHome() });
-        report({ ...result, syncNeeded: true }, () => writeLine(`Enrolled box ${result.box}. Run ferry sync --box ${result.box}.`));
+        report({ ...result, syncNeeded: true }, () => writeLine(`Enrolled box ${result.box} as ${result.device}. Run ferry sync --box ${result.box}.`));
         return;
       }
       if (options.relay === undefined) throw new FerryError("usage", "ferry messaging enroll needs --relay <url>, or --box <name>.");
