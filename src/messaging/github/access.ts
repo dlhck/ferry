@@ -60,17 +60,20 @@ export interface GitHubAccess {
 }
 
 export type GitHubAccessConfig = AppCredentials & {
-  readonly endpoints?: GitHubEndpoints;
+  /** Default: `https://api.github.com`. */
+  readonly apiUrl?: string;
+  /** Default: `https://github.com`. */
+  readonly webUrl?: string;
   readonly clock?: Clock;
   readonly fetch?: Fetch;
 };
 
 export function createGitHubAccess(config: GitHubAccessConfig): GitHubAccess {
-  const endpoints = config.endpoints ?? GITHUB_ENDPOINTS;
+  const endpoints: GitHubEndpoints = { api: config.apiUrl ?? GITHUB_ENDPOINTS.api, web: config.webUrl ?? GITHUB_ENDPOINTS.web };
   const fetcher = config.fetch ?? ((input, init) => fetch(input, init));
   const tokens = new InstallationTokens({
     appId: config.appId,
-    privateKey: config.privateKey,
+    privateKey: config.privateKeyPem,
     api: endpoints.api,
     clock: config.clock ?? systemClock,
     fetch: fetcher,

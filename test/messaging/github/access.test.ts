@@ -38,8 +38,9 @@ async function setup(clock = clockAt()): Promise<{ github: FakeGitHub; access: G
     appId: github.app.appId,
     clientId: github.app.clientId,
     slug: github.app.slug,
-    privateKey: github.app.privateKeyPem,
-    endpoints: { api: github.apiUrl, web: github.webUrl },
+    privateKeyPem: github.app.privateKeyPem,
+    apiUrl: github.apiUrl,
+    webUrl: github.webUrl,
     clock,
   });
   return { github, access };

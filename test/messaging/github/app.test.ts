@@ -138,7 +138,7 @@ describe("the relay files", () => {
     writeAppKey(home, github.app.privateKeyPem);
 
     expect(readRelayConfig(home)).toEqual(config);
-    expect(readAppCredentials(home)).toEqual({ ...config.github, privateKey: github.app.privateKeyPem });
+    expect(readAppCredentials(home)).toEqual({ ...config.github, privateKeyPem: github.app.privateKeyPem });
     expect(statSync(relayDir(home)).mode & 0o777).toBe(0o700);
     expect(statSync(join(relayDir(home), "config.json")).mode & 0o777).toBe(0o600);
     expect(statSync(join(relayDir(home), "github-app.pem")).mode & 0o777).toBe(0o600);

@@ -37,7 +37,8 @@ export type AppCredentials = {
   readonly appId: number;
   readonly slug: string;
   readonly clientId: string;
-  readonly privateKey: string;
+  /** The App private key in PEM form. */
+  readonly privateKeyPem: string;
 };
 
 export function relayDir(home: string): string {
@@ -110,7 +111,7 @@ export function writeAppKey(home: string, pem: string): void {
 export function readAppCredentials(home: string): AppCredentials {
   const config = readRelayConfig(home);
   if (!config) throw new Error("The relay has no GitHub App. Run ferry relay setup github-app.");
-  return { ...config.github, privateKey: readAppKey(home) };
+  return { ...config.github, privateKeyPem: readAppKey(home) };
 }
 
 /** Refuse a value that is not an RSA private key. The error has no part of the value. */
