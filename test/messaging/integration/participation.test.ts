@@ -6,13 +6,13 @@
 
 import { describe, expect, test } from "bun:test";
 import { suiteTitle } from "../harness/lanes.ts";
-import { openConversation, systemReady, useSystem, type Session } from "../harness/system.ts";
+import { memberAddresses, openConversation, systemReady, useSystem, type MessagingSystem, type Session } from "../harness/system.ts";
 
 const TIMEOUT = 30_000;
 
-async function memberships(session: Session): Promise<string[]> {
-  const whoami = await session.tool("ferry_whoami");
-  return (whoami.result!.session.memberships ?? []) as string[];
+async function isMember(system: MessagingSystem, session: Session, conversationId: string): Promise<boolean> {
+  const p = system.participant(session.login);
+  return (await memberAddresses(p.http, p.checkout.key, conversationId)).includes(session.address);
 }
 
 describe.skipIf(!systemReady)(suiteTitle("participation"), () => {
@@ -46,9 +46,10 @@ describe.skipIf(!systemReady)(suiteTitle("participation"), () => {
       // The linked worktree is on feat/clo-1442-example. The main worktree is on main.
       const onIssueBranch = await system().startSession("bob", "codex", { where: "linked" });
       const onMain = await system().startSession("bob", "claude");
-      expect(await memberships(onIssueBranch)).toEqual(expect.arrayContaining([linked.id, everyone.id]));
-      expect(await memberships(onMain)).toContain(everyone.id);
-      expect(await memberships(onMain)).not.toContain(linked.id);
+      expect(await isMember(system(), onIssueBranch, linked.id)).toBe(true);
+      expect(await isMember(system(), onIssueBranch, everyone.id)).toBe(true);
+      expect(await isMember(system(), onMain, everyone.id)).toBe(true);
+      expect(await isMember(system(), onMain, linked.id)).toBe(false);
       expect(onIssueBranch.startContext).toContain(linked.slug);
     },
     TIMEOUT,

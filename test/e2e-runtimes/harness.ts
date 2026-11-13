@@ -23,7 +23,7 @@ import { join } from "node:path";
 import { systemClock } from "../messaging/harness/clock.ts";
 import { ALICE, BOB } from "../messaging/harness/homes.ts";
 import { waitingFor } from "../messaging/harness/lanes.ts";
-import { parseEnvelopes, REPO_ROOT, RELAY_STACK_PARTS, startRelayStack, waitFor, type RelayStack, type ToolResult } from "../messaging/harness/system.ts";
+import { parseEnvelopes, relaySession, REPO_ROOT, RELAY_STACK_PARTS, startRelayStack, waitFor, type RelayStack, type ToolResult } from "../messaging/harness/system.ts";
 import { callWorker } from "../messaging/harness/wire.ts";
 
 export const enabled = process.env.FERRY_E2E_RUNTIMES === "1";
@@ -307,11 +307,13 @@ export async function startE2E(): Promise<E2E> {
         }
         session.pid = runtimePid(panePid, runtime);
         const whoami = await session.tool("ferry_whoami");
-        const info = whoami.ok ? (whoami.result?.session as { id: string; address: string } | undefined) : undefined;
-        if (info === undefined) return null;
-        session.address = info.address;
-        session.id = info.id;
-        return info;
+        const address = whoami.ok ? String(whoami.result?.address ?? "") : "";
+        if (address === "") return null;
+        const relay = await relaySession(p.http, p.checkout.key, address);
+        if (relay === null) return null;
+        session.address = address;
+        session.id = relay.id;
+        return relay;
       },
       { timeoutMs: 120_000, what: `the registration of ${target}` },
     );

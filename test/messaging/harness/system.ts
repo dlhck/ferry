@@ -67,7 +67,7 @@ export type Session = {
   readonly fake: FakeRuntimeSession;
   /** The `additionalContext` of the `SessionStart` hook. */
   readonly startContext: string;
-  /** The relay session id and address, from `ferry_whoami`. */
+  /** The address from `ferry_whoami`, and the relay session id from the relay API. Empty when the session does not participate. */
   readonly id: string;
   readonly address: string;
   hook(event: FakeHookEvent, fields?: Readonly<Record<string, unknown>>): Promise<WorkerReply>;
@@ -340,14 +340,15 @@ export async function startSystem(
     if (!start.ok) throw new Error(`SessionStart failed: ${start.error.code} ${start.error.message}`);
     const startContext = String((start.result as { additionalContext?: unknown }).additionalContext ?? "");
     const whoami = await tool("ferry_whoami");
-    const info = whoami.result?.session as { id?: string; address?: string } | undefined;
+    const address = whoami.ok ? String(whoami.result!.address ?? "") : "";
+    const relay = address === "" ? null : await relaySession(p.http, p.checkout.key, address);
     return {
       login,
       runtime: fake.runtime,
       fake,
       startContext,
-      id: info?.id ?? "",
-      address: info?.address ?? "",
+      id: relay?.id ?? "",
+      address,
       hook,
       tool,
       envelopes: () => parseEnvelopes(fake.received()),
@@ -490,4 +491,25 @@ export async function startHumanTurn(session: Session, prompt = "Continue with t
 export async function endTurn(session: Session): Promise<void> {
   session.fake.setActivity("idle");
   await session.hook("Stop");
+}
+
+/** The relay record of a session, by its address, through the relay API (design 7.6). */
+export async function relaySession(http: RelayHttp, projectKey: string, address: string): Promise<{ id: string; projectId: string } | null> {
+  const project = await http.get<{ project?: { id: string } }>(`/v1/projects?key=${encodeURIComponent(projectKey)}`);
+  const projectId = project.body.project?.id;
+  if (projectId === undefined) return null;
+  const sessions = await http.get<{ sessions?: { id: string; address: string }[] }>(`/v1/projects/${projectId}/sessions?state=all`);
+  const found = sessions.body.sessions?.find((session) => session.address === address);
+  return found === undefined ? null : { id: found.id, projectId };
+}
+
+/** The addresses of the member sessions of a conversation, through the relay API (design 7.6). */
+export async function memberAddresses(http: RelayHttp, projectKey: string, conversationId: string): Promise<string[]> {
+  const project = await http.get<{ project?: { id: string } }>(`/v1/projects?key=${encodeURIComponent(projectKey)}`);
+  const projectId = project.body.project?.id;
+  if (projectId === undefined) return [];
+  const sessions = await http.get<{ sessions?: { address: string }[] }>(
+    `/v1/projects/${projectId}/sessions?state=all&conversationId=${encodeURIComponent(conversationId)}`,
+  );
+  return (sessions.body.sessions ?? []).map((session) => session.address);
 }

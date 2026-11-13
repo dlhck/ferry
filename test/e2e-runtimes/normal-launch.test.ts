@@ -8,6 +8,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect } from "bun:test";
+import { memberAddresses } from "../messaging/harness/system.ts";
 import { e2eTitle, ready, requestOutcome, startE2E, waitFor, type E2E } from "./harness.ts";
 import { caseTest, writeRuntimeTable } from "./results.ts";
 
@@ -37,8 +38,8 @@ describe.skipIf(!ready)(e2eTitle("real runtimes: normal launch"), () => {
 
       // The linked worktree is on feat/clo-1442-example.
       const session = await e2e.launch("bob", runtime, { where: "linked" });
-      const whoami = await session.tool("ferry_whoami");
-      expect(whoami.result!.session.memberships).toContain(conversation.id);
+      const bob = e2e.stack.participant("bob");
+      expect(await memberAddresses(bob.http, bob.checkout.key, conversation.id)).toContain(session.address);
 
       const sent = await creator.tool("ferry_send", {
         conversation: conversation.slug,
