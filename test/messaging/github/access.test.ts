@@ -1,16 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import {
-  ACCESS_GRACE_MS,
-  ACCESS_RECHECK_MS,
-  applyPermissionCheck,
-  checkAccess,
-  createGitHubAccess,
-  grantValid,
-  recheckDue,
-  type AccessGrant,
-  type GitHubAccess,
-  type PermissionLookup,
-} from "../../../src/messaging/github/access.ts";
+import { createGitHubAccess, type GitHubAccess } from "../../../src/messaging/github/access.ts";
 import { DeviceFlowDisabledError } from "../../../src/messaging/github/device-flow.ts";
 import { GitHubUnavailableError } from "../../../src/messaging/github/app.ts";
 import { startFakeGitHub, type FakeGitHub } from "../fakes/github.ts";
@@ -19,7 +8,6 @@ const ALICE = { login: "alice", githubUserId: 1001 };
 const BOB = { login: "bob", githubUserId: 1002 };
 const APP_REPO = { owner: "acme", name: "app", id: 501 };
 const START = Date.parse("2026-01-05T09:00:00.000Z");
-const MINUTE = 60_000;
 
 const clockAt = (start = START) => {
   let now = start;
@@ -161,89 +149,5 @@ describe("permission lookup", () => {
     expect(await access.currentLogin(4040)).toBeNull();
     github.setFault("server-error");
     expect(await access.currentLogin(ALICE.githubUserId)).toBeNull();
-  });
-});
-
-describe("revalidation timing", () => {
-  const ok = (permission: "admin" | "write" | "read" | "none"): PermissionLookup => ({ state: "ok", permission, roleName: null });
-  const unavailable: PermissionLookup = { state: "unavailable" };
-  const iso = (ms: number) => new Date(ms).toISOString();
-
-  test("a grant needs a recheck 15 minutes after the last attempt", () => {
-    const { grant } = applyPermissionCheck(null, ok("write"), START);
-
-    expect(recheckDue(null, START)).toBe(true);
-    expect(recheckDue(grant, START + ACCESS_RECHECK_MS - 1)).toBe(false);
-    expect(recheckDue(grant, START + ACCESS_RECHECK_MS)).toBe(true);
-  });
-
-  test("write and admin qualify, read and none end the memberships", () => {
-    const granted = applyPermissionCheck(null, ok("admin"), START);
-    expect(granted).toEqual({
-      grant: { permission: "admin", roleName: null, state: "granted", lastSuccessAt: iso(START), lastAttemptAt: iso(START), lastError: null },
-      effect: "none",
-    });
-    expect(grantValid(granted.grant, START)).toBe(true);
-
-    for (const permission of ["read", "none"] as const) {
-      const lost = applyPermissionCheck(granted.grant, ok(permission), START + 15 * MINUTE);
-      expect(lost.grant.state).toBe("lost");
-      expect(lost.effect).toBe("end");
-      expect(grantValid(lost.grant, START + 15 * MINUTE)).toBe(false);
-      expect(applyPermissionCheck(lost.grant, ok(permission), START + 30 * MINUTE).effect).toBe("none");
-    }
-  });
-
-  test("an outage keeps the grant for 1 hour after the last success, then suspends, and a success restores", () => {
-    let { grant } = applyPermissionCheck(null, ok("write"), START);
-    const effects: string[] = [];
-    // The background check runs every 15 minutes while GitHub is down.
-    for (const minute of [15, 30, 45]) {
-      const result = applyPermissionCheck(grant, unavailable, START + minute * MINUTE);
-      grant = result.grant;
-      effects.push(result.effect);
-      expect(grantValid(grant, START + minute * MINUTE)).toBe(true);
-    }
-    expect(grant).toMatchObject({ state: "granted", lastSuccessAt: iso(START), lastAttemptAt: iso(START + 45 * MINUTE), lastError: "GitHub unavailable" });
-    expect(grantValid(grant, START + ACCESS_GRACE_MS - 1)).toBe(true);
-    expect(grantValid(grant, START + ACCESS_GRACE_MS)).toBe(false);
-
-    const suspended = applyPermissionCheck(grant, unavailable, START + ACCESS_GRACE_MS);
-    expect(suspended).toMatchObject({ grant: { state: "unverifiable", lastSuccessAt: iso(START) }, effect: "suspend" });
-    expect(applyPermissionCheck(suspended.grant, unavailable, START + 75 * MINUTE).effect).toBe("none");
-
-    const restored = applyPermissionCheck(suspended.grant, ok("write"), START + 90 * MINUTE);
-    expect(restored).toMatchObject({ grant: { state: "granted", lastSuccessAt: iso(START + 90 * MINUTE), lastError: null }, effect: "restore" });
-    expect(effects).toEqual(["none", "none", "none"]);
-  });
-
-  test("no answer keeps a lost grant lost, and a first check without an answer is unverifiable", () => {
-    const lost = applyPermissionCheck(null, ok("read"), START).grant;
-    expect(applyPermissionCheck(lost, unavailable, START + MINUTE)).toMatchObject({ grant: { state: "lost" }, effect: "none" });
-    expect(applyPermissionCheck(null, unavailable, START)).toMatchObject({ grant: { state: "unverifiable", lastSuccessAt: null }, effect: "none" });
-  });
-
-  test("a grant that no check has renewed for 1 hour is not valid", () => {
-    const { grant } = applyPermissionCheck(null, ok("write"), START);
-    expect(grantValid(grant, START + ACCESS_GRACE_MS)).toBe(false);
-  });
-
-  test("checkAccess loses access within one recheck period after the fake GitHub lowers the permission", async () => {
-    const clock = clockAt();
-    const { github, access } = await setup(clock);
-    const installation = github.install("acme");
-    github.setPermission("acme/app", "bob", "write");
-    const target = { installationId: installation, fullName: "acme/app", login: "bob" };
-    let grant: AccessGrant | null = (await checkAccess(access, target, null, clock)).grant;
-    expect(grant.state).toBe("granted");
-
-    github.setPermission("acme/app", "bob", "read");
-    clock.advance(ACCESS_RECHECK_MS);
-    expect(recheckDue(grant, clock.now())).toBe(true);
-    const result = await checkAccess(access, target, grant, clock);
-    grant = result.grant;
-
-    expect(result.effect).toBe("end");
-    expect(grant).toMatchObject({ state: "lost", permission: "read" });
   });
 });

@@ -1,20 +1,10 @@
 /**
- * The GitHub access checks of the relay (design sections 3.4 and 3.6), and
- * the rules for revalidation.
+ * The GitHub access checks of the relay (design sections 3.4 and 3.6).
  *
  * `createGitHubAccess` implements `GitHubAccess`, the interface that the relay
  * server (lane A) consumes. It uses the App JWT for the installation lookup
- * and an installation token for the repository and permission lookups.
- *
- * The revalidation rules are pure functions of a grant and a time, so the
- * relay store applies them with its clock:
- *
- * - A grant needs a recheck 15 minutes after the last attempt.
- * - `write` or `admin` qualifies. `read`, `none`, and a 404 do not.
- * - When GitHub is unavailable, the last successful grant stays valid until 1
- *   hour after it. Then the grant is `unverifiable` and the memberships are suspended.
- * - A successful check after that restores them. A permission that does not
- *   qualify ends them.
+ * and an installation token for the repository and permission lookups. The
+ * relay store applies the revalidation rules of section 3.6 to the results.
  */
 
 import {
@@ -159,84 +149,4 @@ export function createGitHubAccess(config: GitHubAccessConfig): GitHubAccess {
 /** The field has only these four values. Any other value does not qualify. */
 function toPermission(value: string): Permission {
   return value === "admin" || value === "write" || value === "read" ? value : "none";
-}
-
-/** Write, maintain (reported as `write`), and admin qualify for read and post. */
-export function qualifies(permission: Permission): boolean {
-  return permission === "admin" || permission === "write";
-}
-
-/** The time after the last attempt at which a grant needs a new check. */
-export const ACCESS_RECHECK_MS = 15 * 60_000;
-/** The time after the last successful check for which a grant stays valid while GitHub is unavailable. */
-export const ACCESS_GRACE_MS = 60 * 60_000;
-
-/** One row of `access_grants` (design 10.2), with the times as ISO strings. */
-export type AccessGrant = {
-  readonly permission: Permission;
-  readonly roleName: string | null;
-  readonly state: "granted" | "lost" | "unverifiable";
-  readonly lastSuccessAt: string | null;
-  readonly lastAttemptAt: string;
-  readonly lastError: string | null;
-};
-
-/**
- * What the relay does with the memberships of the owner in the project after a check:
- * `suspend` them (`unverifiable`), `restore` the suspended ones, `end` them (`access-lost`), or nothing.
- */
-export type AccessEffect = "none" | "suspend" | "restore" | "end";
-
-/** True when the grant allows access at `now`: granted, and the last success is less than 1 hour old. */
-export function grantValid(grant: AccessGrant | null, now: number): boolean {
-  if (grant?.state !== "granted" || grant.lastSuccessAt === null) return false;
-  return now - Date.parse(grant.lastSuccessAt) < ACCESS_GRACE_MS;
-}
-
-/** True when the background check must check the grant again at `now`. */
-export function recheckDue(grant: AccessGrant | null, now: number): boolean {
-  return grant === null || now - Date.parse(grant.lastAttemptAt) >= ACCESS_RECHECK_MS;
-}
-
-/** The grant after a permission lookup at `now`, and the effect on the memberships. */
-export function applyPermissionCheck(
-  previous: AccessGrant | null,
-  check: PermissionLookup,
-  now: number,
-): { readonly grant: AccessGrant; readonly effect: AccessEffect } {
-  const at = new Date(now).toISOString();
-  if (check.state === "ok") {
-    const granted = qualifies(check.permission);
-    const grant: AccessGrant = {
-      permission: check.permission,
-      roleName: check.roleName,
-      state: granted ? "granted" : "lost",
-      lastSuccessAt: at,
-      lastAttemptAt: at,
-      lastError: null,
-    };
-    if (granted) return { grant, effect: previous?.state === "unverifiable" ? "restore" : "none" };
-    return { grant, effect: previous !== null && previous.state !== "lost" ? "end" : "none" };
-  }
-  const lastError = "GitHub unavailable";
-  if (previous === null) {
-    return { grant: { permission: "none", roleName: null, state: "unverifiable", lastSuccessAt: null, lastAttemptAt: at, lastError }, effect: "none" };
-  }
-  // No new answer: a lost grant stays lost, and a granted one stays granted within the grace time.
-  if (previous.state === "lost" || grantValid(previous, now)) return { grant: { ...previous, lastAttemptAt: at, lastError }, effect: "none" };
-  return {
-    grant: { ...previous, state: "unverifiable", lastAttemptAt: at, lastError },
-    effect: previous.state === "granted" ? "suspend" : "none",
-  };
-}
-
-/** Look up the permission of `login` and apply it to the previous grant. */
-export async function checkAccess(
-  access: Pick<GitHubAccess, "permission">,
-  target: { readonly installationId: number; readonly fullName: string; readonly login: string },
-  previous: AccessGrant | null,
-  clock: Clock,
-): Promise<{ readonly grant: AccessGrant; readonly effect: AccessEffect }> {
-  const check = await access.permission(target.installationId, target.fullName, target.login);
-  return applyPermissionCheck(previous, check, clock.now());
 }
