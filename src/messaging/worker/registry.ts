@@ -13,7 +13,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, readlinkSync, statSync } from "node:fs";
 import { basename } from "node:path";
 import { BUILTIN_HARNESSES } from "../../registry/builtin.ts";
-import type { Runtime } from "./protocol-stub.ts";
+import type { Runtime } from "../protocol.ts";
 
 export type Ancestor = { readonly pid: number; readonly startTime: string };
 

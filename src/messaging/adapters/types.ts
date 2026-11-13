@@ -5,7 +5,7 @@
  * policy to the runtime.
  */
 
-import type { AdapterState, Runtime } from "../worker/protocol-stub.ts";
+import type { AdapterState, Runtime } from "../protocol.ts";
 
 export type { AdapterState, Runtime };
 

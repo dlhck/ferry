@@ -10,7 +10,7 @@
  *   most 2,000 characters, with an "N more" line.
  */
 
-import type { ConversationSummary, Message, RequestState, Runtime, SessionInfo } from "./protocol-stub.ts";
+import type { ConversationSummary, Message, RequestState, Runtime, SessionInfo } from "../protocol.ts";
 
 export const SESSION_START_LIMIT = 4000;
 export const DIGEST_LIMIT = 2000;

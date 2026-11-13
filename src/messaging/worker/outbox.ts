@@ -10,7 +10,7 @@
  * 2, 4, ... seconds, at most 60, for 6 days. Then the entry is `failed`.
  */
 
-import { newId } from "./protocol-stub.ts";
+import { newId } from "../ids.ts";
 import type { OutboxEntry, WorkerStore } from "./store.ts";
 
 export type Method = "GET" | "POST" | "PATCH";
@@ -100,7 +100,7 @@ export class Outbox {
   #insert(call: Call, nextAt: number): OutboxEntry {
     const now = this.#input.clock.now();
     const entry: OutboxEntry = {
-      key: newId("idk", now),
+      key: newId("idempotencyKey", now),
       method: call.method,
       path: call.path,
       body: JSON.stringify(call.body ?? {}),

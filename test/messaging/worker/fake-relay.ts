@@ -1,12 +1,13 @@
 /**
- * An in-memory relay for the worker tests, until lane A's relay merges. It
- * answers the endpoints that the worker calls with fixed example records, and
- * it records each call. A test changes an answer with `on`, takes the relay
+ * An in-memory relay for the worker tests that need a fault or a fixed answer:
+ * the relay offline, a hold or a drop, a stale generation. It answers the
+ * endpoints that the worker calls with fixed example records, and it records
+ * each call. The tests with lane A's relay are in "with lane A's relay". A test changes an answer with `on`, takes the relay
  * offline with `offline`, and queues events with `push`.
  */
 
 import type { RelayAnswer, RelayCall, RelayTransport } from "../../../src/messaging/worker/outbox.ts";
-import type { DispatchDecision, Message, Receipt, RelayEvent, SessionInfo } from "../../../src/messaging/worker/protocol-stub.ts";
+import type { DispatchDecision, Message, Receipt, RelayEvent, SessionInfo } from "../../../src/messaging/protocol.ts";
 
 export const OWNER = { id: "own_01JC9Z8K4Q2M7T5V3X6Y1A2B3C", githubUserId: 1001, login: "alice" };
 export const PROJECT = { id: "prj_01JC9Z8K4Q2M7T5V3X6Y1A2B3C", key: "github.com/acme/app", repoId: 42, access: "granted" as const };

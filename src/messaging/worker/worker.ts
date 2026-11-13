@@ -33,27 +33,26 @@ import { transcriptSize } from "../adapters/transcript.ts";
 import type { Adapter, Check } from "../adapters/types.ts";
 import { addCause, buildDigest, MAX_CAUSES, OFFLINE_CONTEXT, peerMessageIds, refusalContext, sessionStartContext, type DigestItem, type StrandedItem } from "./digest.ts";
 import { Outbox, type Method, type RelayAnswer, type RelayTransport, type Submitted } from "./outbox.ts";
-import {
-  newId,
-  findProject,
-  readOnlyGit,
-  type GitRunner,
-  type RemoteSelection,
-  type Activity,
-  type ConversationSummary,
-  type DispatchDecision,
-  type Events,
-  type EvidenceKind,
-  type Message,
-  type Receipt,
-  type RelayEvent,
-  type Runtime,
-  type SessionRegister,
-  type SessionRegistered,
-} from "./protocol-stub.ts";
+import { newId } from "../ids.ts";
+import type {
+  Activity,
+  ConversationSummary,
+  DeliveryResult,
+  DispatchDecision,
+  Events,
+  Message,
+  Receipt,
+  RelayEvent,
+  Runtime,
+  SessionRegister,
+  SessionRegistered,
+} from "../protocol.ts";
+import { findProject, readOnlyGit, type GitRunner, type RemoteSelection } from "./remote-stub.ts";
 import { findRuntime, runtimeNames, runtimePrograms, systemProcesses, type ProcessTable } from "./registry.ts";
 import { listenSocket, replaySpool, workerSocketPath, type Caller, type LocalRequest, type LocalResponse } from "./socket.ts";
 import { WorkerStore, type StoredAttempt, type StoredSession } from "./store.ts";
+
+type EvidenceKind = NonNullable<DeliveryResult["evidence"]>["kind"];
 
 export type Clock = { now(): number };
 
@@ -813,7 +812,7 @@ export async function runWorker(input: WorkerInput): Promise<RunningWorker> {
   // Delivery
 
   /** Report a delivery result through the outbox. The relay must get it, also after a restart. */
-  function report(receiptId: string, generation: number, outcome: "delivered" | "unconfirmed" | "failed" | "stranded" | "offline", evidence: EvidenceKind | null, detail: string | null): void {
+  function report(receiptId: string, generation: number, outcome: DeliveryResult["outcome"], evidence: EvidenceKind | null, detail: string | null): void {
     outbox.enqueue({
       method: "POST",
       path: `/v1/deliveries/${id(receiptId)}/result`,
@@ -874,7 +873,7 @@ export async function runWorker(input: WorkerInput): Promise<RunningWorker> {
         method: "POST",
         path: `/v1/deliveries/${id(attempt.receiptId)}/dispatch`,
         body: { generation: attempt.generation, activity: session.activity ?? "idle" },
-        idempotencyKey: newId("idk", clock.now()),
+        idempotencyKey: newId("idempotencyKey", clock.now()),
         signal: AbortSignal.timeout(TOOL_WAIT_MS),
       });
     } catch {
@@ -997,7 +996,7 @@ export async function runWorker(input: WorkerInput): Promise<RunningWorker> {
       .filter((session) => session.relaySessionId && (session.state === "live" || (session.endedAt && Date.parse(session.endedAt) >= cutoff)))
       .map((session) => ({ id: session.relaySessionId!, state: session.state, activity: session.state === "live" ? session.activity : null }));
     try {
-      await client.request({ method: "POST", path: "/v1/worker/heartbeat", body: { sessions }, idempotencyKey: newId("idk", clock.now()), signal: AbortSignal.timeout(TOOL_WAIT_MS) });
+      await client.request({ method: "POST", path: "/v1/worker/heartbeat", body: { sessions }, idempotencyKey: newId("idempotencyKey", clock.now()), signal: AbortSignal.timeout(TOOL_WAIT_MS) });
     } catch {
       // The next heartbeat tries again. A late heartbeat has no value.
     }

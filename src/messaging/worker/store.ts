@@ -15,7 +15,7 @@ import { Database } from "bun:sqlite";
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Attempt, LocalSession } from "../adapters/types.ts";
-import type { Activity, AdapterState, Runtime } from "./protocol-stub.ts";
+import type { Activity, AdapterState, Runtime } from "../protocol.ts";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS local_sessions (
