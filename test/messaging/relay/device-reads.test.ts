@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { MINUTE } from "../../../src/messaging/relay/limits.ts";
+import { storeCounts } from "../../../src/messaging/relay/store.ts";
 import { pair, request, REPO, type Device, type World } from "./helpers.ts";
 
 /** The reads of the CLI views (`ferry messaging conversations`, `show`, `requests`, `peers`, `devices`), with a device credential and no session. */
@@ -77,5 +78,13 @@ describe("device-scoped reads", () => {
     expect(send.status).toBe(400);
     const box = await w.addDevice(alice.device, "box");
     expect((await w.call("POST", `/v1/devices/${box.deviceId}/revoke`, { body: {}, device: laptop })).status).toBe(200);
+  });
+});
+
+describe("store counts", () => {
+  test("counts the rows of a store that a relay has open, and is null for a missing store", async () => {
+    const { w } = await setup();
+    expect(storeCounts(w.store.path)).toEqual({ owners: 2, devices: 3, liveSessions: 2, conversations: 1, openRequests: 1 });
+    expect(storeCounts(`${w.store.path}.missing`)).toBeNull();
   });
 });
