@@ -18,7 +18,7 @@ const START = "<!-- e2e-runtimes:start -->";
 const END = "<!-- e2e-runtimes:end -->";
 const RESULTS = join(RUN_ROOT, "results.jsonl");
 
-type CaseResult = {
+export type CaseResult = {
   readonly run: string;
   readonly date: string;
   readonly platform: string;
@@ -75,36 +75,72 @@ export function caseTest(name: string, runtimes: readonly Runtime[], e2e: () => 
   );
 }
 
-/** Writes the version table between the markers of the runtimes page. */
+/** One row of the version table. */
+export type TableRow = { readonly runtime: string; readonly version: string; readonly platform: string; readonly run: string; readonly result: string };
+
+/** The rows between the markers of the runtimes page. */
+export function parseTable(doc: string): TableRow[] {
+  const start = doc.indexOf(START);
+  const end = doc.indexOf(END);
+  if (start === -1 || end === -1) throw new Error(`the runtimes page has no ${START} and ${END} markers`);
+  return doc
+    .slice(start + START.length, end)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("|") && !line.startsWith("| Runtime") && !line.startsWith("| ---"))
+    .map((line) => {
+      const [runtime = "", version = "", platform = "", run = "", result = ""] = line.slice(1, -1).split("|").map((cell) => cell.trim());
+      return { runtime, version, platform, run, result };
+    });
+}
+
+/** The versions of a runtime that the table lists as passed, on any platform. */
+export function passedVersions(doc: string, runtime: Runtime): string[] {
+  const versions = parseTable(doc)
+    .filter((row) => row.runtime === runtime && row.result.startsWith("passed"))
+    .map((row) => row.version);
+  return [...new Set(versions)].sort();
+}
+
+/**
+ * The page with a new table. A runtime version and platform with results gets the
+ * row of its newest run. A row without results stays, such as a row from the design probes.
+ */
+export function renderDoc(doc: string, results: readonly CaseResult[]): string {
+  const groups = new Map<string, CaseResult[]>();
+  for (const result of results) {
+    const key = `${result.runtime} ${result.version} ${result.platform}`;
+    groups.set(key, [...(groups.get(key) ?? []), result]);
+  }
+  const rows = new Map<string, TableRow>();
+  for (const row of parseTable(doc)) rows.set(`${row.runtime} ${row.version} ${row.platform}`, row);
+  for (const [key, group] of groups) {
+    const newest = group.reduce((latest, result) => (result.run > latest ? result.run : latest), "");
+    const cases = group.filter((result) => result.run === newest);
+    const failed = cases.filter((result) => !result.passed).map((result) => result.case);
+    const first = cases[0]!;
+    const result = failed.length === 0 ? `passed all ${cases.length} cases` : `failed: ${failed.join("; ")}`;
+    rows.set(key, { runtime: first.runtime, version: first.version, platform: first.platform, run: first.date, result });
+  }
+  const sorted = [...rows.values()].sort((a, b) =>
+    a.runtime !== b.runtime ? (a.runtime < b.runtime ? -1 : 1) : a.version !== b.version ? Bun.semver.order(b.version, a.version) : a.platform < b.platform ? -1 : 1,
+  );
+  const table = [
+    "| Runtime | Version | Platform | Run | Result |",
+    "| --- | --- | --- | --- | --- |",
+    ...sorted.map((row) => `| ${row.runtime} | ${row.version} | ${row.platform} | ${row.run} | ${row.result} |`),
+  ].join("\n");
+  const start = doc.indexOf(START);
+  const end = doc.indexOf(END);
+  return `${doc.slice(0, start + START.length)}\n${table}\n${doc.slice(end)}`;
+}
+
+/** Writes the version table of the runtimes page from the results of all runs. */
 export function writeRuntimeTable(): void {
   if (!existsSync(RESULTS) || !existsSync(RUNTIMES_DOC)) return;
   const results = readFileSync(RESULTS, "utf8")
     .split("\n")
     .filter((line) => line.trim() !== "")
     .map((line) => JSON.parse(line) as CaseResult);
-  const groups = new Map<string, CaseResult[]>();
-  for (const result of results) {
-    const key = `${result.runtime} ${result.version} ${result.platform}`;
-    groups.set(key, [...(groups.get(key) ?? []), result]);
-  }
-  const rows: string[] = [];
-  for (const group of [...groups.values()].sort((a, b) => compare(a[0]!, b[0]!))) {
-    const newest = group.reduce((latest, result) => (result.run > latest ? result.run : latest), "");
-    const cases = group.filter((result) => result.run === newest);
-    const failed = cases.filter((result) => !result.passed).map((result) => result.case);
-    const first = cases[0]!;
-    const verdict = failed.length === 0 ? `passed all ${cases.length} cases` : `failed: ${failed.join("; ")}`;
-    rows.push(`| ${first.runtime} | ${first.version} | ${first.platform} | ${first.date} | ${verdict} |`);
-  }
-  const table = ["| Runtime | Version | Platform | Run | Result |", "| --- | --- | --- | --- | --- |", ...rows].join("\n");
-  const doc = readFileSync(RUNTIMES_DOC, "utf8");
-  const start = doc.indexOf(START);
-  const end = doc.indexOf(END);
-  if (start === -1 || end === -1) throw new Error(`${RUNTIMES_DOC} has no ${START} and ${END} markers`);
-  writeFileSync(RUNTIMES_DOC, `${doc.slice(0, start + START.length)}\n${table}\n${doc.slice(end)}`);
-}
-
-function compare(a: CaseResult, b: CaseResult): number {
-  if (a.runtime !== b.runtime) return a.runtime < b.runtime ? -1 : 1;
-  return Bun.semver.order(b.version, a.version);
+  writeFileSync(RUNTIMES_DOC, renderDoc(readFileSync(RUNTIMES_DOC, "utf8"), results));
 }

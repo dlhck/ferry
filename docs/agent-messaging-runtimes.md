@@ -9,19 +9,21 @@ This page records the runtime versions that Ferry's agent messaging was tested w
 
 ## Tested versions
 
-The real-CLI suite writes the table below. Do not edit the rows by hand. The suite keeps the newest run for each runtime, version, and platform.
+The real-CLI suite writes the table below. Do not edit the rows by hand. The suite keeps the newest run for each runtime, version, and platform, and keeps the rows of versions that it did not run.
 
 The version gate of the adapters (design 9.2 and 9.3) uses these results:
 
 - A version below the minimum (Claude Code 2.1.323, Codex 0.169.0) is `unsupported`. Ferry does not deliver to it.
-- A version that passed all cases here is `supported`.
+- A version that passed all cases here is `supported`. When the suite passes a new version, add it to `CLAUDE_PASSED` in `src/messaging/adapters/claude.ts` or `CODEX_PASSED` in `src/messaging/adapters/codex.ts`.
 - A newer version is `untested`. Ferry delivers to it, and `ferry status --brief` and `ferry messaging status` report the untested version.
 
-The suite has not run yet. Before the suite, the design probes passed on Linux with Claude Code 2.1.323 and Codex 0.169.0 (design section 20). Those probes are not a run of this suite.
+The suite has not run yet. The two rows below come from the design probes on Linux (design section 20), not from the suite. The first run of the suite on those versions replaces them. The adapters list the same passed versions (`CLAUDE_PASSED` and `CODEX_PASSED`), and a test fails when the two lists differ.
 
 <!-- e2e-runtimes:start -->
 | Runtime | Version | Platform | Run | Result |
 | --- | --- | --- | --- | --- |
+| claude | 2.1.323 | linux | 2026-11-13 | passed: design probes, section 20 |
+| codex | 0.169.0 | linux | 2026-11-13 | passed: design probes, section 20 |
 <!-- e2e-runtimes:end -->
 
 ## Test layers
