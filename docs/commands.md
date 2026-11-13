@@ -1513,7 +1513,7 @@ Commands:
   owners [action] [owner]      List the GitHub owners that the relay serves, or
                                add or remove one
   status                       Print the version, database size, last backup,
-                               GitHub App state, and counts of the relay on this
+                               GitHub App state, and owners of the relay on this
                                machine
   backup [options]             Write a consistent copy of the relay database.
                                With --to -, write it to stdout
@@ -1613,7 +1613,7 @@ Options:
 ```text
 Usage: ferry relay status [options]
 
-Print the version, database size, last backup, GitHub App state, and counts of
+Print the version, database size, last backup, GitHub App state, and owners of
 the relay on this machine
 
 Options:

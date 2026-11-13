@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { changeRelayUrl, messagingStatus, messagingStatusLines, part, readRelayConfig, relayOwners } from "../../../src/messaging/commands.ts";
+import { changeRelayUrl, messagingStatus, messagingStatusLines, part, readRelayConfig, relayOwners, serveRelay } from "../../../src/messaging/commands.ts";
 import { messagingHookCommand } from "../../../src/messaging/hooks.ts";
 import { runMessagingSetup, runMessagingTeardown, type WorkerStatusView } from "../../../src/messaging/setup.ts";
 import { BUILTIN_HARNESSES } from "../../../src/registry/builtin.ts";
@@ -142,6 +142,13 @@ test("ferry messaging relay-url writes the config and client.json", () => {
 
 test("a part that is not in the build gives a clear error", async () => {
   await expect(part("relay")).rejects.toThrow(/This Ferry build has no relay server/);
+});
+
+test("ferry relay serve needs the GitHub App config and key", async () => {
+  const root = home();
+  mkdirSync(join(root, ".ferry", "relay"), { recursive: true });
+  writeFileSync(join(root, ".ferry", "relay", "config.json"), JSON.stringify({ allowedOwners: ["acme"] }));
+  await expect(serveRelay("127.0.0.1:0", "1.0.0", () => {}, root)).rejects.toThrow(/The relay has no GitHub App/);
 });
 
 describe("ferry messaging setup and teardown", () => {

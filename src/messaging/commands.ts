@@ -58,13 +58,31 @@ export type GitHubAppPart = {
   importGitHubApp(input: { home: string; appId: number; clientId: string; slug: string; keyFile: string }): Promise<{ slug: string; appId: number }>;
 };
 
-/** The relay server and its store. */
+type Clock = { now(): number };
+
+/** The relay server (`src/messaging/relay/server.ts`). */
 export type RelayPart = {
-  /** `github` and `allowedOwners` come from `~/.ferry/relay/config.json`. */
-  startRelay(input: { home: string; listen: string; github: unknown; allowedOwners: readonly string[]; log: (line: string) => void }): Promise<{ stop(): Promise<void> }>;
-  relayStatus(input: { home: string }): Promise<Readonly<Record<string, unknown>>>;
-  backupRelay(input: { home: string; to: string | null }): Promise<{ path: string | null; bytes: Uint8Array | null }>;
-  restoreRelay(input: { home: string; file: string }): Promise<void>;
+  startRelay(options: {
+    dbPath: string;
+    listen?: string;
+    github: unknown;
+    clock: Clock;
+    log: (event: string, fields?: Readonly<Record<string, string | number | boolean | null>>) => void;
+    allowedOwners: readonly string[];
+    relayVersion?: string;
+  }): Promise<{ url: string; stop(): Promise<void> }>;
+};
+
+/** The backups of the relay store (`src/messaging/relay/backup.ts`). */
+export type BackupPart = {
+  backupStore(path: string, target?: string, clock?: Clock): string;
+  restoreStore(file: string, path: string, clock?: Clock): string | null;
+  latestBackup(path: string): string | null;
+};
+
+/** The GitHub access of the relay (`src/messaging/github/access.ts`). `app` is the `github` value of the relay config. */
+export type GitHubAccessPart = {
+  createGitHubAccess(config: { app: unknown; privateKey: string }): unknown;
 };
 
 /** The worker (`src/messaging/worker/worker.ts`). */
@@ -91,6 +109,7 @@ const PARTS = {
   remote: { specifier: "./client/remote.ts", what: "remote selection" },
   app: { specifier: "./github/manifest.ts", what: "GitHub App setup" },
   relay: { specifier: "./relay/server.ts", what: "relay server" },
+  access: { specifier: "./github/access.ts", what: "GitHub access" },
   backup: { specifier: "./relay/backup.ts", what: "relay backup" },
   worker: { specifier: "./worker/worker.ts", what: "messaging worker" },
 } as const;
@@ -283,6 +302,88 @@ export function relayOwners(
   chmodSync(`${path}.tmp`, 0o600);
   renameSync(`${path}.tmp`, path);
   return { owners, changed: true, restarted: restart() };
+}
+
+/** The relay store and the GitHub App key, relative to the home. */
+export const RELAY_DB_FILE = `${RELAY_DIR}/relay.db`;
+const RELAY_KEY_FILE = `${RELAY_DIR}/github-app.pem`;
+
+/** `ferry relay serve`: the relay with the config of `~/.ferry/relay`, until SIGINT or SIGTERM. */
+export async function serveRelay(listen: string, version: string, log: Print, home = homedir()): Promise<void> {
+  const { github, allowedOwners } = readRelayConfig(home);
+  let privateKey: string;
+  try {
+    privateKey = readFileSync(join(home, RELAY_KEY_FILE), "utf8");
+  } catch {
+    privateKey = "";
+  }
+  if (github === null || privateKey === "") {
+    throw new FerryError("failed", "The relay has no GitHub App.", { hint: "Run ferry relay setup github-app or ferry relay import-github-app." });
+  }
+  const { startRelay } = await part<RelayPart>("relay");
+  const { createGitHubAccess } = await part<GitHubAccessPart>("access");
+  const relay = await startRelay({
+    dbPath: join(home, RELAY_DB_FILE),
+    listen,
+    github: createGitHubAccess({ app: github, privateKey }),
+    clock: { now: () => Date.now() },
+    // The relay log events have no secret values. Each event is one JSON line on stderr, for the journal.
+    log: (event, fields) => log(JSON.stringify({ event, ...fields })),
+    allowedOwners,
+    relayVersion: version,
+  });
+  await new Promise<void>((resolve) => {
+    for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => resolve());
+  });
+  await relay.stop();
+}
+
+/**
+ * `ferry relay backup`. With `to` "-", the copy goes to a private file in
+ * `~/.ferry/relay` first, and Ferry returns its bytes and removes it.
+ */
+export async function backupRelay(to: string | null, home = homedir()): Promise<{ path: string | null; bytes: Uint8Array | null }> {
+  const { backupStore } = await part<BackupPart>("backup");
+  const db = join(home, RELAY_DB_FILE);
+  if (to !== "-") return { path: backupStore(db, to ?? undefined), bytes: null };
+  const temporary = join(home, RELAY_DIR, `.backup-stdout-${process.pid}.db`);
+  const { rmSync } = await import("node:fs");
+  try {
+    backupStore(db, temporary);
+    return { path: null, bytes: readFileSync(temporary) };
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+}
+
+/** `ferry relay restore`. Returns the path of the moved store, or null. */
+export async function restoreRelay(file: string, home = homedir()): Promise<string | null> {
+  const { restoreStore } = await part<BackupPart>("backup");
+  return restoreStore(file, join(home, RELAY_DB_FILE));
+}
+
+/** `ferry relay status`: the local state of the relay host. It does not open the store. */
+export async function relayStatus(version: string, home = homedir()): Promise<{
+  version: string;
+  service: boolean;
+  database: { path: string; bytes: number | null };
+  lastBackup: string | null;
+  githubApp: boolean;
+  owners: readonly string[];
+}> {
+  const { latestBackup } = await part<BackupPart>("backup");
+  const { statSync } = await import("node:fs");
+  const db = join(home, RELAY_DB_FILE);
+  const config = readRelayConfig(home);
+  const service = process.platform === "darwin" ? launchdPath(RELAY_SERVICE, home) : systemdPath(RELAY_SERVICE, home);
+  return {
+    version,
+    service: existsSync(service),
+    database: { path: db, bytes: existsSync(db) ? statSync(db).size : null },
+    lastBackup: latestBackup(db),
+    githubApp: config.github !== null && existsSync(join(home, RELAY_KEY_FILE)),
+    owners: config.allowedOwners,
+  };
 }
 
 /** Restart the relay service when this machine has it, so that it reads the new config. True when it restarted. */

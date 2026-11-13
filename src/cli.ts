@@ -2047,12 +2047,16 @@ relay on that box.`);
     });
   relayGroup
     .command("status")
-    .description("Print the version, database size, last backup, GitHub App state, and counts of the relay on this machine")
+    .description("Print the version, database size, last backup, GitHub App state, and owners of the relay on this machine")
     .action(async () => {
-      const { part } = await import("./messaging/commands.ts");
-      const { relayStatus } = await part<import("./messaging/commands.ts").RelayPart>("relay");
-      report(await relayStatus({ home: messagingHome() }), (status) => {
-        for (const [key, value] of Object.entries(status)) writeLine(`${key}: ${typeof value === "object" ? JSON.stringify(value) : String(value)}`);
+      const { relayStatus } = await import("./messaging/commands.ts");
+      report(await relayStatus(VERSION, messagingHome()), (status) => {
+        writeLine(`Version: ${status.version}`);
+        writeLine(`Service: ${status.service ? "installed" : "not installed"}`);
+        writeLine(`Database: ${status.database.bytes === null ? `none at ${status.database.path}` : `${status.database.path} (${status.database.bytes} bytes)`}`);
+        writeLine(`Last backup: ${status.lastBackup ?? "none"}`);
+        writeLine(`GitHub App: ${status.githubApp ? "configured" : "not configured. Run ferry relay setup github-app."}`);
+        writeLine(status.owners.length > 0 ? `Owners: ${status.owners.join(", ")}` : "Owners: none. Run ferry relay owners add <owner>.");
       });
     });
   relayGroup
@@ -2060,9 +2064,8 @@ relay on that box.`);
     .description("Write a consistent copy of the relay database. With --to -, write it to stdout")
     .option("--to <path>", "the backup file, or - for stdout")
     .action(async (options: { to?: string }) => {
-      const { part } = await import("./messaging/commands.ts");
-      const { backupRelay } = await part<import("./messaging/commands.ts").RelayPart>("backup");
-      const result = await backupRelay({ home: messagingHome(), to: options.to === "-" ? null : (options.to ?? null) });
+      const { backupRelay } = await import("./messaging/commands.ts");
+      const result = await backupRelay(options.to ?? null, messagingHome());
       if (result.bytes !== null) {
         process.stdout.write(result.bytes);
         return;
@@ -2073,24 +2076,20 @@ relay on that box.`);
     .command("restore <file>")
     .description("Replace the relay database with a backup. Stop the relay service first")
     .action(async (file: string) => {
-      const { part } = await import("./messaging/commands.ts");
-      const { restoreRelay } = await part<import("./messaging/commands.ts").RelayPart>("backup");
-      await restoreRelay({ home: messagingHome(), file });
-      report({ file }, () => writeLine(`Restored the relay database from ${file}. Start the relay service again.`));
+      const { restoreRelay } = await import("./messaging/commands.ts");
+      const previous = await restoreRelay(file, messagingHome());
+      report({ file, previous }, () => {
+        writeLine(`Restored the relay database from ${file}. Start the relay service again.`);
+        if (previous !== null) writeLine(`The old database is in ${previous}.`);
+      });
     });
   relayGroup
     .command("serve", { hidden: true })
     .description("Serve the relay. The relay service runs this command")
     .option("--listen <address>", "the host and port", "127.0.0.1:47830")
     .action(async (options: { listen: string }) => {
-      const { part, readRelayConfig } = await import("./messaging/commands.ts");
-      const { startRelay } = await part<import("./messaging/commands.ts").RelayPart>("relay");
-      const { github, allowedOwners } = readRelayConfig(messagingHome());
-      const relay = await startRelay({ home: messagingHome(), listen: options.listen, github, allowedOwners, log: writeError });
-      await new Promise<void>((resolve) => {
-        for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => resolve());
-      });
-      await relay.stop();
+      const { serveRelay } = await import("./messaging/commands.ts");
+      await serveRelay(options.listen, VERSION, writeError, messagingHome());
     });
 
   const messagingGroup = program
