@@ -16,6 +16,8 @@ import { quoteShell } from "./box-settings.ts";
 import { FerryError, linkFailure } from "./errors.ts";
 import { EXPOSED_DIR } from "./expose.ts";
 import type { Link } from "./link.ts";
+import { MESSAGING_DIR } from "./messaging/hook.ts";
+import { CODEX_HOOKS_FILE, MESSAGING_HOOK_TEXT, MESSAGING_MCP_SERVER, removeMessagingHooksScript } from "./messaging/hooks.ts";
 import { EVENTS_DIR, NOTIFY_HOOK_TEXT, notifySettingsFile, removeNotifyHooksScript } from "./notify.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";
 import { PROFILE_BLOCK_END, PROFILE_BLOCK_START } from "./tools/path.ts";
@@ -27,8 +29,12 @@ const BINARY = ".local/bin/ferry";
 const UNIT_DIRECTORY = ".config/systemd/user";
 /** The MCP gateway files: servers, client key, and tokens. */
 const MCP_GATEWAY = ".ferry/mcp-gateway";
-/** The Ferry files and directories of a box, in the order of removal. The marker goes last, so a failed run leaves a box install. */
-const FERRY_PATHS = [BOX_DIRECTORY, EXPOSED_DIR, EVENTS_DIR, MCP_GATEWAY, STORE, BOX_PROJECTS_RECORD, BINARY, BOX_MARKER];
+/**
+ * The Ferry files and directories of a box, in the order of removal. The
+ * marker goes last, so a failed run leaves a box install. `~/.ferry/relay` is
+ * not in the list: it has the data of the team, so it stays.
+ */
+const FERRY_PATHS = [BOX_DIRECTORY, EXPOSED_DIR, EVENTS_DIR, MCP_GATEWAY, MESSAGING_DIR, STORE, BOX_PROJECTS_RECORD, BINARY, BOX_MARKER];
 
 /** What Ferry removes from a box. Each path is relative to the box home. */
 export type BoxUninstallPlan = {
@@ -43,6 +49,8 @@ export type BoxUninstallPlan = {
   readonly links: readonly { readonly path: string; readonly link: string; readonly backup: string | null }[];
   /** The harness settings files with the hooks of `ferry notify`. Ferry removes these hooks and keeps the other hooks. */
   readonly notifyHooks: readonly string[];
+  /** The settings files with the hooks of agent messaging: the Claude settings and `~/.codex/hooks.json`. Ferry removes these hooks and keeps the other hooks. */
+  readonly messagingHooks: readonly string[];
   /** True when `~/.profile` has the ferry PATH block. */
   readonly profileBlock: boolean;
   /** The Ferry files and directories that are on the box, in the order of removal. */
@@ -65,9 +73,12 @@ link() {
 cd "$HOME" || exit 1
 record H "$HOME"
 if [ -n "$1" ] && [ -f "$1" ] && grep -qF -- "$2" "$1"; then record N "$1"; fi
-backup_depth=$3
-root_count=$4
-shift 4
+for file in "$3" "$4"; do
+  if [ -n "$file" ] && [ -f "$file" ] && grep -qF -- "$5" "$file"; then record M "$file"; fi
+done
+backup_depth=$6
+root_count=$7
+shift 7
 while [ "$root_count" -gt 0 ]; do
   for entry in "$1"/* "$1"/.[!.]*; do link "$entry"; done
   shift
@@ -107,7 +118,13 @@ export async function planBoxUninstall(
   // A backup is at <timestamp>/<harness id>/<path>, below the backup directory.
   const depth = 2 + Math.max(1, ...direct.map((path) => path.split("/").length));
   const result = await link.run(
-    shellCommand(INSPECT_SCRIPT, [notifySettingsFile(harnesses) ?? "", NOTIFY_HOOK_TEXT, String(depth), String(roots.length), ...roots, String(direct.length), ...direct, OPERATOR_CONFIG, ...FERRY_PATHS]),
+    shellCommand(INSPECT_SCRIPT, [
+      notifySettingsFile(harnesses) ?? "",
+      NOTIFY_HOOK_TEXT,
+      notifySettingsFile(harnesses) ?? "",
+      harnesses.some((harness) => harness.id === "codex") ? CODEX_HOOKS_FILE : "",
+      MESSAGING_HOOK_TEXT,
+      String(depth), String(roots.length), ...roots, String(direct.length), ...direct, OPERATOR_CONFIG, ...FERRY_PATHS]),
   );
   if (!result.ok) throw new Error(`${result.error.origin}/${result.error.code}: ${result.error.message}`, { cause: linkFailure(result.error) });
 
@@ -115,6 +132,7 @@ export async function planBoxUninstall(
   const found = new Map<string, string>();
   const services: string[] = [];
   const notifyHooks: string[] = [];
+  const messagingHooks: string[] = [];
   const present = new Set<string>();
   /** The timestamps of each backup, by its path below the timestamp directory. */
   const backups = new Map<string, string[]>();
@@ -126,6 +144,7 @@ export async function planBoxUninstall(
     else if (kind === "L") found.set(value, fromHex(second));
     else if (kind === "U") services.push(value);
     else if (kind === "N") notifyHooks.push(value);
+    else if (kind === "M") messagingHooks.push(value);
     else if (kind === "X") present.add(value);
     else if (kind === "P") profileBlock = true;
     else if (kind === "B") {
@@ -165,7 +184,7 @@ export async function planBoxUninstall(
   // Without the marker, the binary is not a box install of Ferry, so it stays.
   const paths = FERRY_PATHS.filter((path) => present.has(path) && (path !== BINARY || present.has(BOX_MARKER)));
   const unsavedWork = await readBoxWork(link, projects).catch(() => null);
-  return { home, services: services.sort(compare), links, notifyHooks, profileBlock, paths, unsavedWork };
+  return { home, services: services.sort(compare), links, notifyHooks, messagingHooks, profileBlock, paths, unsavedWork };
 }
 
 /** True when the box has the MCP gateway. Then Ferry changes the harness entries of the gateway before it removes the gateway. */
@@ -180,6 +199,8 @@ export function boxUninstallLines(plan: BoxUninstallPlan, box: string): string[]
       ? ["Change each harness entry of the MCP gateway back to its direct entry, or remove it when the gateway does not have the server"]
       : []),
     ...plan.notifyHooks.map((file) => `Remove the hooks of ferry notify from ~/${file}, and keep the other hooks`),
+    ...plan.messagingHooks.map((file) => `Remove the hooks of agent messaging from ~/${file}, and keep the other hooks`),
+    ...(hasMessaging(plan) ? [`Remove the MCP entry ${MESSAGING_MCP_SERVER} of agent messaging from Claude and Codex`] : []),
     ...(plan.services.length > 0
       ? [`Stop and remove the user services: ${plan.services.join(", ")}. A stopped service stops its agents.`]
       : []),
@@ -187,7 +208,10 @@ export function boxUninstallLines(plan: BoxUninstallPlan, box: string): string[]
       entry.backup === null ? `Remove the link ~/${entry.path}` : `Remove the link ~/${entry.path} and move ~/${entry.backup} back`,
     ),
     ...(plan.profileBlock ? ["Remove the ferry PATH block of ~/.profile"] : []),
-    ...plan.paths.map((path) => `Remove ~/${path}${path === MCP_GATEWAY ? ", with the logins of the MCP gateway" : ""}`),
+    ...plan.paths.map(
+      (path) =>
+        `Remove ~/${path}${path === MCP_GATEWAY ? ", with the logins of the MCP gateway" : path === MESSAGING_DIR ? ", with the messaging credential of the box" : ""}`,
+    ),
   ];
   return [
     ...(plan.unsavedWork === null ? ["Unsaved work: unavailable"] : boxWorkLines(plan.unsavedWork, box)),
@@ -211,6 +235,41 @@ export async function removeNotifyHooks(plan: BoxUninstallPlan, link: UninstallL
     } else if (status.startsWith("E") || status.startsWith("S")) {
       lines.push(`Ferry could not remove the hooks of ferry notify from ~/${file}. Without Ferry, they do nothing.`);
     }
+  }
+  return lines;
+}
+
+/** True when the box has agent messaging: its hooks or `~/.ferry/messaging`. */
+export function hasMessaging(plan: BoxUninstallPlan): boolean {
+  return plan.messagingHooks.length > 0 || plan.paths.includes(MESSAGING_DIR);
+}
+
+/**
+ * Remove the hooks and the allow rule of agent messaging from each settings
+ * file of the plan, and the MCP entry `ferry-messaging`. Without Ferry, the
+ * hooks do nothing, so a failure does not stop the removal. Returns a line for
+ * each file that keeps the hooks.
+ */
+export async function removeBoxMessaging(plan: BoxUninstallPlan, link: UninstallLink): Promise<readonly string[]> {
+  const lines: string[] = [];
+  for (const file of plan.messagingHooks) {
+    const runtime = file === CODEX_HOOKS_FILE ? "codex" : "claude";
+    const result = await link.run(`sh -c ${quoteShell(removeMessagingHooksScript(posix.join(plan.home, file), runtime))}`);
+    const status = result.ok ? result.stdout : "S";
+    if (status.startsWith("J")) {
+      lines.push(`jq is not on the box, so ~/${file} keeps the hooks of agent messaging. Without Ferry, they do nothing.`);
+    } else if (status.startsWith("E") || status.startsWith("S")) {
+      lines.push(`Ferry could not remove the hooks of agent messaging from ~/${file}. Without Ferry, they do nothing.`);
+    }
+  }
+  const mcp = await link.run(
+    [
+      `! command -v claude >/dev/null 2>&1 || ! claude mcp get ${MESSAGING_MCP_SERVER} >/dev/null 2>&1 || claude mcp remove --scope user ${MESSAGING_MCP_SERVER} >/dev/null 2>&1 || echo claude`,
+      `! command -v codex >/dev/null 2>&1 || ! codex mcp get ${MESSAGING_MCP_SERVER} >/dev/null 2>&1 || codex mcp remove ${MESSAGING_MCP_SERVER} >/dev/null 2>&1 || echo codex`,
+    ].join("\n"),
+  );
+  for (const harness of mcp.ok ? mcp.stdout.split("\n").filter((line) => line === "claude" || line === "codex") : ["claude", "codex"]) {
+    lines.push(`Ferry could not remove the MCP entry ${MESSAGING_MCP_SERVER} from ${harness === "claude" ? "Claude" : "Codex"}. Without Ferry, it does not start.`);
   }
   return lines;
 }
