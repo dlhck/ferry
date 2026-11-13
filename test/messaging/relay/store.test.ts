@@ -102,7 +102,7 @@ describe("backup and restore", () => {
     const w = world();
     const local = new Date(w.clock.now());
     local.setHours(27, 0, 0, 0);
-    w.clock.ms = local.getTime();
+    w.clock.set(local.getTime());
     await w.tick();
     await w.tick(60_000);
     expect(readdirSync(backupDir(w.store.path))).toHaveLength(1);

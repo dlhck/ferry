@@ -1,8 +1,9 @@
 /**
- * Helpers of the relay tests: a fake clock, a fake `GitHubAccess`, and a client
- * that calls `relay.handle` with a `Request`, without a socket.
+ * Helpers of the relay tests: a fake `GitHubAccess`, and a client that calls
+ * `relay.handle` with a `Request`, without a socket. The fake clock is the one of
+ * the harness.
  *
- * Lane E's harness and lane B's fake GitHub server replace the fakes here when they merge.
+ * Lane B's fake GitHub server can replace the fake `GitHubAccess` when it merges.
  */
 
 import { afterEach } from "bun:test";
@@ -14,21 +15,11 @@ import { HEADERS, validate, type Schema, type SessionRegistered } from "../../..
 import type { GitHubAccess } from "../../../src/messaging/relay/access.ts";
 import { createRelay, type Relay } from "../../../src/messaging/relay/server.ts";
 import { openStore, type Store } from "../../../src/messaging/relay/store.ts";
+import { FakeClock } from "../harness/clock.ts";
+
+export { FakeClock };
 
 export const START = Date.parse("2026-11-13T10:00:00.000Z");
-
-export class FakeClock {
-  ms: number;
-  constructor(start = START) {
-    this.ms = start;
-  }
-  now(): number {
-    return this.ms;
-  }
-  advance(ms: number): void {
-    this.ms += ms;
-  }
-}
 
 /** An error with the `name` of one of lane B's error classes. */
 export function namedError(name: string, message: string): Error {
@@ -156,7 +147,7 @@ let runtimeIds = 0;
 
 export function world(options: { allowedOwners?: string[]; dir?: string; clock?: FakeClock; github?: FakeGitHub } = {}): World {
   const dir = options.dir ?? tempDir();
-  const clock = options.clock ?? new FakeClock();
+  const clock = options.clock ?? new FakeClock(START);
   const github = options.github ?? new FakeGitHub();
   if (!github.repos.has("acme/vendure-cloud")) github.addRepo("acme/vendure-cloud", 4242);
   const store = openStore(join(dir, "relay.db"), clock);
