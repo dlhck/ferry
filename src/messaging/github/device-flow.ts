@@ -26,8 +26,12 @@ export type DeviceCode = {
   readonly intervalS: number;
 };
 
+/** One variant for each state, so a check of `state` narrows the type. */
 export type DevicePoll =
-  | { readonly state: "pending" | "slow-down" | "expired" | "denied" }
+  | { readonly state: "pending" }
+  | { readonly state: "slow-down" }
+  | { readonly state: "expired" }
+  | { readonly state: "denied" }
   | { readonly state: "complete"; readonly user: { readonly id: number; readonly login: string } };
 
 /** The App has "Enable Device Flow" off in its settings. */
@@ -93,8 +97,11 @@ export async function pollDeviceFlow(options: DeviceFlowOptions, deviceCode: str
     case "slow_down":
       return { state: "slow-down" };
     // An unknown device code cannot complete. To the relay it is the same as an expired one.
+    // The GitHub docs also use the names `token_expired` and `bad_verification_code` for these cases.
     case "expired_token":
+    case "token_expired":
     case "incorrect_device_code":
+    case "bad_verification_code":
       return { state: "expired" };
     case "access_denied":
       return { state: "denied" };
