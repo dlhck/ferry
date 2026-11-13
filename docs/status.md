@@ -127,6 +127,22 @@ A limit of 0 turns its part of the check off. When one disk limit is 0, the othe
 
 At the start, every 5 minutes, and after each sync, the watch writes the report of `ferry status --brief --json` to `~/.ferry/status.json`. The menu bar app and the Linux status bar read this file. The report also has the free disk, the memory, and the load of each box. [Linux status bar](linux-status-bar.md#the-status-file) shows the format.
 
+Each box of the report also has `mcpGateway`, the state of its [MCP gateway](boxes.md#an-mcp-gateway-on-the-box):
+
+```json
+"mcpGateway": {
+  "state": "running",
+  "reason": null,
+  "servers": [{ "name": "linear", "state": "login-required" }]
+}
+```
+
+- `state` is `running`, `stopped`, `unavailable`, or `off`. `off` is a box without `mcp_gateway = true`, and its `servers` is `[]`.
+- `reason` says why the gateway is `unavailable`, such as `Ferry is not on the box`. Else it is `null`.
+- `servers` has `{ name, state }` for each gateway server. The state is `ready`, `login-required`, or `cannot-share`.
+- `mcpGateway` is `null` when the box is offline or the gateway check failed. A status file of Ferry 0.11.0 or earlier has no `mcpGateway`.
+- The field has no port, no key, no token, and no env value.
+
 ## The macOS menu bar app
 
 `ferry menubar install` installs a menu bar app that shows the report of `ferry status --brief` for each box. The app reads `~/.ferry/status.json`, so `ferry watch` must run.
@@ -137,6 +153,7 @@ At the start, every 5 minutes, and after each sync, the watch writes the report 
 - The app sends a macOS notification when a box goes offline, a login or MCP login needs a login, or a tool has drift. Turn off Notifications in the menu to stop them.
 - With [agent notifications](#agent-notifications) on, the app also sends a notification when an agent on a box ends its turn or waits for input.
 - Sync now runs `ferry sync`.
+- The settings of the app read and change the box keys with `ferry config`. The app does not write `~/.ferry/config.toml` itself. A change goes to the box at the next sync. See [Change box keys with ferry config](boxes.md#change-box-keys-with-ferry-config).
 
 The app needs macOS 26 or later.
 

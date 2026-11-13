@@ -262,6 +262,18 @@ export type BriefBoxStatus = {
   readonly issues: readonly BriefIssue[];
   /** The disk, memory, and load of the box. Null when the box is offline or the check has no resource read. */
   readonly resources: BoxResources | null;
+  /**
+   * The MCP gateway of the box. `state` is `"off"` for a box without `mcp_gateway = true`.
+   * Null when the box is offline or the gateway check failed.
+   */
+  readonly mcpGateway: BriefGatewayStatus | null;
+};
+
+/** The gateway state of the brief report. It has no port, no key, and no env value. */
+export type BriefGatewayStatus = {
+  readonly state: McpGatewayStatus["state"] | "off";
+  readonly reason: string | null;
+  readonly servers: McpGatewayStatus["servers"];
 };
 
 /** The report of `ferry status --brief`, and the content of `~/.ferry/status.json`. */
@@ -310,7 +322,7 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
     if (box.mcpServers) progress.skip("Checking MCP servers on the box", OFFLINE);
     if (box.mcpGateway) progress.skip(GATEWAY_STEP, OFFLINE);
     if (box.tools) progress.skip("Checking tools on the box", OFFLINE);
-    return { ...base, online: false, error, summary: cutMiddle(error, SUMMARY_LIMIT), issues: [], resources: null };
+    return { ...base, online: false, error, summary: cutMiddle(error, SUMMARY_LIMIT), issues: [], resources: null, mcpGateway: null };
   }
 
   const resources = box.resources?.read() ?? null;
@@ -401,11 +413,15 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
     }
   }
 
+  let mcpGateway: BriefGatewayStatus | null = { state: "off", reason: null, servers: [] };
   if (box.mcpGateway) {
     const gateway = box.mcpGateway;
     try {
-      issues.push(...gatewayIssues(await step(progress, GATEWAY_STEP, () => gateway.read()), box.name));
+      const status = await step(progress, GATEWAY_STEP, () => gateway.read());
+      mcpGateway = { state: status.state, reason: status.reason, servers: status.servers };
+      issues.push(...gatewayIssues(status, box.name));
     } catch (cause) {
+      mcpGateway = null;
       failed("MCP gateway", cause);
     }
   }
@@ -424,7 +440,7 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
 
   if (box.hookPaths) issues.push(...box.hookPaths().map(hookIssue));
 
-  return { ...base, online: true, error: null, summary: null, issues, resources };
+  return { ...base, online: true, error: null, summary: null, issues, resources, mcpGateway };
 }
 
 /**

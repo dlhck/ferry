@@ -1066,13 +1066,14 @@ function readSettings(
 
 /**
  * Read the MCP servers of each harness without the rest of the seed, for a
- * status check. A refused server is left out.
+ * status check. A refused server is left out. `forbidden` gets the refusals,
+ * which stop a sync.
  */
-export function readMcpSources(home: string, harnesses: readonly HarnessDescriptor[]): McpSource[] {
+export function readMcpSources(home: string, harnesses: readonly HarnessDescriptor[], forbidden: ForbiddenHit[] = []): McpSource[] {
   const sources: McpSource[] = [];
   for (const harness of harnesses) {
     if (!harness.mcp) continue;
-    const { servers, nonPortable } = readMcp(home, harness.mcp, [], []);
+    const { servers, nonPortable } = readMcp(home, harness.mcp, forbidden, []);
     if (servers.length > 0 || nonPortable.length > 0) sources.push({ harness: harness.id, servers, nonPortable });
   }
   return sources;

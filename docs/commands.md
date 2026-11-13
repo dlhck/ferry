@@ -51,6 +51,10 @@ The `ferry sherlock` commands exist only when the Sherlock integration is on and
     - [`ferry menubar uninstall`](#ferry-menubar-uninstall)
   - [`ferry self-update`](#ferry-self-update)
   - [`ferry whoami`](#ferry-whoami)
+  - [`ferry config`](#ferry-config)
+    - [`ferry config get`](#ferry-config-get)
+    - [`ferry config set`](#ferry-config-set)
+    - [`ferry config unset`](#ferry-config-unset)
   - [`ferry box`](#ferry-box)
     - [`ferry box list`](#ferry-box-list)
     - [`ferry box add`](#ferry-box-add)
@@ -203,6 +207,8 @@ Commands:
                                        Until then, Ferry lists the paths of the
                                        built-in harnesses that are links
                                        of Ferry on the box.
+  config                               Read and change some keys of
+                                       ~/.ferry/config.toml
   box                                  List, add, and remove the boxes of the
                                        config
   skills                               Install skills into the global harness
@@ -963,7 +969,7 @@ Options:
               logins, and the tools, and print what needs action
   -h, --help  display help for command
 
-With --json: the status report, schema version 2. With --brief, { schemaVersion: 1, checkedAt, boxes: [{ name, host, online, error, summary, issues: [{ kind, name, state, summary, message, command }], resources: { disk, memory, load } }] }.
+With --json: the status report, schema version 2. With --brief, { schemaVersion: 1, checkedAt, boxes: [{ name, host, online, error, summary, issues: [{ kind, name, state, summary, message, command }], resources: { disk, memory, load }, mcpGateway: { state, reason, servers: [{ name, state }] } }] }. mcpGateway.state is off for a box without mcp_gateway = true. mcpGateway is null when the box is offline or the gateway check failed.
 ```
 
 ## ferry doctor
@@ -1445,6 +1451,92 @@ Options:
   -h, --help  display help for command
 
 With --json: { role: "operator" or "box", box, instructions: { file, sources: [{ part: "header", "box", or "shared", path }] }, managedPaths: { instructionFiles, skillRoots, roots } }. box is null on the operator machine and before the first sync of a box. instructions is null on the operator machine and on a box without the generated file. sources has the merged parts in order, and path is the file on the operator machine. On a box, managedPaths has the paths that the last sync linked there.
+```
+
+## ferry config
+
+```text
+Usage: ferry config [options] [command]
+
+Read and change some keys of ~/.ferry/config.toml
+
+Options:
+  -h, --help             display help for command
+
+Commands:
+  get                    Print the keys of each box, and the stdio MCP servers
+                         of this machine that each box can share
+  set <key> [values...]  Set a key in the config
+  unset <key>            Remove a key from the config
+  help [command]         display help for command
+
+The keys:
+
+  notifications.agents  true or false, for all boxes. Give no --box.
+  mcp_gateway           true or false. false removes the key.
+  mcp_gateway_shared    zero or more stdio MCP server names.
+  agent_memory_max      one systemd memory size, such as 6G, 512M, or 50%.
+  projects              zero or more paths relative to the box home.
+
+A box key changes the [box.<name>] table of --box, else of default_box, else
+of the only box. An empty list and unset remove the key. A value that is not
+valid changes nothing. Put -- before the values when a value starts with -,
+as in ferry config set projects --box dev -- -app.
+
+Each change goes to the box at the next ferry sync. When the value changes,
+Ferry prints the sync to run, and syncNeeded is true in the JSON result.
+
+Ferry writes the config again, so the comments in ~/.ferry/config.toml are
+lost after a change.
+```
+
+### ferry config get
+
+```text
+Usage: ferry config get [options]
+
+Print the keys of each box, and the stdio MCP servers of this machine that each
+box can share
+
+Options:
+  -h, --help  display help for command
+
+With --json: { schemaVersion: 1, notifications: { agents }, boxes: [{ name, mcpGateway, mcpGatewayShared, agentMemoryMax, projects, stdioServers }], warnings }. stdioServers is [] when Ferry cannot read the MCP servers of this machine. Then result.warnings has the reason. Without a warning, result has no warnings key.
+```
+
+### ferry config set
+
+```text
+Usage: ferry config set [options] <key> [values...]
+
+Set a key in the config
+
+Arguments:
+  key         notifications.agents, mcp_gateway, mcp_gateway_shared,
+              agent_memory_max, or projects
+  values      the value, or the list items as separate arguments
+
+Options:
+  -h, --help  display help for command
+
+With --json: { changed, box, key, syncNeeded }. box is null for notifications.agents.
+```
+
+### ferry config unset
+
+```text
+Usage: ferry config unset [options] <key>
+
+Remove a key from the config
+
+Arguments:
+  key         notifications.agents, mcp_gateway, mcp_gateway_shared,
+              agent_memory_max, or projects
+
+Options:
+  -h, --help  display help for command
+
+With --json: { changed, box, key, syncNeeded }. box is null for notifications.agents.
 ```
 
 ## ferry box

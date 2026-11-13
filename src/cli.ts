@@ -79,7 +79,7 @@ import {
   type IntegrationCommandResult,
 } from "./integrations/command.ts";
 import { Link, type LinkOptions } from "./link.ts";
-import { loadRegistry, type Registry } from "./registry/load.ts";
+import { loadRegistry, offHarnesses, type Registry } from "./registry/load.ts";
 import {
   formatBriefStatus,
   formatStatus,
@@ -151,7 +151,8 @@ import {
   type UpdateCommandResult,
 } from "./update.ts";
 import { isReleaseVersion, VERSION } from "./version.ts";
-import { redactTokens, redactUrlCredentials } from "./manifest.ts";
+import { readMcpSources, redactTokens, redactUrlCredentials, type ForbiddenHit } from "./manifest.ts";
+import { configGetLines, configSetLines, runConfigGet, runConfigSet } from "./config-command.ts";
 import { packLines, parseScanRequest, redactPackLine, runScan } from "./scan.ts";
 import { writeStdout } from "./stdout.ts";
 import { offerSelfUpdate, offersSelfUpdate, runSelfUpdate, type SelfUpdateDependencies } from "./self-update.ts";
@@ -335,7 +336,7 @@ const JSON_RESULTS: Record<string, string> = {
   expose: "events exposed and exited. The output of the command goes to stderr",
   notify: "{ id, harness, kind, project, at }",
   status:
-    "the status report, schema version 2. With --brief, { schemaVersion: 1, checkedAt, boxes: [{ name, host, online, error, summary, issues: [{ kind, name, state, summary, message, command }], resources: { disk, memory, load } }] }",
+    "the status report, schema version 2. With --brief, { schemaVersion: 1, checkedAt, boxes: [{ name, host, online, error, summary, issues: [{ kind, name, state, summary, message, command }], resources: { disk, memory, load }, mcpGateway: { state, reason, servers: [{ name, state }] } }] }. mcpGateway.state is off for a box without mcp_gateway = true. mcpGateway is null when the box is offline or the gateway check failed",
   doctor:
     "{ schemaVersion: 1, ok, checks: [{ id, box, status, message, fix }] }, also on failure. status is ok, failed, or skipped",
   integrations: "{ boxes: [{ name, destination, integrations: [{ id, description, enabled, parts, available, localVersion, localSource, connectSteps }] }] }",
@@ -354,6 +355,10 @@ const JSON_RESULTS: Record<string, string> = {
     '{ role: "operator" or "box", box, instructions: { file, sources: [{ part: "header", "box", or "shared", path }] }, managedPaths: { instructionFiles, skillRoots, roots } }. box is null on the operator machine and before the first sync of a box. instructions is null on the operator machine and on a box without the generated file. sources has the merged parts in order, and path is the file on the operator machine. On a box, managedPaths has the paths that the last sync linked there',
   "self-update":
     "{ current, latest, updated, state, services: [{ service, action, message }], skill }. state is updated, up-to-date, or not-ready. not-ready: the release latest does not have its files yet, and Ferry did not start the update. skill is the message of the skill update, or null. The output of the installer goes to stderr",
+  "config get":
+    "{ schemaVersion: 1, notifications: { agents }, boxes: [{ name, mcpGateway, mcpGatewayShared, agentMemoryMax, projects, stdioServers }], warnings }. stdioServers is [] when Ferry cannot read the MCP servers of this machine. Then result.warnings has the reason. Without a warning, result has no warnings key",
+  "config set": "{ changed, box, key, syncNeeded }. box is null for notifications.agents",
+  "config unset": "{ changed, box, key, syncNeeded }. box is null for notifications.agents",
   "box list": "{ boxes: [{ name, transport, destination, default }] }",
   "box add": "{ name, transport, destination, gitAuth, migrated, instructionFile }",
   "box remove":
@@ -1923,6 +1928,68 @@ of Ferry on the box.`)
       report(result, (result) => writeLine(result.message));
     });
 
+  const configCommand = program
+    .command("config")
+    .description("Read and change some keys of ~/.ferry/config.toml")
+    .addHelpText("after", `
+The keys:
+
+  notifications.agents  true or false, for all boxes. Give no --box.
+  mcp_gateway           true or false. false removes the key.
+  mcp_gateway_shared    zero or more stdio MCP server names.
+  agent_memory_max      one systemd memory size, such as 6G, 512M, or 50%.
+  projects              zero or more paths relative to the box home.
+
+A box key changes the [box.<name>] table of --box, else of default_box, else
+of the only box. An empty list and unset remove the key. A value that is not
+valid changes nothing. Put -- before the values when a value starts with -,
+as in ferry config set projects --box dev -- -app.
+
+Each change goes to the box at the next ferry sync. When the value changes,
+Ferry prints the sync to run, and syncNeeded is true in the JSON result.
+
+Ferry writes the config again, so the comments in ~/.ferry/config.toml are
+lost after a change.`);
+  configCommand
+    .command("get")
+    .description("Print the keys of each box, and the stdio MCP servers of this machine that each box can share")
+    .action(() => {
+      const home = (dependencies.home ?? homedir)();
+      const result = runConfigGet({
+        readConfig: config,
+        // The read of sync. It gives only the server names, never a command, an env value, a header, or a URL.
+        stdioServers: (target) => {
+          const current = registry();
+          const off = offHarnesses(current, target.tools);
+          const forbidden: ForbiddenHit[] = [];
+          const sources = readMcpSources(home, current.harnesses.filter((harness) => !off.includes(harness)), forbidden);
+          if (forbidden.length > 0) throw new Error(forbidden.map((hit) => `${hit.reason}: ${hit.path}`).join("; "));
+          return sources.flatMap((source) => source.servers.flatMap((server) => (server.type === "stdio" ? [server.name] : [])));
+        },
+      });
+      report(result, (result) => {
+        for (const line of configGetLines(result)) writeLine(line);
+      });
+    });
+  for (const unset of [false, true]) {
+    const command = configCommand
+      .command(unset ? "unset" : "set")
+      .description(unset ? "Remove a key from the config" : "Set a key in the config")
+      .argument("<key>", "notifications.agents, mcp_gateway, mcp_gateway_shared, agent_memory_max, or projects");
+    if (!unset) command.argument("[values...]", "the value, or the list items as separate arguments");
+    command.action((key: string, values: unknown) => {
+      const names = boxNames();
+      if (names.length > 1) throw new FerryError("usage", `ferry config ${command.name()} changes one box. Give --box once.`);
+      const result = runConfigSet(
+        { key, values: Array.isArray(values) ? values : [], unset, ...(names[0] !== undefined ? { box: names[0] } : {}) },
+        { readConfig: config, writeConfig: (value) => writeConfig(value, (dependencies.home ?? homedir)()) },
+      );
+      report(result, (result) => {
+        for (const line of configSetLines(result, unset)) writeLine(line);
+      });
+    });
+  }
+
   const box = program.command("box").description("List, add, and remove the boxes of the config");
   const boxDependencies = (
     reporter: Progress,
@@ -2258,6 +2325,7 @@ Ferry reads the token as ferry box create does.
     if (command) boxCommands.add(command);
   }
   for (const command of integrations.commands) boxCommands.add(command);
+  for (const command of configCommand.commands) if (command.name() !== "get") boxCommands.add(command);
 
   program
     .command("skills")
