@@ -16,6 +16,8 @@ import { join } from "node:path";
 import { quoteShell } from "../box-settings.ts";
 import { isRelayUrl, setBoxMessagingKey, setMessagingRelay } from "../config.ts";
 import { FerryError } from "../errors.ts";
+import { LOGIN } from "./ids.ts";
+import type { GitHubAccess } from "./relay/access.ts";
 import type { LinkResult, RunOptions } from "../link.ts";
 import { spawnSync } from "node:child_process";
 import { installUserService, launchdPath, systemdPath, uninstallUserService, type WatchServiceResult } from "../watch-service.ts";
@@ -58,31 +60,9 @@ export type GitHubAppPart = {
   importGitHubApp(input: { home: string; appId: number; clientId: string; slug: string; keyFile: string }): Promise<{ slug: string; appId: number }>;
 };
 
-type Clock = { now(): number };
-
-/** The relay server (`src/messaging/relay/server.ts`). */
-export type RelayPart = {
-  startRelay(options: {
-    dbPath: string;
-    listen?: string;
-    github: unknown;
-    clock: Clock;
-    log: (event: string, fields?: Readonly<Record<string, string | number | boolean | null>>) => void;
-    allowedOwners: readonly string[];
-    relayVersion?: string;
-  }): Promise<{ url: string; stop(): Promise<void> }>;
-};
-
-/** The backups of the relay store (`src/messaging/relay/backup.ts`). */
-export type BackupPart = {
-  backupStore(path: string, target?: string, clock?: Clock): string;
-  restoreStore(file: string, path: string, clock?: Clock): string | null;
-  latestBackup(path: string): string | null;
-};
-
 /** The GitHub access of the relay (`src/messaging/github/access.ts`). `app` is the `github` value of the relay config. */
 export type GitHubAccessPart = {
-  createGitHubAccess(config: { app: unknown; privateKey: string }): unknown;
+  createGitHubAccess(config: { app: unknown; privateKey: string }): GitHubAccess;
 };
 
 /** The worker (`src/messaging/worker/worker.ts`). */
@@ -108,9 +88,7 @@ const PARTS = {
   client: { specifier: "./client/relay-client.ts", what: "relay client" },
   remote: { specifier: "./client/remote.ts", what: "remote selection" },
   app: { specifier: "./github/manifest.ts", what: "GitHub App setup" },
-  relay: { specifier: "./relay/server.ts", what: "relay server" },
   access: { specifier: "./github/access.ts", what: "GitHub access" },
-  backup: { specifier: "./relay/backup.ts", what: "relay backup" },
   worker: { specifier: "./worker/worker.ts", what: "messaging worker" },
 } as const;
 
@@ -259,7 +237,6 @@ export async function uninstallRelay(keepData: boolean, home = homedir()): Promi
 
 /** The relay config file, relative to the home. The GitHub App setup writes `github`, and `ferry relay owners` writes `allowedOwners`. */
 export const RELAY_CONFIG_FILE = `${RELAY_DIR}/config.json`;
-const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 
 /** The relay config. A missing file is an empty config. */
 export function readRelayConfig(home = homedir()): { readonly github: unknown; readonly allowedOwners: readonly string[]; readonly rest: Record<string, unknown> } {
@@ -289,7 +266,7 @@ export function relayOwners(
   const config = readRelayConfig(home);
   const owner = input.add ?? input.remove;
   if (owner === undefined) return { owners: config.allowedOwners, changed: false, restarted: false };
-  if (!GITHUB_LOGIN.test(owner)) throw new FerryError("usage", `${owner} is not a GitHub user or organization name.`);
+  if (!LOGIN.test(owner)) throw new FerryError("usage", `${owner} is not a GitHub user or organization name.`);
   const same = (entry: string) => entry.toLowerCase() === owner.toLowerCase();
   const owners =
     input.add !== undefined
@@ -320,7 +297,7 @@ export async function serveRelay(listen: string, version: string, log: Print, ho
   if (github === null || privateKey === "") {
     throw new FerryError("failed", "The relay has no GitHub App.", { hint: "Run ferry relay setup github-app or ferry relay import-github-app." });
   }
-  const { startRelay } = await part<RelayPart>("relay");
+  const { startRelay } = await import("./relay/server.ts");
   const { createGitHubAccess } = await part<GitHubAccessPart>("access");
   const relay = await startRelay({
     dbPath: join(home, RELAY_DB_FILE),
@@ -343,7 +320,7 @@ export async function serveRelay(listen: string, version: string, log: Print, ho
  * `~/.ferry/relay` first, and Ferry returns its bytes and removes it.
  */
 export async function backupRelay(to: string | null, home = homedir()): Promise<{ path: string | null; bytes: Uint8Array | null }> {
-  const { backupStore } = await part<BackupPart>("backup");
+  const { backupStore } = await import("./relay/backup.ts");
   const db = join(home, RELAY_DB_FILE);
   if (to !== "-") return { path: backupStore(db, to ?? undefined), bytes: null };
   const temporary = join(home, RELAY_DIR, `.backup-stdout-${process.pid}.db`);
@@ -358,7 +335,7 @@ export async function backupRelay(to: string | null, home = homedir()): Promise<
 
 /** `ferry relay restore`. Returns the path of the moved store, or null. */
 export async function restoreRelay(file: string, home = homedir()): Promise<string | null> {
-  const { restoreStore } = await part<BackupPart>("backup");
+  const { restoreStore } = await import("./relay/backup.ts");
   return restoreStore(file, join(home, RELAY_DB_FILE));
 }
 
@@ -371,7 +348,7 @@ export async function relayStatus(version: string, home = homedir()): Promise<{
   githubApp: boolean;
   owners: readonly string[];
 }> {
-  const { latestBackup } = await part<BackupPart>("backup");
+  const { latestBackup } = await import("./relay/backup.ts");
   const { statSync } = await import("node:fs");
   const db = join(home, RELAY_DB_FILE);
   const config = readRelayConfig(home);

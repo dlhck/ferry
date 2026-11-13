@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { changeRelayUrl, messagingStatus, messagingStatusLines, part, readRelayConfig, relayOwners, serveRelay } from "../../../src/messaging/commands.ts";
+import { backupRelay, changeRelayUrl, messagingStatus, messagingStatusLines, part, readRelayConfig, relayOwners, relayStatus, restoreRelay, serveRelay } from "../../../src/messaging/commands.ts";
 import { messagingHookCommand } from "../../../src/messaging/hooks.ts";
 import { runMessagingSetup, runMessagingTeardown, type WorkerStatusView } from "../../../src/messaging/setup.ts";
+import { openStore } from "../../../src/messaging/relay/store.ts";
 import { BUILTIN_HARNESSES } from "../../../src/registry/builtin.ts";
 import { messagingIssues } from "../../../src/status.ts";
 
@@ -141,7 +142,7 @@ test("ferry messaging relay-url writes the config and client.json", () => {
 });
 
 test("a part that is not in the build gives a clear error", async () => {
-  await expect(part("relay")).rejects.toThrow(/This Ferry build has no relay server/);
+  await expect(part("worker")).rejects.toThrow(/This Ferry build has no messaging worker/);
 });
 
 test("ferry relay serve needs the GitHub App config and key", async () => {
@@ -149,6 +150,24 @@ test("ferry relay serve needs the GitHub App config and key", async () => {
   mkdirSync(join(root, ".ferry", "relay"), { recursive: true });
   writeFileSync(join(root, ".ferry", "relay", "config.json"), JSON.stringify({ allowedOwners: ["acme"] }));
   await expect(serveRelay("127.0.0.1:0", "1.0.0", () => {}, root)).rejects.toThrow(/The relay has no GitHub App/);
+});
+
+test("ferry relay backup, restore, and status work on the relay store", async () => {
+  const root = home();
+  mkdirSync(join(root, ".ferry", "relay"), { recursive: true, mode: 0o700 });
+  openStore(join(root, ".ferry", "relay", "relay.db"), { now: () => NOW }).close();
+
+  const { path } = await backupRelay(null, root);
+  const { bytes } = await backupRelay("-", root);
+  const status = await relayStatus("1.0.0", root);
+  const previous = await restoreRelay(path!, root);
+
+  expect(path).toStartWith(join(root, ".ferry", "relay", "backups", "relay-"));
+  expect(new TextDecoder().decode(bytes!.slice(0, 15))).toBe("SQLite format 3");
+  expect(status).toMatchObject({ version: "1.0.0", lastBackup: path, githubApp: false, owners: [] });
+  expect(status.database.bytes).toBeGreaterThan(0);
+  expect(previous).toStartWith(join(root, ".ferry", "relay", "relay.db.before-restore-"));
+  expect(readdirSync(join(root, ".ferry", "relay")).filter((name) => name.startsWith(".backup-stdout"))).toEqual([]);
 });
 
 describe("ferry messaging setup and teardown", () => {

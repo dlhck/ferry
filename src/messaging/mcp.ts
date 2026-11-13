@@ -16,6 +16,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { VERSION } from "../version.ts";
 import { callerAncestors, callWorker, workerSocketPath, WORKER_OFFLINE, type Caller } from "./hook.ts";
 import { MESSAGING_MCP_SERVER } from "./hooks.ts";
+import { LIMITS } from "./protocol.ts";
 
 /** The skill of messaging, relative to the home. */
 export const MESSAGING_SKILL_FILE = ".agents/skills/ferry-messaging/SKILL.md";
@@ -42,7 +43,7 @@ export const MESSAGING_TOOLS: readonly { readonly name: string; readonly descrip
   {
     name: "ferry_whoami",
     description: "Show the address, owner, runtime, and project of this session, and its memberships. With task, set the short task text that other sessions see.",
-    inputSchema: object({ task: string("What this session works on, in at most 280 characters.", { maxLength: 280 }) }),
+    inputSchema: object({ task: string(`What this session works on, in at most ${LIMITS.task} characters.`, { maxLength: LIMITS.task }) }),
   },
   {
     name: "ferry_conversations",
@@ -57,8 +58,8 @@ export const MESSAGING_TOOLS: readonly { readonly name: string; readonly descrip
     description: "Create a conversation in the project of this session, and join it. The relay refuses a slug that exists and, without force, a similar open conversation. Then join the existing one.",
     inputSchema: object(
       {
-        name: string("The display name, 1 to 80 characters.", { minLength: 1, maxLength: 80 }),
-        purpose: string("What the conversation is for, 1 to 500 characters.", { minLength: 1, maxLength: 500 }),
+        name: string(`The display name, 1 to ${LIMITS.conversationName} characters.`, { minLength: 1, maxLength: LIMITS.conversationName }),
+        purpose: string(`What the conversation is for, 1 to ${LIMITS.conversationPurpose} characters.`, { minLength: 1, maxLength: LIMITS.conversationPurpose }),
         slug: string("1 to 48 characters from a-z, 0-9, and -. The default comes from the name.", { pattern: "^[a-z0-9][a-z0-9-]{0,47}$" }),
         issue: string("An issue key to link, such as CLO-1442 or #306. A session on a branch with this key joins automatically."),
         branch: string("A branch name to link. A session on this branch joins automatically."),
@@ -89,7 +90,7 @@ export const MESSAGING_TOOLS: readonly { readonly name: string; readonly descrip
       {
         conversation: CONVERSATION,
         kind: oneOf(["update", "request", "answer"], "update, request, or answer."),
-        body: string("The message text, at most 16,384 bytes. Do not put secrets in it.", { minLength: 1 }),
+        body: string(`The message text, at most ${LIMITS.bodyBytes.toLocaleString("en-US")} bytes. Do not put secrets in it.`, { minLength: 1 }),
         to: string("request only: a session address (@login/runtime-xxxxxx), a session id, or an owner login with one live member session."),
         answers: string("answer only: the message id of the request (msg_...)."),
         generation: GENERATION,
@@ -106,7 +107,7 @@ export const MESSAGING_TOOLS: readonly { readonly name: string; readonly descrip
         items: {
           type: "array",
           minItems: 1,
-          maxItems: 50,
+          maxItems: LIMITS.ackItems,
           description: "The messages to acknowledge.",
           items: object({ id: string("The message id (msg_...)."), generation: GENERATION }, ["id"]),
         },
@@ -146,7 +147,7 @@ export const MESSAGING_TOOLS: readonly { readonly name: string; readonly descrip
       {
         conversation: CONVERSATION,
         before: string("A message id. Read the messages before it."),
-        limit: integer("The number of messages, 1 to 50.", { minimum: 1, maximum: 50 }),
+        limit: integer(`The number of messages, 1 to ${LIMITS.historyPage}.`, { minimum: 1, maximum: LIMITS.historyPage }),
         message: string("A message id. Read only this message."),
       },
       ["conversation"],
@@ -161,7 +162,7 @@ export const MESSAGING_TOOLS: readonly { readonly name: string; readonly descrip
         action: oneOf(["list", "create", "adopt", "resolve", "request-resolution"], "The action."),
         conversation: string("list and create: the conversation (id or slug)."),
         constraint: string("adopt, resolve, and request-resolution: the constraint id (con_...)."),
-        text: string("create: the restriction, at most 1,000 characters. Name the resource.", { maxLength: 1000 }),
+        text: string(`create: the restriction, at most ${LIMITS.constraintText.toLocaleString("en-US")} characters. Name the resource.`, { maxLength: LIMITS.constraintText }),
         source: string("create: the message id that the constraint comes from."),
         note: string("resolve: why the constraint no longer applies."),
         evidence: string("request-resolution: why the constraint can end."),
