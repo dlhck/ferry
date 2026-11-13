@@ -381,7 +381,7 @@ describe("delivery", () => {
     await t.worker.tick();
     expect(t.relay.results().map((result) => result.outcome)).toEqual(["unconfirmed", "unconfirmed", "unconfirmed"]);
     expect(t.relay.find("PATCH", /^\/v1\/sessions\//)[0]!.body).toMatchObject({ adapter: "unconfirmed" });
-    expect(t.worker.status().sessions[0]!.adapter).toBe("unconfirmed");
+    expect((await t.worker.status()).sessions[0]!.adapter).toBe("unconfirmed");
     // A later arrival in the 24-hour watch still counts as delivered.
     session.setActivity("idle");
     await waitFor(() => session.received().length === 3, "late frames");

@@ -35,7 +35,10 @@ import { addCause, buildDigest, MAX_CAUSES, OFFLINE_CONTEXT, peerMessageIds, ref
 import { Outbox, type Method, type RelayAnswer, type RelayTransport, type Submitted } from "./outbox.ts";
 import {
   newId,
-  selectRepoKeyStub,
+  findProject,
+  readOnlyGit,
+  type GitRunner,
+  type RemoteSelection,
   type Activity,
   type ConversationSummary,
   type DispatchDecision,
@@ -72,7 +75,7 @@ export type WorkerInput = {
   readonly clock: Clock;
   readonly processes?: ProcessTable;
   /** The repository of a directory. Null outside a repository. */
-  readonly resolveRepo?: (cwd: string) => RepoInfo | null;
+  readonly resolveRepo?: (cwd: string) => Promise<RepoInfo | null>;
   /** The output of `<program> --version`, or null when the program fails. */
   readonly runVersion?: (program: string) => string | null;
   readonly log?: (line: string) => void;
@@ -112,7 +115,7 @@ export type RunningWorker = {
   tick(): Promise<void>;
   /** One long poll of the relay events. */
   pollOnce(waitMs?: number): Promise<void>;
-  status(): WorkerStatus;
+  status(): Promise<WorkerStatus>;
   stop(): Promise<void>;
 };
 
@@ -140,35 +143,34 @@ export function messagingSkillPath(home: string): string {
   return join(home, ".agents", "skills", "ferry-messaging", "SKILL.md");
 }
 
-function git(cwd: string, args: readonly string[]): string | null {
-  // Read-only Git only: no optional locks, no fsmonitor, never `git status` (design section 4.1).
-  const result = spawnSync("git", ["-c", "core.fsmonitor=false", ...args], {
-    cwd,
-    encoding: "utf8",
-    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
-    timeout: 3000,
-    stdio: ["ignore", "pipe", "ignore"],
-  });
-  return result.status === 0 ? result.stdout.trim() : null;
+/** The text of each remote selection refusal (design section 4.1). */
+function remoteRefusal(code: Extract<RemoteSelection, { ok: false }>["code"], remotes: readonly string[]): string {
+  switch (code) {
+    case "no-remote":
+      return "The checkout has no remote.";
+    case "unknown-remote":
+      return "The remote that ferry messaging remote set selected for this checkout does not exist. Ask your user to run ferry messaging remote set <name> or ferry messaging remote clear in it.";
+    case "unsupported-host":
+      return "The checkout has no GitHub.com remote.";
+    case "invalid-remote":
+      return "The URL of the selected remote is not a GitHub repository URL.";
+    case "ambiguous-remote":
+      return `The checkout has more than one GitHub remote (${remotes.join(", ")}). Ask your user to run ferry messaging remote set <name> in it.`;
+  }
 }
 
 /** The repository of a directory with read-only Git commands. */
-export function gitRepo(cwd: string): RepoInfo | null {
+export async function gitRepo(cwd: string, home: string, git: GitRunner = readOnlyGit): Promise<RepoInfo | null> {
   if (!existsSync(cwd)) return null;
-  const root = git(cwd, ["rev-parse", "--show-toplevel"]);
-  if (!root) return null;
-  const remotes = new Map<string, string>();
-  for (const name of (git(root, ["remote"]) ?? "").split("\n").filter(Boolean)) {
-    const url = git(root, ["remote", "get-url", name]);
-    if (url) remotes.set(name, url);
-  }
-  const selected = selectRepoKeyStub(remotes);
-  const head = git(root, ["rev-parse", "--verify", "-q", "HEAD"]);
+  const project = await findProject(cwd, { home, git });
+  if (!project) return null;
+  const { root } = project;
+  const head = (await git(["rev-parse", "--verify", "-q", "HEAD"], root))?.trim();
   return {
     root,
-    key: "key" in selected ? selected.key : null,
-    refusal: "refusal" in selected ? selected.refusal : null,
-    branch: git(root, ["symbolic-ref", "--short", "-q", "HEAD"]),
+    key: project.ok ? project.key : null,
+    refusal: project.ok ? null : { code: project.code, message: remoteRefusal(project.code, project.remotes) },
+    branch: (await git(["symbolic-ref", "--short", "-q", "HEAD"], root))?.trim() || null,
     head: head && /^[0-9a-f]{40}$/.test(head) ? head : null,
     worktree: basename(root).slice(0, 128),
   };
@@ -246,7 +248,7 @@ const id = encodeURIComponent;
 export async function runWorker(input: WorkerInput): Promise<RunningWorker> {
   const { home, clock } = input;
   const processes = input.processes ?? systemProcesses;
-  const resolveRepo = input.resolveRepo ?? gitRepo;
+  const resolveRepo = input.resolveRepo ?? ((cwd: string) => gitRepo(cwd, home));
   const runVersion = input.runVersion ?? defaultRunVersion;
   const log = input.log ?? (() => {});
   const tickMs = input.tickMs ?? 1000;
@@ -422,7 +424,7 @@ export async function runWorker(input: WorkerInput): Promise<RunningWorker> {
     for (const old of store.sessionsOfProcess(found.pid, found.start)) if (old.runtimeSessionId !== runtimeSessionId) endSession(old, "replaced");
 
     const cwd = str(event.cwd) ?? "";
-    const repo = cwd ? resolveRepo(cwd) : null;
+    const repo = cwd ? await resolveRepo(cwd) : null;
     const program = runtimeProgram(found.pid, adapter);
     const existing = store.session(runtime, runtimeSessionId);
     const source = SOURCES.has(String(event.source)) ? (event.source as SessionRegister["source"]) : "startup";
@@ -1112,7 +1114,7 @@ export async function runWorker(input: WorkerInput): Promise<RunningWorker> {
   // Status
 
   /** Live Codex processes in a participating repository that did not register: Codex does not run the Ferry hooks. */
-  function unregisteredCodex(): { pid: number; worktree: string }[] {
+  async function unregisteredCodex(): Promise<{ pid: number; worktree: string }[]> {
     if (process.platform !== "linux") return [];
     const sessions = store.sessions();
     const keys = new Set(sessions.filter((session) => session.projectId !== null && session.projectKey !== null).map((session) => session.projectKey!));
@@ -1136,13 +1138,13 @@ export async function runWorker(input: WorkerInput): Promise<RunningWorker> {
       } catch {
         continue;
       }
-      const repo = resolveRepo(cwd);
+      const repo = await resolveRepo(cwd);
       if (repo?.key && keys.has(repo.key)) found.push({ pid, worktree: repo.worktree });
     }
     return found;
   }
 
-  function status(): WorkerStatus {
+  async function status(): Promise<WorkerStatus> {
     const count = (state: Parameters<WorkerStore["latestAttempts"]>[0][number]) => store.latestAttempts([state]).length;
     return {
       pid: process.pid,
@@ -1167,7 +1169,7 @@ export async function runWorker(input: WorkerInput): Promise<RunningWorker> {
         failed: store.outboxEntries("failed").map((entry) => ({ key: entry.key, method: entry.method, path: entry.path, createdAt: entry.createdAt, lastError: entry.lastError })),
       },
       deliveries: { held: count("held"), unconfirmed: count("unconfirmed"), stranded: count("stranded"), failed: count("failed") },
-      unregisteredCodex: unregisteredCodex(),
+      unregisteredCodex: await unregisteredCodex(),
     };
   }
 
@@ -1193,7 +1195,7 @@ export async function runWorker(input: WorkerInput): Promise<RunningWorker> {
       case "tool.call":
         return done(await toolCall(params));
       case "status":
-        return done(status());
+        return done(await status());
       default:
         return { v: 1, id: request.id, ok: false, error: { code: "invalid-request", message: `Unknown op ${String(request.op)}.` } };
     }
