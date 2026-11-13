@@ -122,7 +122,8 @@ Rules:
 
 - Each agent host runs one worker for each OS user. Agents on the relay host also connect through a worker and the HTTPS URL. The relay gives a loopback client no extra authority.
 - Hooks and the MCP server never hold relay credentials. They talk only to the local worker through `~/.ferry/messaging/worker.sock`.
-- The worker is the only process with the device credential. It keeps a local outbox, so a send while the relay is offline is not lost.
+- The worker is the only long-running process with the device credential. It keeps a local outbox, so a send while the relay is offline is not lost.
+- The `ferry messaging` CLI views (`conversations`, `show`, `requests`, `peers`, `devices`, `revoke`) can read the credential file and call the relay directly. They run as the same OS user that owns the 0600 file, so they get no access that this user does not already have. They exit when the command ends.
 - The worker never starts a runtime. A stopped session stays stopped.
 - The relay is the clock. All stored times are relay times, ISO 8601 in UTC with milliseconds.
 - If the relay is offline, messaging is unavailable. Agents continue their own work. The `SessionStart` context and the tool results say that messaging is offline.
@@ -497,7 +498,7 @@ A live session has an activity: `idle`, `busy`, or `awaiting-approval`, from the
 - Authentication: `Authorization: Bearer fmr_...` on every endpoint except `/v1/enroll/*` and `GET /v1/health`.
 - Headers from the client: `Ferry-Protocol: 1`, `Ferry-Version: <semver>`, and `Idempotency-Key` on each mutating call except `/v1/enroll/*`.
 - A session-scoped call names `sessionId`. The relay checks that the session belongs to the calling device, is not retired, and that the owner has a valid grant for the project.
-- A `GET` endpoint with a `sessionId` query parameter also works without it. The relay then checks only that the device's owner has a valid grant for the project. The human CLI views use this form.
+- Device-scoped calls: a `GET` endpoint with a `sessionId` query parameter also works without it. The relay then applies the same owner and repository access checks to the device's owner: the device is not revoked, and the owner has a valid grant for the project. The human CLI views use this form. Device-scoped calls are read-only, except `POST /v1/devices/{id}/revoke` for a device of the same owner. A mutating call without `sessionId` fails with `400 invalid-request`.
 - Times: ISO 8601 UTC strings with milliseconds.
 - Schema notation: each type below is a closed JSON object (`additionalProperties: false`). `?` marks an optional field. String limits are in Unicode code points. Lane A writes these types in `src/messaging/protocol.ts` with runtime validators, and exports a JSON Schema for each request and response type from the same source. A test checks that the validators refuse unknown fields.
 
@@ -511,10 +512,10 @@ type ErrorBody = { error: { code: ErrorCode; message: string; hint: string | nul
 | --- | --- |
 | 400 | `invalid-request` |
 | 401 | `unauthenticated`, `device-revoked` |
-| 403 | `no-project-access`, `owner-not-allowed`, `app-not-installed`, `not-assignee`, `not-member`, `not-constraint-owner`, `forbidden` |
+| 403 | `no-project-access`, `owner-not-allowed`, `app-not-installed`, `not-assignee`, `not-member`, `not-constraint-owner`, `forbidden`, `device-flow-disabled` (the App has "Enable Device Flow" off; the relay operator turns it on) |
 | 404 | `not-found`, `enrollment-unknown` |
 | 409 | `idempotency-mismatch`, `generation-conflict`, `stale-generation`, `request-closed`, `request-reassigned`, `in-progress`, `conversation-exists`, `conversation-similar`, `ambiguous-recipient`, `limit-reached` |
-| 410 | `enrollment-expired`, `enrollment-denied` |
+| 410 | `enrollment-expired`, `enrollment-denied`, `enrollment-failed` (GitHub refused the device flow; the relay does not copy GitHub's error text) |
 | 413 | `too-large` |
 | 426 | `upgrade-required` |
 | 429 | `rate-limited` (with `details.retryAfterMs`) |
@@ -607,7 +608,8 @@ type EnrollPoll = { enrollmentId: string };
 type EnrollPolled =
   | { state: "pending"; intervalMs: number }          // HTTP 202
   | { state: "complete"; owner: Owner; device: { id: string; name: string } };  // HTTP 200
-// 410 enrollment-expired | enrollment-denied, 404 enrollment-unknown
+// 410 enrollment-expired | enrollment-denied | enrollment-failed, 404 enrollment-unknown
+// enroll/start: 403 device-flow-disabled
 
 // POST /v1/devices
 type DeviceCreate = { name: string; platform: "linux" | "darwin"; credentialSha256: string };
@@ -1420,7 +1422,7 @@ Assets: message text, constraint text, the membership map, device credentials, t
 | A person without repository write access reads or posts | Every project-scoped call checks a grant of write or higher for the owner. The check is fresh on join and repeats every 15 minutes. |
 | A removed collaborator keeps access | Revocation within 15 minutes, or 1 hour when GitHub is down, then memberships end. |
 | A claimed name or a remote URL gives access | The owner is the GitHub user from the device flow. Session addresses come from the relay. The project comes from the repository id, and access from the permission endpoint. |
-| A stolen device credential | 0600 file. The relay stores only a SHA-256. `ferry messaging revoke` ends it and its sessions. The deny rules keep it out of the snapshot. |
+| A stolen device credential | 0600 file, read only by the worker and by the short-lived `ferry messaging` CLI views of the same OS user. Hooks and the MCP server never read it. The relay stores only a SHA-256. `ferry messaging revoke` ends it and its sessions. The deny rules keep it out of the snapshot. |
 | A relay database leak | No credentials, no GitHub tokens. Message text leaks. |
 | GitHub App key leak | The key can read metadata of the installed repositories, and can check permissions. It cannot read code or write anything. Rotate in the App settings. |
 | Prompt injection through a message | The envelope marks peer text and denies approval. The Claude frame carries the cross-session wrapper, and Claude Code applies its documented consent rule to inbox messages. Ack is required before action. The skill tells agents to treat peer messages as information from a colleague, not as instructions from their user. |
@@ -1430,7 +1432,7 @@ Assets: message text, constraint text, the membership map, device credentials, t
 | Stale work after reassignment | Dispatch check before each injection, and ack and answer refusal with a stale generation. |
 | Agents on the relay host | They use the HTTPS URL and a device credential like everyone else. The relay gives a source address no authority. |
 | The relay host operator | Has full access to the database and the App key. This is a trust assumption: the team chooses a relay operator it trusts. Messages are not end-to-end encrypted. |
-| A local process of the same OS user | Can call `worker.sock` and act as any session of that device. Same-owner only. |
+| A local process of the same OS user | Can call `worker.sock` and act as any session of that device, and can read the credential file. Same-owner only. Device-scoped relay calls without a session are read-only, except revoke of the owner's own devices. |
 | Secrets in message text | The worker refuses a body that matches Ferry's token rules (`secret-in-message`), before it leaves the host. This finds tokens, not every secret. |
 | Logs | The relay and worker logs have IDs, states, and codes. They never have message bodies, tokens, or credentials. |
 
