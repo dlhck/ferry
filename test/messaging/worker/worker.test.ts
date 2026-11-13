@@ -4,10 +4,19 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { credentialSha256, newDeviceCredential, newId } from "../../../src/messaging/ids.ts";
+import { HEADERS, PROTOCOL_VERSION } from "../../../src/messaging/protocol.ts";
+import { startRelay } from "../../../src/messaging/relay/server.ts";
 import { OFFLINE_CONTEXT } from "../../../src/messaging/worker/digest.ts";
+import type { RelayTransport } from "../../../src/messaging/worker/outbox.ts";
 import { spoolDir, type LocalRequest } from "../../../src/messaging/worker/socket.ts";
 import { runWorker, type RunningWorker } from "../../../src/messaging/worker/worker.ts";
-import { createFakeRuntimes, type FakeRuntimes, type FakeRuntimeSession } from "../fakes/runtimes.ts";
+import { createFakeRuntimes } from "../fakes/runtimes.ts";
+import type { Adapter } from "../../../src/messaging/adapters/types.ts";
+import type { FakeRuntimes, FakeRuntimeSession } from "../harness/contracts.ts";
+import type { TestHome } from "../harness/homes.ts";
+import { VERSION } from "../../../src/version.ts";
+import { FakeGitHub } from "../relay/helpers.ts";
 import { CONVERSATION, FakeRelay, message, messageId } from "./fake-relay.ts";
 
 const cleanups: (() => Promise<void> | void)[] = [];
@@ -57,10 +66,11 @@ function treeHash(root: string): string {
 
 type Setup = {
   clock: Clock;
+  /** The fake relay. A test that gives its own `client` does not use it. */
   relay: FakeRelay;
   worker: RunningWorker;
-  runtimes: FakeRuntimes;
-  home: Parameters<FakeRuntimes["adapters"]>[0];
+  runtimes: FakeRuntimes<Adapter>;
+  home: TestHome;
   checkout: string;
   outside: string;
   start(runtime: "claude" | "codex", cwd?: string): Promise<{ session: FakeRuntimeSession; context: string; relayId: string | null }>;
@@ -70,7 +80,7 @@ type Setup = {
 
 let requestCount = 0;
 
-async function setup(options: { offline?: boolean } = {}): Promise<Setup> {
+async function setup(options: { offline?: boolean; clock?: Clock; client?: RelayTransport } = {}): Promise<Setup> {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "ferry-worker-")));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const homeDir = join(root, "alice");
@@ -100,12 +110,12 @@ async function setup(options: { offline?: boolean } = {}): Promise<Setup> {
   const outside = join(homeDir, "notes");
   mkdirSync(outside);
 
-  const clock = new Clock();
+  const clock = options.clock ?? new Clock();
   const relay = new FakeRelay(clock);
   relay.offline = options.offline ?? false;
   const runtimes = await createFakeRuntimes({ root: join(root, "rt"), clock });
   cleanups.push(() => runtimes.stop());
-  const worker = await runWorker({ home: homeDir, client: relay, adapters: runtimes.adapters(home), clock, tickMs: 0 });
+  const worker = await runWorker({ home: homeDir, client: options.client ?? relay, adapters: runtimes.adapters(home), clock, tickMs: 0 });
   cleanups.push(() => worker.stop());
 
   const hook: Setup["hook"] = async (session, op, event, fields) => {
@@ -465,5 +475,125 @@ describe("liveness and socket", () => {
     expect(status).toMatchObject({ v: 1, id: "a", ok: true, result: { revoked: false, sessions: [{ runtime: "claude", state: "live", adapter: "supported" }] } });
     expect(JSON.parse(lines[1]!)).toMatchObject({ ok: false, error: { code: "invalid-request" } });
     expect(statSync(join(t.home.home, ".ferry", "messaging", "worker.sqlite")).mode & 0o777).toBe(0o600);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Layer 2 with lane A's relay: a real relay on a free port, with a fake GitHub,
+// and an HTTP client until lane B's RelayClient merges.
+
+/** Send one call. Throw when the relay answers with an error. */
+async function ok(client: RelayTransport, method: "GET" | "POST", path: string, body?: unknown): Promise<any> {
+  const idempotencyKey = method === "POST" && !path.startsWith("/v1/enroll/") ? newId("idempotencyKey") : undefined;
+  const answer = await client.request({ method, path, body, idempotencyKey });
+  if (answer.status >= 300) throw new Error(`${method} ${path}: HTTP ${answer.status} ${JSON.stringify(answer.body)}`);
+  return answer.body;
+}
+
+async function relayWorld() {
+  const clock = new Clock();
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "ferry-worker-relay-")));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  const github = new FakeGitHub();
+  github.addRepo("acme/app", 4242);
+  const relay = await startRelay({ github, clock, log: () => {}, allowedOwners: ["acme"], dbPath: join(dir, "relay.db"), listen: "127.0.0.1:0" });
+  cleanups.push(() => relay.stop());
+
+  const client = (credential: string | null): RelayTransport => ({
+    async request(call) {
+      const headers: Record<string, string> = { [HEADERS.protocol]: String(PROTOCOL_VERSION), [HEADERS.version]: VERSION };
+      if (credential !== null) headers.authorization = `Bearer ${credential}`;
+      if (call.idempotencyKey) headers[HEADERS.idempotencyKey] = call.idempotencyKey;
+      const init: RequestInit = { method: call.method, headers, signal: call.signal ?? null };
+      if (call.method !== "GET") {
+        init.body = JSON.stringify(call.body ?? {});
+        headers["content-type"] = "application/json";
+      }
+      const response = await fetch(`${relay.url}${call.path}`, init);
+      const text = await response.text();
+      let body: unknown = null;
+      try {
+        body = text === "" ? null : JSON.parse(text);
+      } catch {}
+      return { status: response.status, body };
+    },
+  });
+  const enroll = async (login: string, githubUserId: number): Promise<RelayTransport> => {
+    github.addUser(login, githubUserId);
+    github.grant(login, "acme/app", "write");
+    const credential = newDeviceCredential();
+    const started = await ok(client(null), "POST", "/v1/enroll/start", { deviceName: `${login}-box`, platform: "linux", ferryVersion: VERSION, credentialSha256: credentialSha256(credential) });
+    github.polls.push({ state: "complete", user: { id: githubUserId, login } });
+    await ok(client(null), "POST", "/v1/enroll/poll", { enrollmentId: started.enrollmentId });
+    return client(credential);
+  };
+
+  const alice = await enroll("alice", 1001);
+  const bob = await enroll("bob", 1002);
+  const registered = await ok(bob, "POST", "/v1/sessions", {
+    runtime: "codex",
+    runtimeSessionId: "bob-thread",
+    runtimeVersion: "0.169.0",
+    adapter: "supported",
+    repo: { key: "github.com/acme/app" },
+    branch: "main",
+    head: null,
+    worktree: "app",
+    task: null,
+    source: "startup",
+  });
+  const bobSession = registered.session as { id: string };
+  const conversation = (await ok(bob, "POST", `/v1/projects/${registered.project.id}/conversations`, { sessionId: bobSession.id, name: "Production applies", purpose: "Coordinate applies to production.", autoJoin: "all", force: true })).conversation as { id: string };
+  const t = await setup({ clock, client: alice });
+  const send = (body: Record<string, unknown>) => ok(bob, "POST", `/v1/conversations/${conversation.id}/messages`, { sessionId: bobSession.id, ...body });
+  return { t, bob, conversation, send };
+}
+
+describe("with lane A's relay", () => {
+  test("SessionStart registers through the relay and auto-joins the conversation", async () => {
+    const r = await relayWorld();
+    const { session, context, relayId } = await r.t.start("claude");
+    expect(relayId).toMatch(/^ses_/);
+    expect(context).toContain("in project github.com/acme/app");
+    expect(context).toContain("app/production-applies (auto-joined)");
+    const listed = await r.t.tool(session, "ferry_conversations", {});
+    expect(listed.ok).toBe(true);
+    expect(JSON.stringify(listed.result)).toContain(r.conversation.id);
+  });
+
+  test("a request of another owner reaches an idle Claude session, the transcript confirms it, and the ack and the answer close it", async () => {
+    const r = await relayWorld();
+    const { session } = await r.t.start("claude");
+    const address = r.t.worker.store.session("claude", session.runtimeSessionId)!.address!;
+    const request = (await r.send({ kind: "request", body: "Has the apply finished?", to: address })).message as { id: string };
+    await r.t.worker.pollOnce(0);
+    await waitFor(() => session.received().length === 1, "envelope");
+    expect(session.received()[0]).toContain(`id="${request.id}"`);
+    await r.t.worker.tick();
+    const delivered = await ok(r.bob, "GET", `/v1/messages/${request.id}`);
+    expect(delivered.receipts).toMatchObject([{ state: "delivered" }]);
+    expect(delivered.receipts[0].evidence.map((evidence: { kind: string }) => evidence.kind)).toContain("transcript");
+
+    const acked = await r.t.tool(session, "ferry_ack", { items: [{ id: request.id, generation: 1 }] });
+    expect(acked.result).toMatchObject({ items: [{ id: request.id, result: "acknowledged" }] });
+    const answered = await r.t.tool(session, "ferry_send", { conversation: r.conversation.id, kind: "answer", answers: request.id, generation: 1, body: "Yes, it finished." });
+    expect(answered.ok).toBe(true);
+    expect((await ok(r.bob, "GET", `/v1/messages/${request.id}`)).message.request).toMatchObject({ status: "answered" });
+  });
+
+  test("an update goes into the next prompt digest of a Codex thread, and the relay records context-digest", async () => {
+    const r = await relayWorld();
+    const { session, relayId } = await r.t.start("codex");
+    const update = (await r.send({ kind: "update", body: "The apply finished." })).message as { id: string };
+    await r.t.worker.pollOnce(0);
+    await waitFor(() => r.t.worker.store.digest(relayId!).length === 1, "digest");
+    expect(session.received()).toEqual([]);
+    const digest = (await r.t.hook(session, "hook.userPromptSubmit", "UserPromptSubmit", { prompt: "Go on." })) as { additionalContext: string };
+    expect(digest.additionalContext).toContain(`Update ${update.id} in production-applies`);
+    expect(digest.additionalContext).toContain("The apply finished.");
+    await r.t.worker.tick();
+    const receipts = (await ok(r.bob, "GET", `/v1/messages/${update.id}`)).receipts;
+    expect(receipts).toMatchObject([{ state: "delivered" }]);
+    expect(receipts[0].evidence.map((evidence: { kind: string }) => evidence.kind)).toContain("context-digest");
   });
 });

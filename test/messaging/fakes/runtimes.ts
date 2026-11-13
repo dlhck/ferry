@@ -47,55 +47,13 @@ import { join } from "node:path";
 import type { Adapter } from "../../../src/messaging/adapters/types.ts";
 import { callerAncestors } from "../../../src/messaging/worker/registry.ts";
 import { defaultAdapters } from "../../../src/messaging/worker/worker.ts";
-
-// The types of the harness contract (lane E, test/messaging/harness/contracts.ts). Import them from there once it merges.
-type Clock = { now(): number };
-type TestHome = {
-  readonly login: string;
-  readonly githubUserId: number;
-  readonly deviceName: string;
-  readonly home: string;
-  readonly messagingDir: string;
-  readonly relayDir: string;
-  readonly claudeDir: string;
-  readonly codexHome: string;
-  readonly env: Readonly<Record<string, string>>;
-};
-type FakeRuntime = "claude" | "codex";
-type FakeActivity = "idle" | "busy" | "awaiting-approval";
-type FakeCaller = { readonly ancestors: readonly { readonly pid: number; readonly startTime: string }[] };
-type FakeHookEvent = "SessionStart" | "UserPromptSubmit" | "Stop" | "PermissionRequest" | "Notification" | "PostToolUse" | "SessionEnd";
-
-export interface FakeRuntimeSession {
-  readonly runtime: FakeRuntime;
-  readonly runtimeSessionId: string;
-  readonly runtimeVersion: string;
-  readonly pid: number;
-  readonly cwd: string;
-  readonly transcriptPath: string;
-  readonly home: TestHome;
-  caller(): FakeCaller;
-  hookInput(event: FakeHookEvent, fields?: Readonly<Record<string, unknown>>): Record<string, unknown>;
-  hookEnv(): Record<string, string>;
-  activity(): FakeActivity;
-  setActivity(activity: FakeActivity): void;
-  received(): readonly string[];
-  exit(): Promise<void>;
-  crash(): Promise<void>;
-  resume(): Promise<FakeRuntimeSession>;
-}
-
-export type CreateFakeRuntimesOptions = {
-  readonly root: string;
-  readonly clock?: Clock;
-  readonly versions?: { readonly claude?: string; readonly codex?: string };
-};
-
-export interface FakeRuntimes<A = Adapter> {
-  adapters(home: TestHome): readonly A[];
-  start(runtime: FakeRuntime, options: { readonly home: TestHome; readonly cwd: string }): Promise<FakeRuntimeSession>;
-  stop(): Promise<void>;
-}
+import type {
+  CreateFakeRuntimes,
+  FakeActivity,
+  FakeRuntime,
+  FakeRuntimeSession,
+} from "../harness/contracts.ts";
+import type { TestHome } from "../harness/homes.ts";
 
 /** The newest tested versions of design 9.2 and 9.3. */
 export const FAKE_VERSIONS = { claude: "2.1.323", codex: "0.169.0" } as const;
@@ -113,7 +71,7 @@ type SessionConfig = {
   readonly codexHome: string | null;
 };
 
-export const createFakeRuntimes = async (options: CreateFakeRuntimesOptions): Promise<FakeRuntimes> => {
+export const createFakeRuntimes: CreateFakeRuntimes<Adapter> = async (options) => {
   const clock = options.clock ?? { now: () => Date.now() };
   const versions = { ...FAKE_VERSIONS, ...options.versions };
   const bin = join(options.root, "bin");
