@@ -128,7 +128,7 @@ describe("permission lookup", () => {
     expect(await access.permission(installation, "acme/docs", "alice")).toEqual({ state: "ok", permission: "none", roleName: null });
   });
 
-  test("an uninstalled App means no access, and GitHub problems are unavailable", async () => {
+  test("a removed installation and GitHub problems are unavailable, and the repository lookup tells removal from a new install", async () => {
     const { github, access } = await setup();
     const installation = github.install("acme");
     github.setPermission("acme/app", "alice", "admin");
@@ -140,7 +140,14 @@ describe("permission lookup", () => {
 
     github.uninstall("acme");
     // GitHub refuses the cached token. The retry mints a new token, and the mint finds no installation.
-    expect(await access.permission(installation, "acme/app", "alice")).toEqual({ state: "ok", permission: "none", roleName: null });
+    expect(await access.permission(installation, "acme/app", "alice")).toEqual({ state: "unavailable" });
+    expect(await access.resolveRepository("acme", "app")).toEqual({ state: "app-not-installed" });
+
+    const reinstalled = github.install("acme");
+    expect(reinstalled).not.toBe(installation);
+    expect(await access.permission(installation, "acme/app", "alice")).toEqual({ state: "unavailable" });
+    expect(await access.resolveRepository("acme", "app")).toMatchObject({ state: "ok", installationId: reinstalled });
+    expect(await access.permission(reinstalled, "acme/app", "alice")).toMatchObject({ state: "ok", permission: "admin" });
   });
 
   test("the current login follows a rename of the user id", async () => {

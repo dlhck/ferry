@@ -52,7 +52,12 @@ export interface GitHubAccess {
   pollDeviceFlow(deviceCode: string): Promise<DevicePoll>;
   /** The repository id, canonical name, and installation of `<owner>/<repo>`. Redirects of a renamed repository are followed. */
   resolveRepository(owner: string, repo: string): Promise<RepositoryLookup>;
-  /** The `permission` field of the collaborator permission endpoint. A 404 and a removed installation are `none`. */
+  /**
+   * The `permission` field of the collaborator permission endpoint. A 404 is `none`.
+   * A removed installation is `unavailable`, because the caller can have a stale
+   * installation id after a new install. The caller then calls `resolveRepository`:
+   * `app-not-installed` is the loss of access, and `ok` gives the new installation.
+   */
   permission(installationId: number, fullName: string, login: string): Promise<PermissionLookup>;
   /** The current login of a GitHub user id. Null when GitHub does not answer or has no such user. */
   currentLogin(userId: number): Promise<string | null>;
@@ -130,8 +135,8 @@ export function createGitHubAccess(config: GitHubAccessConfig): GitHubAccess {
           roleName: typeof body.role_name === "string" ? body.role_name : null,
         };
       } catch (error) {
-        // The App lost its installation, so it lost its access to the repository.
-        if (error instanceof InstallationGoneError) return { state: "ok", permission: "none", roleName: null };
+        // The installation id is stale or the App is gone. Only `resolveRepository` can tell which.
+        if (error instanceof InstallationGoneError) return { state: "unavailable" };
         if (error instanceof GitHubUnavailableError) return { state: "unavailable" };
         throw error;
       }
