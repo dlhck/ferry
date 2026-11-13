@@ -978,7 +978,7 @@ Capability check: at registration, the worker checks within 10 seconds that the 
 Delivery, after a `go`:
 
 1. Check liveness. Not live: report the outcome `offline`. The relay sets `hold = recipient-offline` and the session state `offline`.
-2. Run `<runtime exe> queue --thread <thread id> --message <envelope>`, with `CODEX_HOME` of the session. Never pass `--resume`, because it can start a stopped thread. Parse the queue item id from stdout.
+2. Run `<runtime exe> queue --thread <thread id> --message <envelope>`, with `CODEX_HOME` of the session. In 0.169.0 this argument form is the only one: `codex queue` reads the message only from `--message <TEXT>`, with no stdin or file option. See [18](#18-known-limits). Never pass `--resume`, because it can start a stopped thread. Parse the queue item id from stdout.
 3. Watch for 60 seconds: the row is gone and the lock is still held, or the transcript has the message id. Then `delivered`.
 4. If the session stops while the row still exists, the attempt is `stranded`. The worker reports `stranded`, and the relay puts the receipt back to `stored` with `hold = recipient-offline`. The request stays open, so a claim can move it.
 
@@ -1640,6 +1640,7 @@ The open items of the first discovery milestone:
 - GitHub.com only. No GitHub Enterprise, GitLab, or other hosts.
 - The hop count depends partly on the worker's report of turn causes.
 - One OS user on one host is one owner.
+- The Codex adapter passes the envelope on the command line of `codex queue`, because 0.169.0 has no stdin or file option. While the command runs (about 3 seconds), other OS users on the same host can read the message in the process list. On a host with several OS users, mount `/proc` with `hidepid=2` to hide it. Follow-up item 5 also asks for a stdin or file option.
 
 ## 19. Follow-up issues
 
@@ -1649,7 +1650,7 @@ Do not open these yet.
 2. Read-only web view of conversations, receipts, and held messages.
 3. History prune command for the relay, which keeps open requests and active constraints.
 4. Ask Anthropic for a documented external send interface or frame for the inbox socket.
-5. Ask OpenAI for a documented liveness check and dequeue for `codex queue`, or a documented way to attach to a running TUI.
+5. Ask OpenAI for a documented liveness check and dequeue for `codex queue`, a stdin or file option for the message, or a documented way to attach to a running TUI.
 6. Codex active-turn steering when a documented attach path exists.
 7. Relay replication or continuous backup (for example with Litestream) and a warm standby.
 8. GitHub Enterprise Server and other hosts.
