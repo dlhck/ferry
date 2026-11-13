@@ -169,10 +169,30 @@ The table has one row for each box of `~/.ferry/status.json`, then one row for e
 - State: Online or Offline.
 - Free disk: the free space of the file system of the box home.
 - Free memory: the available memory.
+- MCP gateway: Running, Stopped, Unavailable, or Off. The cell is empty when the status has no gateway data, for example for an offline box or a status file of an older Ferry.
 - Needs action: the count of items that need action. An offline box counts as one item, and so does a disconnected tunnel of an online box.
 - Ports: the ports of its running `ferry tunnel --follow`.
 
 Select a row to see the items of the box with the full message, the fix command, and Copy. Click a fix command to run it in Terminal. Click a port to open it in the browser. Sync now and Refresh now do the same as in the menu.
+
+The MCP gateway part of a box shows the gateway state, the reason when the gateway is stopped or unavailable, and each gateway server with its state.
+
+### Settings in the window
+
+The window shows some settings of `~/.ferry/config.toml` and changes them. It reads them with `ferry config get --json` when the window opens.
+
+- Agent notifications, at the top of the window: `[notifications] agents`.
+- In the part of a selected box:
+  - MCP gateway: `mcp_gateway`.
+  - Shared stdio servers: one checkbox for each carried stdio MCP server, for `mcp_gateway_shared`.
+  - Agent memory limit: `agent_memory_max`. Type a value and click Apply. Clear removes the key.
+  - Projects: `projects`. Add a path, or remove one.
+
+Each change runs one `ferry config set` or `ferry config unset` command with `--box <name> --json`. The app does not write `config.toml` itself. After the command, the app reads the settings again. When the command fails, the window shows its error next to the setting.
+
+A change takes effect on the box at the next sync. The box part then shows "Settings changed, sync to apply." with Sync now, which runs `ferry sync --box <name>`. A change of Agent notifications marks each box. The mark goes away after a sync of the box succeeds. The app keeps the mark only while it runs.
+
+With a Ferry that has no `ferry config` command, the window shows "This Ferry has no settings command. Run ferry self-update." and no settings. The rest of the window works as before.
 
 The window reads the same files as the menu. It updates when `~/.ferry/status.json` or a tunnel file changes. When the status file is missing, or `ferry watch` did not write it in the last 15 minutes, the window shows the same message as the menu.
 
