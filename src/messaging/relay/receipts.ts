@@ -256,7 +256,7 @@ export function dispatch(store: Store, deviceId: string, receiptId: string, body
     const now = store.now();
     const leaseUntil = iso(now + LEASE_MS);
     store.db.query("UPDATE receipts SET attempts = attempts + 1, lease_until = ?, hold = NULL, retry_at = NULL WHERE id = ?").run(leaseUntil, row.id);
-    if (wake) store.db.query("INSERT INTO wake_log (session_id, receipt_id, at) VALUES (?, ?, ?)").run(session.id, row.id, iso(now));
+    if (wake) store.db.query("INSERT OR IGNORE INTO wake_log (session_id, receipt_id, at) VALUES (?, ?, ?)").run(session.id, row.id, iso(now));
     return { decision: "go", leaseUntil, envelope: envelope(store, message, row.generation) };
   });
 }
