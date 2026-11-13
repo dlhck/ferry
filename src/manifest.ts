@@ -1089,7 +1089,7 @@ export function readMcpSources(home: string, harnesses: readonly HarnessDescript
  * arguments, or a credential, and a stdio server with a token, a secret, or a
  * URL credential in its command or arguments, refuse the seed. An entry whose
  * URL starts with `GATEWAY_URL_PREFIX` points at the MCP gateway of a box, and
- * Ferry skips it.
+ * Ferry skips it. Ferry also skips the entry `ferry-messaging` of agent messaging.
  */
 function readMcp(
   home: string,
@@ -1122,6 +1122,8 @@ function readMcp(
   for (const [name, declaration] of entries.sort(([a], [b]) => compare(a, b))) {
     // An entry of the MCP gateway on a box. Sync writes it from a carried server, and it has the client key of the box.
     if (isRecord(declaration) && typeof declaration.url === "string" && declaration.url.startsWith(GATEWAY_URL_PREFIX)) continue;
+    // The MCP entry of agent messaging (`MESSAGING_MCP_SERVER`). Sync writes it on a box with `messaging = true`, with the Ferry path of the box.
+    if (name === "ferry-messaging") continue;
     const remote = isRecord(declaration) ? remoteServer(declaration) : null;
     const stdio = isRecord(declaration) && !remote ? stdioServer(declaration) : null;
     if (!remote && !stdio) {

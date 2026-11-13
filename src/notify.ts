@@ -234,11 +234,11 @@ export function notifySettingsFile(harnesses: readonly HarnessDescriptor[]): str
 }
 
 /**
- * A jq filter: remove each hook of NOTIFY_HOOKS, then each group without a
- * hook, then each event without a group. Ferry removes only what it made
- * empty, and keeps all other hooks.
+ * A jq filter: remove each hook whose command is in `$c`, then each group
+ * without a hook, then each event without a group. Ferry removes only what it
+ * made empty, and keeps all other hooks. Agent messaging uses it too.
  */
-const REMOVE_NOTIFY_HOOKS = [
+export const REMOVE_HOOKS_FILTER = [
   'def ferry: type == "object" and (.command as $x | any($c[]; . == $x));',
   'def group: type == "object" and (.hooks | type) == "array";',
   'if (.hooks | type) == "object" then .hooks |= with_entries(',
@@ -253,7 +253,7 @@ const REMOVE_NOTIFY_HOOKS = [
  */
 export function removeNotifyHooksScript(path: string): string {
   const commands = Object.values(NOTIFY_HOOKS).flatMap((group) => (group.hooks as { command: string }[]).map((hook) => hook.command));
-  return jqEditScript(path, `--argjson c ${quoteShell(JSON.stringify(commands))}`, 'type == "object"', REMOVE_NOTIFY_HOOKS);
+  return jqEditScript(path, `--argjson c ${quoteShell(JSON.stringify(commands))}`, 'type == "object"', REMOVE_HOOKS_FILTER);
 }
 
 /**
