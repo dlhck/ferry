@@ -142,6 +142,22 @@ describe("the relay client", () => {
     expect(relay.seen).toHaveLength(1);
   });
 
+  // The relay codes of a device flow that a retry cannot fix (#315).
+  test.each([
+    [403, "device-flow-disabled"],
+    [410, "enrollment-failed"],
+  ] as const)("the relay error %d %s is a RelayError without a retry", async (status, code) => {
+    const relay = fakeRelay([json(status, { error: { code, message: `The relay message for ${code}.`, hint: null } })]);
+
+    const error = (await client(relay.url)
+      .enrollStart({ deviceName: "alice-laptop", platform: "linux", ferryVersion: "0.12.0", credentialSha256: "a".repeat(64) })
+      .catch((caught: unknown) => caught)) as RelayError;
+
+    expect(error).toBeInstanceOf(RelayError);
+    expect({ status: error.status, code: error.code, message: error.message }).toEqual({ status, code, message: `The relay message for ${code}.` });
+    expect(relay.seen).toHaveLength(1);
+  });
+
   test("refuses an invalid request body before it sends it", async () => {
     const relay = fakeRelay([]);
     const body = { sessions: [], extra: true } as unknown as Parameters<RelayClient["heartbeat"]>[0];

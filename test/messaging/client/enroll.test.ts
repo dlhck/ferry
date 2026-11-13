@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { messagingDir, readClientConfig, readCredential, writeClientConfig, writeCredential } from "../../../src/messaging/client/credential.ts";
 import { enroll, enrollBox } from "../../../src/messaging/client/enroll.ts";
+import { RelayError } from "../../../src/messaging/client/relay-client.ts";
 import { createGitHubAccess, type GitHubAccess } from "../../../src/messaging/github/access.ts";
 import { credentialSha256, newDeviceCredential, newId } from "../../../src/messaging/ids.ts";
 import { startFakeGitHub, type FakeGitHub } from "../fakes/github.ts";
@@ -175,6 +176,44 @@ describe("ferry messaging enroll", () => {
     });
 
     await expect(run).rejects.toThrow(message);
+    expect(readCredential(home)).toBeNull();
+    expect(readClientConfig(home)).toBeNull();
+  });
+
+  // The relay codes of a device flow that a retry cannot fix (#315).
+  test.each([
+    ["start", 403, "device-flow-disabled", 'The GitHub App has the device flow off. The relay operator turns on "Enable Device Flow" in the App settings.'],
+    ["poll", 410, "enrollment-failed", "GitHub refused the device flow of the relay's GitHub App."],
+  ] as const)("stops at the first %s that the relay refuses with %d %s, with the message of the relay", async (step, status, code, message) => {
+    const paths: string[] = [];
+    const refusal = () => json(status, { error: { code, message, hint: null } });
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const path = new URL(request.url).pathname;
+        paths.push(path);
+        if (step === "start" || path === "/v1/enroll/poll") return refusal();
+        return json(200, { enrollmentId: "enr-1", userCode: "WDJB-MJHT", verificationUri: "https://github.com/login/device", intervalMs: 1, expiresAt: ISO });
+      },
+    });
+    cleanups.push(() => server.stop(true));
+    const home = makeHome();
+
+    const error = (await enroll({
+      home,
+      relayUrl: `http://127.0.0.1:${server.port}`,
+      deviceName: "alice-laptop",
+      platform: "linux",
+      ferryVersion: "0.12.0",
+      print: () => {},
+      client: { sleep: async () => {} },
+      sleep: async () => {},
+    }).catch((caught: unknown) => caught)) as RelayError;
+
+    expect(error).toBeInstanceOf(RelayError);
+    expect({ status: error.status, code: error.code, message: error.message }).toEqual({ status, code, message });
+    expect(paths).toEqual(step === "start" ? ["/v1/enroll/start"] : ["/v1/enroll/start", "/v1/enroll/poll"]);
     expect(readCredential(home)).toBeNull();
     expect(readClientConfig(home)).toBeNull();
   });
