@@ -7,8 +7,8 @@
  *   and for the faults that need a hand-made request.
  */
 
-import { createHash, randomBytes } from "node:crypto";
 import { createConnection } from "node:net";
+import { credentialSha256, newDeviceCredential, newId } from "../../../src/messaging/ids.ts";
 
 export type WorkerReply = { readonly ok: true; readonly result: unknown } | { readonly ok: false; readonly error: { readonly code: string; readonly message: string } };
 
@@ -44,15 +44,13 @@ export function callWorker(socketPath: string, op: string, params: Record<string
 
 /** A new device credential (design 1.2): `fmr_` and 32 random bytes in base64url. */
 export function newCredential(): { readonly credential: string; readonly sha256: string } {
-  const credential = `fmr_${randomBytes(32).toString("base64url")}`;
-  return { credential, sha256: createHash("sha256").update(credential).digest("hex") };
+  const credential = newDeviceCredential();
+  return { credential, sha256: credentialSha256(credential) };
 }
 
-/** A new idempotency key (design 5.2). Not a real ULID, but of the same form. */
+/** A new idempotency key (design 5.2). */
 export function newIdempotencyKey(): string {
-  const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-  const bytes = randomBytes(26);
-  return `idk_${[...bytes].map((byte) => alphabet[byte % 32]).join("")}`;
+  return newId("idempotencyKey");
 }
 
 export type RelayResponse<T = Record<string, unknown>> = { readonly status: number; readonly headers: Headers; readonly body: T };

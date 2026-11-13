@@ -6,6 +6,8 @@
  * skips with the name of the lane that it waits for, and `bun run typecheck` stays
  * green. A module that exists but fails to load is an error, not a skip.
  *
+ * Lane A (the relay) is on `main`, and `system.ts` imports it statically. Until
+ * lane B merges, `system.ts` uses the stand-ins of `interim.ts` for the lane B parts.
  * When all lanes are on `main`, replace this file with static imports and the real
  * types. Each type below is only the part of the interface that the harness calls.
  */
@@ -16,18 +18,6 @@ import type { Clock } from "./clock.ts";
 import type { CreateFakeRuntimes, StartFakeGitHub } from "./contracts.ts";
 
 const REPO = join(import.meta.dir, "..", "..", "..");
-
-/** Design 14.1. */
-export type RelayModule = {
-  startRelay(options: {
-    readonly dbPath: string;
-    readonly listen: string;
-    readonly github: unknown;
-    readonly clock: Clock;
-    readonly log: (line: string) => void;
-    readonly allowedOwners: readonly string[];
-  }): Promise<{ readonly url: string; stop(): Promise<void> }>;
-};
 
 /** Design 14.2. */
 export type GitHubAccessModule = {
@@ -58,7 +48,6 @@ export type WorkerModule = {
 };
 
 export type Lanes = {
-  readonly relay: RelayModule | null;
   readonly github: GitHubAccessModule | null;
   readonly client: RelayClientModule | null;
   readonly worker: WorkerModule | null;
@@ -71,7 +60,6 @@ export type Lanes = {
 type LaneKey = Exclude<keyof Lanes, "cli">;
 
 const FILES: Record<LaneKey | "cli", { readonly lane: string; readonly file: string }> = {
-  relay: { lane: "A", file: "src/messaging/relay/server.ts" },
   github: { lane: "B", file: "src/messaging/github/access.ts" },
   client: { lane: "B", file: "src/messaging/client/relay-client.ts" },
   fakeGitHub: { lane: "B", file: "test/messaging/fakes/github.ts" },
@@ -87,7 +75,6 @@ async function load<T>(key: LaneKey): Promise<T | null> {
 }
 
 export const lanes: Lanes = {
-  relay: await load<RelayModule>("relay"),
   github: await load<GitHubAccessModule>("github"),
   client: await load<RelayClientModule>("client"),
   worker: await load<WorkerModule>("worker"),
@@ -106,8 +93,8 @@ export function waitingFor(needed: readonly (keyof Lanes)[]): string[] {
     .map((key) => `lane ${FILES[key].lane} (${FILES[key].file})`);
 }
 
-/** The parts that the layer 2 system needs. */
-export const SYSTEM_PARTS: readonly (keyof Lanes)[] = ["relay", "github", "client", "worker", "fakeGitHub", "fakeRuntimes"];
+/** The parts that the layer 2 system needs. The lane B parts have stand-ins in `interim.ts`. */
+export const SYSTEM_PARTS: readonly (keyof Lanes)[] = ["worker", "fakeRuntimes"];
 
 /** The suite title, with the missing lanes when the suite skips. */
 export function suiteTitle(title: string, needed: readonly (keyof Lanes)[] = SYSTEM_PARTS): string {

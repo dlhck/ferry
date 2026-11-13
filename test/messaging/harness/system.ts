@@ -4,13 +4,14 @@
  * runtimes.
  *
  * The suites drive it through the two wire protocols: the worker socket, as hooks
- * and the MCP server do, and the relay HTTP API for assertions. Only this file and
- * `lanes.ts` call the TypeScript interfaces of the other lanes.
+ * and the MCP server do, and the relay HTTP API for assertions. Only this file,
+ * `lanes.ts`, and `interim.ts` call the TypeScript interfaces of the other lanes.
  */
 
 import { afterEach, beforeEach } from "bun:test";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { startRelay } from "../../../src/messaging/relay/server.ts";
 import { changedPaths, createCheckout, treeState, type Checkout, type TreeState } from "./checkout.ts";
 import { FakeClock, type Clock } from "./clock.ts";
 import type {
@@ -24,6 +25,7 @@ import type {
 } from "./contracts.ts";
 import { startFaultProxy, type FaultProxy } from "./fault-proxy.ts";
 import { ALICE, BOB, createHomes, type TestHome, type TestHomes, type TestIdentity } from "./homes.ts";
+import { fetchTransport, InProcessGitHub } from "./interim.ts";
 import { lanes, waitingFor, SYSTEM_PARTS } from "./lanes.ts";
 import { callWorker, newCredential, RelayHttp, type WorkerReply } from "./wire.ts";
 
@@ -96,7 +98,7 @@ export type MessagingSystem = {
   stopWorker(login: string): Promise<void>;
   /** Starts the worker of a login. `wrap` can change the adapters, for fault injection. */
   startWorker(login: string, options?: { readonly wrap?: (adapter: unknown) => unknown }): Promise<void>;
-  /** The relay log lines so far. */
+  /** The relay log events so far, each as one JSON line. */
   logs(): readonly string[];
   /** Throws when a file in a checkout or its Git metadata changed since the system started. */
   expectCheckoutsUnchanged(): void;
@@ -176,7 +178,8 @@ export type RelayStack = {
   stop(): Promise<void>;
 };
 
-export const RELAY_STACK_PARTS: readonly (keyof typeof lanes)[] = ["relay", "github", "fakeGitHub"];
+/** The relay stack needs no lane that is not on `main`. */
+export const RELAY_STACK_PARTS: readonly (keyof typeof lanes)[] = [];
 
 /**
  * Starts the fake GitHub and the relay, and enrolls one home for each identity. Each
@@ -186,9 +189,6 @@ export const RELAY_STACK_PARTS: readonly (keyof typeof lanes)[] = ["relay", "git
 export async function startRelayStack(
   options: { readonly identities?: readonly SystemIdentity[]; readonly repository?: FakeRepository; readonly clock?: Clock } = {},
 ): Promise<RelayStack> {
-  const missing = waitingFor(RELAY_STACK_PARTS);
-  if (missing.length > 0) throw new Error(`the relay stack waits for ${missing.join(", ")}`);
-  const relayModule = lanes.relay!;
   const identities: readonly SystemIdentity[] = options.identities ?? [ALICE, BOB];
   const repository = options.repository ?? ACME_APP;
   const fullName = `${repository.owner}/${repository.name}`;
@@ -196,15 +196,15 @@ export async function startRelayStack(
   const homes = createHomes(identities);
   const relayLog: string[] = [];
 
-  const github = await lanes.fakeGitHub!.startFakeGitHub({
-    users: identities.map(({ login, githubUserId }) => ({ login, githubUserId })),
-    repositories: [repository],
-    clock,
-  });
+  const fakeOptions = { users: identities.map(({ login, githubUserId }) => ({ login, githubUserId })), repositories: [repository], clock };
+  const laneB = lanes.fakeGitHub !== null && lanes.github !== null;
+  const github = laneB ? await lanes.fakeGitHub!.startFakeGitHub(fakeOptions) : new InProcessGitHub(fakeOptions);
   github.install(repository.owner);
   for (const identity of identities) github.setPermission(fullName, identity.login, identity.permission ?? "write", null);
 
-  const access = lanes.github!.createGitHubAccess({ ...github.app, apiUrl: github.apiUrl, webUrl: github.webUrl, clock });
+  const access = laneB
+    ? (lanes.github!.createGitHubAccess({ ...github.app, apiUrl: github.apiUrl, webUrl: github.webUrl, clock }) as Parameters<typeof startRelay>[0]["github"])
+    : (github as InProcessGitHub);
   const dbDir = join(homes.root, "relay-host", ".ferry", "relay");
   mkdirSync(dbDir, { recursive: true, mode: 0o700 });
   const dbPath = join(dbDir, "relay.db");
@@ -213,10 +213,10 @@ export async function startRelayStack(
     listen,
     github: access,
     clock,
-    log: (line: string) => relayLog.push(line),
+    log: (event: string, fields?: Readonly<Record<string, unknown>>) => relayLog.push(JSON.stringify({ event, ...fields })),
     allowedOwners: [repository.owner],
   });
-  let relay = await relayModule.startRelay(relayOptions("127.0.0.1:0"));
+  let relay = await startRelay(relayOptions("127.0.0.1:0"));
   const relayPort = Number(new URL(relay.url).port);
   let relayRunning = true;
   const proxy = await startFaultProxy(relayPort);
@@ -265,7 +265,7 @@ export async function startRelayStack(
     },
     async startRelay() {
       if (relayRunning) return;
-      relay = await relayModule.startRelay(relayOptions(`127.0.0.1:${relayPort}`));
+      relay = await startRelay(relayOptions(`127.0.0.1:${relayPort}`));
       relayRunning = true;
       proxy.setMode("pass");
     },
@@ -290,7 +290,6 @@ export async function startSystem(
 ): Promise<MessagingSystem> {
   const missing = waitingFor(SYSTEM_PARTS);
   if (missing.length > 0) throw new Error(`the messaging system waits for ${missing.join(", ")}`);
-  const clientModule = lanes.client!;
   const workerModule = lanes.worker!;
   const clock = new FakeClock();
   const stack = await startRelayStack({ ...options, clock });
@@ -302,7 +301,10 @@ export async function startSystem(
   const startWorker: MessagingSystem["startWorker"] = async (login, workerOptions = {}) => {
     if (workers.has(login)) throw new Error(`the worker of ${login} runs already`);
     const p = participant(login);
-    const client = new clientModule.RelayClient({ url: proxy.url, credential: p.credential, ferryVersion: TEST_FERRY_VERSION });
+    const client =
+      lanes.client === null
+        ? fetchTransport(proxy.url, p.credential, TEST_FERRY_VERSION)
+        : new lanes.client.RelayClient({ url: proxy.url, credential: p.credential, ferryVersion: TEST_FERRY_VERSION });
     const adapters = runtimes.adapters(p.home).map((adapter) => (workerOptions.wrap === undefined ? adapter : workerOptions.wrap(adapter)));
     workers.set(login, await workerModule.runWorker({ home: p.home.home, client, adapters, clock }));
     await waitFor(() => existsSync(p.socketPath), { what: `the worker socket of ${login}` });
