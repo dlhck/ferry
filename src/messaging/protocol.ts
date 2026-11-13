@@ -666,7 +666,7 @@ export type RequestList = Infer<typeof RequestList>;
 export const Dispatch = object({ generation: generation(), activity: Activity });
 export type Dispatch = Infer<typeof Dispatch>;
 
-export const DropReason = oneOf("request-closed", "request-reassigned", "stale-generation", "access-lost", "session-retired");
+export const DropReason = oneOf("request-closed", "request-reassigned", "stale-generation", "already-acknowledged", "access-lost", "session-retired");
 export type DropReason = Infer<typeof DropReason>;
 
 export const DispatchDecision = tagged("decision", {
