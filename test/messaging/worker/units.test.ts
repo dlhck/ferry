@@ -11,7 +11,7 @@ import { compareVersions, gate, type LocalSession } from "../../../src/messaging
 import { addCause, buildDigest, DIGEST_LIMIT, formatAge, peerMessageIds, SESSION_START_LIMIT, sessionStartContext, type DigestItem } from "../../../src/messaging/worker/digest.ts";
 import { backoffMs, Outbox } from "../../../src/messaging/worker/outbox.ts";
 import { callerAncestors, findRuntime, flockHolders, parseProcLocks, runtimePrograms, type ProcessTable } from "../../../src/messaging/worker/registry.ts";
-import { WorkerStore } from "../../../src/messaging/worker/store.ts";
+import { WORKER_SCHEMA_VERSION, WorkerStore } from "../../../src/messaging/worker/store.ts";
 import { BOB, CONVERSATION, envelope, message, messageId, OWNER } from "./fake-relay.ts";
 
 const dirs: string[] = [];
@@ -382,5 +382,21 @@ describe("worker store", () => {
     store.close();
     const { statSync } = require("node:fs") as typeof import("node:fs");
     expect(statSync(join(root, "worker.sqlite")).mode & 0o777).toBe(0o600);
+  });
+
+  test("records the schema version, and opens its own file again", () => {
+    const path = join(dir(), "worker.sqlite");
+    new WorkerStore(path).close();
+    const store = new WorkerStore(path);
+    expect((store.db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(WORKER_SCHEMA_VERSION);
+    store.close();
+  });
+
+  test("refuses a file of a newer schema version", () => {
+    const path = join(dir(), "worker.sqlite");
+    const db = new Database(path, { create: true });
+    db.exec(`PRAGMA user_version = ${WORKER_SCHEMA_VERSION + 1}`);
+    db.close();
+    expect(() => new WorkerStore(path)).toThrow(`schema version ${WORKER_SCHEMA_VERSION + 1}`);
   });
 });

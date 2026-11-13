@@ -65,6 +65,14 @@ CREATE TABLE IF NOT EXISTS runtime_marks (
 );
 `;
 
+/**
+ * The schema steps. Step n changes a store of version n to version n + 1.
+ * The file stays on each host across Ferry updates, so each schema change
+ * adds a step here. Do not change a released step.
+ */
+const MIGRATIONS: readonly string[] = [SCHEMA];
+export const WORKER_SCHEMA_VERSION = MIGRATIONS.length;
+
 /** A session row with the relay fields of this store. */
 export type StoredSession = LocalSession & {
   readonly turnOrigin: "human" | "peer";
@@ -225,7 +233,15 @@ export class WorkerStore {
     this.db = new Database(path, { create: true });
     if (created) chmodSync(path, 0o600);
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
-    this.db.exec(SCHEMA);
+    const version = (this.db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+    if (version > WORKER_SCHEMA_VERSION) {
+      this.db.close();
+      throw new Error(`${path} has worker schema version ${version}. This Ferry knows version ${WORKER_SCHEMA_VERSION} and earlier.`);
+    }
+    this.db.transaction(() => {
+      for (const step of MIGRATIONS.slice(version)) this.db.exec(step);
+      this.db.exec(`PRAGMA user_version = ${WORKER_SCHEMA_VERSION}`);
+    })();
   }
 
   close(): void {
