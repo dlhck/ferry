@@ -30,6 +30,13 @@ export class FakeClock {
   }
 }
 
+/** An error with the `name` of one of lane B's error classes. */
+export function namedError(name: string, message: string): Error {
+  const error = new Error(message);
+  error.name = name;
+  return error;
+}
+
 type Repo = { repoId: number; installationId: number };
 
 /** A fake of the GitHub calls of the relay. The test changes its maps to change GitHub. */
@@ -41,6 +48,8 @@ export class FakeGitHub implements GitHubAccess {
   /** The next results of `pollDeviceFlow`, in order. */
   polls: ({ state: "pending" | "slow-down" | "expired" | "denied" } | { state: "complete"; user: { id: number; login: string } })[] = [];
   unavailable = false;
+  /** An error that `startDeviceFlow` and `pollDeviceFlow` throw. Lane B's client tells its errors apart by `name`. */
+  flowError: Error | null = null;
   uninstalled = new Set<string>();
   calls: string[] = [];
   private codes = 0;
@@ -59,13 +68,15 @@ export class FakeGitHub implements GitHubAccess {
 
   async startDeviceFlow() {
     this.calls.push("startDeviceFlow");
-    if (this.unavailable) throw new Error("network");
+    if (this.flowError !== null) throw this.flowError;
+    if (this.unavailable) throw namedError("GitHubUnavailableError", "network");
     this.codes++;
     return { deviceCode: `device-code-${this.codes}`, userCode: `ABCD-${1000 + this.codes}`, verificationUri: "https://github.com/login/device", expiresInS: 900, intervalS: 5 };
   }
 
   async pollDeviceFlow(deviceCode: string) {
     this.calls.push(`pollDeviceFlow ${deviceCode}`);
+    if (this.flowError !== null) throw this.flowError;
     return this.polls.shift() ?? { state: "pending" as const };
   }
 
