@@ -50,40 +50,20 @@ import { generateKeyPairSync, randomBytes, verify, type KeyObject } from "node:c
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
-export type FakePermission = "admin" | "write" | "read" | "none";
-export type FakeRepository = { readonly owner: string; readonly name: string; readonly id: number };
-export type FakeGitHubFault = "server-error" | "rate-limit" | "drop";
-type FakeUser = { readonly login: string; readonly githubUserId: number };
+import type {
+  FakeGitHub as ContractFakeGitHub,
+  FakeGitHubFault,
+  FakePermission,
+  FakeRepository,
+  StartFakeGitHub,
+  StartFakeGitHubOptions,
+} from "../harness/contracts.ts";
 
-export type StartFakeGitHubOptions = {
-  readonly users?: readonly FakeUser[];
-  readonly repositories?: readonly FakeRepository[];
-  readonly clock?: { now(): number };
-};
-
-export interface FakeGitHub {
-  readonly apiUrl: string;
-  readonly webUrl: string;
-  readonly app: { readonly appId: number; readonly clientId: string; readonly slug: string; readonly privateKeyPem: string };
-  addUser(user: FakeUser): void;
-  renameUser(githubUserId: number, login: string): void;
-  addRepository(repository: FakeRepository): void;
-  install(owner: string, repositories?: readonly string[]): number;
-  uninstall(owner: string): void;
-  setPermission(fullName: string, login: string, permission: FakePermission, roleName?: string | null): void;
-  pendingUserCodes(): string[];
-  authorizeDevice(userCode: string, githubUserId: number): void;
-  denyDevice(userCode: string): void;
-  expireDevice(userCode: string): void;
-  slowDownDevice(userCode: string): void;
-  setFault(fault: FakeGitHubFault | null): void;
-  requests(): readonly { readonly method: string; readonly path: string }[];
-  stop(): Promise<void>;
+/** The `FakeGitHub` of the harness contract, and the controls beyond it. */
+export interface FakeGitHub extends ContractFakeGitHub {
   manifestCode(owner: string): string;
   setDeviceFlow(enabled: boolean): void;
 }
-
-export type StartFakeGitHub = (options?: StartFakeGitHubOptions) => Promise<FakeGitHub>;
 
 const APP = { appId: 424242, clientId: "Iv23liExampleClient01", slug: "example-ferry-relay", name: "Example Ferry relay" };
 const DEVICE_CODE_TTL_MS = 15 * 60_000;
@@ -102,7 +82,7 @@ type DeviceFlow = {
   interval: number;
 };
 
-export const startFakeGitHub: StartFakeGitHub = async (options = {}) => {
+export const startFakeGitHub: (options?: StartFakeGitHubOptions) => Promise<FakeGitHub> = async (options = {}) => {
   const clock = options.clock ?? { now: () => Date.now() };
   const keys = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const privateKeyPem = keys.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
@@ -394,3 +374,6 @@ export const startFakeGitHub: StartFakeGitHub = async (options = {}) => {
     },
   };
 };
+
+// The export fits the contract of the harness.
+startFakeGitHub satisfies StartFakeGitHub;
