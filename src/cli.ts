@@ -47,6 +47,8 @@ import {
 import {
   isBoxName,
   readConfig,
+  resolveLinkOptions,
+  setBoxMessagingKey,
   setIntegration,
   writeConfig,
   type BoxesOperatorConfig,
@@ -55,7 +57,8 @@ import {
 } from "./config.ts";
 import { BOX_MARKER } from "./box-ferry.ts";
 import { whoami, whoamiLines } from "./box-identity.ts";
-import { installBundledSkill } from "./bundled-skill.ts";
+import { installBundledSkill, installMessagingSkill, MESSAGING_SKILL_RELATIVE_PATH } from "./bundled-skill.ts";
+import { MESSAGING_DIR } from "./messaging/hook.ts";
 import { BoxRequiredError, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import {
   boxListLines,
@@ -274,7 +277,27 @@ const STREAM_COMMANDS = new Set(["watch", "tunnel", "expose"]);
  * The commands that a box install runs. `scan`, `redact`, and `usage-count` are hidden: the operator machine runs them over Link.
  * The hidden `mcp` commands run the MCP gateway of the box.
  */
-const BOX_INSTALL_COMMANDS = new Set(["expose", "notify", "whoami", "scan", "redact", "usage-count", "mcp serve", "mcp list", "mcp login"]);
+const BOX_INSTALL_COMMANDS = new Set([
+  "expose",
+  "notify",
+  "whoami",
+  "scan",
+  "redact",
+  "usage-count",
+  "mcp serve",
+  "mcp list",
+  "mcp login",
+  // Agent messaging: the worker, the hooks, the MCP server, and the relay of a box.
+  "messaging worker",
+  "messaging hook",
+  "messaging mcp",
+  "messaging status",
+  "relay serve",
+  "relay backup",
+  "relay restore",
+  "relay status",
+  "relay import-github-app",
+]);
 
 const JSON_HELP = `JSON output (--json):
   stdout has only JSON. Progress and the text lines go to stderr. Ferry
@@ -362,7 +385,7 @@ const JSON_RESULTS: Record<string, string> = {
   "box list": "{ boxes: [{ name, transport, destination, default }] }",
   "box add": "{ name, transport, destination, gitAuth, migrated, instructionFile }",
   "box remove":
-    "{ name, defaultBoxRemoved, tunnelService, instructionFile }. tunnelService is the file of the tunnel user service that Ferry removed from this machine, or null. instructionFile is the per-box instruction file that stays on this machine, or null. With --uninstall, also uninstall: { dryRun, plan: { home, services, links: [{ path, link, backup }], notifyHooks, profileBlock, paths, unsavedWork }, remaining }, or null when cancelled. notifyHooks has the settings files with the hooks of ferry notify. unsavedWork is { checked, projects, unchecked } as in ferry status, or null when Ferry could not read it. The plan paths are relative to the box home. backup is the file that Ferry moves back to path, or null. remaining has the names that stay in ~/.ferry on the box. A dry run changes nothing",
+    "{ name, defaultBoxRemoved, tunnelService, instructionFile }. tunnelService is the file of the tunnel user service that Ferry removed from this machine, or null. instructionFile is the per-box instruction file that stays on this machine, or null. With --uninstall, also uninstall: { dryRun, plan: { home, services, links: [{ path, link, backup }], notifyHooks, messagingHooks, profileBlock, paths, unsavedWork }, remaining }, or null when cancelled. notifyHooks has the settings files with the hooks of ferry notify. messagingHooks has the settings files with the hooks of agent messaging. unsavedWork is { checked, projects, unchecked } as in ferry status, or null when Ferry could not read it. The plan paths are relative to the box home. backup is the file that Ferry moves back to path, or null. remaining has the names that stay in ~/.ferry on the box. A dry run changes nothing",
   "box default": "{ defaultBox }",
   "box create":
     "{ name, dryRun, provider, serverType, image, location, monthlyPrice, currency, machine: { id, name, box, ipv4, ipv6, serverType, location }, tailscale }, or null when cancelled. machine and tailscale are null with --dry-run. A failure after the machine exists has error.details.machine",
@@ -1910,6 +1933,335 @@ of Ferry on the box.`)
       }),
     );
 
+  // Agent messaging (#306). Each action loads src/messaging/* with await import(...), so the other commands load none of it.
+  const messagingHome = () => (dependencies.home ?? homedir)();
+  const relayGroup = program
+    .command("relay")
+    .summary("Run the team relay of agent messaging on this machine")
+    .description(`Run the team relay of agent messaging on this machine.
+
+The relay stores the conversations of a team. It runs on one host of the
+team, as the service ferry-relay.service or dev.ferry.relay, and keeps its
+data in ~/.ferry/relay. Agents reach it over HTTPS, for example through
+Tailscale Serve. With --box, relay install and relay uninstall change the
+box key relay of [box.<name>], and the next ferry sync starts or removes the
+relay on that box.`);
+  relayGroup
+    .command("setup")
+    .description("Create the GitHub App of the relay")
+    .command("github-app")
+    .description("Create the GitHub App of the relay with the manifest flow of GitHub, and store its key in ~/.ferry/relay")
+    .option("--org <org>", "create the App for this organization, else for your user")
+    .option("--public", "let other owners install the App")
+    .option("--name <name>", "the App name")
+    .action(async (options: { org?: string; public?: boolean; name?: string }) => {
+      const { part } = await import("./messaging/commands.ts");
+      const { setupGitHubApp } = await part<import("./messaging/commands.ts").GitHubAppPart>("app");
+      const result = await setupGitHubApp({
+        home: messagingHome(),
+        public: options.public === true,
+        print: writeLine,
+        ...(options.org !== undefined ? { org: options.org } : {}),
+        ...(options.name !== undefined ? { name: options.name } : {}),
+      });
+      report(result, (result) => writeLine(`Created the GitHub App ${result.slug}.`));
+    });
+  relayGroup
+    .command("import-github-app")
+    .description("Store an existing GitHub App for the relay, when the manifest flow is not possible")
+    .requiredOption("--app-id <id>", "the numeric App id")
+    .requiredOption("--client-id <id>", "the client id of the App")
+    .requiredOption("--slug <slug>", "the App slug")
+    .requiredOption("--key-file <path>", "the private key file of the App. Ferry copies it into ~/.ferry/relay")
+    .action(async (options: { appId: string; clientId: string; slug: string; keyFile: string }) => {
+      const appId = Number(options.appId);
+      if (!Number.isInteger(appId) || appId <= 0) throw new FerryError("usage", `invalid App id ${options.appId}`);
+      const { part } = await import("./messaging/commands.ts");
+      const { importGitHubApp } = await part<import("./messaging/commands.ts").GitHubAppPart>("app");
+      const result = await importGitHubApp({ home: messagingHome(), appId, clientId: options.clientId, slug: options.slug, keyFile: options.keyFile });
+      report(result, (result) => writeLine(`Stored the GitHub App ${result.slug}.`));
+    });
+  const relayInstall = relayGroup
+    .command("install")
+    .description("Install and start the relay service on this machine. With --box, set relay = true for the box")
+    .action(async () => {
+      const selected = boxNames().length > 0 ? selectBox("relay install") : undefined;
+      if (selected) {
+        const changed = setBoxMessagingKey(selected.box.name, "relay", true, messagingHome());
+        report({ box: selected.box.name, changed, syncNeeded: changed }, () =>
+          writeLine(changed ? `Set relay = true for box ${selected.box.name}. Run ferry sync --box ${selected.box.name}.` : `Box ${selected.box.name} has relay = true.`),
+        );
+        return;
+      }
+      const { installRelay } = await import("./messaging/commands.ts");
+      const result = await installRelay(messagingHome());
+      report({ box: null, service: result.path }, () => writeLine(`Installed the relay service: ${result.path}.`));
+    });
+  const relayUninstall = relayGroup
+    .command("uninstall")
+    .description("Stop and remove the relay service. Without --keep-data, also remove ~/.ferry/relay, with the data of the team. With --box, remove relay = true of the box")
+    .option("--keep-data", "keep ~/.ferry/relay")
+    .option("--yes", "remove the data of the team without a question")
+    .action(async (options: { keepData?: boolean; yes?: boolean }) => {
+      const selected = boxNames().length > 0 ? selectBox("relay uninstall") : undefined;
+      if (selected) {
+        const changed = setBoxMessagingKey(selected.box.name, "relay", false, messagingHome());
+        report({ box: selected.box.name, changed, syncNeeded: changed }, () =>
+          writeLine(
+            changed
+              ? `Removed relay = true of box ${selected.box.name}. Run ferry sync --box ${selected.box.name}. ~/.ferry/relay stays on the box.`
+              : `Box ${selected.box.name} has no relay = true.`,
+          ),
+        );
+        return;
+      }
+      const keepData = options.keepData === true;
+      if (!keepData && options.yes !== true) {
+        const question = "Remove ~/.ferry/relay, with all conversations of the team? Make a backup with ferry relay backup first.";
+        const confirm = json() ? (message: string) => refuse(message)() : (dependencies.confirm ?? ((message: string) => prompts.confirm({ message, initialValue: false })));
+        if ((await confirm(question)) !== true) {
+          writeLine("Relay uninstall cancelled.");
+          return;
+        }
+      }
+      const { uninstallRelay } = await import("./messaging/commands.ts");
+      const result = await uninstallRelay(keepData, messagingHome());
+      report(result, (result) =>
+        writeLine(`${result.removed ? "Removed the relay service." : "The relay service was not installed."}${result.dataRemoved ? " Removed ~/.ferry/relay." : ""}`),
+      );
+    });
+  boxCommands.add(relayInstall);
+  boxCommands.add(relayUninstall);
+  relayGroup
+    .command("owners [action] [owner]")
+    .description("List the GitHub owners that the relay serves, or add or remove one")
+    .action(async (action: string | undefined, owner: string | undefined) => {
+      if (action !== undefined && action !== "add" && action !== "remove") throw new FerryError("usage", `unknown action ${action}. Use add or remove.`);
+      if (action !== undefined && owner === undefined) throw new FerryError("usage", `relay owners ${action} needs an owner.`);
+      const { relayOwners } = await import("./messaging/commands.ts");
+      const result = relayOwners(action === "add" ? { add: owner } : action === "remove" ? { remove: owner } : {}, messagingHome());
+      report(result, ({ owners, restarted }) => {
+        writeLine(owners.length > 0 ? `Owners: ${owners.join(", ")}` : "The relay serves no owner.");
+        if (restarted) writeLine("Restarted the relay service.");
+      });
+    });
+  relayGroup
+    .command("status")
+    .description("Print the version, database size, last backup, GitHub App state, and counts of the relay on this machine")
+    .action(async () => {
+      const { part } = await import("./messaging/commands.ts");
+      const { relayStatus } = await part<import("./messaging/commands.ts").RelayPart>("relay");
+      report(await relayStatus({ home: messagingHome() }), (status) => {
+        for (const [key, value] of Object.entries(status)) writeLine(`${key}: ${typeof value === "object" ? JSON.stringify(value) : String(value)}`);
+      });
+    });
+  relayGroup
+    .command("backup")
+    .description("Write a consistent copy of the relay database. With --to -, write it to stdout")
+    .option("--to <path>", "the backup file, or - for stdout")
+    .action(async (options: { to?: string }) => {
+      const { part } = await import("./messaging/commands.ts");
+      const { backupRelay } = await part<import("./messaging/commands.ts").RelayPart>("backup");
+      const result = await backupRelay({ home: messagingHome(), to: options.to === "-" ? null : (options.to ?? null) });
+      if (result.bytes !== null) {
+        process.stdout.write(result.bytes);
+        return;
+      }
+      report({ path: result.path }, ({ path }) => writeLine(`Wrote the relay backup ${path}.`));
+    });
+  relayGroup
+    .command("restore <file>")
+    .description("Replace the relay database with a backup. Stop the relay service first")
+    .action(async (file: string) => {
+      const { part } = await import("./messaging/commands.ts");
+      const { restoreRelay } = await part<import("./messaging/commands.ts").RelayPart>("backup");
+      await restoreRelay({ home: messagingHome(), file });
+      report({ file }, () => writeLine(`Restored the relay database from ${file}. Start the relay service again.`));
+    });
+  relayGroup
+    .command("serve", { hidden: true })
+    .description("Serve the relay. The relay service runs this command")
+    .option("--listen <address>", "the host and port", "127.0.0.1:47830")
+    .action(async (options: { listen: string }) => {
+      const { part, readRelayConfig } = await import("./messaging/commands.ts");
+      const { startRelay } = await part<import("./messaging/commands.ts").RelayPart>("relay");
+      const { github, allowedOwners } = readRelayConfig(messagingHome());
+      const relay = await startRelay({ home: messagingHome(), listen: options.listen, github, allowedOwners, log: writeError });
+      await new Promise<void>((resolve) => {
+        for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => resolve());
+      });
+      await relay.stop();
+    });
+
+  const messagingGroup = program
+    .command("messaging")
+    .summary("Let Claude Code and Codex sessions of a team send messages to each other")
+    .description(`Let Claude Code and Codex sessions of a team send messages to each other.
+
+Agents use the ferry_* MCP tools. These commands enroll a machine or a box,
+set up the hooks, the MCP entry, the skill, and the worker service, and show
+the state for people. Humans do not post through the CLI: tell your agent
+what to send.
+
+To start on this machine:
+
+  ferry messaging enroll --relay https://<relay host>
+  ferry messaging setup
+
+For a box, run ferry messaging enroll --box <name>. It sets messaging = true
+for the box, and the next ferry sync installs the hooks, the MCP entry, and
+the worker on the box.`);
+  const messagingEnroll = messagingGroup
+    .command("enroll")
+    .description("Enroll this machine with the device flow of GitHub, or with --box, give a box its own device credential")
+    .option("--relay <url>", "the HTTPS URL of the relay")
+    .action(async (options: { relay?: string }) => {
+      const commands = await import("./messaging/commands.ts");
+      const selected = boxNames().length > 0 ? selectBox("messaging enroll") : undefined;
+      if (selected) {
+        if (options.relay !== undefined) throw new FerryError("usage", "--relay does not apply with --box. The box uses the relay of [messaging].");
+        const result = await commands.enrollBox({ box: selected.box.name, link: createLink(resolveLinkOptions(selected.box.host)), home: messagingHome() });
+        report({ ...result, syncNeeded: true }, () => writeLine(`Enrolled box ${result.box}. Run ferry sync --box ${result.box}.`));
+        return;
+      }
+      if (options.relay === undefined) throw new FerryError("usage", "ferry messaging enroll needs --relay <url>, or --box <name>.");
+      const result = await commands.enrollMachine({ relayUrl: options.relay, home: messagingHome(), print: writeLine });
+      report(result, (result) => writeLine(`Enrolled this machine as ${result.device} of ${result.owner}. Run ferry messaging setup.`));
+    });
+  boxCommands.add(messagingEnroll);
+  messagingGroup
+    .command("setup")
+    .description("Add the hooks, the MCP entry ferry-messaging, the messaging skill, and the worker service on this machine")
+    .action(async () => {
+      const { runMessagingSetup } = await import("./messaging/setup.ts");
+      const result = await runMessagingSetup({ home: messagingHome(), harnesses: registry().harnesses });
+      report(result, (result) => {
+        writeLine(`Claude settings: ${result.claude}. Codex hooks: ${result.codex}.`);
+        for (const entry of result.mcp) writeLine(`MCP entry for ${entry.harness}: ${entry.action}.`);
+        if (result.skill) writeLine(result.skill.message);
+        if (result.service) writeLine(`Installed the worker service: ${result.service.path}.`);
+        if (result.codex !== "absent") writeLine("In Codex, open /hooks once and trust the Ferry hooks.");
+      });
+    });
+  messagingGroup
+    .command("teardown")
+    .description("Remove what ferry messaging setup added. The credential and the skill stay")
+    .action(async () => {
+      const { runMessagingTeardown } = await import("./messaging/setup.ts");
+      const result = await runMessagingTeardown({ home: messagingHome(), harnesses: registry().harnesses });
+      report(result, (result) => {
+        writeLine(`Claude settings: ${result.claude}. Codex hooks: ${result.codex}.`);
+        for (const entry of result.mcp) writeLine(`MCP entry for ${entry.harness}: ${entry.action}.`);
+        writeLine("Removed the worker service.");
+      });
+    });
+  messagingGroup
+    .command("status")
+    .description("Print the worker state, the relay state, the sessions, the held and failed deliveries, and the outbox")
+    .action(async () => {
+      const { messagingStatus, messagingStatusLines } = await import("./messaging/commands.ts");
+      report(await messagingStatus(messagingHome()), (status) => messagingStatusLines(status).forEach((line) => writeLine(line)));
+    });
+  const view = (read: Parameters<typeof import("./messaging/commands.ts").relayView>[0]) => async () => {
+    const { relayView } = await import("./messaging/commands.ts");
+    report(await relayView(read, process.cwd(), messagingHome()), (result) => writeLine(JSON.stringify(result, null, 2)));
+  };
+  messagingGroup
+    .command("conversations")
+    .description("List the conversations of the project of the current directory")
+    .option("--query <words>", "words to find")
+    .option("--all", "also the closed conversations")
+    .action((options: { query?: string; all?: boolean }) =>
+      view(async (call, project) =>
+        call("GET", `/v1/projects/${(await project()).id}/conversations`, { state: options.all ? "all" : "open", ...(options.query ? { query: options.query } : {}) }),
+      )(),
+    );
+  messagingGroup
+    .command("show <conversation>")
+    .description("Show the recent messages of a conversation (id or slug)")
+    .option("--before <message>", "the messages before this message id")
+    .action((conversation: string, options: { before?: string }) =>
+      view(async (call, project) => {
+        const id = conversation.startsWith("cnv_")
+          ? conversation
+          : ((await call("GET", `/v1/projects/${(await project()).id}/conversations`, { query: conversation, state: "all" })) as {
+              conversations: { id: string; slug: string }[];
+            }).conversations.find((entry) => entry.slug === conversation)?.id;
+        if (id === undefined) throw new FerryError("usage", `The project has no conversation ${conversation}.`);
+        return call("GET", `/v1/conversations/${id}/messages`, options.before ? { before: options.before } : {});
+      })(),
+    );
+  messagingGroup
+    .command("requests")
+    .description("List the open requests to your sessions in the project of the current directory. With --sent, the requests that they sent")
+    .option("--sent", "the requests that your sessions sent")
+    .action((options: { sent?: boolean }) =>
+      view(async (call, project) => call("GET", `/v1/projects/${(await project()).id}/requests`, { role: options.sent ? "sent" : "assigned", state: "open" }))(),
+    );
+  messagingGroup
+    .command("peers")
+    .description("List the live sessions in the project of the current directory")
+    .action(() => view(async (call, project) => call("GET", `/v1/projects/${(await project()).id}/sessions`, { state: "live" }))());
+  messagingGroup
+    .command("devices")
+    .description("List the devices of your owner")
+    .action(() => view(async (call) => call("GET", "/v1/devices"))());
+  messagingGroup
+    .command("revoke <device>")
+    .description("Revoke a device credential of your owner, and end its sessions")
+    .action((device: string) => view(async (call) => call("POST", `/v1/devices/${encodeURIComponent(device)}/revoke`, {}, {}))());
+  messagingGroup
+    .command("leave")
+    .description("Retire a session of your owner. Its memberships end")
+    .requiredOption("--session <id>", "the session id (ses_...)")
+    .action((options: { session: string }) =>
+      view(async (call) => call("POST", `/v1/sessions/${encodeURIComponent(options.session)}/end`, {}, { reason: "retired" }))(),
+    );
+  const remote = messagingGroup.command("remote").description("Choose the Git remote of the project for the checkout of the current directory");
+  remote
+    .command("set <name>")
+    .description("Use the remote <name> for the checkout of the current directory. Ferry writes ~/.ferry/messaging/remotes.json, not the checkout")
+    .action(async (name: string) => {
+      const { setRemote } = await import("./messaging/commands.ts");
+      report(await setRemote(name, process.cwd(), messagingHome()), (result) => writeLine(`The checkout ${result.root} uses the remote ${name}.`));
+    });
+  remote
+    .command("clear")
+    .description("Remove the remote choice of the checkout of the current directory")
+    .action(async () => {
+      const { setRemote } = await import("./messaging/commands.ts");
+      report(await setRemote(null, process.cwd(), messagingHome()), (result) => writeLine(`The checkout ${result.root} uses the default remote.`));
+    });
+  messagingGroup
+    .command("relay-url <url>")
+    .description("Use a new relay URL, after a move of the relay. ferry sync writes it to the boxes")
+    .action(async (url: string) => {
+      const { changeRelayUrl } = await import("./messaging/commands.ts");
+      report({ ...changeRelayUrl(url, messagingHome()), syncNeeded: true }, () => writeLine(`The relay URL is ${url}. Run ferry sync.`));
+    });
+  messagingGroup
+    .command("worker", { hidden: true })
+    .description("Run the messaging worker. The worker service runs this command")
+    .action(async () => {
+      const { runWorkerService } = await import("./messaging/commands.ts");
+      await runWorkerService(messagingHome(), writeError);
+    });
+  messagingGroup
+    .command("mcp", { hidden: true })
+    .description("Serve the ferry_* tools on stdin and stdout. Claude Code and Codex start it")
+    .action(async () => {
+      const { runMessagingMcp } = await import("./messaging/mcp.ts");
+      await runMessagingMcp();
+    });
+  messagingGroup
+    .command("hook <runtime> <event>", { hidden: true })
+    .description("The hook of agent messaging. It never fails, and prints only the hook output")
+    .action(async (runtime: string, event: string) => {
+      const { runHook } = await import("./messaging/hook.ts");
+      const output = await runHook({ runtime, event });
+      if (output !== "") await (dependencies.writeText ?? writeStdout)(`${output}\n`);
+    });
+
   // move --from-box sends the output of each box command through this filter, so that a name with a token stays on the box.
   program
     .command("redact", { hidden: true })
@@ -1924,8 +2276,16 @@ of Ferry on the box.`)
     .command("install-skill", { hidden: true })
     .description("Write the Ferry agent skill of this version to ~/.agents/skills/ferry")
     .action(() => {
-      const result = installBundledSkill({ home: homedir(), harnesses: registry().harnesses });
-      report(result, (result) => writeLine(result.message));
+      const home = homedir();
+      const result = installBundledSkill({ home, harnesses: registry().harnesses });
+      // A machine with agent messaging also gets the messaging skill of this version.
+      const messaging = existsSync(join(home, MESSAGING_DIR)) || existsSync(join(home, MESSAGING_SKILL_RELATIVE_PATH))
+        ? installMessagingSkill({ home, harnesses: registry().harnesses })
+        : null;
+      report({ ...result, messaging }, (result) => {
+        writeLine(result.message);
+        if (result.messaging) writeLine(result.messaging.message);
+      });
     });
 
   const configCommand = program
