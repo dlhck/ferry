@@ -9,7 +9,7 @@
 import { describe, expect, test } from "bun:test";
 import { ALICE, BOB, type TestIdentity } from "../harness/homes.ts";
 import { suiteTitle } from "../harness/lanes.ts";
-import { openConversation, receiptsOf, sendRequest, systemReady, useSystem, waitFor } from "../harness/system.ts";
+import { openConversation, receiptsOf, relaySession, sendRequest, systemReady, useSystem, waitFor } from "../harness/system.ts";
 
 const TIMEOUT = 30_000;
 const CAROL: TestIdentity = { login: "carol", githubUserId: 1003, deviceName: "carol-box" };
@@ -65,6 +65,11 @@ describe.skipIf(!systemReady)(suiteTitle("two identities on one host"), () => {
 
       await bobCodex.fake.exit();
       await bobCodex.hook("SessionEnd", { reason: "exit" });
+      // The worker sends the end to the relay through its outbox, so it arrives later.
+      const bob = system().participant("bob");
+      await waitFor(async () => (await relaySession(bob.http, bob.checkout.key, bobCodex.address))?.state !== "live", {
+        what: "the end of the Codex session at the relay",
+      });
       const id = await sendRequest(alice, conversation.slug, "bob", "Who owns the example job?");
       await waitFor(() => bobClaude.envelopes().find((envelope) => envelope.id === id), { what: "the request at the one live session" });
     },

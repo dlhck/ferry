@@ -496,13 +496,17 @@ export async function endTurn(session: Session): Promise<void> {
 }
 
 /** The relay record of a session, by its address, through the relay API (design 7.6). */
-export async function relaySession(http: RelayHttp, projectKey: string, address: string): Promise<{ id: string; projectId: string } | null> {
+export async function relaySession(
+  http: RelayHttp,
+  projectKey: string,
+  address: string,
+): Promise<{ id: string; projectId: string; state: string } | null> {
   const project = await http.get<{ project?: { id: string } }>(`/v1/projects?key=${encodeURIComponent(projectKey)}`);
   const projectId = project.body.project?.id;
   if (projectId === undefined) return null;
-  const sessions = await http.get<{ sessions?: { id: string; address: string }[] }>(`/v1/projects/${projectId}/sessions?state=all`);
+  const sessions = await http.get<{ sessions?: { id: string; address: string; state: string }[] }>(`/v1/projects/${projectId}/sessions?state=all`);
   const found = sessions.body.sessions?.find((session) => session.address === address);
-  return found === undefined ? null : { id: found.id, projectId };
+  return found === undefined ? null : { id: found.id, projectId, state: found.state };
 }
 
 /** The addresses of the member sessions of a conversation, through the relay API (design 7.6). */
