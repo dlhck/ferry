@@ -9,8 +9,7 @@
  * const github = await startFakeGitHub({ users: [ALICE], repositories: [{ owner: "acme", name: "app", id: 501 }] });
  * github.install("acme");
  * github.setPermission("acme/app", "alice", "write");
- * const access = createGitHubAccess({ ...github.app, privateKey: github.app.privateKeyPem,
- *   endpoints: { api: github.apiUrl, web: github.webUrl }, clock });
+ * const access = createGitHubAccess({ ...github.app, apiUrl: github.apiUrl, webUrl: github.webUrl, clock });
  * // ...
  * await github.stop();
  * ```
