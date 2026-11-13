@@ -109,6 +109,9 @@ export function createCodexAdapter(input: CodexAdapterInput): Adapter {
     },
     async inject(session, envelope) {
       if (!session.codexHome) return { ok: false, error: "The session has no Codex home." };
+      // Known limit: the envelope is an argument, so other OS users on the
+      // host can see it in the process list while `codex queue` runs. Codex
+      // 0.169.0 has no option to read the message from stdin or a file.
       const result = run(session.runtimeExe, ["queue", "--thread", session.runtimeSessionId, "--message", envelope], { CODEX_HOME: session.codexHome });
       // The output can echo the message, so the error has only the exit status.
       if (result.status !== 0) return { ok: false, error: `codex queue exited with ${result.status ?? "a signal"}.` };
