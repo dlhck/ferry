@@ -53,9 +53,24 @@ export function backupStore(path: string, target?: string, clock: Clock = system
   return file;
 }
 
+/** The backup files in `dir`, oldest first. `relay-<time>-1.db` is newer than `relay-<time>.db`. */
+function backupFiles(dir: string): string[] {
+  const order = (name: string): [string, number] => {
+    const match = /^relay-(\d{8}T\d{6}Z)(?:-(\d+))?\.db$/.exec(name);
+    return [match?.[1] ?? "", Number(match?.[2] ?? "0")];
+  };
+  return readdirSync(dir)
+    .filter((name) => /^relay-\d{8}T\d{6}Z(-\d+)?\.db$/.test(name))
+    .sort((a, b) => {
+      const [timeA, indexA] = order(a);
+      const [timeB, indexB] = order(b);
+      return timeA === timeB ? indexA - indexB : timeA < timeB ? -1 : 1;
+    });
+}
+
 /** Remove all but the newest `keep` backups in `dir`. */
 export function pruneBackups(dir: string, keep = BACKUPS_KEPT): void {
-  const files = readdirSync(dir).filter((name) => /^relay-\d{8}T\d{6}Z(-\d+)?\.db$/.test(name)).sort();
+  const files = backupFiles(dir);
   for (const name of files.slice(0, Math.max(0, files.length - keep))) rmSync(join(dir, name), { force: true });
 }
 
@@ -63,8 +78,7 @@ export function pruneBackups(dir: string, keep = BACKUPS_KEPT): void {
 export function latestBackup(path: string): string | null {
   const dir = backupDir(path);
   if (!existsSync(dir)) return null;
-  const files = readdirSync(dir).filter((name) => /^relay-\d{8}T\d{6}Z(-\d+)?\.db$/.test(name)).sort();
-  const last = files.at(-1);
+  const last = backupFiles(dir).at(-1);
   return last === undefined ? null : join(dir, last);
 }
 
