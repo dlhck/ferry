@@ -13,28 +13,13 @@
  * - When the permission is lost, the memberships end and the open receipts are superseded.
  */
 
+import type { GitHubAccess } from "../github/access.ts";
 import { newId } from "../ids.ts";
 import { RECHECK_MS, OUTAGE_GRACE_MS } from "./limits.ts";
 import { RelayError, deviceOf, emit, type Store } from "./store.ts";
 
-/** The GitHub calls of the relay. Lane B implements it in `src/messaging/github/access.ts`. Tests use a fake. */
-export interface GitHubAccess {
-  startDeviceFlow(): Promise<{ deviceCode: string; userCode: string; verificationUri: string; expiresInS: number; intervalS: number }>;
-  pollDeviceFlow(
-    deviceCode: string,
-  ): Promise<{ state: "pending" | "slow-down" | "expired" | "denied" } | { state: "complete"; user: { id: number; login: string } }>;
-  resolveRepository(
-    owner: string,
-    repo: string,
-  ): Promise<{ state: "ok"; repoId: number; fullName: string; installationId: number } | { state: "app-not-installed" | "not-found" | "unavailable" }>;
-  permission(
-    installationId: number,
-    fullName: string,
-    login: string,
-  ): Promise<{ state: "ok"; permission: "admin" | "write" | "read" | "none"; roleName: string | null } | { state: "unavailable" }>;
-  currentLogin(userId: number): Promise<string | null>;
-  appSlug(): string;
-}
+/** The GitHub calls of the relay. Tests use a fake. */
+export type { GitHubAccess };
 
 export type Access = { readonly github: GitHubAccess; readonly allowedOwners: () => readonly string[] };
 
@@ -153,7 +138,8 @@ export function isAdmin(store: Store, ownerId: string, projectId: string): boole
 
 /**
  * Check that the owner has access to the project. `fresh` asks GitHub. `cached`
- * uses a valid stored grant, and asks GitHub only when there is none. Throws
+ * uses a valid stored grant whose last check is less than 15 minutes old, and
+ * asks GitHub when there is none. Throws
  * `no-project-access`, `app-not-installed`, or `access-unverifiable`.
  */
 export async function checkAccess(
@@ -165,7 +151,9 @@ export async function checkAccess(
 ): Promise<"granted" | "unverifiable"> {
   if (mode === "cached") {
     const stored = storedAccess(store, ownerId, projectId);
-    if (stored !== null) return stored;
+    const row = grant(store, ownerId, projectId);
+    // The background recheck covers only owners with memberships. A device read of another owner checks here.
+    if (stored !== null && row !== null && Date.parse(row.last_attempt_at) + RECHECK_MS > store.now()) return stored;
   }
   const result = await askGitHub(store, access, ownerId, projectId);
   if (result.state === "granted") return "granted";

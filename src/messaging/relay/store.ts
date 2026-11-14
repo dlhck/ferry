@@ -148,3 +148,28 @@ export function getMeta(store: Store, key: string): string | null {
 export function setMeta(store: Store, key: string, value: string): void {
   store.db.query("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key, value);
 }
+
+/** The counts of `ferry relay status`. */
+export type StoreCounts = { owners: number; devices: number; liveSessions: number; conversations: number; openRequests: number };
+
+/**
+ * Count the rows of the store at `path` on a read-only connection. It does not
+ * migrate and does not take the relay lock, so it works while the relay runs.
+ * Null when the store does not exist.
+ */
+export function storeCounts(path: string): StoreCounts | null {
+  if (!existsSync(path)) return null;
+  const db = new Database(path, { readonly: true });
+  try {
+    const count = (sql: string) => db.query<{ n: number }, []>(sql).get()?.n ?? 0;
+    return {
+      owners: count("SELECT count(*) AS n FROM owners"),
+      devices: count("SELECT count(*) AS n FROM devices WHERE revoked_at IS NULL"),
+      liveSessions: count("SELECT count(*) AS n FROM sessions WHERE state = 'live'"),
+      conversations: count("SELECT count(*) AS n FROM conversations"),
+      openRequests: count("SELECT count(*) AS n FROM requests WHERE status IN ('pending','delivered','acknowledged')"),
+    };
+  } finally {
+    db.close();
+  }
+}

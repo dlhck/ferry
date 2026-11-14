@@ -293,6 +293,7 @@ const tokens: [string, string][] = [
   ["slack-token", "xo" + "xb-" + "1234567890-1234567890-" + "a1B2".repeat(6)],
   ["slack-token", "xo" + "xp-" + "1234567890-1234567890-" + "a1B2".repeat(6)],
   ["aws-access-key", "AK" + "IA" + "Q2W3E4R5T6Y7U8I9"],
+  ["ferry-credential", "fm" + "r_" + "a1B2-c3D4_".repeat(4) + "e5F"],
 ];
 
 describe("the deny set", () => {
@@ -326,6 +327,11 @@ describe("the deny set", () => {
       {
         code: "aws-access-key",
         description: "AWS access key ID in file content",
+        behavior: "refuse",
+      },
+      {
+        code: "ferry-credential",
+        description: "Ferry messaging device credential in file content",
         behavior: "refuse",
       },
       {
