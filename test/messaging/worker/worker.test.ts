@@ -4,8 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RelayClient } from "../../../src/messaging/client/relay-client.ts";
 import { credentialSha256, newDeviceCredential, newId } from "../../../src/messaging/ids.ts";
-import { HEADERS, PROTOCOL_VERSION } from "../../../src/messaging/protocol.ts";
 import { startRelay } from "../../../src/messaging/relay/server.ts";
 import { OFFLINE_CONTEXT } from "../../../src/messaging/worker/digest.ts";
 import type { RelayTransport } from "../../../src/messaging/worker/outbox.ts";
@@ -226,6 +226,8 @@ describe("tools", () => {
     const { session } = await t.start("claude");
     const result = await t.tool(session, "ferry_send", { conversation: CONVERSATION.id, kind: "update", body: `Use ghp_${"a".repeat(36)} for it.` });
     expect(result.error?.code).toBe("secret-in-message");
+    const credential = await t.tool(session, "ferry_send", { conversation: CONVERSATION.id, kind: "update", body: `The device key is ${newDeviceCredential()}.` });
+    expect(credential.error?.code).toBe("secret-in-message");
     expect(t.relay.find("POST", /\/messages$/)).toEqual([]);
   });
 
@@ -480,7 +482,7 @@ describe("liveness and socket", () => {
 
 // ---------------------------------------------------------------------------
 // Layer 2 with lane A's relay: a real relay on a free port, with a fake GitHub,
-// and an HTTP client until lane B's RelayClient merges.
+// and lane B's RelayClient.
 
 /** Send one call. Throw when the relay answers with an error. */
 async function ok(client: RelayTransport, method: "GET" | "POST", path: string, body?: unknown): Promise<any> {
@@ -499,25 +501,7 @@ async function relayWorld() {
   const relay = await startRelay({ github, clock, log: () => {}, allowedOwners: ["acme"], dbPath: join(dir, "relay.db"), listen: "127.0.0.1:0" });
   cleanups.push(() => relay.stop());
 
-  const client = (credential: string | null): RelayTransport => ({
-    async request(call) {
-      const headers: Record<string, string> = { [HEADERS.protocol]: String(PROTOCOL_VERSION), [HEADERS.version]: VERSION };
-      if (credential !== null) headers.authorization = `Bearer ${credential}`;
-      if (call.idempotencyKey) headers[HEADERS.idempotencyKey] = call.idempotencyKey;
-      const init: RequestInit = { method: call.method, headers, signal: call.signal ?? null };
-      if (call.method !== "GET") {
-        init.body = JSON.stringify(call.body ?? {});
-        headers["content-type"] = "application/json";
-      }
-      const response = await fetch(`${relay.url}${call.path}`, init);
-      const text = await response.text();
-      let body: unknown = null;
-      try {
-        body = text === "" ? null : JSON.parse(text);
-      } catch {}
-      return { status: response.status, body };
-    },
-  });
+  const client = (credential: string | null): RelayTransport => new RelayClient({ url: relay.url, credential, ferryVersion: VERSION });
   const enroll = async (login: string, githubUserId: number): Promise<RelayTransport> => {
     github.addUser(login, githubUserId);
     github.grant(login, "acme/app", "write");
