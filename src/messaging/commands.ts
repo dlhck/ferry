@@ -18,6 +18,7 @@ import { FerryError } from "../errors.ts";
 import { VERSION } from "../version.ts";
 import { LOGIN } from "./ids.ts";
 import type { GitHubAccess } from "./relay/access.ts";
+import type { StoreCounts } from "./relay/store.ts";
 import type { LinkResult, RunOptions } from "../link.ts";
 import { spawn, spawnSync } from "node:child_process";
 import { installUserService, launchdPath, systemdPath, uninstallUserService, type WatchServiceResult } from "../watch-service.ts";
@@ -378,7 +379,7 @@ export async function restoreRelay(file: string, home = homedir()): Promise<stri
   return restoreStore(file, join(home, RELAY_DB_FILE));
 }
 
-/** `ferry relay status`: the local state of the relay host. It does not open the store. */
+/** `ferry relay status`: the local state of the relay host. It reads the counts of the store and takes no lock, so it works while the relay runs. */
 export async function relayStatus(version: string, home = homedir()): Promise<{
   version: string;
   service: boolean;
@@ -386,8 +387,10 @@ export async function relayStatus(version: string, home = homedir()): Promise<{
   lastBackup: string | null;
   githubApp: boolean;
   owners: readonly string[];
+  counts: StoreCounts | null;
 }> {
   const { latestBackup } = await import("./relay/backup.ts");
+  const { storeCounts } = await import("./relay/store.ts");
   const { statSync } = await import("node:fs");
   const db = join(home, RELAY_DB_FILE);
   const config = readRelayConfig(home);
@@ -399,6 +402,7 @@ export async function relayStatus(version: string, home = homedir()): Promise<{
     lastBackup: latestBackup(db),
     githubApp: config.github !== null && existsSync(join(home, RELAY_KEY_FILE)),
     owners: config.allowedOwners,
+    counts: storeCounts(db),
   };
 }
 

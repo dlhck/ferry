@@ -2050,7 +2050,7 @@ relay on that box.`);
     });
   relayGroup
     .command("status")
-    .description("Print the version, database size, last backup, GitHub App state, and owners of the relay on this machine")
+    .description("Print the version, database size, last backup, GitHub App state, owners, and counts of the relay on this machine")
     .action(async () => {
       const { relayStatus } = await import("./messaging/commands.ts");
       report(await relayStatus(VERSION, messagingHome()), (status) => {
@@ -2060,6 +2060,10 @@ relay on that box.`);
         writeLine(`Last backup: ${status.lastBackup ?? "none"}`);
         writeLine(`GitHub App: ${status.githubApp ? "configured" : "not configured. Run ferry relay setup github-app."}`);
         writeLine(status.owners.length > 0 ? `Owners: ${status.owners.join(", ")}` : "Owners: none. Run ferry relay owners add <owner>.");
+        if (status.counts !== null) {
+          const { owners, devices, liveSessions, conversations, openRequests } = status.counts;
+          writeLine(`Counts: ${owners} owners, ${devices} devices, ${liveSessions} live sessions, ${conversations} conversations, ${openRequests} open requests`);
+        }
       });
     });
   relayGroup

@@ -207,7 +207,14 @@ test("ferry relay backup, restore, and status work on the relay store", async ()
 
   expect(path).toStartWith(join(root, ".ferry", "relay", "backups", "relay-"));
   expect(new TextDecoder().decode(bytes!.slice(0, 15))).toBe("SQLite format 3");
-  expect(status).toMatchObject({ version: "1.0.0", lastBackup: path, githubApp: false, owners: [] });
+  expect(status).toMatchObject({
+    version: "1.0.0",
+    lastBackup: path,
+    githubApp: false,
+    owners: [],
+    counts: { owners: 0, devices: 0, liveSessions: 0, conversations: 0, openRequests: 0 },
+  });
+  expect((await relayStatus("1.0.0", home())).counts).toBeNull();
   expect(status.database.bytes).toBeGreaterThan(0);
   expect(previous).toStartWith(join(root, ".ferry", "relay", "relay.db.before-restore-"));
   expect(readdirSync(join(root, ".ferry", "relay")).filter((name) => name.startsWith(".backup-stdout"))).toEqual([]);
