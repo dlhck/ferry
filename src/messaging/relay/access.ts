@@ -153,7 +153,8 @@ export function isAdmin(store: Store, ownerId: string, projectId: string): boole
 
 /**
  * Check that the owner has access to the project. `fresh` asks GitHub. `cached`
- * uses a valid stored grant, and asks GitHub only when there is none. Throws
+ * uses a valid stored grant whose last check is less than 15 minutes old, and
+ * asks GitHub when there is none. Throws
  * `no-project-access`, `app-not-installed`, or `access-unverifiable`.
  */
 export async function checkAccess(
@@ -165,7 +166,9 @@ export async function checkAccess(
 ): Promise<"granted" | "unverifiable"> {
   if (mode === "cached") {
     const stored = storedAccess(store, ownerId, projectId);
-    if (stored !== null) return stored;
+    const row = grant(store, ownerId, projectId);
+    // The background recheck covers only owners with memberships. A device read of another owner checks here.
+    if (stored !== null && row !== null && Date.parse(row.last_attempt_at) + RECHECK_MS > store.now()) return stored;
   }
   const result = await askGitHub(store, access, ownerId, projectId);
   if (result.state === "granted") return "granted";
