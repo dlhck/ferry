@@ -152,6 +152,28 @@ function errorResponse(error: RelayError): Response {
   return json(status, errorBody(error.code, error.message, error.hint, error.details), headers);
 }
 
+/**
+ * The relay error for an error of the GitHub device flow. The GitHub client
+ * throws `GitHubUnavailableError` when GitHub does not answer,
+ * `DeviceFlowDisabledError` when the App has the device flow off, and a plain
+ * `Error` for an OAuth error that a poll cannot fix. Other errors are bugs, and
+ * the caller gets them unchanged. The relay tells them apart by `name`.
+ */
+function deviceFlowError(error: unknown): RelayError {
+  if (!(error instanceof Error)) throw error;
+  if (error.name === "GitHubUnavailableError") return new RelayError("github-unavailable", "GitHub is not available now. Try again later.");
+  if (error.name === "DeviceFlowDisabledError") {
+    return new RelayError(
+      "device-flow-disabled",
+      'The GitHub App has the device flow off. The relay operator turns on "Enable Device Flow" in the App settings.',
+    );
+  }
+  if (error.name === "Error") {
+    return new RelayError("enrollment-failed", "GitHub refused the device flow of the relay's GitHub App.", "The relay operator checks the App settings.");
+  }
+  throw error;
+}
+
 export function createRelay(store: Store, options: RelayOptions): Relay {
   const access: Access = { github: options.github, allowedOwners: () => options.allowedOwners };
   const enrollments = new Map<string, Enrollment>();
@@ -523,8 +545,8 @@ export function createRelay(store: Store, options: RelayOptions): Relay {
   ];
 
   async function enrollStart(body: EnrollStart): Promise<Reply> {
-    const flow = await options.github.startDeviceFlow().catch(() => {
-      throw new RelayError("github-unavailable", "GitHub is not available now. Try again later.");
+    const flow = await options.github.startDeviceFlow().catch((error: unknown) => {
+      throw deviceFlowError(error);
     });
     const enrollmentId = `enr_${randomBytes(18).toString("base64url")}`;
     const intervalMs = flow.intervalS * 1000;
@@ -552,8 +574,10 @@ export function createRelay(store: Store, options: RelayOptions): Relay {
       enrollments.delete(enrollmentId);
       throw new RelayError("enrollment-expired", "The enrollment code expired.", "Start the enrollment again.");
     }
-    const result = await options.github.pollDeviceFlow(enrollment.deviceCode).catch(() => {
-      throw new RelayError("github-unavailable", "GitHub is not available now. Try again later.");
+    const result = await options.github.pollDeviceFlow(enrollment.deviceCode).catch((error: unknown) => {
+      const refusal = deviceFlowError(error);
+      if (refusal.code !== "github-unavailable") enrollments.delete(enrollmentId);
+      throw refusal;
     });
     if (result.state === "pending") return reply(202, { state: "pending", intervalMs: enrollment.intervalMs });
     if (result.state === "slow-down") {

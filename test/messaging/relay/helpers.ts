@@ -1,8 +1,9 @@
 /**
- * Helpers of the relay tests: a fake clock, a fake `GitHubAccess`, and a client
- * that calls `relay.handle` with a `Request`, without a socket.
+ * Helpers of the relay tests: a fake `GitHubAccess`, and a client that calls
+ * `relay.handle` with a `Request`, without a socket. The fake clock is the one of
+ * the harness.
  *
- * Lane E's harness and lane B's fake GitHub server replace the fakes here when they merge.
+ * Lane B's fake GitHub server can replace the fake `GitHubAccess` when it merges.
  */
 
 import { afterEach } from "bun:test";
@@ -14,20 +15,17 @@ import { HEADERS, validate, type Schema, type SessionRegistered } from "../../..
 import type { GitHubAccess } from "../../../src/messaging/relay/access.ts";
 import { createRelay, type Relay } from "../../../src/messaging/relay/server.ts";
 import { openStore, type Store } from "../../../src/messaging/relay/store.ts";
+import { FakeClock } from "../harness/clock.ts";
+
+export { FakeClock };
 
 export const START = Date.parse("2026-11-13T10:00:00.000Z");
 
-export class FakeClock {
-  ms: number;
-  constructor(start = START) {
-    this.ms = start;
-  }
-  now(): number {
-    return this.ms;
-  }
-  advance(ms: number): void {
-    this.ms += ms;
-  }
+/** An error with the `name` of one of lane B's error classes. */
+export function namedError(name: string, message: string): Error {
+  const error = new Error(message);
+  error.name = name;
+  return error;
 }
 
 type Repo = { repoId: number; installationId: number };
@@ -41,6 +39,8 @@ export class FakeGitHub implements GitHubAccess {
   /** The next results of `pollDeviceFlow`, in order. */
   polls: ({ state: "pending" | "slow-down" | "expired" | "denied" } | { state: "complete"; user: { id: number; login: string } })[] = [];
   unavailable = false;
+  /** An error that `startDeviceFlow` and `pollDeviceFlow` throw. Lane B's client tells its errors apart by `name`. */
+  flowError: Error | null = null;
   uninstalled = new Set<string>();
   calls: string[] = [];
   private codes = 0;
@@ -59,13 +59,15 @@ export class FakeGitHub implements GitHubAccess {
 
   async startDeviceFlow() {
     this.calls.push("startDeviceFlow");
-    if (this.unavailable) throw new Error("network");
+    if (this.flowError !== null) throw this.flowError;
+    if (this.unavailable) throw namedError("GitHubUnavailableError", "network");
     this.codes++;
     return { deviceCode: `device-code-${this.codes}`, userCode: `ABCD-${1000 + this.codes}`, verificationUri: "https://github.com/login/device", expiresInS: 900, intervalS: 5 };
   }
 
   async pollDeviceFlow(deviceCode: string) {
     this.calls.push(`pollDeviceFlow ${deviceCode}`);
+    if (this.flowError !== null) throw this.flowError;
     return this.polls.shift() ?? { state: "pending" as const };
   }
 
@@ -145,7 +147,7 @@ let runtimeIds = 0;
 
 export function world(options: { allowedOwners?: string[]; dir?: string; clock?: FakeClock; github?: FakeGitHub } = {}): World {
   const dir = options.dir ?? tempDir();
-  const clock = options.clock ?? new FakeClock();
+  const clock = options.clock ?? new FakeClock(START);
   const github = options.github ?? new FakeGitHub();
   if (!github.repos.has("acme/vendure-cloud")) github.addRepo("acme/vendure-cloud", 4242);
   const store = openStore(join(dir, "relay.db"), clock);
