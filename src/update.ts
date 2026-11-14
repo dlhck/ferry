@@ -22,6 +22,7 @@ import { hasBoxPart, INTEGRATIONS, type BoxIntegration, type Integration } from 
 import { BunHostAdapter, Link, type HostAdapter, type LinkError, type LinkOptions } from "./link.ts";
 import { FerryError, linkFailure } from "./errors.ts";
 import { RESTART_GATEWAY_COMMAND } from "./mcp-gateway/service.ts";
+import { RESTART_MESSAGING_COMMAND } from "./messaging/setup.ts";
 import { errorInfo, type ErrorInfo } from "./output.ts";
 import { noProgress, plural, step, type Progress } from "./progress.ts";
 import { boxLocker } from "./sync.ts";
@@ -390,11 +391,16 @@ async function updateBoxes(
   return result();
 }
 
-/** The Ferry step of a box with the MCP gateway also restarts the gateway, so that it runs the new binary. */
+/**
+ * The Ferry step of a box with the MCP gateway, agent messaging, or the relay
+ * also restarts these services, so that they run the new binary.
+ */
 function withGatewayRestart(box: ResolvedBox, step: ToolStep): ToolStep {
-  if (!box.mcpGateway || step.command === undefined) return step;
+  if (step.command === undefined) return step;
+  const restarts = [...(box.mcpGateway ? [RESTART_GATEWAY_COMMAND] : []), ...(box.messaging || box.relay ? [RESTART_MESSAGING_COMMAND] : [])];
+  if (restarts.length === 0) return step;
   // The last line of the command writes the box marker, so the restart runs only after a complete install.
-  return { ...step, command: `${step.command} && ${RESTART_GATEWAY_COMMAND}` };
+  return { ...step, command: [step.command, ...restarts].join(" && ") };
 }
 
 /** The commands to run: the box changes of each box in `depends` order, then the operator updates. */

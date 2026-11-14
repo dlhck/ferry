@@ -11,6 +11,7 @@ import type { LinkError, LinkResult } from "./link.ts";
 import type { IntegrationHealth, IntegrationId } from "./integrations/types.ts";
 import { cannotShareText, type McpGatewayStatus } from "./mcp-gateway/service.ts";
 import { MCP_SKIPS, type DenyRuleDescription, type NonPortableMcp } from "./manifest.ts";
+import { MESSAGING_SERVICE, type BoxMessagingHealth } from "./messaging/setup.ts";
 import { groupProgress, noProgress, plural, step, type Progress } from "./progress.ts";
 import type { TipReport } from "./store.ts";
 import { changedPaths } from "./sync.ts";
@@ -56,6 +57,10 @@ export type BoxStatusDependencies = {
   /** The MCP gateway of a box with `mcp_gateway = true`. Absent for a box without the key. */
   readonly mcpGateway?: {
     read(): Promise<McpGatewayStatus>;
+  };
+  /** The agent messaging of a box with `messaging = true`. Absent for a box without the key. Only the brief check reads it. */
+  readonly messaging?: {
+    read(): Promise<BoxMessagingHealth>;
   };
   /** The registry tools with the policies of this box. `online` is false when the box is offline. */
   readonly tools?: {
@@ -241,7 +246,7 @@ export type StatusReport = {
  * in words>`, of at most 60 characters. `message` is the full text.
  */
 export type BriefIssue = {
-  readonly kind: "login" | "mcp-login" | "mcp-gateway" | "mcp-server" | "tool" | "hook" | "resource" | "check-failed";
+  readonly kind: "login" | "mcp-login" | "mcp-gateway" | "mcp-server" | "messaging" | "tool" | "hook" | "resource" | "check-failed";
   readonly name: string;
   readonly state: string;
   readonly summary: string;
@@ -295,7 +300,9 @@ export async function composeBriefStatus(
   checkedAt: Date,
   progress: Progress = noProgress,
 ): Promise<BriefStatusReport> {
-  progress.plan(boxes.reduce((total, box) => total + 3 + (box.mcpServers ? 1 : 0) + (box.mcpGateway ? 1 : 0) + (box.tools ? 1 : 0), 0));
+  progress.plan(
+    boxes.reduce((total, box) => total + 3 + (box.mcpServers ? 1 : 0) + (box.mcpGateway ? 1 : 0) + (box.messaging ? 1 : 0) + (box.tools ? 1 : 0), 0),
+  );
   const boxProgress = orderedProgress(progress, boxes.map((box) => box.name));
   const results = await mapLimit(boxes, BOX_LIMIT, async (box, index) => {
     try {
@@ -321,6 +328,7 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
     progress.skip("Checking MCP logins on the box", OFFLINE);
     if (box.mcpServers) progress.skip("Checking MCP servers on the box", OFFLINE);
     if (box.mcpGateway) progress.skip(GATEWAY_STEP, OFFLINE);
+    if (box.messaging) progress.skip(MESSAGING_STEP, OFFLINE);
     if (box.tools) progress.skip("Checking tools on the box", OFFLINE);
     return { ...base, online: false, error, summary: cutMiddle(error, SUMMARY_LIMIT), issues: [], resources: null, mcpGateway: null };
   }
@@ -423,6 +431,15 @@ async function composeBriefBox(box: BoxStatusDependencies, progress: Progress): 
     } catch (cause) {
       mcpGateway = null;
       failed("MCP gateway", cause);
+    }
+  }
+
+  if (box.messaging) {
+    const messaging = box.messaging;
+    try {
+      issues.push(...messagingIssues(await step(progress, MESSAGING_STEP, () => messaging.read()), box.name, Date.now()));
+    } catch (cause) {
+      failed("agent messaging", cause);
     }
   }
 
@@ -570,6 +587,84 @@ function gatewayIssues(gateway: McpGatewayStatus, box: string): BriefIssue[] {
       message: `The MCP gateway on the box needs a login for ${server.name}.`,
       command: `ferry auth --mcp ${shellArg(server.name)} ${flag}`,
     });
+  }
+  return issues;
+}
+
+const MESSAGING_STEP = "Checking agent messaging on the box";
+/** The relay can be away this long before the brief status reports it, so a restart of the relay gives no issue. */
+const RELAY_GRACE_MS = 5 * 60_000;
+
+/**
+ * The agent messaging issues of a box: the worker does not run, the relay did
+ * not answer for more than 5 minutes, the device credential is revoked, a
+ * runtime version is unsupported or untested, or Codex has not trusted the
+ * Ferry hooks. A box without Ferry gives no issue here, because the tool check reports it.
+ */
+export function messagingIssues(health: BoxMessagingHealth, box: string, now: number): BriefIssue[] {
+  if (health.state === "unavailable") return [];
+  const flag = `--box ${box}`;
+  const issue = (name: string, state: string, words: string, message: string, command: string | null): BriefIssue => ({
+    kind: "messaging",
+    name,
+    state,
+    summary: summarize(name, words),
+    message,
+    command,
+  });
+  const issues: BriefIssue[] = [];
+  const status = health.status;
+  if (status === null) {
+    issues.push(
+      health.enrolled
+        ? issue(
+            "messaging",
+            "worker-stopped",
+            "worker not running",
+            `The agent messaging worker ${MESSAGING_SERVICE.unit} does not run on the box. A sync starts it. journalctl --user -u ${MESSAGING_SERVICE.unit} on the box shows why it stopped.`,
+            `ferry sync ${flag}`,
+          )
+        : issue(
+            "messaging",
+            "worker-stopped",
+            "not enrolled",
+            "The box has no messaging credential, so the agent messaging worker does not run.",
+            `ferry messaging enroll ${flag}`,
+          ),
+    );
+    return issues;
+  }
+  if (status.revoked) {
+    issues.push(issue("messaging", "device-revoked", "device revoked", "The relay revoked the messaging credential of the box.", `ferry messaging enroll ${flag}`));
+  }
+  // Without a last contact, the worker never reached the relay. Then the time is unknown, and the issue shows at once.
+  const since = status.relay.lastContactAt === null ? Number.NEGATIVE_INFINITY : Date.parse(status.relay.lastContactAt);
+  if (!status.relay.reachable && !(now - since <= RELAY_GRACE_MS)) {
+    issues.push(
+      issue(
+        "messaging",
+        "relay-unreachable",
+        "relay unreachable",
+        `The box cannot reach the relay${health.relayUrl === null ? "" : ` ${health.relayUrl}`}. The last contact was ${status.relay.lastContactAt ?? "never"}. Check the relay host.`,
+        null,
+      ),
+    );
+  }
+  // One issue for each runtime version of a live session.
+  const seen = new Set<string>();
+  for (const session of status.sessions) {
+    const key = `${session.runtime} ${session.runtimeVersion}`;
+    if (session.state !== "live" || (session.adapter !== "unsupported" && session.adapter !== "untested") || seen.has(key)) continue;
+    seen.add(key);
+    const name = `messaging/${session.runtime}`;
+    issues.push(
+      session.adapter === "unsupported"
+        ? issue(name, "runtime-unsupported", "version not supported", `${key} on the box is too old for agent messaging. Update ${session.runtime} on the box.`, null)
+        : issue(name, "runtime-untested", "version untested", `Ferry has not tested agent messaging with ${key}. Delivery can fail.`, null),
+    );
+  }
+  if (status.unregisteredCodex.length > 0) {
+    issues.push(issue("messaging/codex", "codex-untrusted", "hooks not trusted", `Codex has not trusted the Ferry hooks on ${box}. Open /hooks in Codex once.`, null));
   }
   return issues;
 }

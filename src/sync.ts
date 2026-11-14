@@ -2,7 +2,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname, homedir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -33,11 +33,15 @@ import {
   type Registry,
   type RegistryConfig,
 } from "./registry/load.ts";
-import type { HarnessDescriptor } from "./registry/types.ts";
+import type { HarnessDescriptor, ToolDescriptor } from "./registry/types.ts";
 import { openStore as openSnapshotStore, skillChanged, type PublishResult } from "./store.ts";
 import { adoptPublishedSkills } from "./adopt.ts";
 import { installBoxPlugins, mergeBoxSettings } from "./box-settings.ts";
 import { NOTIFY_PROBE_COMMAND, withNotifyHooks } from "./notify.ts";
+import { MESSAGING_DIR } from "./messaging/hook.ts";
+import { processStart } from "./process-start.ts";
+import { withMessagingHooks, withoutMessagingHooks } from "./messaging/hooks.ts";
+import { disableBoxParts, enableBoxMessaging, enableBoxRelay, messagingMcpEntries, MESSAGING_SERVICE, RELAY_SERVICE } from "./messaging/setup.ts";
 import { gatewayCleanupCommand, gatewayCleanupLines, registerBoxMcp, sharedEnvScript, sharedRestoreCommand } from "./box-mcp.ts";
 import { disableGateway, enableGateway, gatewayServers, MCP_GATEWAY_SERVICE } from "./mcp-gateway/service.ts";
 import { isReleaseVersion, VERSION } from "./version.ts";
@@ -328,7 +332,7 @@ export async function runSync(
         return total + BOX_STEPS + (box.profiles === null ? 0 : 2) + pluginStep +
           (hasProviders(box.providers) ? 1 : 0) + (hasPreferences(box.preferences) ? 1 : 0) +
           (hasTerminals(box.terminals) ? 1 : 0) + (box.profiles !== null && box.agentMemoryMax !== null ? 1 : 0) +
-          (box.mcpGateway ? 1 : 0);
+          (box.mcpGateway ? 1 : 0) + (box.messaging ? 1 : 0) + (box.relay ? 1 : 0);
       }, operatorSteps);
   if (planned !== (input.dryRun ? 1 : operatorSteps + BOX_STEPS)) progress.plan(planned);
   for (const leftover of seed.leftovers) {
@@ -457,6 +461,8 @@ export async function runSync(
           seed,
           force: input.force === true,
           ferryVersion: dependencies.ferryVersion ?? VERSION,
+          // An operator who never used agent messaging has no messaging parts on a box, so sync does not look for them.
+          messagingUsed: config.messaging !== undefined || existsSync(join(home, MESSAGING_DIR)),
           apply: dependencies.apply ?? applyStore,
           boxStep,
           progress,
@@ -536,6 +542,8 @@ async function applyOnBox(context: {
   readonly seed: Seed;
   readonly force: boolean;
   readonly ferryVersion: string;
+  /** True when this machine has the `[messaging]` section or `~/.ferry/messaging`. */
+  readonly messagingUsed: boolean;
   readonly apply: (input: RemoteApplyInput) => Promise<ApplyPlan>;
   readonly boxStep: <T>(name: string, work: () => T | Promise<T>, describe?: (result: T) => string | undefined) => Promise<T>;
   readonly progress: Progress;
@@ -641,11 +649,18 @@ async function applyOnBox(context: {
       (warnings) => (warnings.length > 0 ? plural(warnings.length, "warning") : undefined),
     );
     for (const warning of warnings) warn(`Box plugins: ${warning}`);
+    // `ferry messaging setup` put the messaging hooks into the operator settings. Only a box with `messaging = true` gets them.
+    const carried = withoutMessagingHooks(settings);
+    const messaging = box.messaging ? withMessagingHooks(carried, harnesses) : carried;
+    if (messaging === null && harnesses.some((harness) => harness.id === "claude")) {
+      warn("Agent messaging: Ferry adds the Claude hooks only when ~/.claude/settings.json is on this machine.");
+    }
+    const base = messaging ?? carried;
     // Only the box gets the hooks of `ferry notify`. Without the key, the box hooks are the hooks of the operator again.
-    const notifying = config.notifications?.agents === true ? withNotifyHooks(settings, harnesses) : settings;
+    const notifying = config.notifications?.agents === true ? withNotifyHooks(base, harnesses) : base;
     if (notifying === null) {
       warn("Agent notifications: Ferry adds the Claude hooks only when Claude is on for the box and ~/.claude/settings.json is on this machine.");
-    } else if (notifying !== settings) {
+    } else if (notifying !== base) {
       // The hooks do nothing without a Ferry that has the notify command. A failed check gives no warning.
       const probe = await link.run(NOTIFY_PROBE_COMMAND);
       const state = probe.ok ? probe.stdout.trim() : "";
@@ -665,7 +680,7 @@ async function applyOnBox(context: {
         mergeBoxSettings({
           remoteHome: required(plan.remoteHome),
           harnesses,
-          settings: notifying ?? settings,
+          settings: notifying ?? base,
           link,
         }),
       (result) => (result.warnings.length > 0 ? plural(result.warnings.length, "warning") : undefined),
@@ -789,6 +804,8 @@ async function applyOnBox(context: {
     },
     (detail) => detail,
   );
+
+  await syncMessaging(context, harnesses, tools);
 
   // After the MCP step, so that the harness entries are direct again before the gateway and its client key go.
   if (!box.mcpGateway) {
@@ -925,6 +942,89 @@ async function applyOnBox(context: {
     }
   }
   return { applyPlan, discarded };
+}
+
+/**
+ * The agent messaging steps of one box. They only warn on failure, so they
+ * never block the core sync. A box with `messaging = true` gets the relay URL,
+ * the Codex hooks, the MCP entry, and the worker. A box with `relay = true`
+ * runs the relay. When a key goes off, Ferry removes the parts of it and
+ * keeps the state directory.
+ */
+async function syncMessaging(
+  context: Parameters<typeof applyOnBox>[0],
+  harnesses: readonly HarnessDescriptor[],
+  tools: readonly ToolDescriptor[],
+): Promise<void> {
+  const { plan, box, link, config, boxStep, progress, warn } = context;
+  const remoteHome = required(plan.remoteHome);
+  const codexOn = harnesses.some((harness) => harness.id === "codex");
+  const release = isReleaseVersion(context.ferryVersion);
+  const development = "This Ferry is a development build, so the box has no Ferry";
+  if (box.messaging) {
+    const name = "Setting up agent messaging";
+    const relayUrl = config.messaging?.relay;
+    if (!release) {
+      progress.skip(name, "development build");
+      warn(`Warning: Agent messaging runs the Ferry of the box. ${development} and Ferry did not start the worker.`);
+    } else if (relayUrl === undefined) {
+      progress.skip(name, "no relay URL");
+      warn("Warning: Agent messaging needs the relay URL. Run ferry messaging enroll --relay <url> on this machine, then ferry sync.");
+    } else {
+      try {
+        const result = await boxStep(
+          name,
+          async () => {
+            const enabled = await enableBoxMessaging(link, remoteHome, relayUrl, codexOn);
+            const entries = messagingMcpEntries(`${remoteHome}/.local/bin/ferry`, harnesses);
+            // The MCP entry needs a Ferry with the messaging commands on the box.
+            const mcpWarnings = enabled.state === "missing" || enabled.state === "old" ? [] : await registerBoxMcp({ remoteHome, harnesses, tools, mcp: entries, link });
+            return { enabled, mcpWarnings };
+          },
+          ({ enabled }) => (enabled.state === "missing" ? "no Ferry on the box" : enabled.state === "old" ? "the Ferry of the box has no messaging" : enabled.state === "enroll" ? "not enrolled" : `worker ${enabled.state}`),
+        );
+        const { enabled, mcpWarnings } = result;
+        if (enabled.state === "missing") warn(`Warning: Agent messaging needs Ferry on the box. Run ferry install --box ${box.name}.`);
+        else if (enabled.state === "old") warn(`Warning: The Ferry of the box has no agent messaging. Run ferry update --box ${box.name}, then ferry sync --box ${box.name}.`);
+        else {
+          for (const line of [...enabled.warnings, ...mcpWarnings]) warn(`Agent messaging: ${line}`);
+          if (enabled.state === "enroll") warn(`Warning: The box has no messaging credential, so the worker does not run. Run ferry messaging enroll --box ${box.name}.`);
+          if (enabled.state === "stopped") warn(`Warning: ${MESSAGING_SERVICE.unit} does not run on the box. Run journalctl --user -u ${MESSAGING_SERVICE.unit} on the box to see why.`);
+        }
+      } catch (cause) {
+        warn(`Warning: Ferry could not set up agent messaging: ${messageOf(cause)}. The core sync is complete.`);
+      }
+    }
+  }
+  if (box.relay) {
+    const name = "Starting the team relay";
+    if (!release) {
+      progress.skip(name, "development build");
+      warn(`Warning: The team relay runs the Ferry of the box. ${development} and Ferry did not start the relay.`);
+    } else {
+      try {
+        const state = await boxStep(name, () => enableBoxRelay(link, remoteHome), (state) => state);
+        if (state === "missing") warn(`Warning: The team relay needs Ferry on the box. Run ferry install --box ${box.name}.`);
+        else if (state === "old") warn(`Warning: The Ferry of the box has no team relay. Run ferry update --box ${box.name}, then ferry sync --box ${box.name}.`);
+        else if (state === "stopped") warn(`Warning: ${RELAY_SERVICE.unit} does not run on the box. Run journalctl --user -u ${RELAY_SERVICE.unit} on the box to see why.`);
+      } catch (cause) {
+        warn(`Warning: Ferry could not start the team relay: ${messageOf(cause)}. The core sync is complete.`);
+      }
+    }
+  }
+  // One box command removes the parts of the keys that are off.
+  if (!context.messagingUsed) return;
+  try {
+    const claudeSettings = harnesses.find((harness) => harness.id === "claude")?.settings?.file ?? null;
+    const removed = await disableBoxParts(link, remoteHome, {
+      messaging: box.messaging ? null : { claudeSettings, codexOn },
+      relay: !box.relay,
+    });
+    if (removed.messaging) warn("Removed the agent messaging hooks, MCP entry, and worker from the box. ~/.ferry/messaging stays, with the device credential.");
+    if (removed.relay) warn("Removed the team relay service from the box. ~/.ferry/relay stays, with the data of the team.");
+  } catch (cause) {
+    warn(`Warning: Ferry could not check the agent messaging services of the box: ${messageOf(cause)}. The core sync is complete.`);
+  }
 }
 
 /** Run `work` for each item, with at most `limit` items at the same time. The results keep the item order. */
@@ -1604,27 +1704,6 @@ function staleLock(lock: string): boolean {
   return start !== null && start !== owner.start;
 }
 
-/**
- * The start of the process `pid`, as a string that a later process with the same pid does not
- * have. `null` when the start is not known. Then the caller must not decide that the process stopped.
- */
-function processStart(pid: number): string | null {
-  try {
-    if (process.platform === "linux") {
-      // Field 22 of the stat file is the start in clock ticks after the boot. The boot id makes it
-      // different after a restart of the machine. The command name in field 2 can have spaces.
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-      const ticks = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
-      return ticks ? `${readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim()}:${ticks}` : null;
-    }
-    // macOS has no /proc. A fixed locale and time zone give the same text in each process.
-    const ps = spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { LC_ALL: "C", TZ: "UTC" } });
-    return ps.status === 0 && ps.stdout.trim() ? ps.stdout.trim() : null;
-  } catch {
-    return null;
-  }
-}
-
 /** The command line of the process `pid`, as its arguments. `null` when Ferry cannot read it. */
 function processCommand(pid: number): readonly string[] | null {
   try {
@@ -1725,7 +1804,7 @@ function pathDirsOf(registry: Registry): readonly string[] {
 }
 
 /** The shared part of the config. Each box has its own host, integrations, and tools. */
-type SyncOperatorConfig = Pick<OperatorConfig, "version" | "publisher" | "snapshotUrl" | "notifications">;
+type SyncOperatorConfig = Pick<OperatorConfig, "version" | "publisher" | "snapshotUrl" | "notifications" | "messaging">;
 
 function completeConfig(config: PartialOperatorConfig | null): SyncOperatorConfig {
   // A config without a box passes. `resolveBoxes` refuses it with the message for it.
@@ -1739,6 +1818,7 @@ function completeConfig(config: PartialOperatorConfig | null): SyncOperatorConfi
     publisher: config.publisher,
     snapshotUrl: config.snapshotUrl,
     ...(config.notifications ? { notifications: config.notifications } : {}),
+    ...(config.messaging ? { messaging: config.messaging } : {}),
   };
 }
 
