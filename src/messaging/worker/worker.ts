@@ -47,7 +47,7 @@ import type {
   SessionRegister,
   SessionRegistered,
 } from "../protocol.ts";
-import { findProject, readOnlyGit, type GitRunner, type RemoteSelection } from "./remote-stub.ts";
+import { findProject, readOnlyGit, type GitRunner, type RemoteSelection } from "../client/remote.ts";
 import { findRuntime, runtimeNames, runtimePrograms, systemProcesses, type ProcessTable } from "./registry.ts";
 import { listenSocket, replaySpool, workerSocketPath, type Caller, type LocalRequest, type LocalResponse } from "./socket.ts";
 import { WorkerStore, type StoredAttempt, type StoredSession } from "./store.ts";
