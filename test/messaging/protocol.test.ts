@@ -199,13 +199,15 @@ describe("JSON Schemas", () => {
 
 describe("errors and headers", () => {
   test("each error code has the status of the design table", () => {
-    expect(ERROR_CODES).toHaveLength(30);
+    expect(ERROR_CODES).toHaveLength(32);
     expect(ERROR_STATUS["invalid-request"]).toBe(400);
     expect(ERROR_STATUS["device-revoked"]).toBe(401);
     expect(ERROR_STATUS["not-constraint-owner"]).toBe(403);
     expect(ERROR_STATUS["enrollment-unknown"]).toBe(404);
     expect(ERROR_STATUS["ambiguous-recipient"]).toBe(409);
     expect(ERROR_STATUS["enrollment-denied"]).toBe(410);
+    expect(ERROR_STATUS["enrollment-failed"]).toBe(410);
+    expect(ERROR_STATUS["device-flow-disabled"]).toBe(403);
     expect(ERROR_STATUS["too-large"]).toBe(413);
     expect(ERROR_STATUS["upgrade-required"]).toBe(426);
     expect(ERROR_STATUS["rate-limited"]).toBe(429);

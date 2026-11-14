@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { credentialSha256, newDeviceCredential, newId } from "../../../src/messaging/ids.ts";
 import { DeviceList, EnrollPolled, EnrollStarted, ErrorBody, Health, HEADERS, Me, validate } from "../../../src/messaging/protocol.ts";
 import { startRelay } from "../../../src/messaging/relay/server.ts";
-import { FakeClock, FakeGitHub, pair, tempDir, world, type World } from "./helpers.ts";
+import { FakeClock, FakeGitHub, namedError, pair, tempDir, world, type World } from "./helpers.ts";
 
 async function start(w: World, login = "alice") {
   const credential = newDeviceCredential();
@@ -48,6 +48,37 @@ describe("enrollment", () => {
     w.clock.advance(901_000);
     expect((await poll(w, late.enrollmentId)).body.error.code).toBe("enrollment-expired");
     expect((await poll(w, "enr_unknown")).status).toBe(404);
+  });
+
+  test("GitHub errors of the device flow: an outage can be retried, a disabled device flow and an OAuth error cannot", async () => {
+    const cases: [Error, number, string][] = [
+      [namedError("GitHubUnavailableError", "timeout"), 503, "github-unavailable"],
+      [namedError("DeviceFlowDisabledError", "device_flow_disabled"), 403, "device-flow-disabled"],
+      [new Error("incorrect_client_credentials"), 410, "enrollment-failed"],
+    ];
+    for (const [error, status, code] of cases) {
+      const w = world();
+      const { enrollmentId } = await start(w);
+      w.github.flowError = error;
+      const polled = await poll(w, enrollmentId);
+      expect([polled.status, polled.body.error.code]).toEqual([status, code]);
+      const started = await w.call("POST", "/v1/enroll/start", {
+        body: { deviceName: "laptop", platform: "linux", ferryVersion: "0.13.0", credentialSha256: credentialSha256(newDeviceCredential()) },
+      });
+      expect([started.status, started.body.error.code]).toEqual([status, code]);
+      expect(JSON.stringify([polled.body, started.body])).not.toContain(error.message);
+    }
+    const w = world();
+    const { enrollmentId } = await start(w);
+    w.github.flowError = namedError("DeviceFlowDisabledError", "off");
+    expect((await poll(w, enrollmentId)).body.error.message).toBe(
+      'The GitHub App has the device flow off. The relay operator turns on "Enable Device Flow" in the App settings.',
+    );
+    expect((await poll(w, enrollmentId)).body.error.code).toBe("enrollment-unknown");
+    w.github.flowError = null;
+    const other = await start(w);
+    w.github.flowError = new TypeError("a bug");
+    expect((await poll(w, other.enrollmentId)).body.error.code).toBe("unavailable");
   });
 
   test("a second enrollment of the same GitHub user is the same owner", async () => {
