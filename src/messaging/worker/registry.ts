@@ -12,6 +12,7 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync, readlinkSync, statSync } from "node:fs";
 import { basename } from "node:path";
+import { processStart } from "../../process-start.ts";
 import { BUILTIN_HARNESSES } from "../../registry/builtin.ts";
 import type { Runtime } from "../protocol.ts";
 
@@ -44,21 +45,8 @@ function statFields(pid: number): string[] | null {
   }
 }
 
-let bootId: string | null = null;
-
 export const systemProcesses: ProcessTable = {
-  start(pid) {
-    if (process.platform !== "linux") return ps("lstart", pid);
-    // Field 22 is the start in clock ticks after the boot. The boot id makes it different after a restart of the machine.
-    const ticks = statFields(pid)?.[19];
-    if (!ticks) return null;
-    try {
-      bootId ??= readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
-    } catch {
-      return null;
-    }
-    return `${bootId}:${ticks}`;
-  },
+  start: processStart,
   parent(pid) {
     const value = process.platform === "linux" ? statFields(pid)?.[1] : ps("ppid", pid);
     const parent = Number(value);
