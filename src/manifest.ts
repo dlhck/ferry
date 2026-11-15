@@ -40,7 +40,7 @@ export type DenyRuleDescription = {
  * a box whose number is lower than this one, because older rules can pass a
  * file that this machine refuses.
  */
-export const DENY_RULES_VERSION = 10;
+export const DENY_RULES_VERSION = 11;
 
 const DENY_RULES = {
   dotenv: { code: "dotenv", reason: "environment file", verdict: "refuse" },
@@ -63,6 +63,11 @@ const DENY_RULES = {
   "aws-access-key": {
     code: "aws-access-key",
     reason: "AWS access key ID in file content",
+    verdict: "refuse",
+  },
+  "ferry-credential": {
+    code: "ferry-credential",
+    reason: "Ferry messaging device credential in file content",
     verdict: "refuse",
   },
   "settings-credential": {
@@ -197,6 +202,8 @@ const TOKEN_PATTERNS = [
   [/(?<![A-Za-z0-9])sk-proj-([A-Za-z0-9_-]{20,})/g, DENY_RULES["openai-key"]],
   [/(?<![A-Za-z0-9])xox[bp]-([A-Za-z0-9-]{20,})/g, DENY_RULES["slack-token"]],
   [/(?<![A-Za-z0-9])AKIA([0-9A-Z]{16})(?![A-Za-z0-9])/g, DENY_RULES["aws-access-key"]],
+  // The device credential of Ferry messaging: `fmr_` and 32 random bytes in base64url.
+  [/(?<![A-Za-z0-9])fmr_([A-Za-z0-9_-]{43,})/g, DENY_RULES["ferry-credential"]],
 ] as const satisfies readonly (readonly [RegExp, DenyRule])[];
 /** The source of each token pattern without its guards for the text before and after the token. */
 const TOKEN_SOURCES = TOKEN_PATTERNS.map(([pattern]) => pattern.source.replace("(?<![A-Za-z0-9])", "").replace("(?![A-Za-z0-9])", ""));
