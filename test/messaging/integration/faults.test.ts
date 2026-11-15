@@ -5,14 +5,13 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import type { Adapter } from "../../../src/messaging/adapters/types.ts";
 import { MINUTE, SECOND } from "../harness/clock.ts";
-import { suiteTitle } from "../harness/lanes.ts";
 import {
   enterApproval,
   openConversation,
   receiptsOf,
   sendRequest,
-  systemReady,
   useSystem,
   waitFor,
   type Session,
@@ -34,9 +33,9 @@ async function storedMessages(session: Session, http: { get<T>(path: string): Pr
  * An adapter whose first `inject` reaches the runtime and then never returns, as a
  * worker that dies after the write and before it records the result.
  */
-function hangAfterFirstInject(adapter: unknown): unknown {
+function hangAfterFirstInject(adapter: Adapter): Adapter {
   let first = true;
-  return new Proxy(adapter as object, {
+  return new Proxy(adapter, {
     get(target, property, receiver) {
       const value = Reflect.get(target, property, receiver);
       if (property !== "inject" || typeof value !== "function") return typeof value === "function" ? value.bind(target) : value;
@@ -50,7 +49,7 @@ function hangAfterFirstInject(adapter: unknown): unknown {
   });
 }
 
-describe.skipIf(!systemReady)(suiteTitle("faults"), () => {
+describe("faults", () => {
   const system = useSystem();
 
   test(

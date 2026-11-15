@@ -23,11 +23,11 @@ import { join } from "node:path";
 import { systemClock } from "../messaging/harness/clock.ts";
 import { ALICE, BOB } from "../messaging/harness/homes.ts";
 import { waitingFor } from "../messaging/harness/lanes.ts";
-import { parseEnvelopes, relaySession, REPO_ROOT, RELAY_STACK_PARTS, startRelayStack, waitFor, type RelayStack, type ToolResult } from "../messaging/harness/system.ts";
+import { parseEnvelopes, relaySession, REPO_ROOT, startRelayStack, waitFor, type RelayStack, type ToolResult } from "../messaging/harness/system.ts";
 import { callWorker } from "../messaging/harness/wire.ts";
 
 export const enabled = process.env.FERRY_E2E_RUNTIMES === "1";
-const waiting = waitingFor([...RELAY_STACK_PARTS, "cli"]);
+const waiting = waitingFor();
 export const ready = enabled && waiting.length === 0;
 
 export function e2eTitle(title: string): string {

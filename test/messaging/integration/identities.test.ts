@@ -8,13 +8,12 @@
 
 import { describe, expect, test } from "bun:test";
 import { ALICE, BOB, type TestIdentity } from "../harness/homes.ts";
-import { suiteTitle } from "../harness/lanes.ts";
-import { openConversation, receiptsOf, relaySession, sendRequest, systemReady, useSystem, waitFor } from "../harness/system.ts";
+import { openConversation, receiptsOf, relaySession, sendRequest, useSystem, waitFor } from "../harness/system.ts";
 
 const TIMEOUT = 30_000;
 const CAROL: TestIdentity = { login: "carol", githubUserId: 1003, deviceName: "carol-box" };
 
-describe.skipIf(!systemReady)(suiteTitle("two identities on one host"), () => {
+describe("two identities on one host", () => {
   const system = useSystem({ identities: [ALICE, BOB, { ...CAROL, permission: "read" }] });
 
   test(

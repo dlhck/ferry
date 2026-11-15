@@ -9,7 +9,6 @@ import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { HOUR, SECOND } from "../harness/clock.ts";
-import { suiteTitle } from "../harness/lanes.ts";
 import {
   enterApproval,
   leaveApproval,
@@ -17,7 +16,6 @@ import {
   receiptsOf,
   sendRequest,
   startHumanTurn,
-  systemReady,
   useSystem,
   waitFor,
   type Session,
@@ -45,7 +43,7 @@ async function requestState(session: Session, id: string, role: "sent" | "assign
   return message.request as Record<string, any>;
 }
 
-describe.skipIf(!systemReady)(suiteTitle("request lifecycle"), () => {
+describe("request lifecycle", () => {
   const system = useSystem();
 
   test(

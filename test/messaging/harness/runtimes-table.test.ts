@@ -4,30 +4,17 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+import { CLAUDE_PASSED } from "../../../src/messaging/adapters/claude.ts";
+import { CODEX_PASSED } from "../../../src/messaging/adapters/codex.ts";
 import { passedVersions, renderDoc, RUNTIMES_DOC, type CaseResult } from "../../e2e-runtimes/results.ts";
-import { REPO_ROOT } from "./system.ts";
-
-const ADAPTERS = {
-  claude: { file: join(REPO_ROOT, "src", "messaging", "adapters", "claude.ts"), name: "CLAUDE_PASSED" },
-  codex: { file: join(REPO_ROOT, "src", "messaging", "adapters", "codex.ts"), name: "CODEX_PASSED" },
-} as const;
-const adaptersPresent = existsSync(ADAPTERS.claude.file) && existsSync(ADAPTERS.codex.file);
 
 describe("runtime versions table", () => {
-  test.skipIf(!adaptersPresent)(
-    adaptersPresent ? "the passed versions of the table equal the passed versions of the adapters" : "the table equals the adapters (waits for lane C, src/messaging/adapters)",
-    async () => {
-      const doc = readFileSync(RUNTIMES_DOC, "utf8");
-      for (const runtime of ["claude", "codex"] as const) {
-        const adapter = ADAPTERS[runtime];
-        const passed = ((await import(adapter.file)) as Record<string, readonly string[]>)[adapter.name];
-        expect(passed, `${adapter.name} in ${adapter.file}`).toBeArray();
-        expect([...new Set(passed)].sort(), `${runtime}: ${adapter.name} and docs/agent-messaging-runtimes.md`).toEqual(passedVersions(doc, runtime));
-      }
-    },
-  );
+  test("the passed versions of the table equal the passed versions of the adapters", () => {
+    const doc = readFileSync(RUNTIMES_DOC, "utf8");
+    expect([...new Set(CLAUDE_PASSED)].sort(), "CLAUDE_PASSED and docs/agent-messaging-runtimes.md").toEqual(passedVersions(doc, "claude"));
+    expect([...new Set(CODEX_PASSED)].sort(), "CODEX_PASSED and docs/agent-messaging-runtimes.md").toEqual(passedVersions(doc, "codex"));
+  });
 
   test("a run replaces the rows of its versions and keeps the other rows", () => {
     const doc = [

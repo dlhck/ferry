@@ -5,8 +5,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { suiteTitle } from "../harness/lanes.ts";
-import { memberAddresses, openConversation, systemReady, useSystem, type MessagingSystem, type Session } from "../harness/system.ts";
+import { memberAddresses, openConversation, useSystem, type MessagingSystem, type Session } from "../harness/system.ts";
 
 const TIMEOUT = 30_000;
 
@@ -15,7 +14,7 @@ async function isMember(system: MessagingSystem, session: Session, conversationI
   return (await memberAddresses(p.http, p.checkout.key, conversationId)).includes(session.address);
 }
 
-describe.skipIf(!systemReady)(suiteTitle("participation"), () => {
+describe("participation", () => {
   const system = useSystem();
 
   test(

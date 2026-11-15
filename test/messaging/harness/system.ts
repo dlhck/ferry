@@ -4,8 +4,8 @@
  * runtimes.
  *
  * The suites drive it through the two wire protocols: the worker socket, as hooks
- * and the MCP server do, and the relay HTTP API for assertions. Only this file and
- * `lanes.ts` call the TypeScript interfaces of the other lanes.
+ * and the MCP server do, and the relay HTTP API for assertions. Only this file calls
+ * the TypeScript interfaces of the other lanes.
  */
 
 import { afterEach, beforeEach } from "bun:test";
@@ -13,8 +13,11 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { RelayClient } from "../../../src/messaging/client/relay-client.ts";
 import { createGitHubAccess } from "../../../src/messaging/github/access.ts";
+import type { Adapter } from "../../../src/messaging/adapters/types.ts";
 import { startRelay } from "../../../src/messaging/relay/server.ts";
+import { runWorker } from "../../../src/messaging/worker/worker.ts";
 import { startFakeGitHub } from "../fakes/github.ts";
+import { createFakeRuntimes } from "../fakes/runtimes.ts";
 import { changedPaths, createCheckout, treeState, type Checkout, type TreeState } from "./checkout.ts";
 import { FakeClock, type Clock } from "./clock.ts";
 import type {
@@ -28,7 +31,6 @@ import type {
 } from "./contracts.ts";
 import { startFaultProxy, type FaultProxy } from "./fault-proxy.ts";
 import { ALICE, BOB, createHomes, type TestHome, type TestHomes, type TestIdentity } from "./homes.ts";
-import { lanes, waitingFor, SYSTEM_PARTS } from "./lanes.ts";
 import { callWorker, newCredential, RelayHttp, type WorkerReply } from "./wire.ts";
 
 export const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
@@ -87,7 +89,7 @@ export type MessagingSystem = {
   readonly homes: TestHomes;
   readonly github: FakeGitHub;
   readonly proxy: FaultProxy;
-  readonly runtimes: FakeRuntimes;
+  readonly runtimes: FakeRuntimes<Adapter>;
   /** The relay URL that the workers use: the fault proxy. */
   readonly relayUrl: string;
   participant(login: string): Participant;
@@ -99,16 +101,13 @@ export type MessagingSystem = {
   startRelay(): Promise<void>;
   stopWorker(login: string): Promise<void>;
   /** Starts the worker of a login. `wrap` can change the adapters, for fault injection. */
-  startWorker(login: string, options?: { readonly wrap?: (adapter: unknown) => unknown }): Promise<void>;
+  startWorker(login: string, options?: { readonly wrap?: (adapter: Adapter) => Adapter }): Promise<void>;
   /** The relay log events so far, each as one JSON line. */
   logs(): readonly string[];
   /** Throws when a file in a checkout or its Git metadata changed since the system started. */
   expectCheckoutsUnchanged(): void;
   stop(): Promise<void>;
 };
-
-/** True when every lane that the system needs is on this branch. */
-export const systemReady = waitingFor(SYSTEM_PARTS).length === 0;
 
 /**
  * Polls `probe` until it returns a value that is not `undefined`, `null`, or `false`.
@@ -179,9 +178,6 @@ export type RelayStack = {
   expectCheckoutsUnchanged(): void;
   stop(): Promise<void>;
 };
-
-/** The relay stack needs no lane that is not on `main`. */
-export const RELAY_STACK_PARTS: readonly (keyof typeof lanes)[] = [];
 
 /**
  * Starts the fake GitHub and the relay, and enrolls one home for each identity. Each
@@ -290,14 +286,11 @@ export async function startRelayStack(
 export async function startSystem(
   options: { readonly identities?: readonly SystemIdentity[]; readonly repository?: FakeRepository } = {},
 ): Promise<MessagingSystem> {
-  const missing = waitingFor(SYSTEM_PARTS);
-  if (missing.length > 0) throw new Error(`the messaging system waits for ${missing.join(", ")}`);
-  const workerModule = lanes.worker!;
   const clock = new FakeClock();
   const stack = await startRelayStack({ ...options, clock });
   const { homes, github, proxy, participant } = stack;
 
-  const runtimes = await lanes.fakeRuntimes!.createFakeRuntimes({ root: join(homes.root, "runtimes"), clock });
+  const runtimes = await createFakeRuntimes({ root: join(homes.root, "runtimes"), clock });
   const workers = new Map<string, { stop(): Promise<void> }>();
 
   const startWorker: MessagingSystem["startWorker"] = async (login, workerOptions = {}) => {
@@ -305,7 +298,7 @@ export async function startSystem(
     const p = participant(login);
     const client = new RelayClient({ url: proxy.url, credential: p.credential, ferryVersion: TEST_FERRY_VERSION });
     const adapters = runtimes.adapters(p.home).map((adapter) => (workerOptions.wrap === undefined ? adapter : workerOptions.wrap(adapter)));
-    workers.set(login, await workerModule.runWorker({ home: p.home.home, client, adapters, clock }));
+    workers.set(login, await runWorker({ home: p.home.home, client, adapters, clock }));
     await waitFor(() => existsSync(p.socketPath), { what: `the worker socket of ${login}` });
   };
 

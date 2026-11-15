@@ -5,7 +5,6 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { suiteTitle } from "../harness/lanes.ts";
 import {
   endTurn,
   enterApproval,
@@ -14,14 +13,13 @@ import {
   receiptsOf,
   sendRequest,
   startHumanTurn,
-  systemReady,
   useSystem,
   waitFor,
 } from "../harness/system.ts";
 
 const TIMEOUT = 30_000;
 
-describe.skipIf(!systemReady)(suiteTitle("delivery between runtimes"), () => {
+describe("delivery between runtimes", () => {
   const system = useSystem();
 
   test(
