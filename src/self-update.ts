@@ -19,6 +19,7 @@ import { menuBarService } from "./menubar.ts";
 import { tunnelService } from "./tunnel-service.ts";
 import { isReleaseVersion, notReadyMessage, VERSION } from "./version.ts";
 import { launchdPath, systemdPath, WATCH_SERVICE, type UserService } from "./watch-service.ts";
+import { MESSAGING_SERVICE, RELAY_SERVICE } from "./messaging/setup.ts";
 
 const STATE_RELATIVE_PATH = ".ferry/update-check.json";
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1_000;
@@ -222,6 +223,19 @@ async function refreshInstalledServices(
     dependencies.writeLine(result.message);
     if (result.action === "failed") dependencies.warn(result.message);
   }
+  // The services of agent messaging, when this machine has them.
+  const pathOf = dependencies.platform === "darwin" ? launchdPath : systemdPath;
+  for (const [service, id, name] of [
+    [MESSAGING_SERVICE, "messaging", "messaging worker"],
+    [RELAY_SERVICE, "relay", "relay service"],
+  ] as const) {
+    const path = pathOf(service, dependencies.home);
+    if (!dependencies.exists(path)) continue;
+    const result = await restartService(service, undefined, path, dependencies, { id, name });
+    results.push(result);
+    dependencies.writeLine(result.message);
+    if (result.action === "failed") dependencies.warn(result.message);
+  }
   if (dependencies.platform === "darwin") {
     const result = await updateMenuBar(latest, dependencies);
     if (result) {
@@ -270,9 +284,10 @@ async function restartService(
   box: string | undefined,
   path: string,
   dependencies: SelfUpdateDependencies,
+  label?: { readonly id: string; readonly name: string },
 ): Promise<SelfUpdateServiceResult> {
-  const name = box === undefined ? "watch service" : `tunnel service of ${box}`;
-  const id = box === undefined ? "watch" : `tunnel:${box}`;
+  const name = label?.name ?? (box === undefined ? "watch service" : `tunnel service of ${box}`);
+  const id = label?.id ?? (box === undefined ? "watch" : `tunnel:${box}`);
   let body: string;
   try {
     body = dependencies.readFile(path);

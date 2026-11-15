@@ -32,6 +32,10 @@ export type ResolvedBox = {
   readonly mcpGateway: boolean;
   /** `mcp_gateway_shared` of the box, or none. */
   readonly mcpGatewayShared: readonly string[];
+  /** True when `messaging = true` in `[box.<name>]`. */
+  readonly messaging: boolean;
+  /** True when `relay = true` in `[box.<name>]`. */
+  readonly relay: boolean;
   /** `[integrations]`, with the keys of `[box.<name>.integrations]` on top. */
   readonly integrations: IntegrationsConfig;
   /**
@@ -118,6 +122,8 @@ function resolveBox(config: PartialOperatorConfig, box: BoxConfig): ResolvedBox 
     agentMemoryMax: box.agentMemoryMax ?? null,
     mcpGateway: box.mcpGateway === true,
     mcpGatewayShared: box.mcpGatewayShared ?? [],
+    messaging: box.messaging === true,
+    relay: box.relay === true,
     integrations: { ...config.integrations, ...box.integrations },
     tools,
   };
