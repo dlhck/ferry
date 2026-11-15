@@ -2,9 +2,13 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { backupRelay, changeRelayUrl, enrollMachine, relayFailure, relayRefusal, messagingStatus, messagingStatusLines, part, readRelayConfig, relayOwners, relayStatus, restoreRelay, serveRelay } from "../../../src/messaging/commands.ts";
+import { RelayError } from "../../../src/messaging/client/relay-client.ts";
+import { backupRelay, changeRelayUrl, enrollMachine, relayFailure, relayRefusal, messagingStatus, messagingStatusLines, relayOwners, relayStatus, restoreRelay, serveRelay } from "../../../src/messaging/commands.ts";
+import { readRelayConfig } from "../../../src/messaging/github/app.ts";
+import { newId } from "../../../src/messaging/ids.ts";
 import { messagingHookCommand } from "../../../src/messaging/hooks.ts";
-import { runMessagingSetup, runMessagingTeardown, type WorkerStatusView } from "../../../src/messaging/setup.ts";
+import { runMessagingSetup, runMessagingTeardown } from "../../../src/messaging/setup.ts";
+import type { WorkerStatus } from "../../../src/messaging/worker/worker.ts";
 import { openStore } from "../../../src/messaging/relay/store.ts";
 import { BUILTIN_HARNESSES } from "../../../src/registry/builtin.ts";
 import { messagingIssues } from "../../../src/status.ts";
@@ -20,15 +24,34 @@ function home(): string {
   return root;
 }
 
+const NOW = Date.parse("2026-11-13T12:00:00.000Z");
+const DEVICE = newId("device", NOW);
+
+/** A machine with an example credential and client.json. */
 function enrolled(root = home()): string {
   mkdirSync(join(root, ".ferry", "messaging"), { recursive: true });
-  writeFileSync(join(root, ".ferry", "messaging", "credential"), "fmr_example");
-  writeFileSync(join(root, ".ferry", "messaging", "client.json"), JSON.stringify({ schemaVersion: 1, relayUrl: "https://relay.example", deviceId: "dev_1" }));
+  writeFileSync(join(root, ".ferry", "messaging", "credential"), `fmr_${"a".repeat(43)}\n`);
+  writeFileSync(join(root, ".ferry", "messaging", "client.json"), JSON.stringify({ schemaVersion: 1, relayUrl: "https://relay.example", deviceId: DEVICE, ownerLogin: "user" }));
   return root;
 }
 
-const NOW = Date.parse("2026-11-13T12:00:00.000Z");
-const worker = (change: Partial<WorkerStatusView> = {}): WorkerStatusView => ({
+type Session = WorkerStatus["sessions"][number];
+const session = (runtime: Session["runtime"], runtimeVersion: string, state: Session["state"], adapter: string): Session => ({
+  runtime,
+  runtimeSessionId: "s-1",
+  runtimeVersion,
+  address: null,
+  project: null,
+  state,
+  activity: null,
+  adapter,
+  adapterReason: null,
+  refusal: null,
+});
+const worker = (change: Partial<WorkerStatus> = {}): WorkerStatus => ({
+  pid: 42,
+  version: "1.0.0",
+  startedAt: "2026-11-13T11:00:00.000Z",
   revoked: false,
   relay: { reachable: true, lastContactAt: "2026-11-13T11:59:00.000Z", lastError: null },
   sessions: [],
@@ -47,7 +70,7 @@ describe("ferry messaging status", () => {
   });
 
   test("a running worker gives its status", async () => {
-    const result = worker({ sessions: [{ runtime: "codex", runtimeVersion: "0.200.0", state: "live", adapter: "supported" }] });
+    const result = worker({ sessions: [session("codex", "0.200.0", "live", "supported")] });
     const status = await messagingStatus(enrolled(), async (_socket, op) => {
       expect(op).toBe("status");
       return { v: 1, id: "1", ok: true, result };
@@ -64,7 +87,7 @@ describe("ferry messaging status", () => {
 });
 
 describe("the messaging issues of ferry status --brief", () => {
-  const health = (status: WorkerStatusView | null, enrolledBox = true) =>
+  const health = (status: WorkerStatus | null, enrolledBox = true) =>
     ({ state: "read", worker: status === null ? "stopped" : "running", enrolled: enrolledBox, relayUrl: "https://relay.example", status }) as const;
 
   test("a stopped worker gives the sync, and a box without a credential gives the enroll command", () => {
@@ -83,10 +106,10 @@ describe("the messaging issues of ferry status --brief", () => {
     const status = worker({
       revoked: true,
       sessions: [
-        { runtime: "claude", runtimeVersion: "2.1.300", state: "live", adapter: "unsupported" },
-        { runtime: "claude", runtimeVersion: "2.1.300", state: "live", adapter: "unsupported" },
-        { runtime: "codex", runtimeVersion: "0.300.0", state: "live", adapter: "untested" },
-        { runtime: "codex", runtimeVersion: "0.100.0", state: "offline", adapter: "unsupported" },
+        session("claude", "2.1.300", "live", "unsupported"),
+        session("claude", "2.1.300", "live", "unsupported"),
+        session("codex", "0.300.0", "live", "untested"),
+        session("codex", "0.100.0", "offline", "unsupported"),
       ],
       unregisteredCodex: [{ pid: 9, worktree: "/home/user/app" }],
     });
@@ -104,28 +127,27 @@ describe("the messaging issues of ferry status --brief", () => {
 });
 
 describe("ferry relay owners", () => {
-  test("adds and removes owners in config.json with mode 0600, and keeps the other keys", () => {
+  test("changes the owners in config.json with mode 0600, keeps the App, and restarts the relay after each change", async () => {
     const root = home();
+    const github = { appId: 1, slug: "ferry-relay", clientId: "Iv1.example" };
     mkdirSync(join(root, ".ferry", "relay"), { recursive: true });
-    writeFileSync(join(root, ".ferry", "relay", "config.json"), JSON.stringify({ github: { appId: 1 } }));
+    writeFileSync(join(root, ".ferry", "relay", "config.json"), JSON.stringify({ schemaVersion: 1, github, allowedOwners: [] }));
     let restarts = 0;
     const restart = () => (restarts++, true);
 
-    expect(relayOwners({ add: "acme" }, root, restart)).toEqual({ owners: ["acme"], changed: true, restarted: true });
-    expect(relayOwners({ add: "ACME" }, root, restart)).toEqual({ owners: ["acme"], changed: false, restarted: false });
-    expect(relayOwners({ add: "widgets" }, root, restart).owners).toEqual(["acme", "widgets"]);
-    expect(relayOwners({ remove: "Acme" }, root, restart).owners).toEqual(["widgets"]);
-    expect(relayOwners({}, root, restart).owners).toEqual(["widgets"]);
+    expect(await relayOwners({ add: "acme" }, root, restart)).toEqual({ owners: ["acme"], changed: true, restarted: true });
+    expect(await relayOwners({ add: "ACME" }, root, restart)).toEqual({ owners: ["acme"], changed: false, restarted: false });
+    expect((await relayOwners({ add: "widgets" }, root, restart)).owners).toEqual(["acme", "widgets"]);
+    expect((await relayOwners({ remove: "Acme" }, root, restart)).owners).toEqual(["widgets"]);
+    expect((await relayOwners({}, root, restart)).owners).toEqual(["widgets"]);
 
-    const path = join(root, ".ferry", "relay", "config.json");
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ github: { appId: 1 }, allowedOwners: ["widgets"] });
-    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(statSync(join(root, ".ferry", "relay", "config.json")).mode & 0o777).toBe(0o600);
     expect(restarts).toBe(3);
-    expect(readRelayConfig(root)).toMatchObject({ github: { appId: 1 }, allowedOwners: ["widgets"] });
+    expect(readRelayConfig(root)).toEqual({ schemaVersion: 1, github, allowedOwners: ["widgets"] });
   });
 
-  test("refuses a name that is not a GitHub owner", () => {
-    expect(() => relayOwners({ add: "-bad name" }, home(), () => false)).toThrow(/GitHub/);
+  test("refuses a name that is not a GitHub owner", async () => {
+    await expect(relayOwners({ add: "-bad name" }, home(), () => false)).rejects.toThrow(/GitHub account name/);
   });
 });
 
@@ -137,31 +159,18 @@ test("ferry messaging relay-url writes the config and client.json", () => {
   expect(changeRelayUrl("https://new-relay.example", root)).toEqual({ relayUrl: "https://new-relay.example", client: true });
 
   expect(readFileSync(join(root, ".ferry", "config.toml"), "utf8")).toContain('relay = "https://new-relay.example"');
-  expect(JSON.parse(readFileSync(join(root, ".ferry", "messaging", "client.json"), "utf8"))).toMatchObject({ relayUrl: "https://new-relay.example", deviceId: "dev_1" });
+  expect(JSON.parse(readFileSync(join(root, ".ferry", "messaging", "client.json"), "utf8"))).toEqual({ schemaVersion: 1, relayUrl: "https://new-relay.example", deviceId: DEVICE, ownerLogin: "user" });
   expect(() => changeRelayUrl("http://relay.example", root)).toThrow(/relay URL/);
 });
 
 describe("relay refusals", () => {
-  /** The shape of `RelayError` of the relay client. */
-  class RelayError extends Error {
-    constructor(
-      readonly status: number,
-      readonly code: string,
-      message: string,
-      readonly hint: string | null,
-    ) {
-      super(message);
-      this.name = "RelayError";
-    }
-  }
-
   test("ferry messaging enroll gives the message and the hint of each relay refusal", async () => {
     const root = home();
     for (const [code, hint] of [["device-flow-disabled", "Enable Device Flow in the settings of the GitHub App."], ["enrollment-failed", null]] as const) {
       const refused = enrollMachine({ relayUrl: "https://relay.example", home: root, print: () => {} }, async () => ({
         currentPlatform: () => "linux",
         enroll: async () => {
-          throw new RelayError(400, code, `The relay refused: ${code}.`, hint);
+          throw new RelayError(400, { code, message: `The relay refused: ${code}.`, hint });
         },
       }));
       const message = hint === null ? `The relay refused: ${code}.` : `The relay refused: ${code}. ${hint}`;
@@ -184,15 +193,8 @@ describe("relay refusals", () => {
   });
 });
 
-test("a part that is not in the build gives a clear error", async () => {
-  await expect(part("worker")).rejects.toThrow(/This Ferry build has no messaging worker/);
-});
-
 test("ferry relay serve needs the GitHub App config and key", async () => {
-  const root = home();
-  mkdirSync(join(root, ".ferry", "relay"), { recursive: true });
-  writeFileSync(join(root, ".ferry", "relay", "config.json"), JSON.stringify({ allowedOwners: ["acme"] }));
-  await expect(serveRelay("127.0.0.1:0", "1.0.0", () => {}, root)).rejects.toThrow(/The relay has no GitHub App/);
+  await expect(serveRelay("127.0.0.1:0", "1.0.0", () => {}, home())).rejects.toThrow(/The relay has no GitHub App/);
 });
 
 test("ferry relay backup, restore, and status work on the relay store", async () => {
@@ -272,6 +274,6 @@ describe("ferry messaging setup and teardown", () => {
     expect(JSON.parse(readFileSync(join(root, ".codex", "hooks.json"), "utf8"))).toEqual({});
     expect(runs.at(-1)).toEqual(["codex", "mcp", "remove", "ferry-messaging"]);
     expect(services.at(-1)).toBe("uninstall ferry-messaging.service");
-    expect(readFileSync(join(root, ".ferry", "messaging", "credential"), "utf8")).toBe("fmr_example");
+    expect(readFileSync(join(root, ".ferry", "messaging", "credential"), "utf8")).toBe(`fmr_${"a".repeat(43)}\n`);
   });
 });

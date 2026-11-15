@@ -58,7 +58,7 @@ import {
 import { BOX_MARKER } from "./box-ferry.ts";
 import { whoami, whoamiLines } from "./box-identity.ts";
 import { installBundledSkill, installMessagingSkill, MESSAGING_SKILL_RELATIVE_PATH } from "./bundled-skill.ts";
-import { MESSAGING_DIR } from "./messaging/hook.ts";
+import { MESSAGING_DIR } from "./messaging/setup.ts";
 import { BoxRequiredError, resolveBoxes, resolveTargetBox, type ResolvedBox } from "./boxes.ts";
 import {
   boxListLines,
@@ -2042,7 +2042,7 @@ relay on that box.`);
       if (action !== undefined && action !== "add" && action !== "remove") throw new FerryError("usage", `unknown action ${action}. Use add or remove.`);
       if (action !== undefined && owner === undefined) throw new FerryError("usage", `relay owners ${action} needs an owner.`);
       const { relayOwners } = await import("./messaging/commands.ts");
-      const result = relayOwners(action === "add" ? { add: owner } : action === "remove" ? { remove: owner } : {}, messagingHome());
+      const result = await relayOwners(action === "add" ? { add: owner } : action === "remove" ? { remove: owner } : {}, messagingHome());
       report(result, ({ owners, restarted }) => {
         writeLine(owners.length > 0 ? `Owners: ${owners.join(", ")}` : "The relay serves no owner.");
         if (restarted) writeLine("Restarted the relay service.");
