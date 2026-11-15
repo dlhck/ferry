@@ -45,6 +45,8 @@ describe("resolveBoxes", () => {
         agentMemoryMax: null,
         mcpGateway: false,
         mcpGatewayShared: [],
+        messaging: false,
+        relay: false,
         integrations: { paseo: true },
         tools: { gh: "latest" },
       },
@@ -55,7 +57,7 @@ describe("resolveBoxes", () => {
   test("gives empty integrations and tools when the config has none", () => {
     const { integrations: _integrations, tools: _tools, ...config } = HOST_CONFIG;
 
-    expect(resolveBoxes(config)).toEqual([{ name: "default", host: { tailscale: "box", sshUser: "ferry" }, gitAuth: "agent", projects: [], agentMemoryMax: null, mcpGateway: false, mcpGatewayShared: [], integrations: {}, tools: {} }]);
+    expect(resolveBoxes(config)).toEqual([{ name: "default", host: { tailscale: "box", sshUser: "ferry" }, gitAuth: "agent", projects: [], agentMemoryMax: null, mcpGateway: false, mcpGatewayShared: [], messaging: false, relay: false, integrations: {}, tools: {} }]);
   });
 
   test("gives each box its git_auth, and agent without the key", () => {

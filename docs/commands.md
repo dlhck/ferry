@@ -51,6 +51,32 @@ The `ferry sherlock` commands exist only when the Sherlock integration is on and
     - [`ferry menubar uninstall`](#ferry-menubar-uninstall)
   - [`ferry self-update`](#ferry-self-update)
   - [`ferry whoami`](#ferry-whoami)
+  - [`ferry relay`](#ferry-relay)
+    - [`ferry relay setup`](#ferry-relay-setup)
+      - [`ferry relay setup github-app`](#ferry-relay-setup-github-app)
+    - [`ferry relay import-github-app`](#ferry-relay-import-github-app)
+    - [`ferry relay install`](#ferry-relay-install)
+    - [`ferry relay uninstall`](#ferry-relay-uninstall)
+    - [`ferry relay owners`](#ferry-relay-owners)
+    - [`ferry relay status`](#ferry-relay-status)
+    - [`ferry relay backup`](#ferry-relay-backup)
+    - [`ferry relay restore`](#ferry-relay-restore)
+  - [`ferry messaging`](#ferry-messaging)
+    - [`ferry messaging enroll`](#ferry-messaging-enroll)
+    - [`ferry messaging setup`](#ferry-messaging-setup)
+    - [`ferry messaging teardown`](#ferry-messaging-teardown)
+    - [`ferry messaging status`](#ferry-messaging-status)
+    - [`ferry messaging conversations`](#ferry-messaging-conversations)
+    - [`ferry messaging show`](#ferry-messaging-show)
+    - [`ferry messaging requests`](#ferry-messaging-requests)
+    - [`ferry messaging peers`](#ferry-messaging-peers)
+    - [`ferry messaging devices`](#ferry-messaging-devices)
+    - [`ferry messaging revoke`](#ferry-messaging-revoke)
+    - [`ferry messaging leave`](#ferry-messaging-leave)
+    - [`ferry messaging remote`](#ferry-messaging-remote)
+      - [`ferry messaging remote set`](#ferry-messaging-remote-set)
+      - [`ferry messaging remote clear`](#ferry-messaging-remote-clear)
+    - [`ferry messaging relay-url`](#ferry-messaging-relay-url)
   - [`ferry config`](#ferry-config)
     - [`ferry config get`](#ferry-config-get)
     - [`ferry config set`](#ferry-config-set)
@@ -207,6 +233,10 @@ Commands:
                                        Until then, Ferry lists the paths of the
                                        built-in harnesses that are links
                                        of Ferry on the box.
+  relay                                Run the team relay of agent messaging on
+                                       this machine
+  messaging                            Let Claude Code and Codex sessions of a
+                                       team send messages to each other
   config                               Read and change some keys of
                                        ~/.ferry/config.toml
   box                                  List, add, and remove the boxes of the
@@ -1453,6 +1483,409 @@ Options:
 With --json: { role: "operator" or "box", box, instructions: { file, sources: [{ part: "header", "box", or "shared", path }] }, managedPaths: { instructionFiles, skillRoots, roots } }. box is null on the operator machine and before the first sync of a box. instructions is null on the operator machine and on a box without the generated file. sources has the merged parts in order, and path is the file on the operator machine. On a box, managedPaths has the paths that the last sync linked there.
 ```
 
+## ferry relay
+
+```text
+Usage: ferry relay [options] [command]
+
+Run the team relay of agent messaging on this machine.
+
+The relay stores the conversations of a team. It runs on one host of the
+team, as the service ferry-relay.service or dev.ferry.relay, and keeps its
+data in ~/.ferry/relay. Agents reach it over HTTPS, for example through
+Tailscale Serve. With --box, relay install and relay uninstall change the
+box key relay of [box.<name>], and the next ferry sync starts or removes the
+relay on that box.
+
+Options:
+  -h, --help                   display help for command
+
+Commands:
+  setup                        Create the GitHub App of the relay
+  import-github-app [options]  Store an existing GitHub App for the relay, when
+                               the manifest flow is not possible. With --box,
+                               store it on the box
+  install                      Install and start the relay service on this
+                               machine. With --box, set relay = true for the box
+  uninstall [options]          Stop and remove the relay service. Without
+                               --keep-data, also remove ~/.ferry/relay, with the
+                               data of the team. With --box, remove relay = true
+                               of the box
+  owners [action] [owner]      List the GitHub owners that the relay serves, or
+                               add or remove one
+  status                       Print the version, database size, last backup,
+                               GitHub App state, owners, and counts of the relay
+                               on this machine
+  backup [options]             Write a consistent copy of the relay database.
+                               With --to -, write it to stdout
+  restore <file>               Replace the relay database with a backup. Stop
+                               the relay service first
+  help [command]               display help for command
+```
+
+### ferry relay setup
+
+```text
+Usage: ferry relay setup [options] [command]
+
+Create the GitHub App of the relay
+
+Options:
+  -h, --help            display help for command
+
+Commands:
+  github-app [options]  Create the GitHub App of the relay with the manifest
+                        flow of GitHub, and store its key in ~/.ferry/relay.
+                        With --box, store it on the box
+  help [command]        display help for command
+```
+
+### ferry relay setup github-app
+
+```text
+Usage: ferry relay setup github-app [options]
+
+Create the GitHub App of the relay with the manifest flow of GitHub, and store
+its key in ~/.ferry/relay. With --box, store it on the box
+
+Options:
+  --org <org>    create the App for this organization, else for your user
+  --public       let other owners install the App
+  --name <name>  the App name
+  -h, --help     display help for command
+```
+
+### ferry relay import-github-app
+
+```text
+Usage: ferry relay import-github-app [options]
+
+Store an existing GitHub App for the relay, when the manifest flow is not
+possible. With --box, store it on the box
+
+Options:
+  --app-id <id>      the numeric App id
+  --client-id <id>   the client id of the App
+  --slug <slug>      the App slug
+  --key-file <path>  the private key file of the App. Ferry copies it into
+                     ~/.ferry/relay
+  -h, --help         display help for command
+```
+
+### ferry relay install
+
+```text
+Usage: ferry relay install [options]
+
+Install and start the relay service on this machine. With --box, set relay =
+true for the box
+
+Options:
+  -h, --help  display help for command
+```
+
+### ferry relay uninstall
+
+```text
+Usage: ferry relay uninstall [options]
+
+Stop and remove the relay service. Without --keep-data, also remove
+~/.ferry/relay, with the data of the team. With --box, remove relay = true of
+the box
+
+Options:
+  --keep-data  keep ~/.ferry/relay
+  --yes        remove the data of the team without a question
+  -h, --help   display help for command
+```
+
+### ferry relay owners
+
+```text
+Usage: ferry relay owners [options] [action] [owner]
+
+List the GitHub owners that the relay serves, or add or remove one
+
+Options:
+  -h, --help  display help for command
+```
+
+### ferry relay status
+
+```text
+Usage: ferry relay status [options]
+
+Print the version, database size, last backup, GitHub App state, owners, and
+counts of the relay on this machine
+
+Options:
+  -h, --help  display help for command
+```
+
+### ferry relay backup
+
+```text
+Usage: ferry relay backup [options]
+
+Write a consistent copy of the relay database. With --to -, write it to stdout
+
+Options:
+  --to <path>  the backup file, or - for stdout
+  -h, --help   display help for command
+```
+
+### ferry relay restore
+
+```text
+Usage: ferry relay restore [options] <file>
+
+Replace the relay database with a backup. Stop the relay service first
+
+Options:
+  -h, --help  display help for command
+```
+
+## ferry messaging
+
+```text
+Usage: ferry messaging [options] [command]
+
+Let Claude Code and Codex sessions of a team send messages to each other.
+
+Agents use the ferry_* MCP tools. These commands enroll a machine or a box,
+set up the hooks, the MCP entry, the skill, and the worker service, and show
+the state for people. Humans do not post through the CLI: tell your agent
+what to send.
+
+To start on this machine:
+
+  ferry messaging enroll --relay https://<relay host>
+  ferry messaging setup
+
+For a box, run ferry messaging enroll --box <name>. It sets messaging = true
+for the box, and the next ferry sync installs the hooks, the MCP entry, and
+the worker on the box.
+
+Options:
+  -h, --help                     display help for command
+
+Commands:
+  enroll [options]               Enroll this machine with the device flow of
+                                 GitHub, or with --box, give a box its own
+                                 device credential
+  setup                          Add the hooks, the MCP entry ferry-messaging,
+                                 the messaging skill, and the worker service on
+                                 this machine
+  teardown                       Remove what ferry messaging setup added. The
+                                 credential and the skill stay
+  status                         Print the worker state, the relay state, the
+                                 sessions, the held and failed deliveries, and
+                                 the outbox
+  conversations [options]        List the conversations of the project of the
+                                 current directory
+  show [options] <conversation>  Show the recent messages of a conversation (id
+                                 or slug)
+  requests [options]             List the open requests to your sessions in the
+                                 project of the current directory. With --sent,
+                                 the requests that they sent
+  peers                          List the live sessions in the project of the
+                                 current directory
+  devices                        List the devices of your owner
+  revoke <device>                Revoke a device credential of your owner, and
+                                 end its sessions
+  leave [options]                Retire a session of your owner. Its memberships
+                                 end
+  remote                         Choose the Git remote of the project for the
+                                 checkout of the current directory
+  relay-url <url>                Use a new relay URL, after a move of the relay.
+                                 ferry sync writes it to the boxes
+  help [command]                 display help for command
+```
+
+### ferry messaging enroll
+
+```text
+Usage: ferry messaging enroll [options]
+
+Enroll this machine with the device flow of GitHub, or with --box, give a box
+its own device credential
+
+Options:
+  --relay <url>  the HTTPS URL of the relay
+  -h, --help     display help for command
+```
+
+### ferry messaging setup
+
+```text
+Usage: ferry messaging setup [options]
+
+Add the hooks, the MCP entry ferry-messaging, the messaging skill, and the
+worker service on this machine
+
+Options:
+  -h, --help  display help for command
+```
+
+### ferry messaging teardown
+
+```text
+Usage: ferry messaging teardown [options]
+
+Remove what ferry messaging setup added. The credential and the skill stay
+
+Options:
+  -h, --help  display help for command
+```
+
+### ferry messaging status
+
+```text
+Usage: ferry messaging status [options]
+
+Print the worker state, the relay state, the sessions, the held and failed
+deliveries, and the outbox
+
+Options:
+  -h, --help  display help for command
+```
+
+### ferry messaging conversations
+
+```text
+Usage: ferry messaging conversations [options]
+
+List the conversations of the project of the current directory
+
+Options:
+  --query <words>  words to find
+  -h, --help       display help for command
+```
+
+### ferry messaging show
+
+```text
+Usage: ferry messaging show [options] <conversation>
+
+Show the recent messages of a conversation (id or slug)
+
+Options:
+  --before <message>  the messages before this message id
+  -h, --help          display help for command
+```
+
+### ferry messaging requests
+
+```text
+Usage: ferry messaging requests [options]
+
+List the open requests to your sessions in the project of the current directory.
+With --sent, the requests that they sent
+
+Options:
+  --sent      the requests that your sessions sent
+  -h, --help  display help for command
+```
+
+### ferry messaging peers
+
+```text
+Usage: ferry messaging peers [options]
+
+List the live sessions in the project of the current directory
+
+Options:
+  -h, --help  display help for command
+```
+
+### ferry messaging devices
+
+```text
+Usage: ferry messaging devices [options]
+
+List the devices of your owner
+
+Options:
+  -h, --help  display help for command
+```
+
+### ferry messaging revoke
+
+```text
+Usage: ferry messaging revoke [options] <device>
+
+Revoke a device credential of your owner, and end its sessions
+
+Options:
+  -h, --help  display help for command
+```
+
+### ferry messaging leave
+
+```text
+Usage: ferry messaging leave [options]
+
+Retire a session of your owner. Its memberships end
+
+Options:
+  --session <id>  the session id (ses_...)
+  -h, --help      display help for command
+```
+
+### ferry messaging remote
+
+```text
+Usage: ferry messaging remote [options] [command]
+
+Choose the Git remote of the project for the checkout of the current directory
+
+Options:
+  -h, --help      display help for command
+
+Commands:
+  set <name>      Use the remote <name> for the checkout of the current
+                  directory. Ferry writes ~/.ferry/messaging/remotes.json, not
+                  the checkout
+  clear           Remove the remote choice of the checkout of the current
+                  directory
+  help [command]  display help for command
+```
+
+### ferry messaging remote set
+
+```text
+Usage: ferry messaging remote set [options] <name>
+
+Use the remote <name> for the checkout of the current directory. Ferry writes
+~/.ferry/messaging/remotes.json, not the checkout
+
+Options:
+  -h, --help  display help for command
+```
+
+### ferry messaging remote clear
+
+```text
+Usage: ferry messaging remote clear [options]
+
+Remove the remote choice of the checkout of the current directory
+
+Options:
+  -h, --help  display help for command
+```
+
+### ferry messaging relay-url
+
+```text
+Usage: ferry messaging relay-url [options] <url>
+
+Use a new relay URL, after a move of the relay. ferry sync writes it to the
+boxes
+
+Options:
+  -h, --help  display help for command
+```
+
 ## ferry config
 
 ```text
@@ -1687,7 +2120,7 @@ Options:
   --dry-run    with --uninstall, print the plan and change nothing
   -h, --help   display help for command
 
-With --json: { name, defaultBoxRemoved, tunnelService, instructionFile }. tunnelService is the file of the tunnel user service that Ferry removed from this machine, or null. instructionFile is the per-box instruction file that stays on this machine, or null. With --uninstall, also uninstall: { dryRun, plan: { home, services, links: [{ path, link, backup }], notifyHooks, profileBlock, paths, unsavedWork }, remaining }, or null when cancelled. notifyHooks has the settings files with the hooks of ferry notify. unsavedWork is { checked, projects, unchecked } as in ferry status, or null when Ferry could not read it. The plan paths are relative to the box home. backup is the file that Ferry moves back to path, or null. remaining has the names that stay in ~/.ferry on the box. A dry run changes nothing.
+With --json: { name, defaultBoxRemoved, tunnelService, instructionFile }. tunnelService is the file of the tunnel user service that Ferry removed from this machine, or null. instructionFile is the per-box instruction file that stays on this machine, or null. With --uninstall, also uninstall: { dryRun, plan: { home, services, links: [{ path, link, backup }], notifyHooks, messagingHooks, profileBlock, paths, unsavedWork }, remaining }, or null when cancelled. notifyHooks has the settings files with the hooks of ferry notify. messagingHooks has the settings files with the hooks of agent messaging. unsavedWork is { checked, projects, unchecked } as in ferry status, or null when Ferry could not read it. The plan paths are relative to the box home. backup is the file that Ferry moves back to path, or null. remaining has the names that stay in ~/.ferry on the box. A dry run changes nothing.
 ```
 
 ### ferry box create

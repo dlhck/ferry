@@ -22,6 +22,7 @@ export type OperatorConfig = {
   readonly tools?: ToolsConfig;
   readonly provider?: ProviderConfig;
   readonly notifications?: NotificationsConfig;
+  readonly messaging?: MessagingConfig;
 };
 
 /** A complete config with `[box.<name>]` tables instead of `[host]`. */
@@ -44,6 +45,10 @@ export type BoxConfig = {
   readonly mcpGateway?: true;
   /** The carried stdio MCP servers that the gateway runs as one process for all agents of the box (`mcp_gateway_shared`). */
   readonly mcpGatewayShared?: readonly string[];
+  /** True when sync sets up agent messaging on the box (`messaging = true`). A missing key means off. */
+  readonly messaging?: true;
+  /** True when the box also runs the team relay of agent messaging (`relay = true`). A missing key means off. */
+  readonly relay?: true;
   /** The id of the machine at the provider, for a box of `ferry box create` (`provider_id`). */
   readonly providerId?: string;
   readonly integrations?: IntegrationsConfig;
@@ -167,6 +172,30 @@ const HETZNER_KEYS = {
  */
 export type NotificationsConfig = { readonly agents?: boolean };
 
+/**
+ * `[messaging]`. `relay` is the URL of the team relay of agent messaging.
+ * `ferry messaging enroll --relay <url>` writes it, and sync writes it to each
+ * box with `messaging = true`.
+ */
+export type MessagingConfig = { readonly relay?: string };
+
+/**
+ * True for a relay URL: `https://` with a host, or `http://` only for a
+ * loopback host, so that a bearer credential never crosses a network without
+ * TLS. The URL has no user, password, query, or fragment.
+ */
+export function isRelayUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "" || url.hostname === "") return false;
+  if (url.protocol === "https:") return true;
+  return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+}
+
 /** `watch` turns on the daily tool update in `ferry watch`. */
 export type UpdateConfig = { readonly watch?: boolean };
 
@@ -221,6 +250,7 @@ export type PartialOperatorConfig = {
   readonly tools?: ToolsConfig;
   readonly provider?: ProviderConfig;
   readonly notifications?: NotificationsConfig;
+  readonly messaging?: MessagingConfig;
 };
 
 /** TOML key to parsed property for each `[[harness]]` entry. */
@@ -241,6 +271,7 @@ const SECTION_KEYS: Record<string, readonly string[]> = {
   "[tools]": BUILTIN_TOOLS.map((tool) => tool.id),
   "[provider.hetzner]": Object.keys(HETZNER_KEYS),
   "[notifications]": ["agents"],
+  "[messaging]": ["relay"],
 };
 
 /** The keys of a `[tools.<id>]` table, in the order that writeConfig writes them. */
@@ -299,6 +330,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     tools?: Record<string, ToolPolicy | Record<string, unknown>>;
     provider?: { hetzner?: Record<string, string> };
     notifications?: NotificationsConfig;
+    messaging?: MessagingConfig;
   } = { host: {}, harness: [] };
   let section = "";
   let harness: Record<string, string> | null = null;
@@ -320,7 +352,7 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       hasHost = true;
       continue;
     }
-    if (line === "[update]" || line === "[status]" || line === "[integrations]" || line === "[tools]" || line === "[provider.hetzner]" || line === "[notifications]") {
+    if (line === "[update]" || line === "[status]" || line === "[integrations]" || line === "[tools]" || line === "[provider.hetzner]" || line === "[notifications]" || line === "[messaging]") {
       section = line;
       harness = null;
       tool = null;
@@ -423,6 +455,13 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
     }
 
     const value = parseString(encoded, path);
+    if (section === "[messaging]") {
+      if (!isRelayUrl(value)) {
+        throw new ConfigError(`invalid relay in [messaging] of ${path}. Use an https:// URL, such as "https://ferry-relay.example.ts.net:8443", or an http:// URL of a loopback host.`);
+      }
+      config.messaging = { relay: value };
+      continue;
+    }
     if (section === "[provider.hetzner]") {
       if (value.trim() === "") throw new ConfigError(`empty value for ${key} in [provider.hetzner] of ${path}`);
       const property = HETZNER_KEYS[key as keyof typeof HETZNER_KEYS];
@@ -495,6 +534,8 @@ export function readConfig(home = homedir()): PartialOperatorConfig | null {
       ...(entry.agentMemoryMax ? { agentMemoryMax: entry.agentMemoryMax } : {}),
       ...(entry.mcpGateway ? { mcpGateway: true as const } : {}),
       ...(entry.mcpGatewayShared ? { mcpGatewayShared: entry.mcpGatewayShared } : {}),
+      ...(entry.messaging ? { messaging: true as const } : {}),
+      ...(entry.relay ? { relay: true as const } : {}),
       ...(entry.providerId ? { providerId: entry.providerId } : {}),
       ...(entry.integrations ? { integrations: entry.integrations } : {}),
       ...(entry.tools ? { tools: entry.tools } : {}),
@@ -519,6 +560,8 @@ type ParsedBox = {
   agentMemoryMax?: string;
   mcpGateway?: boolean;
   mcpGatewayShared?: string[];
+  messaging?: boolean;
+  relay?: boolean;
   providerId?: string;
   integrations?: Record<string, boolean>;
   tools?: Record<string, ToolPolicy>;
@@ -566,6 +609,11 @@ function readBoxKey(entry: ParsedBox, part: BoxPart, key: string, encoded: strin
       throw new ConfigError(`invalid mcp_gateway_shared in ${section} of ${path}. Use a list of stdio MCP server names, such as ["context7"].`);
     }
     entry.mcpGatewayShared = list;
+    return;
+  }
+  if (part === "host" && (key === "messaging" || key === "relay")) {
+    if (encoded !== "true" && encoded !== "false") throw new ConfigError(`invalid ${key} in ${section} of ${path}. Use true or false.`);
+    entry[key] = encoded === "true";
     return;
   }
   if (part === "host" && key === "provider_id") {
@@ -684,6 +732,7 @@ export function writeConfig(config: OperatorConfig | BoxesOperatorConfig, home =
       ...toolLines(config.tools ?? {}),
       ...hetznerLines(config.provider?.hetzner),
       ...(config.notifications?.agents !== undefined ? ["[notifications]", `agents = ${config.notifications.agents}`, ""] : []),
+      ...(config.messaging?.relay !== undefined ? ["[messaging]", `relay = ${JSON.stringify(config.messaging.relay)}`, ""] : []),
       ...("boxes" in config ? config.boxes.flatMap(boxLines) : []),
     ].join("\n"),
     { mode: 0o600 },
@@ -727,6 +776,8 @@ function boxLines(box: BoxConfig): string[] {
     ...(box.agentMemoryMax !== undefined ? [`agent_memory_max = ${JSON.stringify(box.agentMemoryMax)}`] : []),
     ...(box.mcpGateway ? ["mcp_gateway = true"] : []),
     ...(box.mcpGatewayShared !== undefined ? [`mcp_gateway_shared = ${JSON.stringify(box.mcpGatewayShared)}`] : []),
+    ...(box.messaging ? ["messaging = true"] : []),
+    ...(box.relay ? ["relay = true"] : []),
     ...(box.providerId !== undefined ? [`provider_id = ${JSON.stringify(box.providerId)}`] : []),
     "",
     ...integrationLines(box.integrations, `box.${box.name}.integrations`),
@@ -804,6 +855,36 @@ export function setIntegration(id: IntegrationId, enabled: boolean, home = homed
     },
     home,
   );
+}
+
+/** Set `relay` of `[messaging]` and keep the rest of the config. The config must be complete. */
+export function setMessagingRelay(relay: string, home = homedir()): void {
+  const config = readConfig(home);
+  const host = completeHostConfig(config?.host);
+  const target = config?.boxes ? { boxes: config.boxes, ...(config.defaultBox !== undefined ? { defaultBox: config.defaultBox } : {}) } : host ? { host } : null;
+  if (config?.version !== 1 || config.publisher === undefined || config.snapshotUrl === undefined || target === null) {
+    throw new ConfigMissingError(`Ferry config at ${configPath(home)} is not complete. Run ferry init.`);
+  }
+  const { host: _host, boxes: _boxes, defaultBox: _defaultBox, ...rest } = config;
+  writeConfig({ ...rest, version: 1, publisher: config.publisher, snapshotUrl: config.snapshotUrl, ...target, messaging: { ...config.messaging, relay } }, home);
+}
+
+/**
+ * Set the box key `messaging` or `relay` of `[box.<box>]` to true, or remove
+ * it. The config must have box tables. Returns true when the key changed.
+ */
+export function setBoxMessagingKey(box: string, key: "messaging" | "relay", on: boolean, home = homedir()): boolean {
+  const config = readConfig(home);
+  if (!config?.boxes) {
+    throw new ConfigError(`The config has one [host] box, and ${key} needs a [box.<name>] table. Add a box with ferry box add <name> first.`);
+  }
+  const current = config.boxes.find((entry) => entry.name === box);
+  if (!current) throw new ConfigError(`The config has no box ${box}.`);
+  if ((current[key] === true) === on) return false;
+  const { [key]: _key, ...rest } = current;
+  const boxes = config.boxes.map((entry) => (entry === current ? { ...rest, ...(on ? { [key]: true as const } : {}) } : entry));
+  writeConfig(withBoxes(config, boxes, config.defaultBox), home);
+  return true;
 }
 
 export function resolveLinkOptions(host: OperatorHostConfig): LinkOptions;

@@ -138,6 +138,22 @@ paseo_relay = true
 
 The relay is off by default. Set `paseo_relay` in `[box.<name>.integrations]` to override it for one box. Run `ferry integrations enable paseo --box <name>` to apply the setting, including changes to an existing service. Omit `--box` for a single box. A changed service config restarts the daemon and stops its agents. A service config that differs only by the `OOMPolicy=continue` line gets no restart. Enable writes the whole unit again, so a line that you added to `ferry-paseo.service` by hand is gone after it. Sync and updates preserve the applied relay setting and each line that you added.
 
+### Agent messaging
+
+Agent messaging lets Claude Code and Codex sessions on different machines send messages to each other through a team relay. It is off by default. Turn it on in `~/.ferry/config.toml` on the operator machine:
+
+```toml
+[messaging]
+relay = "https://relay.example"
+
+[box.dev]
+messaging = true
+```
+
+Then run `ferry messaging enroll --box dev` and `ferry sync --box dev`. Sync adds the messaging hooks to `~/.claude/settings.json` and `~/.codex/hooks.json` on the box, registers the `ferry-messaging` MCP server for Claude and Codex, and starts `ferry-messaging.service`. The device credential stays in `~/.ferry/messaging` on the box, and sync never copies it. Set `relay = true` in `[box.<name>]` to run the team relay on that box as `ferry-relay.service`. Run `ferry relay setup github-app` and `ferry relay owners add <owner>` on the relay host first.
+
+When you remove the key, the next sync removes the hooks, the MCP entry, and the service from the box. `~/.ferry/messaging` and `~/.ferry/relay` stay. `ferry box remove --uninstall` removes the hooks, the MCP entry, and `~/.ferry/messaging`, and keeps `~/.ferry/relay`. On a machine without Ferry sync, use `ferry messaging enroll --relay <url>` and `ferry messaging setup`. See `ferry messaging --help` and `ferry relay --help`.
+
 ## Agent skill
 
 The [`skills/ferry`](skills/ferry/SKILL.md) skill tells agents how to work with Ferry on both machines, for example not to edit a Ferry-managed file on the box. Each Ferry build has the skill of its version, so Ferry installs it without network access.

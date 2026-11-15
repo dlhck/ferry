@@ -25,6 +25,7 @@ import {
 } from "./git-identity.ts";
 import { denyRules, MCP_SKIPS, readMcpSources, type DenyRuleDescription } from "./manifest.ts";
 import { cannotShareText, DEVELOPMENT_BUILD_REASON, readGatewayStatus } from "./mcp-gateway/service.ts";
+import { readBoxMessaging } from "./messaging/setup.ts";
 import { noProgress, type Progress } from "./progress.ts";
 import {
   loadRegistry,
@@ -229,6 +230,17 @@ function boxDependencies(
               isReleaseVersion(resolved.ferryVersion)
                 ? readGatewayStatus(link, box.name)
                 : { state: "unavailable" as const, reason: DEVELOPMENT_BUILD_REASON, port: null, servers: [] },
+          },
+        }
+      : {}),
+    // A development build puts no Ferry on the box, so the box has no messaging worker and Ferry does not ask it.
+    ...(box.messaging
+      ? {
+          messaging: {
+            read: async () =>
+              isReleaseVersion(resolved.ferryVersion)
+                ? readBoxMessaging(link, box.name)
+                : { state: "unavailable" as const, reason: DEVELOPMENT_BUILD_REASON },
           },
         }
       : {}),
