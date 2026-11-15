@@ -32,7 +32,7 @@ The suite has not run yet. The two rows below come from the design probes on Lin
 | --- | --- | --- |
 | 1. Unit, state machines on a real SQLite file | `test/messaging/relay`, `test/messaging/github`, `test/messaging/client`, `test/messaging/worker`, `test/messaging/cli`, `test/messaging/sync` | `bun test`, CI |
 | 2. Integration: relay, two workers, fake GitHub, fake runtimes, fault injection | `test/messaging/integration` | `bun test`, CI |
-| 3. Real `claude` and `codex` in tmux | `test/e2e-runtimes` | `bun run test:e2e-runtimes`, on demand |
+| 3. Real `claude` and `codex` in tmux | `test/e2e-runtimes` | `FERRY_E2E_RUNTIMES=1 bun run test:e2e-runtimes`, on demand |
 | 4. Two identities | One host: `test/messaging/integration/identities.test.ts`. Two hosts and two real GitHub accounts: operator-run, below. | CI, and the operator |
 | 5. macOS | `scripts/messaging-macos-check.sh` | The operator, on a Mac |
 | 6. Soak | `scripts/messaging-soak.ts` | The operator, on a box |
@@ -41,17 +41,23 @@ The shared harness is in `test/messaging/harness`. Each integration test makes a
 
 ## Real-CLI suite
 
-The suite starts real Claude Code and Codex sessions. It uses real model tokens, so it runs only when you start it:
+The suite starts real Claude Code and Codex sessions. It uses real model tokens, so it has two steps. The first step is the preflight, which uses no model tokens:
 
 ```sh
 bun run test:e2e-runtimes
 ```
 
+The preflight checks that `claude`, `codex`, and `tmux` are on the PATH, and prints their versions. It runs `ferry messaging hook` once without a worker. It reads `~/.codex/config.toml` and prints the Codex hook trust entries that are missing (see "Codex hook trust" below). Then it skips the cases. To run the cases:
+
+```sh
+FERRY_E2E_RUNTIMES=1 bun run test:e2e-runtimes
+```
+
 What the suite does:
 
-- It starts the relay and a fake GitHub in the test process, on `127.0.0.1`. It enrolls two identities (`alice` and `bob`), each with its own `HOME` for Ferry state. It starts one `ferry messaging worker` for each identity.
+- It starts the relay (`startRelay`, the function that `ferry relay serve` runs) and the fake GitHub server in the test process, on `127.0.0.1`. `ferry relay serve` always uses the real GitHub API, so checks A and B below cover the command itself. The suite enrolls two identities (`alice` and `bob`), each with its own `HOME` for Ferry state. It starts one `ferry messaging worker` for each identity.
 - It starts each session in tmux, on a tmux server of its own (`tmux -L ferry-e2e-<pid>`). The sessions are plain `claude` and `codex` launches in a test checkout.
-- It gives the Ferry hooks and the `ferry-messaging` MCP entry as CLI options only: `--settings` and `--mcp-config` for Claude, `-c` for Codex. It trusts the test checkout for Codex with `-c projects=...` for that launch only. It changes no global Claude or Codex setting. The runtimes keep their own logins.
+- It gives the Ferry hooks and the `ferry-messaging` MCP entry as CLI options only: `--settings` and `--mcp-config` for Claude, `-c` for Codex. The hooks have the events, matchers, and timeouts of `ferry messaging setup`. Each hook command is fixed text: `HOME="$FERRY_E2E_HOME" exec "$FERRY_E2E_BUN" "$FERRY_E2E_CLI" messaging hook <runtime> <event>`. The launch sets the three variables for the identity, so one Codex trust stays valid for all runs. The suite trusts the test checkout for Codex with `-c projects=...` for that launch only. It changes no global Claude or Codex setting. The runtimes keep their own logins.
 - It copies the bundled `ferry-messaging` skill into each Ferry home, with one added line that tells the agent to end each Ferry answer with a random marker word. The marker is only in the skill file, never in a message. An answer with the marker proves that the model read the skill that the `SessionStart` context names.
 - It writes its state to `$FERRY_E2E_RUNTIMES_DIR`, default `~/.cache/ferry-e2e-runtimes/<time>`. It never uses `/tmp`, and it writes nothing into a participating checkout. When a case fails, it saves each tmux pane to that directory.
 
@@ -67,7 +73,7 @@ The second mode of design 15.3 proves delivery, but not the global install. The 
 
 Known limits of the suite:
 
-- Codex asks once on each machine to trust non-managed hooks. That trust is a global Codex setting, so the suite never answers the prompt. If Codex shows it, the case fails with a message. To run the Codex cases on that machine, open Codex once in a disposable directory with the same `-c hooks=...` value, trust the hooks with `/hooks`, and run the suite again. Do this only on a machine where you accept that change.
+- Codex hook trust. Codex runs a non-managed hook only after the user trusts it, and it keeps that trust in `~/.codex/config.toml`. Codex 0.169.0 writes one table for each hook: `[hooks.state."/<session-flags>/config.toml:<event>:0:0"]` with a `trusted_hash` value. `/<session-flags>/config.toml` is the source name of hooks from `-c`. The Codex cases need these six entries: `session_start`, `user_prompt_submit`, `permission_request`, `stop`, `post_tool_use`, and `session_end`. The entries of `ferry messaging setup` have another source (`~/.codex/hooks.json`), so they do not count for the suite. The suite never answers the trust prompt. If Codex shows it, the case fails with a message. To add the entries on a machine where you accept that change, start Codex once in a disposable directory with the `-c hooks=...` value of the suite (the preflight prints the hooks), open `/hooks`, trust the six hooks, and run the suite again. A Ferry change to the hook text or options needs trust again.
 - If Codex asks for approval of the `ferry-messaging` tool calls, the Codex cases stall. Design 9.4 then needs the narrowest Codex setting that allows those tools. Report it on #306.
 
 ## Operator-run checks
@@ -109,7 +115,7 @@ On a Mac, from a Ferry checkout, after `ferry messaging enroll`:
 scripts/messaging-macos-check.sh
 ```
 
-The script installs the worker under launchd with `ferry messaging setup` (a global install on purpose), checks the launchd job `dev.ferry.messaging` and the worker socket, checks with `lsof` that a live Codex TUI holds its thread writer lock and that no process holds it after `kill -9`, and runs the real-CLI suite. The suite adds the `darwin` rows to the table above. The script prints a table of its steps. Paste it on #306.
+The script installs the worker under launchd with `ferry messaging setup` (a global install on purpose), checks the launchd job `dev.ferry.messaging` and the worker socket, checks with `lsof` that a live Codex TUI holds its thread writer lock and that no process holds it after `kill -9`, and runs the real-CLI suite. The suite adds the `darwin` rows to the table above. The Codex cases need the Codex hook trust of the suite on that Mac (see "Codex hook trust" above). The trust of `ferry messaging setup` does not count for the suite. The script prints a table of its steps. Paste it on #306.
 
 ### D. Soak
 
