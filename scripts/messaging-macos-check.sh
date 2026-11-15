@@ -115,7 +115,7 @@ fi
 tmux -L "$tmux_socket" kill-server 2>/dev/null
 
 # 5. Real-CLI suite
-if (cd "$repo" && FERRY_E2E_RUNTIMES_DIR="$out/e2e" bun run test:e2e-runtimes >"$out/e2e.log" 2>&1); then
+if (cd "$repo" && FERRY_E2E_RUNTIMES=1 FERRY_E2E_RUNTIMES_DIR="$out/e2e" bun run test:e2e-runtimes >"$out/e2e.log" 2>&1); then
   result "real-CLI suite" "pass: rows in docs/agent-messaging-runtimes.md"
 else
   result "real-CLI suite" "fail: see $out/e2e.log"

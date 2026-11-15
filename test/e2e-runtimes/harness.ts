@@ -10,8 +10,9 @@
  * `HOME` for Ferry state only: the hooks, the MCP server, and the worker run with
  * that `HOME`, and the runtimes run with the real one.
  *
- * Opt-in: the suite runs only with `FERRY_E2E_RUNTIMES=1`, which the
- * `test:e2e-runtimes` script sets. It uses real model tokens.
+ * Opt-in: `bun run test:e2e-runtimes` only runs the preflight (`preflight.test.ts`)
+ * and lists the cases. The cases run only with `FERRY_E2E_RUNTIMES=1`, because they
+ * use real model tokens.
  * Its state goes to `$FERRY_E2E_RUNTIMES_DIR` (default `~/.cache/ferry-e2e-runtimes`),
  * never to `/tmp` and never into a participating checkout.
  */
@@ -22,52 +23,45 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { systemClock } from "../messaging/harness/clock.ts";
 import { ALICE, BOB } from "../messaging/harness/homes.ts";
-import { waitingFor } from "../messaging/harness/lanes.ts";
 import { parseEnvelopes, relaySession, REPO_ROOT, startRelayStack, waitFor, type RelayStack, type ToolResult } from "../messaging/harness/system.ts";
 import { callWorker } from "../messaging/harness/wire.ts";
+import { MESSAGING_ALLOW_RULE, MESSAGING_MCP_ARGS, MESSAGING_MCP_SERVER, messagingHooks } from "../../src/messaging/hooks.ts";
 
-export const enabled = process.env.FERRY_E2E_RUNTIMES === "1";
-const waiting = waitingFor();
-export const ready = enabled && waiting.length === 0;
+export const ready = process.env.FERRY_E2E_RUNTIMES === "1";
 
 export function e2eTitle(title: string): string {
-  if (!enabled) return `${title} (opt-in: bun run test:e2e-runtimes)`;
-  return waiting.length === 0 ? title : `${title} (waits for ${waiting.join(", ")})`;
+  return ready ? title : `${title} (opt-in: FERRY_E2E_RUNTIMES=1 bun run test:e2e-runtimes)`;
 }
 
 export const RUN_ROOT = process.env.FERRY_E2E_RUNTIMES_DIR ?? join(homedir(), ".cache", "ferry-e2e-runtimes");
 export const RUN_ID = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
 export const RUN_DIR = join(RUN_ROOT, RUN_ID);
-const CLI = join(REPO_ROOT, "src", "cli.ts");
-const BUN = process.execPath;
+export const CLI = join(REPO_ROOT, "src", "cli.ts");
+export const BUN = process.execPath;
 
 export type Runtime = "claude" | "codex";
-
-/** Design 11.3: the events, options, and timeouts of the Ferry hooks. */
-const CLAUDE_HOOKS: readonly (readonly [string, { timeout: number; async?: boolean; matcher?: string }])[] = [
-  ["SessionStart", { timeout: 10 }],
-  ["UserPromptSubmit", { timeout: 5 }],
-  ["Stop", { timeout: 5, async: true }],
-  ["PermissionRequest", { timeout: 5 }],
-  ["Notification", { timeout: 5, async: true, matcher: "permission_prompt" }],
-  ["PostToolUse", { timeout: 5, async: true }],
-  ["SessionEnd", { timeout: 2 }],
-];
-const CODEX_HOOKS: readonly (readonly [string, { timeout: number; async?: boolean }])[] = [
-  ["SessionStart", { timeout: 10 }],
-  ["UserPromptSubmit", { timeout: 5 }],
-  ["PermissionRequest", { timeout: 5 }],
-  ["Stop", { timeout: 5, async: true }],
-  ["PostToolUse", { timeout: 5, async: true }],
-  ["SessionEnd", { timeout: 1 }],
-];
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
-function hookCommand(home: string, runtime: Runtime, event: string): string {
-  return `HOME=${shellQuote(home)} ${shellQuote(BUN)} ${shellQuote(CLI)} messaging hook ${runtime} ${event}`;
+/**
+ * The command of a suite hook. It is fixed text, as the command of `ferry messaging
+ * setup` is (design 11.3), so one Codex trust of each hook stays valid for all runs,
+ * identities, and checkouts. The launch gives the values in the environment.
+ */
+export function e2eHookCommand(runtime: Runtime, event: string): string {
+  return `HOME="$FERRY_E2E_HOME" exec "$FERRY_E2E_BUN" "$FERRY_E2E_CLI" messaging hook ${runtime} ${event}`;
+}
+
+/** The hooks of `ferry messaging setup` (events, matchers, timeouts), with the suite command. */
+export function e2eHooks(runtime: Runtime): Record<string, Record<string, unknown>[]> {
+  return Object.fromEntries(
+    Object.entries(messagingHooks(runtime)).map(([event, groups]) => [
+      event,
+      groups.map((group) => ({ ...group, hooks: (group.hooks as Record<string, unknown>[]).map((hook) => ({ ...hook, command: e2eHookCommand(runtime, event) })) })),
+    ]),
+  );
 }
 
 /** A TOML value for `codex -c`. JSON strings, numbers, and booleans are valid TOML. */
@@ -79,6 +73,11 @@ function toml(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+/** The `codex -c` value with the suite hooks. The Codex trust of the suite is for this value. */
+export function codexHooksArg(): string {
+  return `hooks=${toml(e2eHooks("codex"))}`;
 }
 
 function tmuxArgs(socket: string, ...args: string[]): string[] {
@@ -228,37 +227,35 @@ export async function startE2E(): Promise<E2E> {
     const cwd = options.where === "linked" ? p.checkout.linked : p.checkout.main;
     const target = `${runtime}-${login}-${++count}`;
     let command: string[];
+    const mcpServer = { command: BUN, args: [CLI, ...MESSAGING_MCP_ARGS], env: { HOME: p.home.home } };
     if (runtime === "claude") {
-      const hooks: Record<string, unknown[]> = {};
-      for (const [event, { matcher, ...hook }] of CLAUDE_HOOKS) {
-        hooks[event] = [{ ...(matcher === undefined ? {} : { matcher }), hooks: [{ type: "command", command: hookCommand(p.home.home, "claude", event), ...hook }] }];
-      }
       const settings = join(RUN_DIR, `${target}-settings.json`);
-      writeFileSync(settings, JSON.stringify({ hooks, permissions: { allow: ["mcp__ferry-messaging"] } }, null, 2));
+      writeFileSync(settings, JSON.stringify({ hooks: e2eHooks("claude"), permissions: { allow: [MESSAGING_ALLOW_RULE] } }, null, 2));
       const mcp = join(RUN_DIR, `${target}-mcp.json`);
-      writeFileSync(
-        mcp,
-        JSON.stringify({ mcpServers: { "ferry-messaging": { command: BUN, args: [CLI, "messaging", "mcp"], env: { HOME: p.home.home } } } }, null, 2),
-      );
+      writeFileSync(mcp, JSON.stringify({ mcpServers: { [MESSAGING_MCP_SERVER]: mcpServer } }, null, 2));
       command = ["claude", "--settings", settings, "--mcp-config", mcp];
       if (options.allowedTools !== undefined) command.push("--allowedTools", options.allowedTools);
       if (options.resume !== undefined) command.push("--resume", options.resume.threadId ?? "");
     } else {
-      const hooks: Record<string, unknown[]> = {};
-      for (const [event, hook] of CODEX_HOOKS) hooks[event] = [{ hooks: [{ type: "command", command: hookCommand(p.home.home, "codex", event), ...hook }] }];
       command = [
         "codex",
         ...(options.resume !== undefined ? ["resume", options.resume.threadId ?? ""] : []),
         "-c",
         `projects=${toml({ [cwd]: { trust_level: "trusted" } })}`,
         "-c",
-        `mcp_servers.ferry-messaging=${toml({ command: BUN, args: [CLI, "messaging", "mcp"], env: { HOME: p.home.home } })}`,
+        `mcp_servers.${MESSAGING_MCP_SERVER}=${toml(mcpServer)}`,
         "-c",
-        `hooks=${toml(hooks)}`,
+        codexHooksArg(),
       ];
     }
-    // The runtime keeps the real HOME and its login. CODEX_HOME is explicit, so the hook reports it.
-    const env = `CODEX_HOME=${shellQuote(process.env.CODEX_HOME ?? join(homedir(), ".codex"))}`;
+    // The runtime keeps the real HOME and its login. The hooks get the Ferry home of the
+    // identity from FERRY_E2E_HOME. CODEX_HOME is explicit, so the hook reports it.
+    const env = [
+      `FERRY_E2E_HOME=${shellQuote(p.home.home)}`,
+      `FERRY_E2E_BUN=${shellQuote(BUN)}`,
+      `FERRY_E2E_CLI=${shellQuote(CLI)}`,
+      `CODEX_HOME=${shellQuote(process.env.CODEX_HOME ?? join(homedir(), ".codex"))}`,
+    ].join(" ");
     const line = `cd ${shellQuote(cwd)} && exec env ${env} ${command.map(shellQuote).join(" ")}`;
     const tmux = server ? ["new-window", "-d", "-n", target] : ["new-session", "-d", "-x", "200", "-y", "50", "-s", "ferry-e2e", "-n", target];
     run(tmuxArgs(socket, ...tmux, line));
