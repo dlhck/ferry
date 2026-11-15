@@ -38,7 +38,7 @@ import { openStore as openSnapshotStore, skillChanged, type PublishResult } from
 import { adoptPublishedSkills } from "./adopt.ts";
 import { installBoxPlugins, mergeBoxSettings } from "./box-settings.ts";
 import { NOTIFY_PROBE_COMMAND, withNotifyHooks } from "./notify.ts";
-import { MESSAGING_DIR } from "./messaging/hook.ts";
+import { MESSAGING_DIR } from "./messaging/setup.ts";
 import { processStart } from "./process-start.ts";
 import { withMessagingHooks, withoutMessagingHooks } from "./messaging/hooks.ts";
 import { disableBoxParts, enableBoxMessaging, enableBoxRelay, messagingMcpEntries, MESSAGING_SERVICE, RELAY_SERVICE } from "./messaging/setup.ts";

@@ -3,9 +3,9 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } f
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { callerAncestors, callWorker, hookFields, OFFLINE_CONTEXT, runHook, workerSocketPath, type LocalResponse } from "../../../src/messaging/hook.ts";
+import { callWorker, hookFields, OFFLINE_CONTEXT, runHook } from "../../../src/messaging/hook.ts";
+import { workerSocketPath, type LocalResponse } from "../../../src/messaging/worker/socket.ts";
 import { messagingEvents } from "../../../src/messaging/hooks.ts";
-import { processStart } from "../../../src/process-start.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -166,11 +166,4 @@ describe("callWorker", () => {
       server.close();
     }
   });
-});
-
-test("callerAncestors starts with this process, with its start in the form of processStart", () => {
-  const { ancestors } = callerAncestors();
-  expect(ancestors[0]).toEqual({ pid: process.pid, startTime: processStart(process.pid)! });
-  expect(ancestors.length).toBeGreaterThan(1);
-  expect(ancestors[1]!.pid).toBe(process.ppid);
 });

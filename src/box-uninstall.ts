@@ -16,7 +16,7 @@ import { quoteShell } from "./box-settings.ts";
 import { FerryError, linkFailure } from "./errors.ts";
 import { EXPOSED_DIR } from "./expose.ts";
 import type { Link } from "./link.ts";
-import { MESSAGING_DIR } from "./messaging/hook.ts";
+import { MESSAGING_DIR } from "./messaging/setup.ts";
 import { CODEX_HOOKS_FILE, MESSAGING_HOOK_TEXT, MESSAGING_MCP_SERVER, removeMessagingHooksScript } from "./messaging/hooks.ts";
 import { EVENTS_DIR, NOTIFY_HOOK_TEXT, notifySettingsFile, removeNotifyHooksScript } from "./notify.ts";
 import type { HarnessDescriptor } from "./registry/types.ts";

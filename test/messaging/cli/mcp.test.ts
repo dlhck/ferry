@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
-import type { LocalResponse } from "../../../src/messaging/hook.ts";
+import type { LocalResponse } from "../../../src/messaging/worker/socket.ts";
 import { createMessagingMcpServer, MESSAGING_TOOLS } from "../../../src/messaging/mcp.ts";
 
 type Call = { socket: string; op: string; params: Record<string, unknown>; timeout: number };

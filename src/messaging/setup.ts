@@ -33,7 +33,7 @@ import {
   type WatchServiceInput,
   type WatchServiceResult,
 } from "../watch-service.ts";
-import { MESSAGING_DIR } from "./hook.ts";
+import type { WorkerStatus } from "./worker/worker.ts";
 import {
   addCodexHooksScript,
   addMessagingHooks,
@@ -43,6 +43,9 @@ import {
   removeMessagingHooks,
   removeMessagingHooksScript,
 } from "./hooks.ts";
+
+/** The worker state directory, relative to the home. It is never in the snapshot and never in a checkout. */
+export const MESSAGING_DIR = ".ferry/messaging";
 
 export const MESSAGING_SERVICE: UserService = {
   command: "messaging worker",
@@ -273,27 +276,6 @@ export async function enableBoxRelay(link: BoxLink, remoteHome: string): Promise
 }
 
 /**
- * The parts of the `status` result of the worker (`WorkerStatus` of
- * `src/messaging/worker/worker.ts`) that `ferry messaging status` and `ferry
- * status --brief` read.
- */
-export type WorkerStatusView = {
-  readonly revoked: boolean;
-  readonly relay: { readonly reachable: boolean; readonly lastContactAt: string | null; readonly lastError: string | null };
-  readonly sessions: readonly {
-    readonly runtime: "claude" | "codex";
-    readonly runtimeVersion: string;
-    readonly state: "live" | "offline";
-    /** `supported`, `untested`, `unconfirmed`, or `unsupported`. */
-    readonly adapter: string;
-  }[];
-  readonly outbox: { readonly pending: number; readonly failed: readonly unknown[] };
-  readonly deliveries: { readonly held: number; readonly unconfirmed: number; readonly stranded: number; readonly failed: number };
-  /** Live Codex processes in a participating repository without a registration: Codex has not trusted the Ferry hooks. */
-  readonly unregisteredCodex: readonly unknown[];
-};
-
-/**
  * The result of `ferry --json messaging status`. `worker` is `stopped` when
  * the worker does not answer on its socket. Then `status` is null.
  */
@@ -303,7 +285,7 @@ export type MessagingStatus = {
   readonly enrolled: boolean;
   readonly relayUrl: string | null;
   /** The `status` result of the worker, with all its fields. */
-  readonly status: WorkerStatusView | null;
+  readonly status: WorkerStatus | null;
 };
 
 /** The messaging of a box for `ferry status --brief`. `unavailable`: the box has no Ferry with messaging. `reason` says why. */

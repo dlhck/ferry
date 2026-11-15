@@ -33,8 +33,11 @@ function staticGraph(entry: string): { files: Set<string>; packages: Set<string>
 
 test("the hook command loads no relay, worker, relay client, or MCP SDK module", () => {
   const { files, packages } = staticGraph("src/messaging/hook.ts");
-  expect([...packages]).toEqual([]);
-  expect([...files].filter((file) => /^src\/messaging\/(relay|worker|client|github|adapters)\/|^src\/messaging\/(mcp|commands|setup)\.ts$|^src\/sync\.ts$/.test(file))).toEqual([]);
+  // The socket and the process chain of the worker are small, and the CLI loads smol-toml at its start anyway.
+  expect([...packages].filter((name) => name !== "smol-toml")).toEqual([]);
+  const forbidden = /^src\/messaging\/(relay|worker|client|github|adapters)\/|^src\/messaging\/(mcp|commands|setup)\.ts$|^src\/sync\.ts$/;
+  const allowed = new Set(["src/messaging/worker/socket.ts", "src/messaging/worker/registry.ts"]);
+  expect([...files].filter((file) => forbidden.test(file) && !allowed.has(file))).toEqual([]);
 });
 
 test("the CLI loads the messaging commands, the MCP server, and the MCP SDK only in their actions", () => {
@@ -43,4 +46,5 @@ test("the CLI loads the messaging commands, the MCP server, and the MCP SDK only
   expect(files.has("src/messaging/mcp.ts")).toBe(false);
   expect([...files].filter((file) => /^src\/messaging\/(relay|worker|client|github|adapters)\//.test(file))).toEqual([]);
   expect([...packages].filter((name) => name.startsWith("@modelcontextprotocol/"))).toEqual([]);
+  expect(files.has("src/messaging/hook.ts")).toBe(false);
 });

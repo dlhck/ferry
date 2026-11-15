@@ -14,7 +14,9 @@ import { join } from "node:path";
 import { Server } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { VERSION } from "../version.ts";
-import { callerAncestors, callWorker, workerSocketPath, WORKER_OFFLINE, type Caller } from "./hook.ts";
+import { callWorker, WORKER_OFFLINE } from "./hook.ts";
+import { callerAncestors } from "./worker/registry.ts";
+import { workerSocketPath, type Caller } from "./worker/socket.ts";
 import { MESSAGING_MCP_SERVER } from "./hooks.ts";
 import { LIMITS } from "./protocol.ts";
 
@@ -191,7 +193,7 @@ export function createMessagingMcpServer(dependencies: Partial<MessagingMcpDepen
   const home = dependencies.home ?? homedir();
   const call = dependencies.call ?? callWorker;
   let caller: Caller | null = null;
-  const callerOf = () => (caller ??= (dependencies.caller ?? (() => callerAncestors()))());
+  const callerOf = () => (caller ??= (dependencies.caller ?? (() => ({ ancestors: callerAncestors() })))());
   const server = new Server(
     { name: MESSAGING_MCP_SERVER, version: VERSION },
     {
