@@ -1,0 +1,4 @@
+[test]
+# The real-CLI suite (design 15.3). It starts the real claude and codex, so it runs
+# without the guard of test/preload.ts. `bun test` ignores this directory. Run it
+# only with: bun run test:e2e-runtimes

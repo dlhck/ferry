@@ -17,6 +17,8 @@
   url: /integrations.html
 - title: Paseo sync
   url: /paseo-sync.html
+- title: Agent messaging runtimes
+  url: /agent-messaging-runtimes.html
 - title: Status and the menu bar
   url: /status.html
 - title: Linux status bar

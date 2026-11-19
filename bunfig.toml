@@ -1,3 +1,5 @@
 [test]
 # The guard against a real tool binary in a test. See CONTRIBUTING.md.
 preload = ["./test/preload.ts"]
+# The real-CLI suite starts the real claude and codex. Run it with: bun run test:e2e-runtimes
+pathIgnorePatterns = ["test/e2e-runtimes/**"]
